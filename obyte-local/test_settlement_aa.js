@@ -1186,7 +1186,7 @@ async function main() {
   //   v(13): seize the residual 5e11 → pool 0;
   //   v(14): pool is EMPTY — must credit ZERO (pre-fix minted a fixed 5e11
   //   out of the shared pool — the run goes red there on debt).
-  await trigger(operator, rollup, { pool: 1 }, 10000000010000);
+  await trigger(operator, rollup, { pool: 1 }, 1000000010000); // gross 1e12+fee → net +1e12
   pool += 1e12;
   await submitLiarAt(12);
   await submitLiarAt(13);
@@ -1228,7 +1228,7 @@ async function main() {
   await trigger(operator, rollup, { claim: "pool" }, 20000); // idle chain: drain
   st = await vars(rollup);
   if (Number(st.last_finalized) !== 14) throw new Error("prep finalize failed: " + st.last_finalized);
-  await trigger(operator, rollup, { pool: 1 }, 10000000010000); // exact 1e12
+  await trigger(operator, rollup, { pool: 1 }, 10000000010000); // 10e12 fund (any >= floor works)
   // h15 commits the LIAR fixture → verdict.
   await submitLiarAt(15);
   await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 15 }, fraudProof), 20000, "h15 verdict");
