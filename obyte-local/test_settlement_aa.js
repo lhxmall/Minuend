@@ -1305,6 +1305,10 @@ async function main() {
     return { roots, sibs, shard: wdShard(wdAddr) };
   }
   const DECOY = "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK3UEE4O25";
+  // The withdrawer IS the operator wallet: leaf_account == trigger.address,
+  // so the leaf folds to a bucket nobody else can claim.
+  const wdAcct = await operator.getAddress();
+
   async function vaultWithdrawTrigger(wdAddr, forest, amount, withdrawn, col, proof) {
     return operator.triggerAaWithData({
       toAddress: vault,
