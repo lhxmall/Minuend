@@ -721,6 +721,10 @@ async function main() {
     units_proof: UNITS3_PROOF,
     fill: SKIP_FILLS[0],
     fill_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 0),
+    // #37-9: single-fill completeness — the sole fill's right neighbor
+    // is the fills_root length sentinel.
+    right: SKIP_FILLS_TREE[1],
+    right_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 1),
     pre_wit: H3_PRE_WIT,
     maker_ord: MAKER_ORD,
     maker_proof: merkle.getMerkleProof(H3_PRE, H3_PRE.indexOf(MAKER_ORD)),
