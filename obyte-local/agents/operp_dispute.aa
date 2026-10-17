@@ -378,26 +378,12 @@
 					if (!$ts OR $ts >= var[$rollup]['inbox_upto_' || $h]) bounce('no fraud');
 					// #23: {force} pins only a timestamp — the id may name a
 					// unit that never existed, and an honest batch correctly
-					// omits it. Omit cannot pay out; the rest of the case is
-					// left unreachable on purpose.
+					// omits it. Omit cannot pay out: everything below this
+					// unconditional bounce was DELETED (unreachable code
+					// costing ~150 ops against the 2000 budget; observable
+					// behavior — always 'no fraud', never a verdict — is
+					// unchanged).
 					bounce('no fraud');
-					$root = trigger.data.units_set_root;
-					$hit1 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.right AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
-						AND trigger.data.right_proof.root == $root
-						AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
-						AND trigger.data.left < $id AND $id < trigger.data.right;
-					$hit2 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.left_proof.index == 0
-						AND $id < trigger.data.left;
-					$hit3 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.left_proof.index == $n - 1
-						AND $id > trigger.data.left;
-					if (!$hit1 AND !$hit2 AND !$hit3) bounce('no fraud');
-					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 				}",
 				messages: [
 					{
