@@ -1262,6 +1262,8 @@ async function main() {
   // compares the PERP column and bounces 'no fraud'.
   // Fixture: DEP_ACCT pre (col=1000000, perp=0) → post (col=1000000,
   // perp=50000) with op D:{acct}:50000, committed at fresh h16.
+  // LIAR first (verdict freezes h16), honest second (frozen-branch
+  // resubmit, then 'no fraud'): a live height cannot be submitted twice.
   const govAcct = DEP_ACCT;
   const govOp = "D:" + govAcct + ":50000";
   const GOV_OPS = pad2([govOp], "govops");
@@ -1270,10 +1272,14 @@ async function main() {
   const GOV_WIT = merkle.getMerkleRoot(GOV_POST);
   const GOV_TRACE = pad2([GOV_WIT], "govtrace");
   const GOV_TRACE_ROOT = merkle.getMerkleRoot(GOV_TRACE);
-  {
+  const GOV_LIAR = pad2([`acct:${govAcct}:1000000:50001:0`], "govliar");
+  const GOV_LIAR_WIT = merkle.getMerkleRoot(GOV_LIAR);
+  const GOV_LIAR_TRACE = pad2([GOV_LIAR_WIT], "govliartrace");
+  const GOV_LIAR_TRACE_ROOT = merkle.getMerkleRoot(GOV_LIAR_TRACE);
+  async function submitGovAt(traceRoot) {
     const sd = submitData(16, STATE_ROOT, STATE_ROOT);
     sd.ops_root = GOV_OPS_ROOT;
-    sd.trace_root = GOV_TRACE_ROOT;
+    sd.trace_root = traceRoot;
     sd.units_root = UNITS_SET_ROOT;
     sd.units_set_root = SET_ROOT1;
     sd.fills_root = FILLS_ROOT;
@@ -1308,37 +1314,9 @@ async function main() {
     pre_leaf_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(DEP_PRE)),
     post_leaf_proof: merkle.getMerkleProof(GOV_POST, 0),
   };
-  await triggerBounce(challenger, dispute, Object.assign({ pred: "deposit", height: 16 }, govHonest), 20000, "no fraud");
-  st = await vars(rollup);
-  if (Number(st.frozen_16 || 0) !== 0) throw new Error("honest gov deposit froze h16!");
-  console.log("24. honest GovDeposit bounces 'no fraud' — gov arm compares PERP");
   // ---- 25. forged gov leg verdicts (#37-5) --------------------------------
-  // Same h16 commitment, but the proven post PERP is 50001 (off by one):
-  // the gov arm must verdict.
-  const GOV_LIAR = pad2([`acct:${govAcct}:1000000:50001:0`], "govliar");
-  const GOV_LIAR_WIT = merkle.getMerkleRoot(GOV_LIAR);
-  const GOV_LIAR_TRACE = pad2([GOV_LIAR_WIT], "govliartrace");
-  const GOV_LIAR_TRACE_ROOT = merkle.getMerkleRoot(GOV_LIAR_TRACE);
-  {
-    const sd = submitData(16, STATE_ROOT, STATE_ROOT);
-    sd.ops_root = GOV_OPS_ROOT;
-    sd.trace_root = GOV_LIAR_TRACE_ROOT;
-    sd.units_root = UNITS_SET_ROOT;
-    sd.units_set_root = SET_ROOT1;
-    sd.fills_root = FILLS_ROOT;
-    sd.wit_root = WIT_ROOT;
-    sd.wit_count = GEN_WIT_COUNT;
-    const header = headerFromSubmit(sd);
-    const r = await operator.sendMulti({
-      messages: [tempDataMsg(header), { app: "data", payload: sd }],
-      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
-    });
-    if (r.error) throw new Error("h16 gov-liar submit failed: " + r.error);
-    await network.witnessUntilStable(r.unit);
-    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
-    if (res && res.response && res.response.bounced)
-      throw new Error("h16 gov-liar submit bounced: " + bounceDetail(res));
-  }
+  // The LIAR commitment goes first: proven post PERP 50001 (off by one).
+  await submitGovAt(GOV_LIAR_TRACE_ROOT);
   await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 16 }, govHonest, {
     trace_root: GOV_LIAR_TRACE_ROOT,
     post_wit: GOV_LIAR_WIT,
@@ -1349,6 +1327,15 @@ async function main() {
   st = await vars(rollup);
   if (Number(st.frozen_16) !== 2) throw new Error("forged gov PERP did not freeze h16");
   console.log("25. forged gov PERP (+1) → frozen=16");
+  // ---- 24. honest GovDeposit resubmit never freezes (#37-5) ---------------
+  // Frozen-branch resubmit of the honest roots, then the same proof shape
+  // bounces 'no fraud' — the pre-fix AA judged D: by collateral math and
+  // froze this height.
+  await submitGovAt(GOV_TRACE_ROOT);
+  await triggerBounce(challenger, dispute, Object.assign({ pred: "deposit", height: 16 }, govHonest), 20000, "no fraud");
+  st = await vars(rollup);
+  if (Number(st.frozen_16 || 0) !== 0) throw new Error("honest gov deposit froze h16!");
+  console.log("24. honest GovDeposit bounces 'no fraud' — gov arm compares PERP");
   // ---- 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17) ---
   // Same h3 honest cross shape (fillBase), but the proven post leaf drifts
   // ONLY in perp (26: `acct:t:-500:7:0`) or ONLY in W (27:
