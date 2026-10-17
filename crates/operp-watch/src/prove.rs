@@ -620,7 +620,6 @@ fn fill_proof(
                 continue;
             }
             let taker_hex = parts[3].to_string();
-            let maker_hex = parts[4].to_string();
             let maker_order_hex = parts[6].to_string();
             let market = parts[7].to_string();
             let price: i64 = parts[8].parse().ok()?;
@@ -648,10 +647,11 @@ fn fill_proof(
                 if o[1] == maker_order_hex {
                     continue;
                 }
-                // #37-9 owner gate (mirrors the AA): the candidate must belong
-                // to neither fill party — own better-priced orders can never
-                // fill against themselves.
-                if o[7] == taker_hex || o[7] == maker_hex {
+                // #37-9 owner gate (mirrors the AA): the candidate must not
+                // be the TAKER's own order — own better-priced orders can
+                // never fill against themselves. A skipped MAKER-owned
+                // better order is still real fraud.
+                if o[7] == taker_hex {
                     continue;
                 }
                 let (c_side, c_price, c_seq): (u8, i64, u64) =

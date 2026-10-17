@@ -616,12 +616,14 @@
 					$bo_rem = $BO[6] + 0;
 					$fill_price = $F[8] + 0;
 					if ($MO[1] != $F[6] OR $bo_rem <= 0) bounce('no fraud');
-					// #37-9: the "better" order must be someone else's live
-					// order. A taker's own better-priced order can never
+					// #37-9: the "better" order must not be the TAKER's own
+					// live order. A taker's own better-priced order can never
 					// fill against itself (self-trade rules skip it by
 					// design), so waving it as a skipped better order
-					// verdicts honest fills — fail closed on self-owned.
-					if ($BO[7] == $F[3] OR $BO[7] == $F[4]) bounce('no fraud');
+					// verdicts honest fills. The MAKER's own better order
+					// skipped is still real fraud (no self-trade between a
+					// maker's resting orders), so only the taker leg is out.
+					if ($BO[7] == $F[3]) bounce('no fraud');
 					$bid_better = ($side == '0') AND $BO[3] == '1'
 						AND ($bo_price < $mo_price OR ($bo_price == $mo_price AND $bo_seq < $mo_seq))
 						AND !($bo_price > $fill_price);
