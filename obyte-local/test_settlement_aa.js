@@ -1163,7 +1163,7 @@ async function main() {
   // verdicts: 5e11 (pool .9e12) → 5e11 (pool .4e12) → verdict 14's
   // seizure = min(5e11, .4e12) = 4e11 and debt moves by EXACTLY 4e11
   // (pre-fix credited the fixed 5e11 — run goes red there).
-  await trigger(operator, rollup, { pool: 1 }, 14000000010000);
+  await trigger(operator, rollup, { pool: 1 }, 1400000010000);
   pool += 1.4e12;
   // oneFraud submits each LIAR height itself (forward, ls+1) and then
   // challenges it: 5e11 (pool .9e12) → 5e11 (pool .4e12) → verdict 14's
