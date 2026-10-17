@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     # Full devnet E2E compiles rocksdb/sqlite3 (~5-8 min). Runs on every push
     # AND on PRs so a broken AA/test pairing is caught BEFORE merging to main.
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v7
@@ -58,5 +58,7 @@ jobs:
         run: cargo run -p operp-settle --example gen_withdraw_proof -- I6X2KSUJJJC5D5T6ARVT7OH5Z7XMSMYG 2000000 0 1000000
       - name: Run AA devnet E2E
         run: node obyte-local/test_settlement_aa.js
+      - name: Run vault withdrawal E2E (#37-11 W watermark, #37-4 fold)
+        run: node obyte-local/test_vault_withdraw_aa.js
       - name: Run pool occupancy gate E2E
         run: node obyte-local/test_pool_occupancy.js

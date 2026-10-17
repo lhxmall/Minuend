@@ -297,9 +297,8 @@ async function main() {
     .with.agent({ vault: VAULT_SRC })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
-    .with.wallet({ challenger2: 2e13 })
     .run();
-  const { operator, challenger, challenger2 } = network.wallet;
+  const { operator, challenger } = network.wallet;
   const rollup = network.agent.rollup;
   const dispute = network.agent.dispute;
   const fill = network.agent.fill;
@@ -1251,140 +1250,10 @@ async function main() {
   if (Number(st.last_finalized) !== 15) throw new Error("h15 finalize failed");
   if (Number(st["pool_" + opAddr] || 0) !== 0) throw new Error("pool claim after recovery failed");
   console.log("22. failed top pins ls, blocks pool drain and forward submits; resubmit recovers");
+  // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
+  // test_vault_withdraw_aa.js: its own short chain (h1..h3 with REAL
+  // forests) keeps this suite inside the 20-minute CI job.
 
-  // ---- 23. vault withdraw: W-watermark gate (#37-11) + fold binding (#37-4)
-  // Real sharded forest (hex domain) over the WITHDRAWER address, built in
-  // JS with the SAME fold the AA runs (leaf=sha256('acct:a:c:p:w'), node=
-  // sha256_hex(left||right), odd level duplicates its last element). Three
-  // finals (h17/h18/h19 each commit the heights' forest):
-  //   F@17: (col=1000000, W=0)               → claim 700000 (issue shape:
-  //        pre-fix needing col<=amount<=min(col,W) bricked here since the
-  //        sidechain had ALREADY debited the 700000)
-  //   F@18: (col=300000, W=700000), claim 700000 → wd_=700000
-  //   F@19: (col=0, W=1000000), claim 300000 → wd_=1000000 (no dead-end)
-  //   replay of the h17 leaf (W=0, amount=0) after wd_ advanced → the
-  //   watermark bounces it (clamped by amount+wd_ <= W).
-  // Decoy peer keeps the withdrawer's shard bucket >= 2 members (empty
-  // proof arrays are illegal in trigger data) and carries no address
-  // binding (nobody can claim it).
-  const wdShard = (addr) => {
-    const h = sha256Hex(addr);
-    return parseInt(h.slice(0, 2), 16) & 15;
-  };
-  const hexLeafOf = (addr, col, perp, w) => sha256Hex(`acct:${addr}:${col}:${perp}:${w}`);
-  const foldLR = (l, r) => sha256Hex(l + r);
-  function shardRoot(bucket, addr) {
-    let level = bucket.map(([a, c, p, w]) => hexLeafOf(a, c, p, w)).sort();
-    // Sibling path for addr inside this bucket (same walk as the AA).
-    const leaf = hexLeafOf(addr, ...bucket.find(([a]) => a === addr).slice(1));
-    let idx = level.indexOf(leaf);
-    let sibs = [];
-    while (level.length > 1) {
-      if (level.length % 2 === 1) level.push(level[level.length - 1]);
-      const pairIdx = idx ^ 1;
-      sibs.push({ hash: level[pairIdx], right: pairIdx > idx });
-      const nxt = [];
-      for (let j = 0; j < level.length; j += 2) nxt.push(foldLR(level[j], level[j + 1]));
-      level = nxt;
-      idx = idx >> 1;
-    }
-    return [level[0], sibs];
-  }
-  function buildForest(pairs, wdAddr) {
-    const buckets = Array.from({ length: 16 }, () => []);
-    for (const pr of pairs) buckets[wdShard(pr[0])].push(pr);
-    const wdBucket = buckets[wdShard(wdAddr)];
-    const [wdRoot, sibs] = shardRoot(wdBucket, wdAddr);
-    const roots = [];
-    for (let i = 0; i < 16; i++) {
-      if (buckets[i].length === 0) { roots[i] = sha256Hex("empty:" + i); continue; }
-      const [r] = shardRoot(buckets[i], buckets[i][0][0]);
-      roots[i] = r;
-    }
-    roots[wdShard(wdAddr)] = wdRoot;
-    return { roots, sibs, shard: wdShard(wdAddr) };
-  }
-  const DECOY = "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK3UEE4O25";
-  // The withdrawer IS the operator wallet: leaf_account == trigger.address,
-  // so the leaf folds to a bucket nobody else can claim.
-  const wdAcct = await operator.getAddress();
-
-  async function vaultWithdrawTrigger(wdAddr, forest, amount, withdrawn, col, proof) {
-    return operator.triggerAaWithData({
-      toAddress: vault,
-      amount: 20000,
-      data: {
-        withdraw: 1, amount, withdrawn, leaf_account: wdAddr,
-        collateral: String(col), perp: "0", shard: forest.shard, proof,
-      },
-    });
-  }
-  // Seed the vault: 1 USD deposit (1_000_000 micro) + bounce fee headroom.
-  const dep1 = await operator.triggerAaWithData({
-    toAddress: vault, amount: 1000000 + 10000, data: { deposit: 1 },
-  });
-  if (dep1.error) throw new Error("vault deposit failed: " + dep1.error);
-  await network.witnessUntilStable(dep1.unit);
-  // Heights 17/18/19 commit the withdrawer's REAL forests. sendCombined
-  // submits carry the FAKE FOREST; here we pass our own submit objects
-  // (trigger(sd) path used elsewhere also hands the sd as data — reuse it).
-  await trigger(operator, rollup, { pool: 1 }, 10000000010000); // submit floor
-  const forest17 = buildForest([[wdAcct, 1000000, 0, 0], [DECOY, 500, 0, 0]], wdAcct);
-  const sd17 = submitData(17, STATE_ROOT, STATE_ROOT);
-  sd17.aa_forest = forest17.roots.join("");
-  sd17.aa_root = sha256Hex(sd17.aa_forest);
-  await trigger(operator, rollup, sd17, SUBMIT_FEE);
-  await network.timetravel({ shift: "3600s" });
-  await trigger(operator, rollup, { finalize: 1, height: 17 }, 20000);
-  // h17 leaf (col=1e6, W=0): W=0 authorizes ZERO vault payout.
-  await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 700000, withdrawn: 0, leaf_account: wdAcct,
-    collateral: "1000000", perp: "0", shard: forest17.shard, proof: forest17.sibs,
-  }, 20000, "bad claim amount");
-  // h18: sidechain withdraw 700000 → leaf (col=300000, W=700000).
-  const forest18 = buildForest([[wdAcct, 300000, 0, 700000], [DECOY, 500, 0, 0]], wdAcct);
-  const sd18 = submitData(18, STATE_ROOT, STATE_ROOT);
-  sd18.aa_forest = forest18.roots.join("");
-  sd18.aa_root = sha256Hex(sd18.aa_forest);
-  await trigger(operator, rollup, sd18, SUBMIT_FEE);
-  await network.timetravel({ shift: "3600s" });
-  await trigger(operator, rollup, { finalize: 1, height: 18 }, 20000);
-  const res18 = await vaultWithdrawTrigger(wdAcct, forest18, 700000, 700000, 300000, forest18.sibs);
-  if (res18.error) throw new Error("h18 withdraw trigger failed: " + res18.error);
-  await network.witnessUntilStable(res18.unit);
-  const rr18 = await network.getAaResponseToUnit(res18.unit).catch(() => null);
-  const log18 = JSON.stringify(rr18 || {});
-  if (log18.includes('"bounced":true')) throw new Error("h18 withdraw bounced: " + bounceDetail(rr18));
-  st = await vars(vault);
-  if (Number(st["wd_" + wdAcct] || 0) !== 700000) throw new Error("wd_ not advanced: " + JSON.stringify(st["wd_" + wdAcct]));
-  console.log("23. issue example (col=300k, W=700k) pays the pending 700k — no brick");
-  // Old-leaf replay: h17's leaf (W=0, amount 0) — watermark bounces it.
-  await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 0, withdrawn: 0, leaf_account: wdAcct,
-    collateral: "1000000", perp: "0", shard: forest17.shard, proof: forest17.sibs,
-  }, 20000, "bad claim amount");
-  // h19: residual (col=0, W=1000000) — pays the last 300000 (no dead-end).
-  const forest19 = buildForest([[wdAcct, 0, 0, 1000000], [DECOY, 500, 0, 0]], wdAcct);
-  const sd19 = submitData(19, STATE_ROOT, STATE_ROOT);
-  sd19.aa_forest = forest19.roots.join("");
-  sd19.aa_root = sha256Hex(sd19.aa_forest);
-  await trigger(operator, rollup, sd19, SUBMIT_FEE);
-  await network.timetravel({ shift: "3600s" });
-  await trigger(operator, rollup, { finalize: 1, height: 19 }, 20000);
-  const res19 = await vaultWithdrawTrigger(wdAcct, forest19, 300000, 1000000, 0, forest19.sibs);
-  if (res19.error) throw new Error("h19 residual withdraw trigger failed: " + res19.error);
-  await network.witnessUntilStable(res19.unit);
-  const rr19 = await network.getAaResponseToUnit(res19.unit).catch(() => null);
-  const log19 = JSON.stringify(rr19 || {});
-  if (log19.includes('"bounced":true')) throw new Error("h19 residual withdraw bounced: " + bounceDetail(rr19));
-  st = await vars(vault);
-  if (Number(st["wd_" + wdAcct] || 0) !== 1000000) throw new Error("residual claim failed: " + JSON.stringify(st["wd_" + wdAcct]));
-  // Post-drain replay of the h19 leaf with amount 1 — watermark stops it.
-  await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 1, withdrawn: 1000000, leaf_account: wdAcct,
-    collateral: "0", perp: "0", shard: forest19.shard, proof: forest19.sibs,
-  }, 20000, "bad claim amount");
-  console.log("23. sequential withdrawals drain the deposit with no dead-end; replays bounce");
 
   process.exit(failures === 0 ? 0 : 1);
 }
