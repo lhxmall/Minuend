@@ -303,19 +303,20 @@ fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              collateral + pre-order margin_left；Place escrow 无此证明分支
              验不过 → bounce('no fraud')，高度不动；
              验过 → dispute 付 10000 bytes + {verdict:'fraud',height,challenger}
-               → rollup frozen_h=2、清根、last_submitted=h-1、
-                 pool_<operator> 扣 500000000000（不足则清零）、
-                 slash_reward_<challenger> += 500000000000
+               → rollup frozen_h=2、清根（含 aa_root）、last_submitted 保持为 h、
+                 pool_<operator> 扣 min(500000000000, pool)、
+                 slash_reward_<challenger> += 实际扣款
 
-finalize(h)  !frozen ∧ h == last_finalized+1 ∧ now ≥ submitted_at_h+3600
-             （escape_finalize 用 604800）
-             → last_finalized=h；reward += 20000（无 sbond 记账）
+finalize(h)  !frozen ∧ h == last_finalized+1 ∧ prev_<h>==state_root_{h-1}
+             ∧ now ≥ submitted_at_h+3600（escape_finalize 用 604800）
+             → 先复核 sha256(aa_forest_h,'hex')==aa_root_h，再 last_finalized=h；
+             reward += 20000（无 sbond 记账）
 
 claim        'reward'|'sbond'|'slash' 按旧键支付；'pool' 仅链空闲
-             （last_submitted==last_finalized）可取，全额支付并清零
+             （last_submitted==last_finalized 且 frozen_<last_submitted>≠2）可取，全额支付并清零
 
-withdraw     vault：leaf_account==trigger.address；
-             amount + wd_<addr> ≤ min(collateral, withdrawn)；
+withdraw     vault：leaf_account==trigger.address；先复核 finalized
+             forest 折叠到 aa_root_<lf>；amount + wd_<addr> ≤ withdrawn(W)；
              leaf = sha256('acct:'+address+':'+collateral+':'+perp+':'+withdrawn,'hex')
              reduce(...,16,...) == substring(aa_forest_h, shard*64, 64)
              → 支付抵押品并累加 wd_（PERP 领取一律 bounce

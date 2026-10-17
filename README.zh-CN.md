@@ -289,8 +289,8 @@ cd obyte-local && node post_batch.js
    提款/GovWithdraw 可重新执行（AA 侧 `wd_`/`wp_` 仍封顶），但存款锚点
    被永久作废（`consumed_deposits`，计入 `state_root`）——同一笔付款
    不可能二次入账。
-10. AA 强制 `amount + wd_ <= min(collateral, withdrawn)`，且叶子数字字段
-    上限为 15 位十进制（< 2^53）。
+10. AA 强制 `amount + wd_ <= withdrawn`（W=侧链累计已借记提款，是唯一的
+    付款依据），且叶子数字字段上限为 15 位十进制（< 2^53）。
 11. 单账户分片证明生成必须先注册 PAD 诱饵绑定，否则
     `aa_sharded_proof_for_account` 返回 `None`。
 12. 批次 JSON 的 `perp_burned` 是十进制字符串。

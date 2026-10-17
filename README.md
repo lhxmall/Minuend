@@ -365,7 +365,8 @@ This codebase meets the plan's bar of *"deployable to Obyte testnet"*. It is
    (AA-side `wd_`/`wp_` caps still hold), but deposit anchors are
    permanently nullified (`consumed_deposits`, committed into `state_root`)
    so one payment can never credit twice.
-10. AA enforces `amount + wd_ <= min(collateral, withdrawn)`, and leaf
+10. AA enforces `amount + wd_ <= withdrawn` (W = the sidechain's cumulative
+    debited withdrawals, the only payment authority), and leaf
     numeric fields are capped at 15 decimal digits (< 2^53).
 11. Single-account shard proof generation requires registering PAD decoy
     bindings first, else `aa_sharded_proof_for_account` returns `None`.

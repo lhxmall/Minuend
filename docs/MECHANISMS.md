@@ -693,15 +693,21 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.1 submit(h) — rollup
 
-前置：`chain_id=='operp-v2'` ∧ `assertion_version==1` ∧ h == last_submitted+1
-∧ prev == `state_root_{h-1}`（上一高度 frozen=2 时豁免）
-∧ state_root/prev 64 hex ∧ aa_forest 1024 hex ∧ 六个承诺根 44 b64
+前置：`chain_id=='operp-v2'` ∧ `assertion_version==1`
+∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 原位重提）
+∧ 全新提交时 prev == `state_root_{h-1}`（前序高度 fraud-failed 时拒绝，
+  不再豁免——失败高度之上的新链必须走重提分支）；重提时 prev 必须等于
+  `state_root_{h-1}` 的**当前值**（前序同样失败则 fail-closed，先修低高度）
+∧ state_root/prev 64 hex ∧ aa_forest 1024 hex
+∧ `aa_root` 64 hex 且 `sha256(aa_forest,'hex') == aa_root`（散列绑定，
+  错配 bounce 'bad submit'）
+∧ 六个承诺根 44 b64
 ∧ 组合单元（temp_data 在同一 unit，`da_unit_h=trigger.unit`）
 ∧ 输出 ≥ 10000（仅 bounce 费）∧ `pool_<sender> >= 1e12`
 ∧ `last_submitted-last_finalized < 50`（在途占用）
-→ 写全部 <h> 键 + `inbox_upto_h = timestamp` + last_submitted=h；
+→ 写全部 <h> 键（含 `aa_root_<h>`）+ `inbox_upto_h = timestamp` + last_submitted=h；
   活高度重发（h ≤ last_submitted 且 frozen≠2）→ bounce('height taken')；
-  欺诈重开的后续高度可自由覆盖。无 lock。
+  frozen==2 高度原位重提复位 frozen=0。无 lock。
 
 ### 10.2 谓词揭发 — dispute / dispute_fill
 
@@ -723,21 +729,29 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 `trigger.address ∈ {dispute_aa, dispute_fill_aa}` ∧ verdict=='fraud'
 ∧ 高度 live ∧ 窗内 ∧ challenger 是合法 32 字符地址
-→ frozen_h=2、清 state_root/aa_forest/active_bond/fee_winner、
-  last_submitted=h-1、`pool_<operator>` 扣 5e11（不足清零）、
-  slash_reward_<challenger> += 5e11。
+→ frozen_h=2、清 state_root/aa_forest/aa_root/active_bond/fee_winner、
+  last_submitted **保持为 h**（失败高度钉住，不再回退 h-1——回退会让
+  `last_submitted==last_finalized` 误判空闲、池子被提走）、
+  `pool_<operator>` 扣 min(5e11, pool)（债务上界=实际罚没额，不再固定记 5e11）、
+  slash_reward_<challenger> += 实际扣款。
 ### 10.4 finalize / escape_finalize(h) — rollup
 
 `{finalize}`：!frozen ∧ root 在 ∧ h == last_finalized+1
-∧ now ≥ submitted_at_h + 3600 → last_finalized=h、
-reward_<fee_winner> += 20000（无 sbond 记账）。`{escape_finalize}` 窗口阈值 604800，
-任意账户，不越过未结欺诈（frozen≠0 bounce 'challenged'）。
+∧ prev_<h> == state_root_{h-1}（stale 高度拒绝 'stale height'：失败高度之上
+已提交的旧根在重提/清零后不再能 finalize）
+∧ now ≥ submitted_at_h + 3600 → finalize 前复核
+`sha256(aa_forest_h,'hex') == aa_root_h`（错配 bounce 'forest hash mismatch'），
+然后 last_finalized=h、reward_<fee_winner> += 20000（无 sbond 记账）。
+`{escape_finalize}` 同门，窗口阈值 604800，
 
 ### 10.5 withdraw — vault
 
-`$lf = var[ROLLUP]['last_finalized']`；`$src = var[ROLLUP]['aa_forest_'||$lf]`。
+`$lf = var[ROLLUP]['last_finalized']`；`$src = var[ROLLUP]['aa_forest_'||$lf]`，
+先复核 `sha256($src,'hex') == var[ROLLUP]['aa_root_'||$lf]`
+（错配 bounce 'bad forest hash'）。
 叶子 `acct:addr:col:perp:W`（hex 域），16 深折叠，
-`amount + wd_ <= min(collateral, withdrawn)`；`perp_amount` 领取当前
+`amount + wd_ <= withdrawn`（W=侧链累计借记提款，是唯一的付款依据；
+旧 `min(collateral, withdrawn)` 双重计数会永久锁死 W>col 账户）；
 一律 `bounce('perp claim needs burn')`（#12：侧链仅 GovWithdraw 减
 `perp_balances`，先兑付会双计投票权；PERP 持有者可传 `perp_amount: 0`
 只提抵押品）。`{escape_withdraw}` 无对应 case（vault 仅 `deposit` /
@@ -749,8 +763,8 @@ reward_<fee_winner> += 20000（无 sbond 记账）。`{escape_finalize}` 窗口�
 bounce `need pool`。`{force, unit_id 64hex}` ≥10000 bytes →
 `inbox_<id>=timestamp`（重复 bounce `already forced`）。
 claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
-（`last_submitted==last_finalized`，否则 bounce `pool busy`）可取，
-全额支付并清零。
+（`last_submitted==last_finalized` **且** frozen_<last_submitted>≠2，
+否则 bounce `pool busy`）可取，全额支付并清零。
 
 ## 11. Witness 树与谓词承诺
 

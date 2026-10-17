@@ -110,8 +110,8 @@ P-skip 替代「在 AA 里重放订单簿」：不必证明「这是最优」，
 | 提交资格 | `{pool:1}` 为 poster 累积常备池；提交前须 `pool >= 1e12`，无逐高度 submit bond |
 | 提交费用 | submit 支付 10000 bytes bounce 费；finalize 不退还所谓提交债 |
 | 假揭发 | 谓词不成立即 bounce `no fraud`，**不能冻结诚实根** |
-| 成功揭发 | rollup 从 operator 常备池扣 5e11（不足时归零），并记入 challenger 的 `slash_reward`，高度重开 |
-| 取回资金 | `{claim:'pool'}` 仅在 `last_submitted == last_finalized` 时可取常备池 |
+| 成功揭发 | rollup 从 operator 常备池扣 min(5e11, pool)，记入 challenger 的 `slash_reward`（债务上界=实际罚没），高度钉住待重提 |
+| 取回资金 | `{claim:'pool'}` 仅在 `last_submitted == last_finalized` 且顶高度未失败时可取常备池 |
 | 名单 | 无 |
 
 旧版「付 1000 G 即可杀根」与逐高度提交债均非当前机制。
@@ -125,13 +125,13 @@ P-skip 替代「在 AA 里重放订单簿」：不必证明「这是最优」，
 
 窗内任何人：打裁判，带一条谓词
   → bounce：账不动
-  → fraud：operator 常备池扣减，主张清掉，h 重开
+  → fraud：operator 常备池扣减（min(5e11, pool)），主张清掉，h 钉住待重提
 
 窗后任何人：{finalize} → last_finalized=h（无提交债退款）
              金库从此对该 aa_forest 付款
 
 7 天无进展：{escape_finalize} 仍在，任意人，不越过未结欺诈
-链空闲后 poster 才可 `{claim:'pool'}` 取回常备池
+链空闲（且顶高度未失败）后 poster 才可 `{claim:'pool'}` 取回常备池
 ```
 
 ---
