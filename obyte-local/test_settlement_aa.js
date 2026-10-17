@@ -764,6 +764,214 @@ async function main() {
   });
   await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, negBase), 20000, "bad unit");
   console.log("13a. fake unit hex bounced 'bad unit' — no verdict");
+  // ---- 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17) ---
+  // Same h3 honest cross shape (fillBase), but the proven post leaf drifts
+  // ONLY in perp (26: `acct:t:-500:7:0`) or ONLY in W (27:
+  // `acct:t:-500:0:9`): collateral/pos math is untouched, yet the fill AA
+  // must verdict — pre-fix it compared collateral alone and bounced.
+  // Chain: 13a left h3 LIVE, so freeze it first with the scenario-13 skip
+  // verdict (replayed below), then resubmit each LIAR in the frozen branch.
+  async function submitH3Post(postTree) {
+    const postWit = merkle.getMerkleRoot(postTree);
+    const trace = pad2([postWit], "t2637");
+    const traceRoot2 = merkle.getMerkleRoot(trace);
+    await submitH3(traceRoot2, FILLS_ROOT1);
+    return { postWit, trace, traceRoot: traceRoot2 };
+  }
+  // Freeze h3 with the skip verdict (same proof as scenario 13).
+  await triggerVerdict(challenger, dispute, Object.assign({ pred: "skip", height: 3 }, {
+    rollup: ROLLUP_ADDR,
+    k: 0,
+    trace_root: SKIP_TRACE4_ROOT,
+    fills_root: SKIP_FILLS_ROOT,
+    ops_root: OPS3_ROOT,
+    units_root: UNITS3_ROOT,
+    units_proof: UNITS3_PROOF,
+    fill: SKIP_FILLS[0],
+    fill_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 0),
+    right: SKIP_FILLS_TREE[1],
+    right_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 1),
+    pre_wit: H3_PRE_WIT,
+    maker_ord: MAKER_ORD,
+    maker_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[MAKER_ORD]),
+    better_ord: BETTER_ORD,
+    better_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
+  }), 20000, "skip freeze for 26/27 chain");
+  st = await vars(rollup);
+  if (Number(st.frozen_3) !== 2) throw new Error("skip freeze did not hold h3");
+  const tamperPayload = (leaf, tree, postWit, trace, traceRoot) => Object.assign({}, fillBase, {
+    trace_root: traceRoot,
+    post_wit: postWit,
+    post_proof: merkle.getMerkleProof(trace, 0),
+    post_acct: leaf,
+    post_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(leaf)),
+    post_pos: `pos:${takerH}:1:100000000:100000000:0:0`,
+    post_pos_proof: merkle.getMerkleProof(tree, tree.indexOf(`pos:${takerH}:1:100000000:100000000:0:0`)),
+  });
+  async function freezeTamper27() {
+    const leaf = `acct:${takerH}:-500:0:9`;
+    const tree = [`${leaf}`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
+    const { postWit, trace, traceRoot } = await submitH3Post(tree);
+    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, tamperPayload(leaf, tree, postWit, trace, traceRoot)), 20000, "tamper freeze step");
+    st = await vars(rollup);
+    if (Number(st.frozen_3) !== 2) throw new Error("tamper freeze step did not hold h3");
+  }
+  for (const [tag, leaf] of [["26-perp", `acct:${takerH}:-500:7:0`], ["27-wd", `acct:${takerH}:-500:0:9`]]) {
+    const tree = [`${leaf}`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
+    const { postWit, trace, traceRoot } = await submitH3Post(tree);
+    const payload = tamperPayload(leaf, tree, postWit, trace, traceRoot);
+    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, payload), 20000, tag + " tamper predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_3) !== 2) throw new Error(tag + " tamper did not freeze h3");
+    console.log(tag + ": perp/W-only post drift → frozen=3");
+  }
+  // ---- 28. skip with a SELF-OWNED better order → 'no fraud' (#37-9) ------
+  // Same h3 skip shape, but the better order belongs to the taker itself
+  // (owner = FILL_TAKER): self-trade rules would skip it by design, so the
+  // predicate must bounce instead of verdict-freezing an honest height.
+  const SELF_BETTER = `ord:${"e".repeat(63)}f:1:1:90000000:6:9:${FILL_TAKER}:0:0`;
+  const SELF_PRE = [DEP_PRE, FILL_TAKER_PRE, META1, META2, POS2, MAKER_ORD, SELF_BETTER].sort();
+  const SELF_PRE_WIT = merkle.getMerkleRoot(SELF_PRE);
+  const SELF_PRE_IDX = {};
+  // 30's bounce left h3 LIVE — freeze it so 28's submit rides frozen.
+  await freezeTamper27();
+  {
+    const s = submitData(3, STATE_ROOT, STATE_ROOT);
+    s.wit_root = SELF_PRE_WIT;
+    s.wit_count = SELF_PRE.length;
+    s.trace_root = SKIP_TRACE4_ROOT;
+    s.fills_root = SKIP_FILLS_ROOT;
+    s.ops_root = OPS3_ROOT;
+    s.units_root = UNITS3_ROOT;
+    s.fill_count = 1;
+    const h3header = headerFromSubmit(s);
+    const r = await operator.sendMulti({
+      messages: [tempDataMsg(h3header), { app: "data", payload: s }],
+      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
+    });
+    if (r.error) throw new Error("h3 self-skip submit failed: " + r.error);
+    await network.witnessUntilStable(r.unit);
+    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+    if (res && res.response && res.response.bounced)
+      throw new Error("h3 self-skip submit bounced: " + bounceDetail(res));
+  }
+  await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: 3 }, {
+    rollup: ROLLUP_ADDR,
+    k: 0,
+    trace_root: SKIP_TRACE4_ROOT,
+    fills_root: SKIP_FILLS_ROOT,
+    ops_root: OPS3_ROOT,
+    units_root: UNITS3_ROOT,
+    units_proof: UNITS3_PROOF,
+    fill: SKIP_FILLS[0],
+    fill_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 0),
+    right: SKIP_FILLS_TREE[1],
+    right_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 1),
+    pre_wit: SELF_PRE_WIT,
+    maker_ord: MAKER_ORD,
+    maker_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[MAKER_ORD]),
+    better_ord: SELF_BETTER,
+    better_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[SELF_BETTER]),
+  }), 20000, "no fraud");
+  st = await vars(rollup);
+  if (Number(st.frozen_3 || 0) !== 0) throw new Error("self-owned skip froze h3!");
+  console.log("28. self-owned better order bounces 'no fraud' — height live");
+  // ---- 29. skip on a MULTI-fill unit → 'no fraud' (#37-9) -----------------
+  // Two fills in the same unit (idx 0 + idx 1): the idx-0 fill's skip proof
+  // cannot exclude that the idx-1 fill already consumed the candidate —
+  // fail closed even though the better order is third-party.
+  const MFILL0 = SKIP_FILLS[0];
+  const MFILL1 = `f:${H3_UNIT_HEX}:1:${FILL_TAKER}:${"c".repeat(64)}:${"d".repeat(64)}:${"d".repeat(64)}:1:100000000:50000000:7:0:0:0`;
+  const MFILLS = [MFILL0, MFILL1];
+  const MFILLS_TREE = fillsTree(MFILLS);
+  // 28's bounce left h3 LIVE — freeze it with the tamper verdict so 29's
+  // submit rides the frozen branch.
+  await freezeTamper27();
+  await submitH3(SKIP_TRACE4_ROOT, MFILLS_ROOT);
+  await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: 3 }, {
+    rollup: ROLLUP_ADDR,
+    k: 0,
+    trace_root: SKIP_TRACE4_ROOT,
+    fills_root: MFILLS_ROOT,
+    ops_root: OPS3_ROOT,
+    units_root: UNITS3_ROOT,
+    units_proof: UNITS3_PROOF,
+    fill: MFILL0,
+    fill_proof: merkle.getMerkleProof(MFILLS_TREE, 0),
+    right: MFILLS_TREE[1],
+    right_proof: merkle.getMerkleProof(MFILLS_TREE, 1),
+    pre_wit: H3_PRE_WIT,
+    maker_ord: MAKER_ORD,
+    maker_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[MAKER_ORD]),
+    better_ord: BETTER_ORD,
+    better_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
+  }), 20000, "no fraud");
+  st = await vars(rollup);
+  if (Number(st.frozen_3 || 0) !== 0) throw new Error("multi-fill skip froze h3!");
+  console.log("29. multi-fill unit skip bounces 'no fraud' — fail closed");
+  // ---- 30/31. kind-2 ADL fills run the math arm (#37-10, fee 0) ---------
+  // ADL fill: same shape as the h3 cross fill but kind=2, taker flat-close
+  // (pre col 0, no position): honest post col = 0 - 0 fee = 0. Pre-fix the
+  // AA bounced kind 2 outright, leaving every ADL math lie unchallengeable.
+  // LIAR first (31 verdicts, h3 frozen), honest resubmit second (30
+  // bounces 'no fraud', chain live): a live height cannot be submitted twice.
+  const ADL_FILL = `f:${H3_UNIT_HEX}:0:${takerH}:${"c".repeat(64)}:${"d".repeat(64)}:${"e".repeat(64)}:1:100000000:100000000:9:0:2:0`;
+  const ADL_FILLS = [ADL_FILL];
+  const ADL_TREE = fillsTree(ADL_FILLS);
+  const ADL_ROOT = merkle.getMerkleRoot(ADL_TREE);
+  const ADL_POST = [`acct:${takerH}:0:0:0`, META1].sort();
+  const ADL_WIT = merkle.getMerkleRoot(ADL_POST);
+  const ADL_TRACE = pad2([ADL_WIT], "adltrace");
+  const ADL_TRACE_ROOT = merkle.getMerkleRoot(ADL_TRACE);
+  const adlPayload = (traceRoot, wit, tree, arr, col) => {
+    const leaf = `acct:${takerH}:${col}:0:0`;
+    return {
+      rollup: ROLLUP_ADDR,
+      k: 0,
+      trace_root: traceRoot,
+      fills_root: ADL_ROOT,
+      ops_root: OPS3_ROOT,
+      units_root: UNITS3_ROOT,
+      units_proof: UNITS3_PROOF,
+      fill: ADL_FILL,
+      fill_proof: merkle.getMerkleProof(ADL_TREE, 0),
+      op: FILL_OP,
+      ops_proof: OPS3_PROOF,
+      right: ADL_TREE[1],
+      right_proof: merkle.getMerkleProof(ADL_TREE, 1),
+      pre_wit: H3_PRE_WIT,
+      post_wit: wit,
+      post_proof: merkle.getMerkleProof(arr, 0),
+      pre_acct: FILL_TAKER_PRE,
+      pre_acct_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[FILL_TAKER_PRE]),
+      post_acct: leaf,
+      post_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(leaf)),
+      pre_meta: META1,
+      pre_meta_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[META1]),
+      pos_absent: true,
+      pleft: BETTER_ORD,
+      pleft_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
+      pright: POS2,
+      pright_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[POS2]),
+      who: "taker",
+    };
+  };
+  // 31. liar ADL FIRST (post col 1, off by one) → verdict (h3 frozen).
+  const ADL_LIAR = [`acct:${takerH}:1:0:0`, META1].sort();
+  const ADL_LIAR_WIT = merkle.getMerkleRoot(ADL_LIAR);
+  const ADL_LIAR_TRACE = pad2([ADL_LIAR_WIT], "adlliartrace");
+  const ADL_LIAR_ROOT = merkle.getMerkleRoot(ADL_LIAR_TRACE);
+  await submitH3(ADL_LIAR_ROOT, ADL_ROOT);
+  await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, adlPayload(ADL_LIAR_ROOT, ADL_LIAR_WIT, ADL_LIAR, ADL_LIAR_TRACE, 1)), 20000, "adl liar predicate");
+  st = await vars(rollup);
+  if (Number(st.frozen_3) !== 2) throw new Error("liar ADL did not freeze h3");
+  console.log("31. liar kind-2 ADL (+1) → frozen=3");
+  // 30. honest ADL resubmit (post col 0, fee 0) → 'no fraud', chain live.
+  await submitH3(ADL_TRACE_ROOT, ADL_ROOT);
+  await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, adlPayload(ADL_TRACE_ROOT, ADL_WIT, ADL_POST, ADL_TRACE, 0)), 20000, "no fraud");
+  st = await vars(rollup);
+  if (Number(st.frozen_3 || 0) !== 0) throw new Error("honest ADL froze h3!");
+  console.log("30. honest kind-2 ADL bounces 'no fraud' (fee 0, math arm open)");
 
   // ---- 14. two-package height: deposit-fraud predicate fires, height fails --
   // 13a's NEG submit left last_submitted=3 (a bounce rolls nothing back), so
@@ -1336,180 +1544,6 @@ async function main() {
   st = await vars(rollup);
   if (Number(st.frozen_16 || 0) !== 0) throw new Error("honest gov deposit froze h16!");
   console.log("24. honest GovDeposit bounces 'no fraud' — gov arm compares PERP");
-  // ---- 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17) ---
-  // Same h3 honest cross shape (fillBase), but the proven post leaf drifts
-  // ONLY in perp (26: `acct:t:-500:7:0`) or ONLY in W (27:
-  // `acct:t:-500:0:9`): collateral/pos math is untouched, yet the fill AA
-  // must verdict — pre-fix it compared collateral alone and bounced.
-  // Each needs its own fresh h3 commitment (a verdict freezes the height).
-  async function submitH3Post(postTree, traceRoot) {
-    const postWit = merkle.getMerkleRoot(postTree);
-    const trace = pad2([postWit], "t2637");
-    const traceRoot2 = merkle.getMerkleRoot(trace);
-    await submitH3(traceRoot2, FILLS_ROOT1);
-    return { postWit, trace, traceRoot: traceRoot2 };
-  }
-  for (const [tag, leaf] of [["26-perp", `acct:${takerH}:-500:7:0`], ["27-wd", `acct:${takerH}:-500:0:9`]]) {
-    const tree = [`${leaf}`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
-    const { postWit, trace, traceRoot } = await submitH3Post(tree, TRACE_H_ROOT);
-    const payload = Object.assign({}, fillBase, {
-      trace_root: traceRoot,
-      post_wit: postWit,
-      post_proof: merkle.getMerkleProof(trace, 0),
-      post_acct: leaf,
-      post_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(leaf)),
-      post_pos: `pos:${takerH}:1:100000000:100000000:0:0`,
-      post_pos_proof: merkle.getMerkleProof(tree, tree.indexOf(`pos:${takerH}:1:100000000:100000000:0:0`)),
-    });
-    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, payload), 20000, tag + " tamper predicate");
-    st = await vars(rollup);
-    if (Number(st.frozen_3) !== 2) throw new Error(tag + " tamper did not freeze h3");
-    console.log(tag + ": perp/W-only post drift → frozen=3");
-  }
-  // ---- 28. skip with a SELF-OWNED better order → 'no fraud' (#37-9) ------
-  // Same h3 skip shape, but the better order belongs to the taker itself
-  // (owner = FILL_TAKER): self-trade rules would skip it by design, so the
-  // predicate must bounce instead of verdict-freezing an honest height.
-  const SELF_BETTER = `ord:${"e".repeat(63)}f:1:1:90000000:6:9:${FILL_TAKER}:0:0`;
-  const SELF_PRE = [DEP_PRE, FILL_TAKER_PRE, META1, META2, POS2, MAKER_ORD, SELF_BETTER].sort();
-  const SELF_PRE_WIT = merkle.getMerkleRoot(SELF_PRE);
-  const SELF_PRE_IDX = {};
-  SELF_PRE.forEach((l, i) => { SELF_PRE_IDX[l] = i; });
-  {
-    const s = submitData(3, STATE_ROOT, STATE_ROOT);
-    s.wit_root = SELF_PRE_WIT;
-    s.wit_count = SELF_PRE.length;
-    s.trace_root = SKIP_TRACE4_ROOT;
-    s.fills_root = SKIP_FILLS_ROOT;
-    s.ops_root = OPS3_ROOT;
-    s.units_root = UNITS3_ROOT;
-    s.fill_count = 1;
-    const h3header = headerFromSubmit(s);
-    const r = await operator.sendMulti({
-      messages: [tempDataMsg(h3header), { app: "data", payload: s }],
-      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
-    });
-    if (r.error) throw new Error("h3 self-skip submit failed: " + r.error);
-    await network.witnessUntilStable(r.unit);
-    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
-    if (res && res.response && res.response.bounced)
-      throw new Error("h3 self-skip submit bounced: " + bounceDetail(res));
-  }
-  await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: 3 }, {
-    rollup: ROLLUP_ADDR,
-    k: 0,
-    trace_root: SKIP_TRACE4_ROOT,
-    fills_root: SKIP_FILLS_ROOT,
-    ops_root: OPS3_ROOT,
-    units_root: UNITS3_ROOT,
-    units_proof: UNITS3_PROOF,
-    fill: SKIP_FILLS[0],
-    fill_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 0),
-    right: SKIP_FILLS_TREE[1],
-    right_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 1),
-    pre_wit: SELF_PRE_WIT,
-    maker_ord: MAKER_ORD,
-    maker_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[MAKER_ORD]),
-    better_ord: SELF_BETTER,
-    better_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[SELF_BETTER]),
-  }), 20000, "no fraud");
-  st = await vars(rollup);
-  if (Number(st.frozen_3 || 0) !== 0) throw new Error("self-owned skip froze h3!");
-  console.log("28. self-owned better order bounces 'no fraud' — height live");
-  // ---- 29. skip on a MULTI-fill unit → 'no fraud' (#37-9) -----------------
-  // Two fills in the same unit (idx 0 + idx 1): the idx-0 fill's skip proof
-  // cannot exclude that the idx-1 fill already consumed the candidate —
-  // fail closed even though the better order is third-party.
-  const MFILL0 = SKIP_FILLS[0];
-  const MFILL1 = `f:${H3_UNIT_HEX}:1:${FILL_TAKER}:${"c".repeat(64)}:${"d".repeat(64)}:${"d".repeat(64)}:1:100000000:50000000:7:0:0:0`;
-  const MFILLS = [MFILL0, MFILL1];
-  const MFILLS_TREE = fillsTree(MFILLS);
-  const MFILLS_ROOT = merkle.getMerkleRoot(MFILLS_TREE);
-  await submitH3(SKIP_TRACE4_ROOT, MFILLS_ROOT);
-  await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: 3 }, {
-    rollup: ROLLUP_ADDR,
-    k: 0,
-    trace_root: SKIP_TRACE4_ROOT,
-    fills_root: MFILLS_ROOT,
-    ops_root: OPS3_ROOT,
-    units_root: UNITS3_ROOT,
-    units_proof: UNITS3_PROOF,
-    fill: MFILL0,
-    fill_proof: merkle.getMerkleProof(MFILLS_TREE, 0),
-    right: MFILLS_TREE[1],
-    right_proof: merkle.getMerkleProof(MFILLS_TREE, 1),
-    pre_wit: H3_PRE_WIT,
-    maker_ord: MAKER_ORD,
-    maker_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[MAKER_ORD]),
-    better_ord: BETTER_ORD,
-    better_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
-  }), 20000, "no fraud");
-  st = await vars(rollup);
-  if (Number(st.frozen_3 || 0) !== 0) throw new Error("multi-fill skip froze h3!");
-  console.log("29. multi-fill unit skip bounces 'no fraud' — fail closed");
-  // ---- 30/31. kind-2 ADL fills run the math arm (#37-10, fee 0) ---------
-  // ADL fill: same shape as the h3 cross fill but kind=2, taker flat-close
-  // (pre col 0, no position): honest post col = 0 - 0 fee = 0. Pre-fix the
-  // AA bounced kind 2 outright, leaving every ADL math lie unchallengeable;
-  // post-fix the honest ADL bounces 'no fraud' (30) and a +1 post verdicts
-  // (31). Each needs its own fresh h3 (a verdict freezes the height).
-  const ADL_FILL = `f:${H3_UNIT_HEX}:0:${takerH}:${"c".repeat(64)}:${"d".repeat(64)}:${"e".repeat(64)}:1:100000000:100000000:9:0:2:0`;
-  const ADL_FILLS = [ADL_FILL];
-  const ADL_TREE = fillsTree(ADL_FILLS);
-  const ADL_ROOT = merkle.getMerkleRoot(ADL_TREE);
-  const ADL_POST = [`acct:${takerH}:0:0:0`, META1].sort();
-  const ADL_WIT = merkle.getMerkleRoot(ADL_POST);
-  const ADL_TRACE = pad2([ADL_WIT], "adltrace");
-  const ADL_TRACE_ROOT = merkle.getMerkleRoot(ADL_TRACE);
-  const adlPayload = (traceRoot, wit, tree, arr, col) => {
-    const leaf = `acct:${takerH}:${col}:0:0`;
-    return {
-      rollup: ROLLUP_ADDR,
-      k: 0,
-      trace_root: traceRoot,
-      fills_root: ADL_ROOT,
-      ops_root: OPS3_ROOT,
-      units_root: UNITS3_ROOT,
-      units_proof: UNITS3_PROOF,
-      fill: ADL_FILL,
-      fill_proof: merkle.getMerkleProof(ADL_TREE, 0),
-      op: FILL_OP,
-      ops_proof: OPS3_PROOF,
-      right: ADL_TREE[1],
-      right_proof: merkle.getMerkleProof(ADL_TREE, 1),
-      pre_wit: H3_PRE_WIT,
-      post_wit: wit,
-      post_proof: merkle.getMerkleProof(arr, 0),
-      pre_acct: FILL_TAKER_PRE,
-      pre_acct_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[FILL_TAKER_PRE]),
-      post_acct: leaf,
-      post_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(leaf)),
-      pre_meta: META1,
-      pre_meta_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[META1]),
-      pos_absent: true,
-      pleft: BETTER_ORD,
-      pleft_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
-      pright: POS2,
-      pright_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[POS2]),
-      who: "taker",
-    };
-  };
-  // 30. honest ADL (post col 0, fee 0) → 'no fraud'.
-  await submitH3(ADL_TRACE_ROOT, ADL_ROOT);
-  await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, adlPayload(ADL_TRACE_ROOT, ADL_WIT, ADL_POST, ADL_TRACE, 0)), 20000, "no fraud");
-  st = await vars(rollup);
-  if (Number(st.frozen_3 || 0) !== 0) throw new Error("honest ADL froze h3!");
-  console.log("30. honest kind-2 ADL bounces 'no fraud' (fee 0, math arm open)");
-  // 31. liar ADL (post col 1, off by one) → verdict.
-  const ADL_LIAR = [`acct:${takerH}:1:0:0`, META1].sort();
-  const ADL_LIAR_WIT = merkle.getMerkleRoot(ADL_LIAR);
-  const ADL_LIAR_TRACE = pad2([ADL_LIAR_WIT], "adlliartrace");
-  const ADL_LIAR_ROOT = merkle.getMerkleRoot(ADL_LIAR_TRACE);
-  await submitH3(ADL_LIAR_ROOT, ADL_ROOT);
-  await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: 3 }, adlPayload(ADL_LIAR_ROOT, ADL_LIAR_WIT, ADL_LIAR, ADL_LIAR_TRACE, 1)), 20000, "adl liar predicate");
-  st = await vars(rollup);
-  if (Number(st.frozen_3) !== 2) throw new Error("liar ADL did not freeze h3");
-  console.log("31. liar kind-2 ADL (+1) → frozen=3");
   // ---- 32. adjacent heights fraud in turn, then recover in order (#37-8) --
   // h16/h17 pipeline LIAR submits, verdicts top-down (h16 then h17):
   // last_submitted pins at each failed height, then both resubmit honestly
