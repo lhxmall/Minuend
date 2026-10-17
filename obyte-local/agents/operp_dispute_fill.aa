@@ -148,10 +148,11 @@
 					// OTHER parties' shortfalls — unmodelable here.
 					if ($acct_hex == '0000000000000000000000000000000000000000000000000000000000000000')
 						bounce('no fraud');
-					// ADL fills sit on top of explicit insurance top-up and
-					// pro-rata haircut transfers the fill string cannot
-					// describe — fail closed.
-					if ($F[12] == '2') bounce('no fraud');
+					// #37-10: kind 2 (ADL transfer, not a trade) runs the
+					// same collateral/position math arm as 0/1/3 — with fee
+					// forced to 0 below (the engine charges no taker fee on
+					// ADL; #37-16). Bouncing kind 2 outright left every ADL
+					// math lie unchallengeable.
 					$side_acct = ($who == 'taker') ? $F[11] : (($F[11] == '0') ? '1' : '0');
 					$delta = ($side_acct == '0') ? ($F[9] + 0) : (0 - ($F[9] + 0));
 					$price = $F[8] + 0;
@@ -241,13 +242,20 @@
 					// notional), kind 0/3 off the encoded price, truncating
 					// toward zero at every step like Rust i128 division.
 					$kind = $F[12] + 0;
-					if ($kind == 1) {
-						$fn = floor($qty * $usd * 1000000 / 100000000);
-						$fee = floor($fn * $fee_bps / 10000);
+					if ($kind == 2) {
+						// #37-10/#37-16: ADL pays no taker fee (transfer,
+						// not a trade) — the engine skips it, so the model
+						// must too, or honest ADL heights false-verdict.
+						$fee = 0;
 					} else {
-						$t1 = ($qty * $price < 0) ? ceil($qty * $price / 100000000) : floor($qty * $price / 100000000);
-						$t2 = ($t1 * 1000000 < 0) ? ceil($t1 * 1000000 / 100000000) : floor($t1 * 1000000 / 100000000);
-						$fee = floor(abs($t2) * $fee_bps / 10000);
+						if ($kind == 1) {
+							$fn = floor($qty * $usd * 1000000 / 100000000);
+							$fee = floor($fn * $fee_bps / 10000);
+						} else {
+							$t1 = ($qty * $price < 0) ? ceil($qty * $price / 100000000) : floor($qty * $price / 100000000);
+							$t2 = ($t1 * 1000000 < 0) ? ceil($t1 * 1000000 / 100000000) : floor($t1 * 1000000 / 100000000);
+							$fee = floor(abs($t2) * $fee_bps / 10000);
+						}
 					}
 					$tfee = ($who == 'taker') ? $fee : 0;
 					$post_acct = trigger.data.post_acct;
@@ -258,6 +266,12 @@
 					$A1 = split($post_acct, ':');
 					if (array_length($A1) != 5 OR $A1[1] != $acct_hex) bounce('bad post acct');
 					$post_col = $A1[2] + 0;
+					// #37-17: Place/fill never touches PERP balances or the
+					// cumulative-withdrawn ledger (fill path writes neither;
+					// only GovDeposit/GovWithdraw move perp, only Withdraw
+					// moves W). A post leaf that smuggles a perp/W change
+					// past the collateral identity is fraud — pin both.
+					if ($A1[3] != $A0[3] OR $A1[4] != $A0[4]) bounce('no fraud');
 					// Is the challenged account's POST position range provably
 					// empty? Then equity == collateral and a non-negative
 					// expected lands exact on its own. Either way a negative
