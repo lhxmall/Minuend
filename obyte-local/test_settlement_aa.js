@@ -1145,6 +1145,28 @@ async function main() {
     console.log(`21. h${hh}: seized ${seized}, debt ${afterDebt}, pool ${afterPool}`);
     return [afterDebt, afterPool];
   }
+  // Verdict WITHOUT the submit (heights were pipelined earlier).
+  async function oneVerdictOnly(hh, preDebt, prePool) {
+    await triggerVerdict(
+      challenger,
+      dispute,
+      Object.assign({ pred: "deposit", height: hh }, fraudProof),
+      20000,
+      "deposit fraud predicate h" + hh
+    );
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh]) !== 2) throw new Error("h" + hh + " verdict did not freeze");
+    const seized = Math.min(SLASH_HALF, prePool);
+    const afterDebt = Number(st["slash_reward_" + chAddr] || 0);
+    const afterPool = Number(st["pool_" + opAddr] || 0);
+    if (afterDebt !== preDebt + seized)
+      throw new Error(`h${hh} debt ${afterDebt} != banked ${preDebt} + seized ${seized} (pool was ${prePool})`);
+    if (afterPool !== prePool - seized)
+      throw new Error(`h${hh} pool ${afterPool} != ${prePool} - ${seized}`);
+    console.log(`21. h${hh}: seized ${seized}, debt ${afterDebt}, pool ${afterPool}`);
+    return [afterDebt, afterPool];
+  }
+
   [debt, pool] = await oneFraud(11, debt, 49e12);
   // 21b. resubmit h11 honestly, finalize 8..11, claim the pool to 0.
   await sendCombinedSubmit(operator, 11, STATE_ROOT, STATE_ROOT);
@@ -1157,22 +1179,24 @@ async function main() {
   pool = Number(st["pool_" + opAddr] || 0);
   if (pool !== 0) throw new Error("pool not drained by claim: " + pool);
   console.log("21. pool drained to 0 via idle-chain claim");
-  // 21c. PARTIAL seize (the red-green needle): sub-slice pool. Fund the
-  // pool with a NON-MULTIPLE of the slash: 1.4e12 net. Three LIAR
-  // heights (each pass the 1e12 submit floor on the same pool), then
-  // verdicts: 5e11 (pool .9e12) → 5e11 (pool .4e12) → verdict 14's
-  // seizure = min(5e11, .4e12) = 4e11 and debt moves by EXACTLY 4e11
-  // (pre-fix credited the fixed 5e11 — run goes red there).
-  await trigger(operator, rollup, { pool: 1 }, 1400000010000);
-  pool += 1.4e12;
-  // oneFraud submits each LIAR height itself (forward, ls+1) and then
-  // challenges it: 5e11 (pool .9e12) → 5e11 (pool .4e12) → verdict 14's
-  [debt, pool] = await oneFraud(12, debt, pool);
-  [debt, pool] = await oneFraud(13, debt, pool);
-  [debt, pool] = await oneFraud(14, debt, pool);
-  if (pool !== 4e11 - 4e11 || debt !== 2.5e12 + 5e11 + 5e11 + 4e11)
-    throw new Error(`partial-seize accounting wrong: pool=${pool} debt=${debt}`);
-  console.log("21. partial seizure: debt moved by 4e11 (not the fixed 5e11)");
+  // 21c. PIPELINED multi-height drill (the red-green needle): fund 1e12,
+  // submit THREE adjacent LIAR heights (12/13/14) with no interim verdict,
+  // then challenge them TOP-DOWN. verdicts seize min(5e11, pool):
+  //   v(12): seize 5e11 → pool .5e12;
+  //   v(13): seize the residual 5e11 → pool 0;
+  //   v(14): pool is EMPTY — must credit ZERO (pre-fix minted a fixed 5e11
+  //   out of the shared pool — the run goes red there on debt).
+  await trigger(operator, rollup, { pool: 1 }, 10000000010000);
+  pool += 1e12;
+  await submitLiarAt(12);
+  await submitLiarAt(13);
+  await submitLiarAt(14);
+  [debt, pool] = await oneVerdictOnly(12, debt, pool);
+  [debt, pool] = await oneVerdictOnly(13, debt, pool);
+  [debt, pool] = await oneVerdictOnly(14, debt, pool);
+  if (pool !== 0 || debt !== 3e12 + 5e11 + 5e11)
+    throw new Error(`empty-pool debt wrong: pool=${pool} debt=${debt}`);
+  console.log("21. empty-pool verdict credits zero; debt == cumulative seizure");
   // Close out: bank the challenger debt (== cumulative seizure).
   await trigger(challenger, rollup, { claim: "slash" }, 20000);
   st = await vars(rollup);
