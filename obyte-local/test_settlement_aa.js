@@ -1165,9 +1165,8 @@ async function main() {
   // (pre-fix credited the fixed 5e11 — run goes red there).
   await trigger(operator, rollup, { pool: 1 }, 14000000010000);
   pool += 1.4e12;
-  await submitLiarAt(12);
-  await submitLiarAt(13);
-  await submitLiarAt(14);
+  // oneFraud submits each LIAR height itself (forward, ls+1) and then
+  // challenges it: 5e11 (pool .9e12) → 5e11 (pool .4e12) → verdict 14's
   [debt, pool] = await oneFraud(12, debt, pool);
   [debt, pool] = await oneFraud(13, debt, pool);
   [debt, pool] = await oneFraud(14, debt, pool);
