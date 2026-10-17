@@ -172,10 +172,22 @@ function shardRoot(bucket, addr) {
   return [level[0], sibs];
 }
 function buildForest(pairs, wdAddr) {
+  // ocore fatals on EMPTY arrays in trigger data, so the withdrawer's
+  // shard bucket must hold >= 2 members for a non-empty proof (same
+  // bucket-padding rule as gen_withdraw_proof.rs): deterministic PAD
+  // decoys fill whichever shard lacks a second member.
+  const all = pairs.slice();
+  let pad = 0;
+  const inShard = (a, s) => wdShard(a) === s;
+  while (!all.some(([a]) => a !== wdAddr && inShard(a, wdShard(wdAddr)))) {
+    pad += 1;
+    all.push([`PAD${pad}`.padEnd(32, "0"), 500, 0, 0]);
+  }
   const buckets = Array.from({ length: 16 }, () => []);
-  for (const pr of pairs) buckets[wdShard(pr[0])].push(pr);
+  for (const pr of all) buckets[wdShard(pr[0])].push(pr);
   const wdBucket = buckets[wdShard(wdAddr)];
   const [wdRoot, sibs] = shardRoot(wdBucket, wdAddr);
+  if (sibs.length === 0) throw new Error("withdrawer shard proof is empty after padding");
   const roots = [];
   for (let i = 0; i < 16; i++) {
     if (buckets[i].length === 0) { roots[i] = sha256Hex("empty:" + i); continue; }
