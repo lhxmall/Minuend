@@ -1254,6 +1254,8 @@ async function main() {
   if (Number(st.last_finalized) !== 15) throw new Error("h15 finalize failed");
   if (Number(st["pool_" + opAddr] || 0) !== 0) throw new Error("pool claim after recovery failed");
   console.log("22. failed top pins ls, blocks pool drain and forward submits; resubmit recovers");
+  // Scenario 22 drained the pool to 0 — fund the floor for 24..32.
+  await trigger(operator, rollup, { pool: 1 }, POOL_FUND_GROSS);
   // ---- 24. honest GovDeposit batches never freeze (#37-5) -----------------
   // D: moves PERP (col pinned): the pre-fix AA judged it by collateral
   // math and verdict-froze the honest height. Post-fix the gov arm
