@@ -668,7 +668,38 @@ async function main() {
     if (res && res.response && res.response.bounced)
       throw new Error("h3 submit bounced: " + bounceDetail(res));
   }
-
+  // k=1 two-unit submit: unit 0 is a padding unit (its trace entry carries
+  // the pre tree), unit 1 is the challenged unit. Lets batch C+D scenarios
+  // run on fresh heights past the h3 window: k=1 predicates anchor pre_wit
+  // via pre_proof (trace[0] membership) instead of wit_root_(h-1).
+  const K1_PAD_HEX = sha256Hex("k1-pad-unit");
+  const K1_UNITS = [K1_PAD_HEX, H3_UNIT_HEX].sort();
+  const K1_UNITS_ROOT = merkle.getMerkleRoot(K1_UNITS);
+  const K1_UNITS_PROOF = merkle.getMerkleProof(K1_UNITS, K1_UNITS.indexOf(H3_UNIT_HEX));
+  async function submitK1(hh, preWit, postWit, fillsRoot, opsRoot) {
+    const trace = [preWit, postWit];
+    const traceRoot = merkle.getMerkleRoot(trace);
+    const s = submitData(hh, STATE_ROOT, STATE_ROOT);
+    s.wit_root = preWit;
+    s.wit_count = 2;
+    s.trace_root = traceRoot;
+    s.fills_root = fillsRoot;
+    s.ops_root = opsRoot;
+    s.units_root = K1_UNITS_ROOT;
+    s.unit_count = 2;
+    s.fill_count = 1;
+    const header = headerFromSubmit(s);
+    const r = await operator.sendMulti({
+      messages: [tempDataMsg(header), { app: "data", payload: s }],
+      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
+    });
+    if (r.error) throw new Error(`h${hh} k1 submit failed: ` + r.error);
+    await network.witnessUntilStable(r.unit);
+    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+    if (res && res.response && res.response.bounced)
+      throw new Error(`h${hh} k1 submit bounced: ` + bounceDetail(res));
+    return { trace, traceRoot };
+  }
   // ---- 12. ghost: maker order absent → fraud -------------------------------
   // maker id "e"*64 has no ord leaf in H3_PRE. Sorted H3_PRE runs
   // ... MAKER_ORD(ord:d, idx4), BETTER_ORD(ord:eee..f, idx5), POS2(idx6):
@@ -884,6 +915,7 @@ async function main() {
   const MFILL1 = `f:${H3_UNIT_HEX}:1:${FILL_TAKER}:${"c".repeat(64)}:${"d".repeat(64)}:${"d".repeat(64)}:1:100000000:50000000:7:0:0:0`;
   const MFILLS = [MFILL0, MFILL1];
   const MFILLS_TREE = fillsTree(MFILLS);
+  const MFILLS_ROOT = merkle.getMerkleRoot(MFILLS_TREE);
   // 28's bounce left h3 LIVE — freeze it with the tamper verdict so 29's
   // submit rides the frozen branch.
   await freezeTamper27();
@@ -1575,6 +1607,149 @@ async function main() {
   st = await vars(rollup);
   if (Number(st.last_finalized) !== 17) throw new Error("post-recovery finalize stalled at " + st.last_finalized);
   console.log("32. resubmit bottom-up + finalize in order — chain recovers");
+  // ---- 26-31 on fresh heights via k=1 two-unit submits --------------------
+  // h3 is long finalized: k=1 predicates anchor pre_wit through pre_proof
+  // (trace[0] membership), so the H3_PRE tree rides fresh heights 18..23.
+  // Each verdict freezes its height; bounce scenarios resubmit cleanly.
+  // K1 ops tree: [pad-op, FILL_OP] — the challenged unit (k=1) carries the
+  // Place op the taker leg models.
+  const K1_PAD_OP = "x";
+  const K1_OPS = [K1_PAD_OP, FILL_OP];
+  const K1_OPS_ROOT = merkle.getMerkleRoot(K1_OPS);
+  const K1_OPS_PROOF = merkle.getMerkleProof(K1_OPS, 1);
+  const k1fillBase = (hh, traceRoot, trace, fillsRoot, fillsTree, fill, postWit, postTree, postLeaf, posLeaf) => ({
+    rollup: ROLLUP_ADDR,
+    k: 1,
+    trace_root: traceRoot,
+    fills_root: fillsRoot,
+    ops_root: K1_OPS_ROOT,
+    units_root: K1_UNITS_ROOT,
+    units_proof: K1_UNITS_PROOF,
+    fill,
+    fill_proof: merkle.getMerkleProof(fillsTree, 0),
+    op: FILL_OP,
+    ops_proof: K1_OPS_PROOF,
+    right: fillsTree[1],
+    right_proof: merkle.getMerkleProof(fillsTree, 1),
+    pre_wit: H3_PRE_WIT,
+    pre_proof: merkle.getMerkleProof(trace, 0),
+    post_wit: postWit,
+    post_proof: merkle.getMerkleProof(trace, 1),
+    pre_acct: FILL_TAKER_PRE,
+    pre_acct_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[FILL_TAKER_PRE]),
+    post_acct: postLeaf,
+    post_acct_proof: merkle.getMerkleProof(postTree, postTree.indexOf(postLeaf)),
+    post_pos: posLeaf,
+    post_pos_proof: posLeaf ? merkle.getMerkleProof(postTree, postTree.indexOf(posLeaf)) : { root: postWit, siblings: ["x"], index: 0 },
+    pre_meta: META1,
+    pre_meta_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[META1]),
+    pos_absent: true,
+    pleft: BETTER_ORD,
+    pleft_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
+    pright: POS2,
+    pright_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[POS2]),
+    who: "taker",
+  });
+  const k1post = (leaf) => {
+    const tree = [`${leaf}`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
+    return { tree, wit: merkle.getMerkleRoot(tree) };
+  };
+  // 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17).
+  for (const [tag, hh, leaf] of [["26-perp", 18, `acct:${takerH}:-500:7:0`], ["27-wd", 19, `acct:${takerH}:-500:0:9`]]) {
+    const { tree, wit } = k1post(leaf);
+    const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, FILLS_ROOT1, K1_OPS_ROOT);
+    const posLeaf = `pos:${takerH}:1:100000000:100000000:0:0`;
+    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: hh }, k1fillBase(hh, traceRoot, trace, FILLS_ROOT1, FILLS1_TREE, fillStr, wit, tree, leaf, posLeaf)), 20000, tag + " tamper predicate");
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh]) !== 2) throw new Error(tag + " tamper did not freeze h" + hh);
+    console.log(tag + ": perp/W-only post drift → frozen=" + hh);
+  }
+  // 28. self-owned better-order skip → 'no fraud' (#37-9).
+  {
+    const hh = 20;
+    const { trace, traceRoot } = await submitK1(hh, SELF_PRE_WIT, SELF_PRE_WIT, SKIP_FILLS_ROOT, K1_OPS_ROOT);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: hh }, {
+      rollup: ROLLUP_ADDR,
+      k: 1,
+      trace_root: traceRoot,
+      fills_root: SKIP_FILLS_ROOT,
+      ops_root: K1_OPS_ROOT,
+      units_root: K1_UNITS_ROOT,
+      units_proof: K1_UNITS_PROOF,
+      fill: SKIP_FILLS[0],
+      fill_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 0),
+      right: SKIP_FILLS_TREE[1],
+      right_proof: merkle.getMerkleProof(SKIP_FILLS_TREE, 1),
+      pre_wit: SELF_PRE_WIT,
+      pre_proof: merkle.getMerkleProof(trace, 0),
+      maker_ord: MAKER_ORD,
+      maker_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[MAKER_ORD]),
+      better_ord: SELF_BETTER,
+      better_proof: merkle.getMerkleProof(SELF_PRE, SELF_PRE_IDX[SELF_BETTER]),
+    }), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh] || 0) !== 0) throw new Error("self-owned skip froze h" + hh + "!");
+    console.log("28. self-owned better order bounces 'no fraud' — height live");
+  }
+  // 29. multi-fill skip → 'no fraud' (#37-9, fail closed).
+  {
+    const hh = 21;
+    const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, H3_PRE_WIT, MFILLS_ROOT, K1_OPS_ROOT);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: hh }, {
+      rollup: ROLLUP_ADDR,
+      k: 1,
+      trace_root: traceRoot,
+      fills_root: MFILLS_ROOT,
+      ops_root: K1_OPS_ROOT,
+      units_root: K1_UNITS_ROOT,
+      units_proof: K1_UNITS_PROOF,
+      fill: MFILL0,
+      fill_proof: merkle.getMerkleProof(MFILLS_TREE, 0),
+      right: MFILLS_TREE[1],
+      right_proof: merkle.getMerkleProof(MFILLS_TREE, 1),
+      pre_wit: H3_PRE_WIT,
+      pre_proof: merkle.getMerkleProof(trace, 0),
+      maker_ord: MAKER_ORD,
+      maker_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[MAKER_ORD]),
+      better_ord: BETTER_ORD,
+      better_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[BETTER_ORD]),
+    }), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh] || 0) !== 0) throw new Error("multi-fill skip froze h" + hh + "!");
+    console.log("29. multi-fill unit skip bounces 'no fraud' — fail closed");
+  }
+  // 30. honest ADL → 'no fraud'; 31. liar ADL → verdict (#37-10).
+  // Honest post tree has NO pos leaf (flat close): prove the empty range
+  // with eleft over the post tree.
+  {
+    const hh = 22;
+    const tree = [`acct:${takerH}:0:0:0`, META1].sort();
+    const wit = merkle.getMerkleRoot(tree);
+    const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, ADL_ROOT, K1_OPS_ROOT);
+    const leaf = `acct:${takerH}:0:0:0`;
+    const payload = Object.assign(k1fillBase(hh, traceRoot, trace, ADL_ROOT, ADL_TREE, ADL_FILL, wit, tree, leaf, null), {
+      eleft: META1,
+      eleft_proof: merkle.getMerkleProof(tree, tree.indexOf(META1)),
+    });
+    delete payload.post_pos;
+    delete payload.post_pos_proof;
+    await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: hh }, payload), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh] || 0) !== 0) throw new Error("honest ADL froze h" + hh + "!");
+    console.log("30. honest kind-2 ADL bounces 'no fraud' (fee 0, math arm open)");
+  }
+  {
+    const hh = 23;
+    const tree = [`acct:${takerH}:1:0:0`, META1].sort();
+    const wit = merkle.getMerkleRoot(tree);
+    const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, ADL_ROOT, K1_OPS_ROOT);
+    const leaf = `acct:${takerH}:1:0:0`;
+    const posLeaf = `pos:${takerH}:1:100000000:100000000:0:0`;
+    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: hh }, k1fillBase(hh, traceRoot, trace, ADL_ROOT, ADL_TREE, ADL_FILL, wit, tree, leaf, posLeaf)), 20000, "adl liar predicate");
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh]) !== 2) throw new Error("liar ADL did not freeze h" + hh);
+    console.log("31. liar kind-2 ADL (+1) → frozen=" + hh);
+  }
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
   // test_vault_withdraw_aa.js: its own short chain (h1..h3 with REAL
   // forests) keeps this suite inside the 20-minute CI job.
