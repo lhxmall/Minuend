@@ -926,7 +926,10 @@ impl ChainState {
         // The rate is a per-market parameter since permissionless listing.
         // Funding-rate markets charge it on the multiplier notional: their
         // encoded price is a rate, not dollars.
-        if fill.taker != INSURANCE_ACCOUNT {
+        // #37-16: kind 2 (ADL transfer, not a trade) pays no taker fee —
+        // the fill AA models kind 2 with fee 0, and charging here would
+        // drift honest ADL collateral off the provable identity.
+        if fill.taker != INSURANCE_ACCOUNT && fill.kind != 2 {
             let params = self.market_params(fill.market);
             let notional = match funding_usd {
                 Some(usd) => funding_notional_usd(fill.qty, usd),

@@ -107,6 +107,12 @@
 					$lo = $deposit ? 'd:' : 'w:';
 					$up = $deposit ? 'D:' : 'W:';
 					if (!starts_with($op, $lo) AND !starts_with($op, $up)) bounce('no fraud');
+					// #37-5: gov ops (D:/W:) move PERP balances, never
+					// collateral (exec gov_deposit/gov_withdraw only touch
+					// perp_balances/supply). A single arm judging them by
+					// collateral math verdicts honest gov batches — compare
+					// the PERP column instead, and pin collateral unchanged.
+					$gov = starts_with($op, 'D:') OR starts_with($op, 'W:');
 					// Pre-wit anchor: k==0 -> previous height's committed root
 					// (height 1 -> empty sentinel); k>0 -> trace membership at
 					// k-1 proves the pre state.
@@ -144,6 +150,10 @@
 					$amount = substring($amt, 0, $next < 0 ? length($amt) : $next);
 					$tail1 = substring($post_leaf, 70, length($post_leaf));
 					$col1 = substring($tail1, 0, index_of($tail1, ':'));
+					// #37-5: acct leaf columns are acct:hex:col:perp:W —
+					// the PERP leg sits one colon past collateral.
+					$ptail1 = substring($tail1, length($col1) + 1, length($tail1));
+					$perp1 = substring($ptail1, 0, index_of($ptail1, ':'));
 					if (typeof($post_leaf) == 'boolean' OR typeof($post_wit) == 'boolean'
 						OR !is_valid_merkle_proof($post_leaf, trigger.data.post_leaf_proof)
 						OR trigger.data.post_leaf_proof.root != $post_wit)
@@ -170,7 +180,8 @@
 							AND trigger.data.left_proof.index == (var[$rollup]['wit_count_' || ($h - 1)] otherwise 0) - 1
 							AND $ghost > trigger.data.left;
 						if (!$hit1 AND !$hit2 AND !$hit3) bounce('no fraud');
-						if ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1))
+						// Gov fresh account: pre perp = 0, collateral stays 0.
+						if ($gov ? (0 + $amount == $perp1 AND $col1 == '0') : ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1)))
 							bounce('no fraud');
 					} else {
 						if (typeof($pre_leaf) == 'boolean'
@@ -180,7 +191,10 @@
 						if (substring($pre_leaf, 5, 64) != $acct) bounce('bad leaf');
 						$tail0 = substring($pre_leaf, 70, length($pre_leaf));
 						$col0 = substring($tail0, 0, index_of($tail0, ':'));
-						if ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1))
+						$ptail0 = substring($tail0, length($col0) + 1, length($tail0));
+						$perp0 = substring($ptail0, 0, index_of($ptail0, ':'));
+						// Gov old account: PERP moves by amount, collateral pinned.
+						if ($gov ? (($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1)) AND $col0 == $col1) : ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1)))
 							bounce('no fraud');
 					}
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
@@ -364,26 +378,12 @@
 					if (!$ts OR $ts >= var[$rollup]['inbox_upto_' || $h]) bounce('no fraud');
 					// #23: {force} pins only a timestamp — the id may name a
 					// unit that never existed, and an honest batch correctly
-					// omits it. Omit cannot pay out; the rest of the case is
-					// left unreachable on purpose.
+					// omits it. Omit cannot pay out: everything below this
+					// unconditional bounce was DELETED (unreachable code
+					// costing ~150 ops against the 2000 budget; observable
+					// behavior — always 'no fraud', never a verdict — is
+					// unchanged).
 					bounce('no fraud');
-					$root = trigger.data.units_set_root;
-					$hit1 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.right AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
-						AND trigger.data.right_proof.root == $root
-						AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
-						AND trigger.data.left < $id AND $id < trigger.data.right;
-					$hit2 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.left_proof.index == 0
-						AND $id < trigger.data.left;
-					$hit3 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
-						AND trigger.data.left_proof.root == $root
-						AND trigger.data.left_proof.index == $n - 1
-						AND $id > trigger.data.left;
-					if (!$hit1 AND !$hit2 AND !$hit3) bounce('no fraud');
-					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 				}",
 				messages: [
 					{
@@ -571,6 +571,17 @@
 						OR trigger.data.units_proof.root != trigger.data.units_root
 						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
 						bounce('bad unit');
+					// #37-9: single-fill completeness (mirrors dispute_fill):
+					// without it an earlier fill in the SAME unit may already
+					// have consumed the "better" order, so the challenge is
+					// unprovable — fail closed on multi-fill units.
+					if ($F[2] != '0') bounce('no fraud');
+					$right_ok = trigger.data.right
+						AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
+						AND trigger.data.right_proof.root == trigger.data.fills_root
+						AND trigger.data.right_proof.index == trigger.data.fill_proof.index + 1
+						AND !starts_with(trigger.data.right, 'f:' || $F[1] || ':');
+					if (!$right_ok) bounce('no fraud');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
@@ -605,6 +616,14 @@
 					$bo_rem = $BO[6] + 0;
 					$fill_price = $F[8] + 0;
 					if ($MO[1] != $F[6] OR $bo_rem <= 0) bounce('no fraud');
+					// #37-9: the "better" order must not be the TAKER's own
+					// live order. A taker's own better-priced order can never
+					// fill against itself (self-trade rules skip it by
+					// design), so waving it as a skipped better order
+					// verdicts honest fills. The MAKER's own better order
+					// skipped is still real fraud (no self-trade between a
+					// maker's resting orders), so only the taker leg is out.
+					if ($BO[7] == $F[3]) bounce('no fraud');
 					$bid_better = ($side == '0') AND $BO[3] == '1'
 						AND ($bo_price < $mo_price OR ($bo_price == $mo_price AND $bo_seq < $mo_seq))
 						AND !($bo_price > $fill_price);

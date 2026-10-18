@@ -128,55 +128,70 @@ fn deposit_proof(
     }
     let acct_hex = parts[1].to_string();
     let amount: i128 = parts[2].parse().ok()?;
+    // #37-5: gov ops (D:/W:) move the PERP column, never collateral —
+    // mirror the dispute AA's split arm, else the watcher would flag
+    // honest gov batches (or miss gov lies aimed at the wrong column).
+    let is_gov = op.starts_with("D:") || op.starts_with("W:");
     // Fresh account: no pre leaf — pre col is 0, and the AA takes the
     // pre_absent non-membership geometry over the sorted pre leaves.
     let pre_hit = pre_leaves
         .iter()
         .find(|l| l.starts_with(&format!("acct:{acct_hex}:")))
         .cloned();
-    let (pre_col, pre_absent_fields): (i128, serde_json::Value) = match pre_hit.clone() {
-        Some(pre_leaf) => {
-            let c: i128 = pre_leaf.split(':').nth(2)?.parse().ok()?;
-            (c, serde_json::json!({}))
-        }
-        None => {
-            let mut sorted = pre_leaves.to_vec();
-            sorted.sort();
-            let ghost_key = format!("acct:{acct_hex}:");
-            let pos = sorted
-                .iter()
-                .position(|s| s.as_str() > ghost_key.as_str())
-                .unwrap_or(sorted.len());
-            let mut f = serde_json::json!({"pre_absent": true});
-            let obj = f.as_object_mut()?;
-            if pos > 0 && pos < sorted.len() {
-                obj.insert("left".into(), sorted[pos - 1].clone().into());
-                obj.insert("left_proof".into(), {
+    let (pre_col, pre_perp, pre_absent_fields): (i128, u128, serde_json::Value) =
+        match pre_hit.clone() {
+            Some(pre_leaf) => {
+                let c: i128 = pre_leaf.split(':').nth(2)?.parse().ok()?;
+                let p: u128 = pre_leaf.split(':').nth(3)?.parse().ok()?;
+                (c, p, serde_json::json!({}))
+            }
+            None => {
+                let mut sorted = pre_leaves.to_vec();
+                sorted.sort();
+                let ghost_key = format!("acct:{acct_hex}:");
+                let pos = sorted
+                    .iter()
+                    .position(|s| s.as_str() > ghost_key.as_str())
+                    .unwrap_or(sorted.len());
+                let mut f = serde_json::json!({"pre_absent": true});
+                let obj = f.as_object_mut()?;
+                if pos > 0 && pos < sorted.len() {
+                    obj.insert("left".into(), sorted[pos - 1].clone().into());
+                    obj.insert("left_proof".into(), {
                     let p = obyte_merkle::proof(&sorted, pos - 1);
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
-                obj.insert("right".into(), sorted[pos].clone().into());
-                obj.insert("right_proof".into(), {
+                    obj.insert("right".into(), sorted[pos].clone().into());
+                    obj.insert("right_proof".into(), {
                     let p = obyte_merkle::proof(&sorted, pos);
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
-            } else if !sorted.is_empty() {
-                let i = if pos == 0 { 0 } else { sorted.len() - 1 };
-                obj.insert("left".into(), sorted[i].clone().into());
-                obj.insert("left_proof".into(), {
+                } else if !sorted.is_empty() {
+                    let i = if pos == 0 { 0 } else { sorted.len() - 1 };
+                    obj.insert("left".into(), sorted[i].clone().into());
+                    obj.insert("left_proof".into(), {
                     let p = obyte_merkle::proof(&sorted, i);
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
-            } else {
-                return None;
+                } else {
+                    return None;
+                }
+                (0, 0, f)
             }
-            (0, f)
-        }
-    };
-    let expected = if is_deposit {
-        pre_col + amount
+        };
+    // Gov leg: PERP moves by amount, collateral pinned. Non-gov: the
+    // collateral identity as before.
+    let (expected, gov_col_must_match): (i128, Option<i128>) = if is_gov {
+        let e = if is_deposit {
+            (pre_perp as i128) + amount
+        } else {
+            (pre_perp as i128) - amount
+        };
+        (e, Some(pre_col))
+    } else if is_deposit {
+        (pre_col + amount, None)
     } else {
-        pre_col - amount
+        (pre_col - amount, None)
     };
     let posted_post: Vec<String> = batch.leaf_trace.get(k)?.clone();
     let liar_leaf = posted_post
@@ -184,7 +199,17 @@ fn deposit_proof(
         .find(|l| l.starts_with(&format!("acct:{acct_hex}:")))?
         .clone();
     let liar_col: i128 = liar_leaf.split(':').nth(2)?.parse().ok()?;
-    if liar_col == expected {
+    let liar_perp: i128 = liar_leaf.split(':').nth(3)?.parse().ok()?;
+    let (liar_val, col_pinned) = if is_gov {
+        (liar_perp, Some(liar_col))
+    } else {
+        (liar_col, None)
+    };
+    if liar_val == expected
+        && col_pinned
+            .map(|c| Some(c) == gov_col_must_match)
+            .unwrap_or(true)
+    {
         return None; // honest leg — keep scanning
     }
     let mut roots = trace_roots(batch);
@@ -346,17 +371,28 @@ fn aa_fill_verdict(
     who_taker: bool,
     keeper: Option<&(String, i128, i128)>,
     allow_last: bool,
+    pre_perp_w: Option<(&str, &str)>,
 ) -> bool {
     // Missing post acct leaf bounces the AA prelude — no verdict at all.
-    let post_col: i128 = match tree
+    let post_acct = match tree
         .iter()
         .find(|l| l.starts_with(&format!("acct:{acct_hex}:")))
-        .and_then(|l| l.split(':').nth(2))
-        .and_then(|c| c.parse().ok())
     {
+        Some(a) => a,
+        None => return false,
+    };
+    let post_col: i128 = match post_acct.split(':').nth(2).and_then(|c| c.parse().ok()) {
         Some(c) => c,
         None => return false,
     };
+    // #37-17: the AA pins post.perp == pre.perp and post.W == pre.W —
+    // a drifted committed leaf verdicts even when collateral matches.
+    if let Some((pp, pw)) = pre_perp_w {
+        let mut it = post_acct.split(':');
+        if it.nth(3) != Some(pp) || it.next() != Some(pw) {
+            return true;
+        }
+    }
     // Position leg.
     let pos_leaf = tree.iter().find(|l| {
         l.starts_with("pos:") && {
@@ -569,92 +605,119 @@ fn fill_proof(
         }
     }
     // Skip: another live order strictly better than the filled maker.
-    for f in &unit_fills {
-        let parts: Vec<&str> = f.split(':').collect();
-        if parts.len() != 14 {
-            continue;
-        }
-        let maker_order_hex = parts[6].to_string();
-        let market = parts[7].to_string();
-        let price: i64 = parts[8].parse().ok()?;
-        let side = parts[11];
-        let maker_ord = pre_leaves
-            .iter()
-            .find(|l| {
-                l.starts_with("ord:") && {
-                    let o: Vec<&str> = l.split(':').collect();
-                    o.len() == 10 && o[1] == maker_order_hex && o[2] == market
+    // #37-9: single-fill units only (mirrors the AA's completeness gate —
+    // an earlier same-unit fill may already have consumed the candidate),
+    // and the candidate must belong to NEITHER fill party (self-trade
+    // rules skip own orders by design; waving them verdicts honest fills).
+    // Multi-fill units fall through to fill_math below.
+    if unit_fills.len() == 1 {
+        for f in &unit_fills {
+            let parts: Vec<&str> = f.split(':').collect();
+            if parts.len() != 14 {
+                continue;
+            }
+            if parts[2] != "0" {
+                continue;
+            }
+            let taker_hex = parts[3].to_string();
+            let maker_order_hex = parts[6].to_string();
+            let market = parts[7].to_string();
+            let price: i64 = parts[8].parse().ok()?;
+            let side = parts[11];
+            let maker_ord = pre_leaves
+                .iter()
+                .find(|l| {
+                    l.starts_with("ord:") && {
+                        let o: Vec<&str> = l.split(':').collect();
+                        o.len() == 10 && o[1] == maker_order_hex && o[2] == market
+                    }
+                })?
+                .clone();
+            let mo: Vec<&str> = maker_ord.split(':').collect();
+            let (_mo_side, mo_price, mo_seq): (u8, i64, u64) = (
+                mo[3].parse().ok()?,
+                mo[4].parse().ok()?,
+                mo[5].parse().ok()?,
+            );
+            for cand in pre_leaves.iter().filter(|l| l.starts_with("ord:")) {
+                let o: Vec<&str> = cand.split(':').collect();
+                if o.len() != 10 || o[2] != market {
+                    continue;
                 }
-            })?
-            .clone();
-        let mo: Vec<&str> = maker_ord.split(':').collect();
-        let (_mo_side, mo_price, mo_seq): (u8, i64, u64) = (
-            mo[3].parse().ok()?,
-            mo[4].parse().ok()?,
-            mo[5].parse().ok()?,
-        );
-        for cand in pre_leaves.iter().filter(|l| l.starts_with("ord:")) {
-            let o: Vec<&str> = cand.split(':').collect();
-            if o.len() != 10 || o[2] != market {
-                continue;
-            }
-            if o[1] == maker_order_hex {
-                continue;
-            }
-            let (c_side, c_price, c_seq): (u8, i64, u64) =
-                match (o[3].parse(), o[4].parse(), o[5].parse()) {
-                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                    _ => continue,
+                if o[1] == maker_order_hex {
+                    continue;
+                }
+                // #37-9 owner gate (mirrors the AA): the candidate must not
+                // be the TAKER's own order — own better-priced orders can
+                // never fill against themselves. A skipped MAKER-owned
+                // better order is still real fraud.
+                if o[7] == taker_hex {
+                    continue;
+                }
+                let (c_side, c_price, c_seq): (u8, i64, u64) =
+                    match (o[3].parse(), o[4].parse(), o[5].parse()) {
+                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                        _ => continue,
+                    };
+                let c_rem: u64 = o[6].parse().unwrap_or(0);
+                if c_rem == 0 {
+                    continue;
+                }
+                let better = if side == "0" {
+                    c_side == 1
+                        && (c_price < mo_price || (c_price == mo_price && c_seq < mo_seq))
+                        && c_price <= price
+                } else if side == "1" {
+                    c_side == 0
+                        && (c_price > mo_price || (c_price == mo_price && c_seq < mo_seq))
+                        && c_price >= price
+                } else {
+                    false
                 };
-            let c_rem: u64 = o[6].parse().unwrap_or(0);
-            if c_rem == 0 {
-                continue;
-            }
-            let better = if side == "0" {
-                c_side == 1
-                    && (c_price < mo_price || (c_price == mo_price && c_seq < mo_seq))
-                    && c_price <= price
-            } else if side == "1" {
-                c_side == 0
-                    && (c_price > mo_price || (c_price == mo_price && c_seq < mo_seq))
-                    && c_price >= price
-            } else {
-                false
-            };
-            if better {
-                let idx = index_of(&batch.fills, f)?;
-                let mut data = serde_json::json!({
-                    "trace_root": batch.checkpoint.trace_root,
-                    "fills_root": batch.checkpoint.fills_root,
-                    "ops_root": batch.checkpoint.ops_root,
-                    "units_root": batch.checkpoint.units_root,
-                    "k": k,
-                    "fill": f,
-                    "fill_proof": proof_json(&fills_tree, idx),
-                    "units_proof": proof_json(&unit_hexes, k),
-                    "maker_ord": maker_ord,
-                    "better_ord": cand,
-                });
-                let pre_fields = pre_wit_fields(batch, k, pre_leaves);
-                data.as_object_mut()?
-                    .extend(pre_fields.as_object()?.clone());
-                // Membership proofs for both orders in pre_wit.
-                let mi = index_of(pre_leaves, &maker_ord)?;
-                let bi = index_of(pre_leaves, cand)?;
-                let obj = data.as_object_mut()?;
-                obj.insert("maker_proof".into(), {
+                if better {
+                    let idx = index_of(&batch.fills, f)?;
+                    // #37-9 completeness mirror: the right neighbor must sit
+                    // outside this unit's fill prefix (the AA gates on it).
+                    let prefix = format!("f:{unit_hex}:");
+                    let right = fills_tree.get(idx + 1)?;
+                    if right.starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut data = serde_json::json!({
+                        "trace_root": batch.checkpoint.trace_root,
+                        "fills_root": batch.checkpoint.fills_root,
+                        "ops_root": batch.checkpoint.ops_root,
+                        "units_root": batch.checkpoint.units_root,
+                        "k": k,
+                        "fill": f,
+                        "fill_proof": proof_json(&fills_tree, idx),
+                        "right": right,
+                        "right_proof": proof_json(&fills_tree, idx + 1),
+                        "units_proof": proof_json(&unit_hexes, k),
+                        "maker_ord": maker_ord,
+                        "better_ord": cand,
+                    });
+                    let pre_fields = pre_wit_fields(batch, k, pre_leaves);
+                    data.as_object_mut()?
+                        .extend(pre_fields.as_object()?.clone());
+                    // Membership proofs for both orders in pre_wit.
+                    let mi = index_of(pre_leaves, &maker_ord)?;
+                    let bi = index_of(pre_leaves, cand)?;
+                    let obj = data.as_object_mut()?;
+                    obj.insert("maker_proof".into(), {
                     let p = obyte_merkle::proof(pre_leaves, mi);
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
-                obj.insert("better_proof".into(), {
+                    obj.insert("better_proof".into(), {
                     let p = obyte_merkle::proof(pre_leaves, bi);
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
-                return Some(BuiltProof {
-                    pred: "skip".into(),
-                    fill_aa: false,
-                    data,
-                });
+                    return Some(BuiltProof {
+                        pred: "skip".into(),
+                        fill_aa: false,
+                        data,
+                    });
+                }
             }
         }
     }
@@ -708,9 +771,6 @@ fn fill_proof(
             Ok(v) if (0..=3).contains(&v) => v,
             _ => continue,
         };
-        if kind == 2 {
-            continue; // AA bails on ADL fills (top-up/haircut unmodelable)
-        }
         let taker_hex = parts[3].to_string();
         let maker_hex = parts[4].to_string();
         let market = parts[7].to_string();
@@ -756,7 +816,11 @@ fn fill_proof(
         };
         // Kind fee, mirroring the engine's i128 trunc chains: funding
         // markets price off the multiplier, regular ones off the price.
-        let (fee, price_notional): (i128, i128) = if kind == 1 {
+        // #37-10/#37-16: kind 2 (ADL transfer) pays no taker fee.
+        let (fee, price_notional): (i128, i128) = if kind == 2 {
+            let t1 = i128::from(qty) * i128::from(price) / 100_000_000;
+            (0, t1 * 1_000_000 / 100_000_000)
+        } else if kind == 1 {
             let fnot = i128::from(qty) * usd * 1_000_000 / 100_000_000;
             (fnot * fee_bps / 10_000, 0)
         } else {
@@ -964,7 +1028,10 @@ fn fill_proof(
                 None
             };
             // AA verdict mirror: silent unless the honest replay passes
-            // every leg and the committed legs fail one of them.
+            // every leg and the committed legs fail one of them. The #37-17
+            // pin compares the committed post leaf against the PRE leaf's
+            // perp/W (fill moves neither); the honest tree is checked with
+            // no pin (it defines the baseline).
             if aa_fill_verdict(
                 post_leaves,
                 acct_hex,
@@ -978,6 +1045,7 @@ fn fill_proof(
                 who_taker,
                 keeper.as_ref(),
                 allow_last,
+                None,
             ) {
                 continue;
             }
@@ -994,6 +1062,7 @@ fn fill_proof(
                 who_taker,
                 keeper.as_ref(),
                 allow_last,
+                Some((pre_parts[3], pre_parts[4])),
             ) {
                 continue;
             }

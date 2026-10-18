@@ -2628,6 +2628,14 @@ mod tests {
         eng.state.marks.insert(BTC_USD, PRICE_SCALE as i64);
         let a = acct_of(&alice);
         let b = acct_of(&bob);
+        // Baseline AFTER the opening book trade (which paid its own taker
+        // fees): the ADL leg below must not move insurance at all.
+        let ins_before = eng
+            .state
+            .accounts
+            .get(&INSURANCE_ACCOUNT)
+            .map(|a| a.collateral)
+            .unwrap_or(0);
         let liq = sign_unit(
             vec![id4],
             Op::Liquidate {
@@ -2664,6 +2672,21 @@ mod tests {
             eng.state.accounts[&a].positions.is_empty(),
             "position fully ADL'd away"
         );
+        // #37-16: kind 2 is a transfer, not a trade — the ADL fill itself
+        // charges no taker fee, so the insurance seed is untouched by the
+        // fill leg (keeper reward below is a separate seize from the
+        // target, capped by its positive collateral).
+        let ins = eng
+            .state
+            .accounts
+            .get(&INSURANCE_ACCOUNT)
+            .map(|a| a.collateral)
+            .unwrap_or(0);
+        // #37-16 (corrected baseline): kind 2 is a transfer, not a trade —
+        // the ADL fill itself charges no taker fee, so insurance is
+        // unchanged across the liquidation leg (keeper reward is a
+        // separate seize from the target, capped by its collateral).
+        assert_eq!(ins, ins_before, "ADL leg must not move insurance");
     }
 
     /// No opposite-sign holder exists: the ADL candidate list is empty, so
