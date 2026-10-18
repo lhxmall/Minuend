@@ -1500,6 +1500,10 @@ async function main() {
       throw new Error(`h${hh} k1-iso submit bounced: ` + bounceDetail(res));
     return { trace, traceRoot };
   }
+  // A verdict freezes its height: the next forward height cannot submit
+  // past a failed top, so resurrect h17 honestly before drilling h18.
+  const ISO_HONEST = [`acct:${DEP_ACCT}:499500:0:0`, META1, isoPos].sort();
+  const ISO_HONEST_WIT = merkle.getMerkleRoot(ISO_HONEST);
   for (const [tag, hh, perp, w] of [["26-perp", 17, 7, 0], ["27-wd", 18, 0, 9]]) {
     const leaf = `acct:${DEP_ACCT}:499500:${perp}:${w}`;
     const tree = [leaf, META1, isoPos].sort();
@@ -1509,6 +1513,10 @@ async function main() {
     st = await vars(rollup);
     if (Number(st["frozen_" + hh]) !== 2) throw new Error(tag + " tamper did not freeze h" + hh);
     console.log(tag + ": perp/W-only post drift → frozen=" + hh);
+    // Resurrect honestly (frozen branch) so the next height can submit.
+    await submitK1Iso(hh, WIT_ROOT, ISO_HONEST_WIT, ISO_FILLS_ROOT);
+    st = await vars(rollup);
+    if (Number(st["frozen_" + hh] || 0) !== 0) throw new Error(tag + " honest resubmit did not un-freeze h" + hh);
   }
   // 28. self-owned better-order skip → 'no fraud' (#37-9).
   {
