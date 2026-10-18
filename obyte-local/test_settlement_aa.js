@@ -671,8 +671,7 @@ async function main() {
   // k=1 two-unit submit: unit 0 is a padding unit (its trace entry carries
   // the pre tree), unit 1 is the challenged unit. Lets batch C+D scenarios
   // run on fresh heights past the h3 window: k=1 predicates anchor pre_wit
-  // via pre_proof (trace[0] membership) instead of wit_root_(h-1).
-  const K1_PAD_HEX = sha256Hex("k1-pad-unit");
+  const K1_PAD_HEX = sha256Hex("k1-pad-unit-2"); // sorts AFTER H3_UNIT_HEX: the challenged unit sits at index 1 == k
   const K1_UNITS = [K1_PAD_HEX, H3_UNIT_HEX].sort();
   const K1_UNITS_ROOT = merkle.getMerkleRoot(K1_UNITS);
   const K1_UNITS_PROOF = merkle.getMerkleProof(K1_UNITS, K1_UNITS.indexOf(H3_UNIT_HEX));
