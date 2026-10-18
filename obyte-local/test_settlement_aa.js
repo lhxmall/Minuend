@@ -1605,35 +1605,39 @@ async function main() {
     console.log("31. liar kind-2 ADL (+1) → frozen=" + hh);
   }
   // ---- 32. adjacent heights fraud in turn, then recover in order (#37-8) --
-  // h24/h25 pipeline LIAR submits, verdicts top-down (h16 then h17):
+  // h23/h24 pipeline LIAR submits, verdicts top-down (h23 then h24):
   // last_submitted pins at each failed height, then both resubmit honestly
   // bottom-up and finalize in order. Pre-fix the rollback left ls on a
   // zeroed root and the resubmit bounced, stalling finalize forever.
+  // 31 left h22 frozen: resurrect it honestly first so h23 can submit.
   await trigger(operator, rollup, { pool: 1 }, POOL_FUND_GROSS);
+  await sendCombinedSubmit(operator, 22, STATE_ROOT, STATE_ROOT);
+  st = await vars(rollup);
+  if (Number(st.frozen_22 || 0) !== 0) throw new Error("h22 resurrect did not un-freeze");
+  await submitLiarAt(23);
   await submitLiarAt(24);
-  await submitLiarAt(25);
+  await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 23 }, fraudProof), 20000, "h23 verdict");
+  st = await vars(rollup);
+  if (Number(st.frozen_23) !== 2) throw new Error("h23 verdict did not freeze");
+  if (Number(st.last_submitted) !== 24) throw new Error("h23 verdict must pin ls=23, got " + st.last_submitted);
   await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 24 }, fraudProof), 20000, "h24 verdict");
   st = await vars(rollup);
   if (Number(st.frozen_24) !== 2) throw new Error("h24 verdict did not freeze");
-  if (Number(st.last_submitted) !== 24) throw new Error("h24 verdict must pin ls=24, got " + st.last_submitted);
-  await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 25 }, fraudProof), 20000, "h25 verdict");
+  if (Number(st.last_submitted) !== 25) throw new Error("h24 verdict must pin ls=24, got " + st.last_submitted);
+  console.log("32. h16+h17 fraud in turn, ls pins 23 then 24");
+  // Recover bottom-up: h23 first (prev == state_root_22 resubmitted below), then h24
+  // (prev == the RESUBMITTED state_root_23).
+  await sendCombinedSubmit(operator, 23, STATE_ROOT, STATE_ROOT);
   st = await vars(rollup);
-  if (Number(st.frozen_25) !== 2) throw new Error("h25 verdict did not freeze");
-  if (Number(st.last_submitted) !== 25) throw new Error("h25 verdict must pin ls=25, got " + st.last_submitted);
-  console.log("32. h16+h17 fraud in turn, ls pins 24 then 25");
-  // Recover bottom-up: h24 first (prev == state_root_23), then h25
-  // (prev == the RESUBMITTED state_root_24).
+  if (Number(st.frozen_23 || 0) !== 0) throw new Error("h23 resubmit did not un-freeze");
   await sendCombinedSubmit(operator, 24, STATE_ROOT, STATE_ROOT);
   st = await vars(rollup);
   if (Number(st.frozen_24 || 0) !== 0) throw new Error("h24 resubmit did not un-freeze");
-  await sendCombinedSubmit(operator, 25, STATE_ROOT, STATE_ROOT);
-  st = await vars(rollup);
-  if (Number(st.frozen_25 || 0) !== 0) throw new Error("h25 resubmit did not un-freeze");
   await network.timetravel({ shift: "3600s" });
-  await trigger(operator, rollup, { finalize: 1, height: 24 }, 20000);
-  await trigger(operator, rollup, { finalize: 1, height: 25 }, 20000);
+  await trigger(operator, rollup, { finalize: 1, height: 23 }, 20000);
+  await trigger(operator, rollup, { finalize: 1, height: 23 }, 20000);
   st = await vars(rollup);
-  if (Number(st.last_finalized) !== 25) throw new Error("post-recovery finalize stalled at " + st.last_finalized);
+  if (Number(st.last_finalized) !== 24) throw new Error("post-recovery finalize stalled at " + st.last_finalized);
   console.log("32. resubmit bottom-up + finalize in order — chain recovers");
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
   // test_vault_withdraw_aa.js: its own short chain (h1..h3 with REAL
