@@ -1634,8 +1634,13 @@ async function main() {
   st = await vars(rollup);
   if (Number(st.frozen_24 || 0) !== 0) throw new Error("h24 resubmit did not un-freeze");
   await network.timetravel({ shift: "3600s" });
+  // Heights 16..22 were never finalized (the drills only froze/resurrected
+  // them): advance last_finalized in order before 23/24 can finalize.
+  for (let fh = 16; fh <= 22; fh++) {
+    await trigger(operator, rollup, { finalize: 1, height: fh }, 20000);
+  }
   await trigger(operator, rollup, { finalize: 1, height: 23 }, 20000);
-  await trigger(operator, rollup, { finalize: 1, height: 23 }, 20000);
+  await trigger(operator, rollup, { finalize: 1, height: 24 }, 20000);
   st = await vars(rollup);
   if (Number(st.last_finalized) !== 24) throw new Error("post-recovery finalize stalled at " + st.last_finalized);
   console.log("32. resubmit bottom-up + finalize in order — chain recovers");
