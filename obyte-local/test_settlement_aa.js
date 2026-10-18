@@ -1594,7 +1594,7 @@ async function main() {
   }
   {
     const hh = 22;
-    const tree = [`acct:${takerH}:1:0:0`, META1].sort();
+    const tree = [`acct:${takerH}:1:0:0`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
     const wit = merkle.getMerkleRoot(tree);
     const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, ADL_ROOT, K1_OPS_ROOT);
     const leaf = `acct:${takerH}:1:0:0`;
