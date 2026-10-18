@@ -1368,7 +1368,7 @@ async function main() {
   console.log("24. honest GovDeposit bounces 'no fraud' — gov arm compares PERP");
   // ---- 26-31 on fresh heights via k=1 two-unit submits --------------------
   // h3 is long finalized: k=1 predicates anchor pre_wit through pre_proof
-  // (trace[0] membership), so the H3_PRE tree rides fresh heights 18..23.
+  // (trace[0] membership), so the H3_PRE tree rides fresh heights 17..22.
   // Each verdict freezes its height; bounce scenarios resubmit cleanly.
   // K1 ops tree: [pad-op, FILL_OP] — the challenged unit (k=1) carries the
   // Place op the taker leg models.
@@ -1428,7 +1428,7 @@ async function main() {
     return { tree, wit: merkle.getMerkleRoot(tree) };
   };
   // 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17).
-  for (const [tag, hh, leaf] of [["26-perp", 18, `acct:${takerH}:-500:7:0`], ["27-wd", 19, `acct:${takerH}:-500:0:9`]]) {
+  for (const [tag, hh, leaf] of [["26-perp", 17, `acct:${takerH}:-500:7:0`], ["27-wd", 18, `acct:${takerH}:-500:0:9`]]) {
     const { tree, wit } = k1post(leaf);
     const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, FILLS_ROOT1, K1_OPS_ROOT);
     const posLeaf = `pos:${takerH}:1:100000000:100000000:0:0`;
@@ -1439,7 +1439,7 @@ async function main() {
   }
   // 28. self-owned better-order skip → 'no fraud' (#37-9).
   {
-    const hh = 20;
+    const hh = 19;
     const { trace, traceRoot } = await submitK1(hh, SELF_PRE_WIT, SELF_PRE_WIT, SKIP_FILLS_ROOT, K1_OPS_ROOT);
     await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: hh }, {
       rollup: ROLLUP_ADDR,
@@ -1466,7 +1466,7 @@ async function main() {
   }
   // 29. multi-fill skip → 'no fraud' (#37-9, fail closed).
   {
-    const hh = 21;
+    const hh = 20;
     const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, H3_PRE_WIT, MFILLS_ROOT, K1_OPS_ROOT);
     await triggerBounce(challenger, dispute, Object.assign({ pred: "skip", height: hh }, {
       rollup: ROLLUP_ADDR,
@@ -1495,7 +1495,7 @@ async function main() {
   // Honest post tree has NO pos leaf (flat close): prove the empty range
   // with eleft over the post tree.
   {
-    const hh = 22;
+    const hh = 21;
     const tree = [`acct:${takerH}:0:0:0`, META1].sort();
     const wit = merkle.getMerkleRoot(tree);
     const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, ADL_ROOT, K1_OPS_ROOT);
@@ -1512,7 +1512,7 @@ async function main() {
     console.log("30. honest kind-2 ADL bounces 'no fraud' (fee 0, math arm open)");
   }
   {
-    const hh = 23;
+    const hh = 22;
     const tree = [`acct:${takerH}:1:0:0`, META1].sort();
     const wit = merkle.getMerkleRoot(tree);
     const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, ADL_ROOT, K1_OPS_ROOT);
