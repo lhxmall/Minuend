@@ -270,8 +270,10 @@
 					// cumulative-withdrawn ledger (fill path writes neither;
 					// only GovDeposit/GovWithdraw move perp, only Withdraw
 					// moves W). A post leaf that smuggles a perp/W change
-					// past the collateral identity is fraud — pin both.
-					if ($A1[3] != $A0[3] OR $A1[4] != $A0[4]) bounce('no fraud');
+					// past the collateral identity is fraud — record the pin
+					// and fold it into $fraud below (never bounce here: a
+					// drifted leaf IS the fraud this predicate hunts).
+					$pin_ok = ($A1[3] == $A0[3] AND $A1[4] == $A0[4]);
 					// Is the challenged account's POST position range provably
 					// empty? Then equity == collateral and a non-negative
 					// expected lands exact on its own. Either way a negative
@@ -550,8 +552,10 @@
 						$col_bail = false;
 					}
 					// Verdict only when a leg is VERIFIED wrong; a bail
-					// (missing evidence) silences its own leg only.
-					$fraud = (!$pos_bail AND !$pos_ok) OR (!$col_bail AND !$col_ok);
+					// (missing evidence) silences its own leg only. The
+					// #37-17 perp/W pin needs no bail: both leaves are
+					// already proven members above.
+					$fraud = (!$pos_bail AND !$pos_ok) OR (!$col_bail AND !$col_ok) OR !$pin_ok;
 					if ($fraud) {
 						if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 					} else {
