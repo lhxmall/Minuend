@@ -1619,12 +1619,12 @@ async function main() {
   await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 23 }, fraudProof), 20000, "h23 verdict");
   st = await vars(rollup);
   if (Number(st.frozen_23) !== 2) throw new Error("h23 verdict did not freeze");
-  if (Number(st.last_submitted) !== 24) throw new Error("h23 verdict must pin ls=23, got " + st.last_submitted);
+  if (Number(st.last_submitted) !== 23) throw new Error("h23 verdict must pin ls=23, got " + st.last_submitted);
   await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 24 }, fraudProof), 20000, "h24 verdict");
   st = await vars(rollup);
   if (Number(st.frozen_24) !== 2) throw new Error("h24 verdict did not freeze");
-  if (Number(st.last_submitted) !== 25) throw new Error("h24 verdict must pin ls=24, got " + st.last_submitted);
-  console.log("32. h16+h17 fraud in turn, ls pins 23 then 24");
+  if (Number(st.last_submitted) !== 24) throw new Error("h24 verdict must pin ls=24, got " + st.last_submitted);
+  console.log("32. h23+h24 fraud in turn, ls pins 23 then 24");
   // Recover bottom-up: h23 first (prev == state_root_22 resubmitted below), then h24
   // (prev == the RESUBMITTED state_root_23).
   await sendCombinedSubmit(operator, 23, STATE_ROOT, STATE_ROOT);
