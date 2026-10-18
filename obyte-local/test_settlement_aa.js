@@ -1393,13 +1393,13 @@ async function main() {
   const ADL_ROOT = merkle.getMerkleRoot(ADL_TREE);
   const k1fillBase = (hh, traceRoot, trace, fillsRoot, fillsTree, fill, postWit, postTree, postLeaf, posLeaf) => ({
     rollup: ROLLUP_ADDR,
+    k: 1,
     trace_root: traceRoot,
     fills_root: fillsRoot,
     ops_root: K1_OPS_ROOT,
     units_root: K1_UNITS_ROOT,
     units_proof: K1_UNITS_PROOF,
     fill,
-    fill_proof: merkle.getMerkleProof(fillsTree, 0),
     op: FILL_OP,
     ops_proof: K1_OPS_PROOF,
     right: fillsTree[1],
