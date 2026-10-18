@@ -1423,16 +1423,89 @@ async function main() {
     pright_proof: merkle.getMerkleProof(H3_PRE, H3_PRE_IDX[POS2]),
     who: "taker",
   });
-  const k1post = (leaf) => {
-    const tree = [`${leaf}`, META1, `pos:${takerH}:1:100000000:100000000:0:0`].sort();
-    return { tree, wit: merkle.getMerkleRoot(tree) };
-  };
   // 26/27. PERP-only / withdrawn-only post tamper verdicts (#37-17).
-  for (const [tag, hh, leaf] of [["26-perp", 17, `acct:${takerH}:-500:7:0`], ["27-wd", 18, `acct:${takerH}:-500:0:9`]]) {
-    const { tree, wit } = k1post(leaf);
-    const { trace, traceRoot } = await submitK1(hh, H3_PRE_WIT, wit, FILLS_ROOT1, K1_OPS_ROOT);
-    const posLeaf = `pos:${takerH}:1:100000000:100000000:0:0`;
-    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: hh }, k1fillBase(hh, traceRoot, trace, FILLS_ROOT1, FILLS1_TREE, fillStr, wit, tree, leaf, posLeaf)), 20000, tag + " tamper predicate");
+  // Isolated-open shape (honest post col 499500, expectation non-negative
+  // so the claw-bail gate stays shut): the proven post leaf drifts ONLY in
+  // perp (26: perp 7) or ONLY in W (27: W 9). Collateral/pos math is
+  // untouched, yet the fill AA must verdict — pre-fix it compared
+  // collateral alone and bounced 'no fraud'.
+  // k=1 on fresh heights: pre side anchors on the GENESIS tree through
+  // pre_proof (trace[0]); the iso unit rides its own K1 units root with
+  // the challenged unit at index 1.
+  const K1_ISO_PAD = sha256Hex("k1-pad-unit-2"); // sorts before iso-unit: ISO at index 1
+  const K1_ISO_UNITS = [K1_ISO_PAD, isoUnit].sort();
+  const K1_ISO_ROOT = merkle.getMerkleRoot(K1_ISO_UNITS);
+  const K1_ISO_PROOF = merkle.getMerkleProof(K1_ISO_UNITS, K1_ISO_UNITS.indexOf(isoUnit));
+  const K1_ISO_OPS = [K1_PAD_OP, isoOp];
+  const K1_ISO_OPS_ROOT = merkle.getMerkleRoot(K1_ISO_OPS);
+  const K1_ISO_OPS_PROOF = merkle.getMerkleProof(K1_ISO_OPS, 1);
+  const k1isoBase = (traceRoot, trace, postWit, postTree, postLeaf) => ({
+    rollup: ROLLUP_ADDR,
+    k: 1,
+    trace_root: traceRoot,
+    fills_root: ISO_FILLS_ROOT,
+    ops_root: K1_ISO_OPS_ROOT,
+    units_root: K1_ISO_ROOT,
+    units_proof: K1_ISO_PROOF,
+    fill: isoFill,
+    fill_proof: merkle.getMerkleProof(ISO_FILLS_TREE, 0),
+    op: isoOp,
+    ops_proof: K1_ISO_OPS_PROOF,
+    right: ISO_FILLS_TREE[1],
+    right_proof: merkle.getMerkleProof(ISO_FILLS_TREE, 1),
+    pre_wit: WIT_ROOT,
+    pre_proof: merkle.getMerkleProof(trace, 0),
+    post_wit: postWit,
+    post_proof: merkle.getMerkleProof(trace, 1),
+    pre_acct: DEP_PRE,
+    pre_acct_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(DEP_PRE)),
+    post_acct: postLeaf,
+    post_acct_proof: merkle.getMerkleProof(postTree, postTree.indexOf(postLeaf)),
+    post_pos: isoPos,
+    post_pos_proof: merkle.getMerkleProof(postTree, postTree.indexOf(isoPos)),
+    pre_meta: META1,
+    pre_meta_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(META1)),
+    pos_absent: true,
+    pleft: META2,
+    pleft_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(META2)),
+    pright: POS2,
+    pright_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(POS2)),
+    oleft: META1,
+    oleft_proof: merkle.getMerkleProof(postTree, postTree.indexOf(META1)),
+    oright: isoPos,
+    oright_proof: merkle.getMerkleProof(postTree, postTree.indexOf(isoPos)),
+    who: "taker",
+  });
+  async function submitK1Iso(hh, preWit, postWit, fillsRoot) {
+    const trace = [preWit, postWit];
+    const traceRoot = merkle.getMerkleRoot(trace);
+    const s = submitData(hh, STATE_ROOT, STATE_ROOT);
+    s.wit_root = preWit;
+    s.wit_count = 2;
+    s.trace_root = traceRoot;
+    s.fills_root = fillsRoot;
+    s.ops_root = K1_ISO_OPS_ROOT;
+    s.units_root = K1_ISO_ROOT;
+    s.unit_count = 2;
+    s.fill_count = 1;
+    const header = headerFromSubmit(s);
+    const r = await operator.sendMulti({
+      messages: [tempDataMsg(header), { app: "data", payload: s }],
+      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
+    });
+    if (r.error) throw new Error(`h${hh} k1-iso submit failed: ` + r.error);
+    await network.witnessUntilStable(r.unit);
+    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+    if (res && res.response && res.response.bounced)
+      throw new Error(`h${hh} k1-iso submit bounced: ` + bounceDetail(res));
+    return { trace, traceRoot };
+  }
+  for (const [tag, hh, perp, w] of [["26-perp", 17, 7, 0], ["27-wd", 18, 0, 9]]) {
+    const leaf = `acct:${DEP_ACCT}:499500:${perp}:${w}`;
+    const tree = [leaf, META1, isoPos].sort();
+    const wit = merkle.getMerkleRoot(tree);
+    const { trace, traceRoot } = await submitK1Iso(hh, WIT_ROOT, wit, ISO_FILLS_ROOT);
+    await triggerVerdict(challenger, fill, Object.assign({ pred: "fill_math", height: hh }, k1isoBase(traceRoot, trace, wit, tree, leaf)), 20000, tag + " tamper predicate");
     st = await vars(rollup);
     if (Number(st["frozen_" + hh]) !== 2) throw new Error(tag + " tamper did not freeze h" + hh);
     console.log(tag + ": perp/W-only post drift → frozen=" + hh);
