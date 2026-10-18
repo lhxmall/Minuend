@@ -1400,6 +1400,7 @@ async function main() {
     units_root: K1_UNITS_ROOT,
     units_proof: K1_UNITS_PROOF,
     fill,
+    fill_proof: merkle.getMerkleProof(fillsTree, 0),
     op: FILL_OP,
     ops_proof: K1_OPS_PROOF,
     right: fillsTree[1],
