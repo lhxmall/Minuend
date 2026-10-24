@@ -1,6 +1,6 @@
 "use strict";
 
-// OPERP pool occupancy gate — standalone e2e (rollup AA only).
+// MINUEND pool occupancy gate — standalone e2e (rollup AA only).
 //
 // Fills the in-flight window: fund {pool:1}, submit heights 1..50 with no
 // finalize between (no timetravel needed — submit has no time gate), then
@@ -44,7 +44,7 @@ function chashOf(aaSource) {
   });
   return objectHash.getChash160(["autonomous agent", parsed]);
 }
-const ROLLUP_ADDR = chashOf(readDef("operp_rollup.aa"));
+const ROLLUP_ADDR = chashOf(readDef("minuend_rollup.aa"));
 
 const POOL_FUND_GROSS = 10000000010000; // 1x POOL_MIN + fee: no fraud here, no slash
 const SUBMIT_FEE = 10000;
@@ -64,7 +64,7 @@ const GENESIS = sha256Hex("genesis");
 function submitData(h, prev) {
   return {
     submit: 1,
-    chain_id: "operp-v2",
+    chain_id: "minuend-v2",
     assertion_version: 1,
     height: h,
     state_root: sha256Hex("state-" + h),
@@ -103,7 +103,7 @@ async function vars(aa) {
 
 async function main() {
   network = await Network.create()
-    .with.agent({ rollup: path.join(__dirname, "agents", "operp_rollup.aa") })
+    .with.agent({ rollup: path.join(__dirname, "agents", "minuend_rollup.aa") })
     .with.wallet({ operator: 2e14 })
     .run();
   const { operator } = network.wallet;

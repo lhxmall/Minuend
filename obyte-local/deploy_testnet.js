@@ -1,8 +1,8 @@
 "use strict";
 
-// OPERP vault AA — Obyte TESTNET deployment script.
+// MINUEND vault AA — Obyte TESTNET deployment script.
 //
-// Deploys the security-hardened operp_vault.aa to a testnet node, performs an
+// Deploys the security-hardened minuend_vault.aa to a testnet node, performs an
 // initial smoke deposit, and prints the resulting AA address for operators.
 //
 // Prerequisites:
@@ -22,7 +22,7 @@ const PERP_ASSET_ID = "PERP_ASSET_ID_HERE";
 // ====================================================================
 
 // Chain id baked into the AA definitions and echoed into deployment.json.
-const CHAIN_ID = "operp-v2";
+const CHAIN_ID = "minuend-v2";
 
 // The .aa sources carry PERP_ASSET_ID_HERE / DISPUTE_AA_HERE placeholders;
 // aa-testkit reads agent definitions from disk, so materialize substituted
@@ -38,16 +38,16 @@ function resolveAa(agentFile, subs, outName) {
   return out;
 }
 function resolveRollupAa(disputeAddr, fillAddr) {
-  return resolveAa("operp_rollup.aa", { DISPUTE_AA_HERE: disputeAddr, DISPUTE_FILL_AA_HERE: fillAddr }, ".operp_rollup.resolved.aa");
+  return resolveAa("minuend_rollup.aa", { DISPUTE_AA_HERE: disputeAddr, DISPUTE_FILL_AA_HERE: fillAddr }, ".minuend_rollup.resolved.aa");
 }
 function resolveDisputeAa() {
-  return resolveAa("operp_dispute.aa", {}, ".operp_dispute.resolved.aa");
+  return resolveAa("minuend_dispute.aa", {}, ".minuend_dispute.resolved.aa");
 }
 function resolveVaultAa(rollupAddress, perpAssetId) {
-  return resolveAa("operp_vault.aa", { ROLLUP_AA_HERE: rollupAddress, PERP_ASSET_ID_HERE: perpAssetId }, ".operp_vault.resolved.aa");
+  return resolveAa("minuend_vault.aa", { ROLLUP_AA_HERE: rollupAddress, PERP_ASSET_ID_HERE: perpAssetId }, ".minuend_vault.resolved.aa");
 }
 function resolveFillAa() {
-  return resolveAa("operp_dispute_fill.aa", {}, ".operp_dispute_fill.resolved.aa");
+  return resolveAa("minuend_dispute_fill.aa", {}, ".minuend_dispute_fill.resolved.aa");
 }
 const aaRoot = path.join(__dirname, "..", "vendor", "aa-testkit");
 const nm = path.join(aaRoot, "node_modules");
@@ -66,7 +66,7 @@ const { Network } = Testkit({
 async function main() {
   if (PERP_ASSET_ID === "PERP_ASSET_ID_HERE")
     throw new Error("Set PERP_ASSET_ID to the issued asset id before deploying");
-  console.log("deploying operp_rollup.aa / operp_dispute.aa / operp_vault.aa to TESTNET ...");
+  console.log("deploying minuend_rollup.aa / minuend_dispute.aa / minuend_vault.aa to TESTNET ...");
   // #13 order: dispute AAs hash first (no rollup in their defs), then the
   // rollup hardcodes them, then vault + binds (rollup rides trigger data).
   const disputePath = resolveDisputeAa();

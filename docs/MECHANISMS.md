@@ -1,9 +1,9 @@
-# OPERP 机制详解（Mechanism Reference）
+# MINUEND 机制详解（Mechanism Reference）
 
-本文是 OPERP 所有运行机制的完整参考，面向需要理解或复现每一层内部行为
+本文是 MINUEND 所有运行机制的完整参考，面向需要理解或复现每一层内部行为
 的读者。概览见 [README](../README.md)；设计动机叙事版见
 [PROTOCOL.md](PROTOCOL.md)。本文按"机制 → 精确规则 → 边界情况"逐层展开，
-所有数字均可在 `crates/operp-types/src/lib.rs` 找到对应常量。
+所有数字均可在 `crates/minuend-types/src/lib.rs` 找到对应常量。
 
 ---
 
@@ -18,7 +18,7 @@
 7. [预言机与 mark 价格](#7-预言机与-mark-价格)
 8. [批次与结算验证](#8-批次与结算验证)
 9. [双 Merkle 树](#9-double-merkle-树)
-10. [结算 AA 状态机](#10-结算-aa-状态机chain_idoperp-v2)
+10. [结算 AA 状态机](#10-结算-aa-状态机chain_idminuend-v2)
 11. [Witness 树与谓词承诺](#11-witness-树与谓词承诺)
 12. [多 operator 手续费竞速](#12-multi-operator-手续费竞速)
 13. [Optimistic / Final 状态提升](#13-optimistic--final-状态提升)
@@ -145,7 +145,7 @@ orphan 缓冲容量 4096。驱逐按**盐化序**执行：对缓冲单元取
 （`DagError::AddrTooLong`）。mark_executed 时做不动点扫描：所有"父母已
 全部已知"的孤儿链式解锁。残余边界：各副本观测 finalize 的时刻不同，
 收敛前可能驱逐不同的孤儿——DA 层自愈：temp_data 全量重放可确定性重建
-缺失单元，WantUnits gossip（`crates/operp-gossip`，§2.6）可按需向同伴
+缺失单元，WantUnits gossip（`crates/minuend-gossip`，§2.6）可按需向同伴
 索取。
 
 ### 2.4 确定性线性化（去盐）
@@ -175,7 +175,7 @@ orphan 缓冲容量 4096。驱逐按**盐化序**执行：对缓冲单元取
 
 ### 2.6 WantUnits gossip（纯 P2P 层）
 
-`crates/operp-gossip` 实现 doc 04 §2.4 的按需孤儿同步：节点观测到缺失
+`crates/minuend-gossip` 实现 doc 04 §2.4 的按需孤儿同步：节点观测到缺失
 父单元后以 `WANT_FANOUT` 扇出 WantUnits（每 (peer, id) 去抖
 `WANT_DEBOUNCE_MS = 500`，单请求 ≤ 64 个 id）；收到请求的一方从 DAG 与
 orphan 缓冲两侧服务，单响应 ≤ 64 个单元且限频。本层不进共识、不影响
@@ -540,7 +540,7 @@ cap 检查并拒绝超限输入。watcher 在缺失 joints 上 backoff 放弃，
 
 `data_hash`/`data_length` 采用与 ocore 一致的**单一规范形**：
 `source = getJsonSource(data)`（递归字典序排序对象键的 minified JSON；
-Rust 侧移植于 `operp_settle::obyte_hash::get_json_source`），
+Rust 侧移植于 `minuend_settle::obyte_hash::get_json_source`），
 `data_hash = hex(sha256(source))`，`data_length = source 的 UTF-8 字节长`。
 Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
 `obyteDataHash`/`obyteDataLength`）使用同一定义，黄金向量测试对拍同一
@@ -656,10 +656,10 @@ AA 只能做字符串拼接与 sha256——它无法解析 i128 LE、无法遍�
 
 ---
 
-## 10. 结算 AA 状态机（CHAIN_ID=operp-v2）
+## 10. 结算 AA 状态机（CHAIN_ID=minuend-v2）
 
-三个 AA：`operp_rollup.aa`（主张链）、`operp_dispute.aa`（充提/漏单谓词）、
-`operp_dispute_fill.aa`（成交谓词）、`operp_vault.aa`（托管）。金库无
+三个 AA：`minuend_rollup.aa`（主张链）、`minuend_dispute.aa`（充提/漏单谓词）、
+`minuend_dispute_fill.aa`（成交谓词）、`minuend_vault.aa`（托管）。金库无
 owner key，claim 在 rollup。
 
 rollup 状态变量（`<h>` 为高度后缀）：
@@ -685,7 +685,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.1 submit(h) — rollup
 
-前置：`chain_id=='operp-v2'` ∧ `assertion_version==1` ∧ h == last_submitted+1
+前置：`chain_id=='minuend-v2'` ∧ `assertion_version==1` ∧ h == last_submitted+1
 ∧ prev == `state_root_{h-1}`（上一高度 frozen=2 时豁免）
 ∧ state_root/prev 64 hex ∧ aa_forest 1024 hex ∧ 六个承诺根 44 b64
 ∧ 组合单元（temp_data 在同一 unit，`da_unit_h=trigger.unit`）
@@ -745,7 +745,7 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
 
 ## 11. Witness 树与谓词承诺
 
-每批 checkpoint 额外携带（`operp_settle`）：`wit_root`（执行完最后单元的
+每批 checkpoint 额外携带（`minuend_settle`）：`wit_root`（执行完最后单元的
 witness 叶根）、`trace_root`（每单元 post wit_root 的 Obyte 原生 Merkle，
 按批序）、`units_root` / `units_set_root`（unit_id hex 批序/排序）、
 `ops_root`（op 描述串）、`fills_root`（成交描述串 + 尾随长度哨兵，见下）、
@@ -764,7 +764,7 @@ taker 抵押。`fills_root` 树 = 成交描述串 + 尾随长度哨兵 `n:{len}`
 只靠右邻证明即可判定，谓词不读任何提交整数。`fill_count` 仍经 submit 存为
 `fill_count_h`（rollup 门与提交头使用），但 dispute 路径不再读它。
 
-witness 叶（`operp_state::wit_leaves`，排序后 Obyte 原生 Merkle）：
+witness 叶（`minuend_state::wit_leaves`，排序后 Obyte 原生 Merkle）：
 
 ```
 acct:{acct_hex}:{collateral}:{perp}:{W}
@@ -796,7 +796,7 @@ submit(h) 竞速:
 ```
 
 - 同批一起稳定的平局由 ocore 内建单元排序裁决；Rust 侧
-  `pick_stable_winner`（operp-settle, mci→unit_id 双键）语义一致
+  `pick_stable_winner`（minuend-settle, mci→unit_id 双键）语义一致
 - 赢家奖励在 finalize 成功路径累加（失败高度不发放），{claim:"reward"} 提取
 - "交易按第一个稳定的填充下一个"由 prev_state_hash 链保证：
   h+1 必须引用赢家的 root_h
@@ -836,13 +836,13 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 | 偷 AA 资金 | 提款只认 finalized 分片森林的 Merkle 证明；leaf 绑定提款人地址；wd_/wp_ 累计标记防证明重放 |
 | 付钱杀根 | 已删除：`{challenge:1}` 无 case；假证明 bounce `no fraud` |
 | 审查用户单元 | rollup inbox `{force}` 钉时间戳；P-omit 已按 #23 禁用（force 只钉时间戳、不能证明单元存在，谓词一律 bounce `no fraud`） |
-| 存款凭空铸造 | deposits_allowed 白名单 + replay 交叉校验 + evidence 绑定 `OPERP_VAULT_AA` |
+| 存款凭空铸造 | deposits_allowed 白名单 + replay 交叉校验 + evidence 绑定 `MINUEND_VAULT_AA` |
 
 ## 15. 明确的已知边界
 
 - 保险钳制不在链上验（watcher 对钳制侧跳过）；fill_math 带 ±1 Decimal 容差
 - `temp_data` 正文 24h 后被节点剥除——揭发必须自带那一笔与证明
-- 充值 joint 主要在链下 `validate_against` 核（`OPERP_VAULT_AA` 空且带
+- 充值 joint 主要在链下 `validate_against` 核（`MINUEND_VAULT_AA` 空且带
   evidence 会被 `validate_against` 拒）
 - 预言机为债券注册制（ORACLE_BOND_PERP = 50_000 PERP，无许可）；按债券计
   的多数合谋仍可在两次罚没之间偏置中位数；外部价锚需治理切换 + keeper 喂价
@@ -884,7 +884,7 @@ asset id。发币时只需改一个常量并重新部署 AA。
 `spot_only`、`funding_rate`），
 存入 `markets[market_id]`——IM/MM/taker fee/keeper 奖励从全局常量变为
 **每市场参数**（§4.2/§5.2/§6.1 相应改为读参数）。除 tick_size 为 0 →
-Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（operp-types，
+Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（minuend-types，
 exec 与治理共用）：任一为 0 或 > 10 000、`im_bps <= mm_bps`、
 `mm_bps < 500`、`im_bps > 5000`、`taker_fee_bps > 200`、
 `keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk。

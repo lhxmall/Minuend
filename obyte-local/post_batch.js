@@ -1,11 +1,11 @@
 "use strict";
 
-// OPERP batch poster — local devnet drill by default; pass testnet/mainnet
+// MINUEND batch poster — local devnet drill by default; pass testnet/mainnet
 // env explicitly (process.env.testnet / process.env.mainnet) to target a
 // real network.
 //
 // Reads an exported batch (obyte-local/batch.json from
-// `cargo run -p operp-settle --example export_batch` or stress tooling),
+// `cargo run -p minuend-settle --example export_batch` or stress tooling),
 // then against the deployed ROLLUP AA (deployment.json rollup_aa_address):
 //   1. posts the FULL batch as OIP-0007 temp_data PLUS the AA submit data
 //      message in ONE combined unit (data availability for watchers AND
@@ -36,8 +36,8 @@ let PERP_ASSET_ID = "PERP_ASSET_ID_HERE";
 // reads agent definitions from disk, so materialize a substituted copy
 // and deploy that instead of the raw source.
 function resolveVaultAa() {
-  const src = fs.readFileSync(path.join(__dirname, "agents/operp_vault.aa"), "utf8");
-  const out = path.join(__dirname, "agents", ".operp_vault.resolved.aa");
+  const src = fs.readFileSync(path.join(__dirname, "agents/minuend_vault.aa"), "utf8");
+  const out = path.join(__dirname, "agents", ".minuend_vault.resolved.aa");
   fs.writeFileSync(out, src.replace(/PERP_ASSET_ID_HERE/g, PERP_ASSET_ID));
   return out;
 }
@@ -67,7 +67,7 @@ const { Network } = Testkit({
 });
 
 // H3 — single canonical definition of the batch data hash/length, matching
-// Rust operp_settle::obyte_hash::get_data_hash: the canonical source is
+// Rust minuend_settle::obyte_hash::get_data_hash: the canonical source is
 // ocore's recursively key-sorted minified JSON (string_utils.getJsonSourceString),
 // data_hash is its SHA-256 in HEX, data_length its UTF-8 byte length.
 const { getJsonSourceString } = require("ocore/string_utils.js");
@@ -143,7 +143,7 @@ async function buildDepositEvidences(batchData, vaultAddress) {
       throw new Error("no joint for " + aaUnit.slice(0, 16));
     }
     // joint carries the FULL joint unit object: the watcher recomputes
-    // unit_hash(joint.unit) via operp_settle::obyte_hash::get_unit_hash and
+    // unit_hash(joint.unit) via minuend_settle::obyte_hash::get_unit_hash and
     // compares against the sidechain deposit's aa_unit. The payer binds the
     // credit: it must be the joint's first author AND the op's addr (#8).
     const authors = Array.isArray(joint.unit.authors) ? joint.unit.authors : [];
@@ -185,12 +185,12 @@ let network;
 async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const rollup = deploy.rollup_aa_address
-    || process.env.OPERP_ROLLUP_AA;
-  if (!rollup) throw new Error("deployment.json rollup_aa_address (or OPERP_ROLLUP_AA) missing");
+    || process.env.MINUEND_ROLLUP_AA;
+  if (!rollup) throw new Error("deployment.json rollup_aa_address (or MINUEND_ROLLUP_AA) missing");
   const batchFile = process.argv[2] || path.join(__dirname, "batch.json");
   const batchData = JSON.parse(fs.readFileSync(batchFile, "utf8"));
   // H3 contract visibility: the canonical pair watchers recompute from
-  // payload.data (Rust operp_settle::obyte_hash::get_data_hash).
+  // payload.data (Rust minuend_settle::obyte_hash::get_data_hash).
   console.log("canonical data_hash:", obyteDataHash(batchData),
     "data_length:", obyteDataLength(batchData));
   console.log("batch:", batchData.chain_id, "height", batchData.height,
@@ -202,7 +202,7 @@ async function main() {
     .run();
   const poster = network.wallet.poster;
   const vault = network.agent.vault;
-  process.env.OPERP_VAULT_AA = vault;
+  process.env.MINUEND_VAULT_AA = vault;
   console.log("rollup", rollup, "vault", vault);
   // Frames come from export_batch (`frames` array). Embed evidences into
   // their Deposit/GovDeposit frames, pack so each package source <= 4MB,
@@ -281,7 +281,7 @@ async function main() {
   const aaForest = shardRoots.join("");
   const submitData = {
     submit: 1,
-    chain_id: header.chain_id || "operp-v2",
+    chain_id: header.chain_id || "minuend-v2",
     height: header.height,
     prev_state_hash: header.prev_state_hash,
     state_root: header.state_root,
@@ -325,7 +325,7 @@ async function main() {
   await network.witnessUntilStable(daUnit);
   console.log("combined da_unit posted & stable:", daUnit);
   console.log("da_unit:", daUnit);
-  // 2. challenge window then finalize (no lock in operp-v2)
+  // 2. challenge window then finalize (no lock in minuend-v2)
   await network.timetravel({ shift: "3600s" });
   await trigger(poster, { finalize: 1, height: header.height }, undefined, rollup);
 

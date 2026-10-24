@@ -1,10 +1,10 @@
-# OPERP 协议原理
+# MINUEND 协议原理
 
 > 本文是设计动机的叙事版。逐条规则的精确参考（常量、边界情况、
 > 威胁模型矩阵）见 [MECHANISMS.md](MECHANISMS.md)。
 
 
-本文深入说明 OPERP（乐观 DAG 侧链永续 DEX，结算到 Obyte）的设计原理与安全机制。
+本文深入说明 MINUEND（乐观 DAG 侧链永续 DEX，结算到 Obyte）的设计原理与安全机制。
 README 是概览；这里是"为什么这样设计"。
 
 术语：
@@ -245,7 +245,7 @@ assert last_unit 一致 ∧ replay.state_root == root   # RootMismatch
 
 TooManyUnits 上限（200000）在 from_applied 就挡住超大批次。
 
-## 4. 结算层：三个 AA（CHAIN_ID=operp-v2）
+## 4. 结算层：三个 AA（CHAIN_ID=minuend-v2）
 
 状态变量（rollup AA；`<h>` 为高度后缀）：
 
@@ -270,7 +270,7 @@ proposals、oracle 账本。金库 vault AA 只有 `deposit` / `deposit_perp` /
 ```
 pool       {pool:1} → pool_<trigger.address> += 输出-10000（bounce 费之外净额）
 
-submit(h)    h == last_submitted+1 ∧ chain_id='operp-v2' ∧ 双根 + 六个 44-char
+submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个 44-char
              承诺根 ∧ 组合单元 = header temp_data（`frames_blob` 或
              `packages`+`data_root`，gzip 帧）+ submit；多包时 package 单元先发，
              da_unit 只钉哈希列表
@@ -344,7 +344,7 @@ Oscript 实现细节（踩过的坑）：
 | 偷 AA 资金 | 提款只认 finalized 森林的 Merkle 证明；leaf 绑定地址；wd_/wp_ 防重放 |
 | 付钱杀根 | 已删除：challenge 无 case；假证明 bounce `no fraud` |
 | 审查 | rollup inbox `{force}` 钉时间戳；P-omit 按 #23 禁用（force 无法证明单元存在，恒 bounce） |
-| 存款自铸 | deposits_allowed 白名单 + replay 交叉注入 + evidence 绑定 `OPERP_VAULT_AA` |
+| 存款自铸 | deposits_allowed 白名单 + replay 交叉注入 + evidence 绑定 `MINUEND_VAULT_AA` |
 | 溢出 DoS / 签名延展 / 乱序 | 入口 checked-mul / verify_strict / orphan 缓冲 |
 
 ## 6. 已知局限
@@ -377,7 +377,7 @@ PERP 的三个机制接管：
 字段），烧毁只在镜像账本进行——对应真实 PERP 永久滞留 AA，协议整体对
 PERP 超抵押。精确规则见 [MECHANISMS.md](MECHANISMS.md) §15。
 
-> **Watcher：** `crates/operp-watch` 离线重放 `da_unit_<h>` 并可组
+> **Watcher：** `crates/minuend-watch` 离线重放 `da_unit_<h>` 并可组
 > `proof.json`。当前 `post_challenge.js` 仍是本地 aa-testkit CLI，未接入生产
 > hub 提交路径；不能据此声称生产环境会自动发挑战。#37 的自动提交项仍未解决，
 > 本 PR 也不修改该脚本。

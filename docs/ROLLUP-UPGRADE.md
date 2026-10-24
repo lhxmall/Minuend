@@ -1,6 +1,6 @@
-# OPERP 结算层：现在（纯永续）与以后升级
+# MINUEND 结算层：现在（纯永续）与以后升级
 
-> 状态：**§2「现在」已实现**（三门 AA + 一枪谓词 + inbox；`CHAIN_ID=operp-v2`）。
+> 状态：**§2「现在」已实现**（三门 AA + 一枪谓词 + inbox；`CHAIN_ID=minuend-v2`）。
 > 精确规则见 [MECHANISMS.md](MECHANISMS.md) §10–11。主网部署脚本
 > `deploy_mainnet.js` 就绪，实发待助记词 + 审计。
 > 本文记录：纯永续阶段把乐观结算做成什么样，以及以后若做成图灵完备侧链怎么升级。
@@ -19,7 +19,7 @@
 
 ## 1. 现在为什么要推倒结算层
 
-现行 `challenge`（`operp_vault.aa`）：已 lock、窗内、付 1000 GBYTE → 立刻 `frozen=2`、清根、回滚高度。AA 不读数据包、不比对根、不要证明。
+现行 `challenge`（`minuend_vault.aa`）：已 lock、窗内、付 1000 GBYTE → 立刻 `frozen=2`、清根、回滚高度。AA 不读数据包、不比对根、不要证明。
 
 这不是乐观 rollup，是付费否决：诚实根也能被杀。交易所引擎（DAG、撮合、清算、PERP）没有这个问题——执行已经是确定性的。要推倒的是 **贴到 Obyte 之后怎么敲定、怎么抓假账**。
 
@@ -35,9 +35,9 @@ Oscript 单次复杂度上限 100，现行金库已占约 76。共识不能再�
 
 | 门 | AA | 现在干什么 | 以后换什么 |
 |---|---|---|---|
-| 金库 | `operp_vault.aa` | 充、提、只认 finalized 的 `aa_forest` | **几乎不改** |
-| 记账 | `operp_rollup.aa`（新） | 谁先稳定谁贴根、开窗、收判决 | 主张加 `version`，争议改派 |
-| 裁判 | `operp_dispute.aa`（新） | 永续专用验算（下一节） | **整扇换掉** 或加新 case |
+| 金库 | `minuend_vault.aa` | 充、提、只认 finalized 的 `aa_forest` | **几乎不改** |
+| 记账 | `minuend_rollup.aa`（新） | 谁先稳定谁贴根、开窗、收判决 | 主张加 `version`，争议改派 |
+| 裁判 | `minuend_dispute.aa`（新） | 永续专用验算（下一节） | **整扇换掉** 或加新 case |
 
 金库用 `var[ROLLUP_AA]['aa_forest_'||last_finalized]` 读根，自己不记候选、不挑战、不判刑。
 
@@ -196,7 +196,7 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 - 继续「付钱即处决」
 - 委员会签根、指定 operator、只有原 poster 应诉
 - 链下 DA（IPFS 当数据可用性）
-- 把争议塞回现行 `operp_vault.aa`
+- 把争议塞回现行 `minuend_vault.aa`
 - 把仓位 / 挂单写进提款叶子
 - 现在做 VM、现在做指令级二分
 - 靠 `validity_proof_hash` 空槽「以后接 ZK」（Oscript 没有 pairing；升级靠拆门）

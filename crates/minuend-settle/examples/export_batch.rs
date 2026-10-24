@@ -1,0 +1,137 @@
+use ed25519_dalek::SigningKey;
+use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
+use minuend_exec::Engine;
+use minuend_settle::Batch;
+use minuend_types::{
+    account_id_from_pubkey, AccountId, OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE,
+    QTY_SCALE, USD_SCALE,
+};
+use std::path::PathBuf;
+
+fn sk(n: u8) -> [u8; 32] {
+    [n; 32]
+}
+fn acct(secret: &[u8; 32]) -> AccountId {
+    account_id_from_pubkey(&SigningKey::from_bytes(secret).verifying_key().to_bytes())
+}
+
+/// 32-char uppercase [A-Z2-7] Obyte-style test address, varied by `n`.
+fn test_addr(n: u8) -> String {
+    let mut bytes = vec![b'A'; 32];
+    bytes[0] = b'A' + (n % 26);
+    String::from_utf8(bytes).unwrap()
+}
+
+fn main() {
+    let mut eng = Engine::new();
+    eng.state.deposits_allowed = (1u8..=255)
+        .flat_map(|b| [([b; 32], false), ([b; 32], true)])
+        .collect();
+    eng.state
+        .markets
+        .insert(BTC_USD, minuend_types::genesis_params());
+    let prev = eng.state.clone();
+    let g = genesis_id();
+    let alice = sk(1);
+    let bob = sk(2);
+    let mut applied = Vec::new();
+    let mut tip = g;
+
+    let d1 = sign_unit(
+        vec![tip],
+        Op::Deposit {
+            aa_unit: [1; 32],
+            account: acct(&alice),
+            addr: test_addr(1),
+            amount: 10_000 * USD_SCALE as i128,
+        },
+        &alice,
+    );
+    tip = unit_id(&d1);
+    applied.push(tip);
+    eng.ingest(d1).unwrap();
+
+    let d2 = sign_unit(
+        vec![tip],
+        Op::Deposit {
+            aa_unit: [2; 32],
+            account: acct(&bob),
+            addr: test_addr(2),
+            amount: 10_000 * USD_SCALE as i128,
+        },
+        &bob,
+    );
+    tip = unit_id(&d2);
+    applied.push(tip);
+    eng.ingest(d2).unwrap();
+
+    let px = 100_000 * PRICE_SCALE as i64;
+    let qty = QTY_SCALE;
+    let ask = sign_unit(
+        vec![tip],
+        Op::Place {
+            account: acct(&bob),
+            market: BTC_USD,
+            side: Side::Ask,
+            typ: OrderType::Limit,
+            tif: TimeInForce::Gtc,
+            price: px,
+            qty,
+            client_seq: 1,
+            isolated: false,
+            margin: 0,
+        },
+        &bob,
+    );
+    tip = unit_id(&ask);
+    applied.push(tip);
+    eng.ingest(ask).unwrap();
+
+    let bid = sign_unit(
+        vec![tip],
+        Op::Place {
+            account: acct(&alice),
+            market: BTC_USD,
+            side: Side::Bid,
+            typ: OrderType::Limit,
+            tif: TimeInForce::Gtc,
+            price: px,
+            qty,
+            client_seq: 1,
+            isolated: false,
+            margin: 0,
+        },
+        &alice,
+    );
+    tip = unit_id(&bid);
+    applied.push(tip);
+    eng.ingest(bid).unwrap();
+    let _ = tip;
+
+    let batch = Batch::from_applied(&prev, &mut eng, &applied).expect("batch");
+    let mut header = batch.header_json();
+    let frames = batch.frames();
+    header["frames"] = serde_json::to_value(&frames).unwrap();
+    let out: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../obyte-local/batch.json")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/batch.json")
+        });
+    if let Some(dir) = out.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text = serde_json::to_string_pretty(&header).unwrap();
+    std::fs::write(&out, &text).expect("write batch.json");
+    println!("wrote {}", out.display());
+    println!("height {}", batch.checkpoint.height);
+    println!("fill_count {}", batch.checkpoint.fill_count);
+    println!("state_root {}", hex::encode(batch.checkpoint.state_root));
+    println!(
+        "prev_state_hash {}",
+        hex::encode(batch.checkpoint.prev_state_hash)
+    );
+    println!("units {}", batch.checkpoint.unit_ids.len());
+    assert_eq!(batch.checkpoint.fill_count, 1);
+    println!("OK: real engine batch exported");
+}

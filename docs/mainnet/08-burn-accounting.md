@@ -1,6 +1,6 @@
 # Mainnet Gap 7 — Burned PERP Stranded / Auditable Burn Accounting
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > **Design-only**. No code edits in this batch. Parent merges after all 11 designs land.
 > Owner: `DesignBurnView` — Gap 7: *Burned PERP stays stranded in the vault AA* (README L7).
@@ -13,12 +13,12 @@
 
 | File | Symbols / vars | Role |
 |------|---------------|------|
-| `crates/operp-state/src/lib.rs` | `ChainState::perp_burned: u128` (existing), `ChainState::perp_supply: u128`, `ChainState::perp_balances`, `ChainState::burn_perp()` *(new helper)*, `meta_leaf()` | Cumulative counter + helper extraction; already committed in leaf |
-| `crates/operp-types/src/lib.rs` | `CREATE_MARKET_FEE_PERP: u128 = 10_000`, `PERP_ASSET`, `PERP_ASSET_PLACEHOLDER` | Constants unchanged; docs added |
-| `crates/operp-exec/src/lib.rs` | `Engine::create_market()` (burn site), future burn sites (`slash_oracle`, `confiscate` — stubs), tests `create_market_burns_exact_fee_and_allocates_ids` | Unify burn path through helper |
-| `crates/operp-dag/src/lib.rs` | `Op::CreateMarket` | No wire change (canonical_bytes untouched); comment clarifies burn semantics |
-| `crates/operp-settle/src/lib.rs` | `Checkpoint` struct — optional `perp_burned: u128` audit field (or derived via `state.perp_burned`), `Batch::from_applied`, `Batch::validate_against`, `TempDataPayload` | Expose counter for off-chain audit; no consensus break if optional |
-| `obyte-local/agents/operp_vault.aa` | State vars `var['perp_burned']` (global), `var['perp_burned_'||h]` (per-height), `var['cand_perp_burned_'||h]` (candidate), messages `{submit}`, `{finalize}`, `{get_burn}`, `{sweep_burn}` *(v2 optional)*, shadow vars `bal_`, `pperp_` untouched | AA-side queryable counter + optional sweep |
+| `crates/minuend-state/src/lib.rs` | `ChainState::perp_burned: u128` (existing), `ChainState::perp_supply: u128`, `ChainState::perp_balances`, `ChainState::burn_perp()` *(new helper)*, `meta_leaf()` | Cumulative counter + helper extraction; already committed in leaf |
+| `crates/minuend-types/src/lib.rs` | `CREATE_MARKET_FEE_PERP: u128 = 10_000`, `PERP_ASSET`, `PERP_ASSET_PLACEHOLDER` | Constants unchanged; docs added |
+| `crates/minuend-exec/src/lib.rs` | `Engine::create_market()` (burn site), future burn sites (`slash_oracle`, `confiscate` — stubs), tests `create_market_burns_exact_fee_and_allocates_ids` | Unify burn path through helper |
+| `crates/minuend-dag/src/lib.rs` | `Op::CreateMarket` | No wire change (canonical_bytes untouched); comment clarifies burn semantics |
+| `crates/minuend-settle/src/lib.rs` | `Checkpoint` struct — optional `perp_burned: u128` audit field (or derived via `state.perp_burned`), `Batch::from_applied`, `Batch::validate_against`, `TempDataPayload` | Expose counter for off-chain audit; no consensus break if optional |
+| `obyte-local/agents/minuend_vault.aa` | State vars `var['perp_burned']` (global), `var['perp_burned_'||h]` (per-height), `var['cand_perp_burned_'||h]` (candidate), messages `{submit}`, `{finalize}`, `{get_burn}`, `{sweep_burn}` *(v2 optional)*, shadow vars `bal_`, `pperp_` untouched | AA-side queryable counter + optional sweep |
 | `obyte-local/test_vault_aa.js` | `makePerpEngine()` shim, `post_batch.js` submit flow | E2E assertion `cumulative_burn == 10k` + view |
 | `docs/PROTOCOL.md`, `docs/MECHANISMS.md`, `README.md` | Auditor section “vault holdings − perp_supply = perp_burned” | Explicit audit recipe |
 
@@ -28,7 +28,7 @@
 
 ## 2. Change — Step by Step
 
-### 2.1 Rust — `crates/operp-state`
+### 2.1 Rust — `crates/minuend-state`
 
 **Step 1 — Canonicalize the counter name.**
 
@@ -57,7 +57,7 @@ impl ChainState {
 - `ChainState::new()` already zeroes `perp_burned`. Keep.
 - Storage keys: in-memory `BTreeMap`s — no disk keys; commitment via meta_leaf ensures replay binding.
 
-### 2.2 Rust — `crates/operp-exec`
+### 2.2 Rust — `crates/minuend-exec`
 
 **Step 3 — Route `create_market` through helper.**
 
@@ -79,7 +79,7 @@ self.state.burn_perp(creator, CREATE_MARKET_FEE_PERP).map_err(map_state)?;
 
 **Step 4 — No wire-format change.** `Op::CreateMarket` canonical_bytes stays `parents || op_tag || ...` via `canonical_bytes()` — adding helper does not alter serialized form.
 
-### 2.3 Rust — `crates/operp-settle`
+### 2.3 Rust — `crates/minuend-settle`
 
 **Step 5 — Expose burn counter for audit (non-consensus optional field).**
 
@@ -93,7 +93,7 @@ impl Batch {
 
 Option B (explicit, if AA needs to read it without replay): add `pub perp_burned: u128` to `Checkpoint`, include in `temp_data_payload` JSON, and assert in `validate_against` that `replay.state.perp_burned == self.checkpoint.perp_burned`. This is a *hard fork* of the checkpoint hash — only choose if AA submit must carry `perp_burned`. Recommendation: **ship Option A for v1** (no fork), add Option B later if sweep needs height-bound burn proof.
 
-### 2.4 Obyte Vault AA — `obyte-local/agents/operp_vault.aa`
+### 2.4 Obyte Vault AA — `obyte-local/agents/minuend_vault.aa`
 
 AA is at complexity budget limit (README L9). Every new op must be offset by simplification elsewhere, or be trivial. Burn accounting can be added with ~4 string ops + 1 integer var per height (<30 Oscript ops).
 
@@ -199,7 +199,7 @@ Add alias note: `burned_PERP == perp_burned == cumulative_burn`.
 
 | Trigger | Required data | Validation | Effect |
 |---------|---------------|------------|--------|
-| `{submit:1, height:h, state_root:64hex, aa_root:64hex, prev_state_hash:64hex, chain_id:'operp-mvp-1', perp_burned:"<decimal string>"}` | `perp_burned` optional (new) | `otherwise 0` default; stored as candidate | `cand_perp_burned_<h> = perp_burned` |
+| `{submit:1, height:h, state_root:64hex, aa_root:64hex, prev_state_hash:64hex, chain_id:'minuend-mvp-1', perp_burned:"<decimal string>"}` | `perp_burned` optional (new) | `otherwise 0` default; stored as candidate | `cand_perp_burned_<h> = perp_burned` |
 | `{finalize:1, height:h}` | — | existing stability + frozen checks | `perp_burned = cand_perp_burned_<h>`; also `burned_PERP` and `perp_burned_<h>` |
 | `{get_burn:1}` | — | none | bounce/state diff exposes `perp_burned` |
 | `{sweep_burn:1, amount:"..."}` | v2 only, governance-gated | proposal passing check | send `amount` PERP to burn sink |
@@ -354,13 +354,13 @@ If even v1 AA var is deemed too expensive, the **minimal v0 fallback** is:
 3. **PERP asset issuance timing:** `PERP_ASSET_ID_HERE` placeholder is still present in AA. Until issuance, `getBalances(aa)[PERP_ASSET]` is meaningless. Audit script should handle “asset not yet issued” gracefully and the burn invariant vacuously holds (holdings = 0, supply = 0, burn = 0 until GovDeposit occurs).
 4. **Submit `perp_burned` validation strictness:** Should v1 bounce on `perp_burned < var['perp_burned']` (non-monotonic lie) or stay permissive? Permissive is safer for backward compat; strict catches operator lying sooner. **Propose permissive in v1, strict in v2.**
 5. **Per-height history depth:** Storing `perp_burned_<h>` for every height grows AA state unbounded. Obyte AA state is not pruned. At 1 batch/2s, 1 var/height ≈ 500k vars/year. Is per-height history worth it, or should we keep only global? **Proposal keeps it for audit trail**; if state bloat is a concern, keep only global and rely on temp_data replay for history.
-6. **Future burn sites:** Oracle slashing was planned but not implemented. Should the `burn_perp` helper be `pub(crate)` or `pub`? Keep `pub` so future `operp-exec` slash path can call it without refactor.
+6. **Future burn sites:** Oracle slashing was planned but not implemented. Should the `burn_perp` helper be `pub(crate)` or `pub`? Keep `pub` so future `minuend-exec` slash path can call it without refactor.
 
 ---
 
 ## 8. Checklist for Implementer
 
-- [ ] Add `ChainState::burn_perp` + `cumulative_burn()` in `crates/operp-state/src/lib.rs`; commit via `meta_leaf` already done.
+- [ ] Add `ChainState::burn_perp` + `cumulative_burn()` in `crates/minuend-state/src/lib.rs`; commit via `meta_leaf` already done.
 - [ ] Refactor `Engine::create_market` to call `burn_perp`; keep `CREATE_MARKET_FEE_PERP` guard order.
 - [ ] AA: add `cand_perp_burned_<h>` in submit, `perp_burned`/`burned_PERP`/`perp_burned_<h>` in finalize, optional `{get_burn}` view.
 - [ ] Bump no wire format for v1 (canonical_bytes, BTreeMap, 256h, MAX_AA_TREE_DEPTH untouched).

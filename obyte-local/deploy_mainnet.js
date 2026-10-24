@@ -1,13 +1,13 @@
 "use strict";
 
-// OPERP four-AA deployment — Obyte MAINNET (GBYTE collateral).
+// MINUEND four-AA deployment — Obyte MAINNET (GBYTE collateral).
 //
-// Posts operp_rollup.aa, operp_dispute.aa, operp_dispute_fill.aa and
-// operp_vault.aa via a light headless wallet (default mainnet hub),
+// Posts minuend_rollup.aa, minuend_dispute.aa, minuend_dispute_fill.aa and
+// minuend_vault.aa via a light headless wallet (default mainnet hub),
 // binds both dispute AAs, smoke-triggers the vault, and writes
 // obyte-local/deployment.json.
 //
-//   OPERP_DEPLOY_MNEMONIC="word word ... " PERP_ASSET_ID=<44-char id> \
+//   MINUEND_DEPLOY_MNEMONIC="word word ... " PERP_ASSET_ID=<44-char id> \
 //     node obyte-local/deploy_mainnet.js   # run issue_perp.js FIRST
 //
 // Needs funded GBYTE (definition posts + 2x20000 bind + smoke). Does NOT
@@ -24,7 +24,7 @@ const PERP_ASSET_ID = process.env.PERP_ASSET_ID;
 if (!PERP_ASSET_ID || PERP_ASSET_ID === "PERP_ASSET_ID_HERE" || PERP_ASSET_ID.length !== 44)
   throw new Error("PERP_ASSET_ID env (44-char base64 asset id) required — run issue_perp.js first");
 
-const CHAIN_ID = "operp-v2";
+const CHAIN_ID = "minuend-v2";
 const POOL_FUND_GROSS = 10000000010000; // POOL_MIN 1e12 + 10000 fee for {pool:1}
 const CHALLENGE_SECS = 3600;
 
@@ -98,28 +98,28 @@ async function main() {
 
   // 1. Dispute AAs FIRST (#13): their definitions carry no rollup address,
   // the rollup hardcodes THEM — mutual hardcoding would be a chash cycle.
-  const disputeSrc = readAa("operp_dispute.aa");
-  const fillSrc = readAa("operp_dispute_fill.aa");
-  const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "operp_dispute.aa")];
-  const fillDef = ["autonomous agent", await parseAa(fillSrc, "operp_dispute_fill.aa")];
+  const disputeSrc = readAa("minuend_dispute.aa");
+  const fillSrc = readAa("minuend_dispute_fill.aa");
+  const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "minuend_dispute.aa")];
+  const fillDef = ["autonomous agent", await parseAa(fillSrc, "minuend_dispute_fill.aa")];
   const dispute = await postDefinition(disputeDef, "dispute");
   const fill = await postDefinition(fillDef, "fill");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
-  const rollupSrc = substitute(readAa("operp_rollup.aa"), {
+  const rollupSrc = substitute(readAa("minuend_rollup.aa"), {
     DISPUTE_AA_HERE: dispute.address,
     DISPUTE_FILL_AA_HERE: fill.address,
   });
-  const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "operp_rollup.aa")];
+  const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
   await waitBeat(rollup.unit, "rollup");
 
-  const vaultSrc = substitute(readAa("operp_vault.aa"), {
+  const vaultSrc = substitute(readAa("minuend_vault.aa"), {
     ROLLUP_AA_HERE: rollup.address,
     PERP_ASSET_ID_HERE: PERP_ASSET_ID,
   });
-  const vaultDef = ["autonomous agent", await parseAa(vaultSrc, "operp_vault.aa")];
+  const vaultDef = ["autonomous agent", await parseAa(vaultSrc, "minuend_vault.aa")];
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 

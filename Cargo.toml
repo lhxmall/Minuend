@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/operp-types",
-  "crates/operp-book",
-  "crates/operp-account",
-  "crates/operp-dag",
-  "crates/operp-state",
-  "crates/operp-exec",
-  "crates/operp-settle",
-  "crates/operp-gossip",
-  "crates/operp-watch",
+  "crates/minuend-types",
+  "crates/minuend-book",
+  "crates/minuend-account",
+  "crates/minuend-dag",
+  "crates/minuend-state",
+  "crates/minuend-exec",
+  "crates/minuend-settle",
+  "crates/minuend-gossip",
+  "crates/minuend-watch",
 ]
 
 [workspace.package]
@@ -28,14 +28,14 @@ ed25519-dalek = "3"
 hex = "0.4"
 base64 = "0.23"
 flate2 = "1"
-operp-types = { path = "crates/operp-types" }
-operp-book = { path = "crates/operp-book" }
-operp-account = { path = "crates/operp-account" }
-operp-dag = { path = "crates/operp-dag" }
-operp-state = { path = "crates/operp-state" }
-operp-exec = { path = "crates/operp-exec" }
-operp-gossip = { path = "crates/operp-gossip" }
-operp-settle = { path = "crates/operp-settle" }
+minuend-types = { path = "crates/minuend-types" }
+minuend-book = { path = "crates/minuend-book" }
+minuend-account = { path = "crates/minuend-account" }
+minuend-dag = { path = "crates/minuend-dag" }
+minuend-state = { path = "crates/minuend-state" }
+minuend-exec = { path = "crates/minuend-exec" }
+minuend-gossip = { path = "crates/minuend-gossip" }
+minuend-settle = { path = "crates/minuend-settle" }
 
 [profile.release]
 lto = "thin"
