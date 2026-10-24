@@ -198,30 +198,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-account"
+name = "minuend-account"
 version = "0.1.0"
 dependencies = [
- "operp-types",
+ "minuend-types",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-book"
+name = "minuend-book"
 version = "0.1.0"
 dependencies = [
- "operp-types",
+ "minuend-types",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-dag"
+name = "minuend-dag"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
- "operp-types",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",
@@ -229,45 +229,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-exec"
+name = "minuend-exec"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
- "operp-account",
- "operp-book",
- "operp-dag",
- "operp-settle",
- "operp-state",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-dag",
+ "minuend-settle",
+ "minuend-state",
+ "minuend-types",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-gossip"
+name = "minuend-gossip"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "operp-dag",
- "operp-types",
+ "minuend-dag",
+ "minuend-types",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-settle"
+name = "minuend-settle"
 version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
  "flate2",
  "hex",
- "operp-account",
- "operp-book",
- "operp-dag",
- "operp-exec",
- "operp-state",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-dag",
+ "minuend-exec",
+ "minuend-state",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",
@@ -275,22 +275,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-state"
+name = "minuend-state"
 version = "0.1.0"
 dependencies = [
  "base64",
  "bincode",
  "hex",
- "operp-account",
- "operp-book",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-types",
  "serde",
  "sha2",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-types"
+name = "minuend-types"
 version = "0.1.0"
 dependencies = [
  "hex",
@@ -300,7 +300,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-watch"
+name = "minuend-watch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -308,11 +308,11 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
- "operp-dag",
- "operp-exec",
- "operp-settle",
- "operp-state",
- "operp-types",
+ "minuend-dag",
+ "minuend-exec",
+ "minuend-settle",
+ "minuend-state",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",

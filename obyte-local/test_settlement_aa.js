@@ -1,6 +1,6 @@
 "use strict";
 
-// OPERP settlement E2E — three-agent lifecycle (rollup + dispute + vault).
+// MINUEND settlement E2E — three-agent lifecycle (rollup + dispute + vault).
 //
 // This is the settlement-v2 harness. The vault is pure custody (no submit /
 // lock / challenge / finalize), the rollup AA stores bonded assertions,
@@ -91,16 +91,16 @@ function writeResolved(file, subs, out) {
 // hash FIRST. Dispute/fill carry no rollup address in their definitions —
 // binds and challenges pass it in trigger data — which is what breaks the
 // chash cycle (each address would otherwise be a hash input of the other).
-const DISPUTE_SRC = writeResolved("operp_dispute.aa", {}, ".e2e_dispute.aa");
-const FILL_SRC = writeResolved("operp_dispute_fill.aa", {}, ".e2e_fill.aa");
+const DISPUTE_SRC = writeResolved("minuend_dispute.aa", {}, ".e2e_dispute.aa");
+const FILL_SRC = writeResolved("minuend_dispute_fill.aa", {}, ".e2e_fill.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
 const FILL_ADDR = chashOf(fs.readFileSync(FILL_SRC, "utf8"));
-const ROLLUP_SRC = writeResolved("operp_rollup.aa", {
+const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_AA_HERE: DISPUTE_ADDR,
   DISPUTE_FILL_AA_HERE: FILL_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
-const VAULT_SRC = writeResolved("operp_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: PERP_ASSET }, ".e2e_vault.aa");
+const VAULT_SRC = writeResolved("minuend_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: PERP_ASSET }, ".e2e_vault.aa");
 const POOL_FUND_GROSS = 50000000010000; // 50x POOL_MIN net: survives all fraud slashes in this run
 const SUBMIT_FEE = 10000; // submits pay only the bounce fee; pool gates
 const RACE_REWARD = 20000;
@@ -200,7 +200,7 @@ const FOREST = sha256Hex("f0").repeat(16); // 1024 hex
 function submitData(height, stateRoot, prev) {
   return {
     submit: 1,
-    chain_id: "operp-v2",
+    chain_id: "minuend-v2",
     assertion_version: 1,
     height,
     state_root: stateRoot,
@@ -228,7 +228,7 @@ function headerFromSubmit(sd, frameOp) {
   const blob = zlib.gzipSync(Buffer.from(frame, "utf8")).toString("base64");
   const raw = zlib.gunzipSync(Buffer.from(blob, "base64"));
   return {
-    chain_id: sd.chain_id || "operp-v2",
+    chain_id: sd.chain_id || "minuend-v2",
     height: sd.height,
     prev_state_hash: sd.prev_state_hash,
     state_root: sd.state_root,
@@ -581,7 +581,7 @@ async function main() {
   sd3.units_root = UNITS3_ROOT;
   sd3.fill_count = 1;
   {
-    const h3data = { chain_id: "operp-v2", height: 3 };
+    const h3data = { chain_id: "minuend-v2", height: 3 };
     const r = await operator.sendMulti({
       messages: [
         { app: "temp_data", payload_location: "inline", payload: {
@@ -604,7 +604,7 @@ async function main() {
   // The committed leaves are honest AND the shape is the claw-bail one:
   // the AA bounces 'no fraud' before any identity comparison (an honest
   // loser can remain negative when the winner cannot pay the claw —
-  // operp-state::claw_cannot_cover_leaves_both_negative).
+  // minuend-state::claw_cannot_cover_leaves_both_negative).
   const fillBase = {
     rollup: ROLLUP_ADDR,
     k: 0,

@@ -1,0 +1,17 @@
+[package]
+name = "minuend-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+minuend-types = { workspace = true }
+minuend-book = { workspace = true }
+minuend-account = { workspace = true }
+sha2 = { workspace = true }
+thiserror.workspace = true
+hex.workspace = true
+base64.workspace = true
+serde = { workspace = true }
+bincode = { workspace = true }

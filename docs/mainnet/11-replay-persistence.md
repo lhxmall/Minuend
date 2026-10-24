@@ -1,9 +1,9 @@
 # Gap 11 — Replay-Dedup Windows Bounded at 256 Heights — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignReplayPersist` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
-> Depends on: `crates/operp-state`, `crates/operp-exec`, `crates/operp-settle`, `crates/operp-types`
+> Depends on: `crates/minuend-state`, `crates/minuend-exec`, `crates/minuend-settle`, `crates/minuend-types`
 > No AA change. No wire-format change in v1.
 
 ---
@@ -16,11 +16,11 @@ Three dedup / anti-replay structures in `ChainState` are pruned on a **rolling 2
 
 | Structure | File | Type | Prune predicate | Current bound |
 |-----------|------|------|-----------------|---------------|
-| `withdrawals` (collateral Withdraw dedup) | `crates/operp-state/src/lib.rs:49,168` | `BTreeMap<(AccountId,u64), Withdrawal{height}>` | `w.height + 256 > min_height` | `WITHDRAWALS_CAP = 65_536` entries |
-| `seen_aa_units` (Deposit / GovDeposit endorse dedup) | `crates/operp-state/src/lib.rs:50,174` | `HashMap<[u8;32], Height>` | `*h + 256 > min_height` | unbounded per-window, deposit-rate × 256 |
-| `seen_gov_nonces` (GovWithdraw watermark) | `crates/operp-state/src/lib.rs:60` / `crates/operp-exec/src/lib.rs:654` | `HashMap<AccountId, u64>` watermark (strict `nonce <= watermark → DuplicateNonce`) | **never pruned** (watermark is monotonic) | `|accounts|` entries |
+| `withdrawals` (collateral Withdraw dedup) | `crates/minuend-state/src/lib.rs:49,168` | `BTreeMap<(AccountId,u64), Withdrawal{height}>` | `w.height + 256 > min_height` | `WITHDRAWALS_CAP = 65_536` entries |
+| `seen_aa_units` (Deposit / GovDeposit endorse dedup) | `crates/minuend-state/src/lib.rs:50,174` | `HashMap<[u8;32], Height>` | `*h + 256 > min_height` | unbounded per-window, deposit-rate × 256 |
+| `seen_gov_nonces` (GovWithdraw watermark) | `crates/minuend-state/src/lib.rs:60` / `crates/minuend-exec/src/lib.rs:654` | `HashMap<AccountId, u64>` watermark (strict `nonce <= watermark → DuplicateNonce`) | **never pruned** (watermark is monotonic) | `|accounts|` entries |
 
-Pruning is invoked exactly once per batch commit inside `crates/operp-settle/src/lib.rs:135-136`:
+Pruning is invoked exactly once per batch commit inside `crates/minuend-settle/src/lib.rs:135-136`:
 
 ```rust
 engine.state.height = prev.height + 1;
@@ -37,19 +37,19 @@ engine.state.prune_aa_units(height);
 
 | Crate | File | Symbol | Action |
 |-------|------|--------|--------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | `REPLAY_WINDOW_HEIGHTS`, `REPLAY_WINDOW_HEIGHTS_LEGACY` constants | **add** (window constant, was hard-coded `256`) |
-| `operp-state` | `crates/operp-state/src/lib.rs:10-16` | `Withdrawal` | add `seq: Seq` optional for index-less pruning (see 2.3) |
-| `operp-state` | `crates/operp-state/src/lib.rs:18-69` | `ChainState` | change `seen_aa_units` to `BTreeMap<[u8;32], Height>` (ordered) or keep HashMap + auxiliary BTree index; add `dedup_journal_seq` + persistence trait |
-| `operp-state` | `crates/operp-state/src/lib.rs:168-176` | `prune_withdrawals`, `prune_aa_units` | generalize to `prune_at(height, window)`; add `prune_with_window` helper; keep old names as wrappers |
-| `operp-state` | `crates/operp-state/src/lib.rs:49` | `withdrawals: BTreeMap<(AccountId,u64), Withdrawal>` | keep type, add height-indexed secondary index for O(k log n) prune instead of O(n) scan (optional) |
-| `operp-state` | `crates/operp-state/src/lib.rs:60` | `seen_gov_nonces` | add `persist_gov_nonce_log` module; no type change |
-| `operp-exec` | `crates/operp-exec/src/lib.rs:13-16` | `WITHDRAWALS_CAP` | unchanged, but document interaction with window |
-| `operp-exec` | `crates/operp-exec/src/lib.rs:648-667` | `gov_withdraw` watermark check | *(Update: shipped as buffered `pending_gov_wal`, flushed by `Batch::from_applied` — no per-op fsync; uncommitted batches never burn nonces.)* |
-| `operp-settle` | `crates/operp-settle/src/lib.rs:98-153` | `Batch::from_applied` | add `prune_cadence` parameter; wire snapshot / journal flush |
-| `operp-settle` | `crates/operp-settle/src/lib.rs:190-260` | `Batch::validate_against` | inject `replay_window` param for determinism; no AA interaction |
-| new | `crates/operp-state/src/persist.rs` | `DedupStore`, `RocksColumnFamily` enum, `Snapshot` trait | **new file** (or `crates/operp-exec/src/persist.rs`) — abstraction over storage backend |
-| new | `crates/operp-exec/src/journal.rs` | `GovNonceJournal` | **new file** — append-only WAL for `seen_gov_nonces` |
-| `obyte-local` | `agents/operp_vault.aa` | `wd_` / `wp_` | **no change** — documented as fund-safety invariant |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | `REPLAY_WINDOW_HEIGHTS`, `REPLAY_WINDOW_HEIGHTS_LEGACY` constants | **add** (window constant, was hard-coded `256`) |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:10-16` | `Withdrawal` | add `seq: Seq` optional for index-less pruning (see 2.3) |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:18-69` | `ChainState` | change `seen_aa_units` to `BTreeMap<[u8;32], Height>` (ordered) or keep HashMap + auxiliary BTree index; add `dedup_journal_seq` + persistence trait |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:168-176` | `prune_withdrawals`, `prune_aa_units` | generalize to `prune_at(height, window)`; add `prune_with_window` helper; keep old names as wrappers |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:49` | `withdrawals: BTreeMap<(AccountId,u64), Withdrawal>` | keep type, add height-indexed secondary index for O(k log n) prune instead of O(n) scan (optional) |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:60` | `seen_gov_nonces` | add `persist_gov_nonce_log` module; no type change |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs:13-16` | `WITHDRAWALS_CAP` | unchanged, but document interaction with window |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs:648-667` | `gov_withdraw` watermark check | *(Update: shipped as buffered `pending_gov_wal`, flushed by `Batch::from_applied` — no per-op fsync; uncommitted batches never burn nonces.)* |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs:98-153` | `Batch::from_applied` | add `prune_cadence` parameter; wire snapshot / journal flush |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs:190-260` | `Batch::validate_against` | inject `replay_window` param for determinism; no AA interaction |
+| new | `crates/minuend-state/src/persist.rs` | `DedupStore`, `RocksColumnFamily` enum, `Snapshot` trait | **new file** (or `crates/minuend-exec/src/persist.rs`) — abstraction over storage backend |
+| new | `crates/minuend-exec/src/journal.rs` | `GovNonceJournal` | **new file** — append-only WAL for `seen_gov_nonces` |
+| `obyte-local` | `agents/minuend_vault.aa` | `wd_` / `wp_` | **no change** — documented as fund-safety invariant |
 | `Cargo.toml` | workspace | `rocksdb` optional dep | add as `optional = true` behind `persist-rocksdb` feature |
 
 **Non-goals (this doc):** changing AA `wd_`/`wp_` logic, changing `CHAIN_ID`, changing `BATCH_MAX_UNITS`, changing orphan dedup (Gap 6), changing ordering (Gap 5).
@@ -79,7 +79,7 @@ Replace the in-memory-only retention with a **durable snapshot + optional RocksD
 **Why not "just RocksDB" unconditionally:** the current `ChainState` is a single struct replayed from genesis via `Batch::validate_against`. Forcing every validator to run RocksDB adds build complexity (native lib) and complicates deterministic replay tests. The design therefore abstracts storage behind a trait; the default validator uses an in-memory BTree backed by periodic snapshot files, and operators who want crash safety without replay-from-genesis use RocksDB.
 
 ```rust
-// crates/operp-state/src/persist.rs (new)
+// crates/minuend-state/src/persist.rs (new)
 pub const REPLAY_WINDOW_HEIGHTS: Height = 2048; // was 256
 pub const REPLAY_WINDOW_LEGACY: Height = 256;   // for replay of old checkpoints
 
@@ -141,7 +141,7 @@ All keys use `BTreeMap` ordering so RocksDB iteration order matches `ChainState`
 
 **Restart recovery (Choice A):**
 
-1. Operator starts node with `--state-dir ./data` (or `OPERP_STATE_DIR` env).
+1. Operator starts node with `--state-dir ./data` (or `MINUEND_STATE_DIR` env).
 2. `Engine::load_or_genesis(dir)` looks for latest `chainstate.<height>.snap` or RocksDB `meta.height`. If found, deserializes `ChainState` (including `withdrawals`, `seen_aa_units`, `seen_gov_nonces`, `aa_addresses`, `withdrawn_total`, `height`, `last_unit`, `seq`, `marks`).
 3. Node fetches `temp_data` batches for heights `snapshot.height+1 .. tip` from Obyte (or local `temp_data` cache) and replays each through `Batch::validate_against(&prev_root, &mut replay_engine)` — which re-applies `prune_withdrawals_at(height, window)` deterministically, so the reconstructed dedup maps match the pre-crash state.
 4. A duplicate `(account, nonce)` whose original is at height `h` is therefore still present in the store when the duplicate arrives at `h+300`, regardless of an intervening restart, because `h + window > h+300` for `window=2048` (and for `256` if persistence is enabled, the entry is literally still on disk).
@@ -153,7 +153,7 @@ If the snapshot is stale (power loss between snapshot and tip), replay fills the
 Keep everything in RAM, change one constant:
 
 ```rust
-// crates/operp-state/src/lib.rs (or crates/operp-types/src/lib.rs)
+// crates/minuend-state/src/lib.rs (or crates/minuend-types/src/lib.rs)
 - w.height + 256 > min_height
 + w.height + REPLAY_WINDOW_HEIGHTS > min_height  // = 2048
 ```
@@ -195,7 +195,7 @@ If RocksDB is used, memory for dedup maps drops to near-zero (only hot keys in b
 
 ### 2.3 API / constant changes (step-by-step)
 
-1. **Add window constant** — `crates/operp-types/src/lib.rs` (or `crates/operp-state/src/lib.rs` if types must stay lean):
+1. **Add window constant** — `crates/minuend-types/src/lib.rs` (or `crates/minuend-state/src/lib.rs` if types must stay lean):
 
    ```rust
    /// Replay-dedup window in heights. Duplicates with original height `h`
@@ -211,7 +211,7 @@ If RocksDB is used, memory for dedup maps drops to near-zero (only hot keys in b
 
    Alternative (simpler, no activation): change `256` → `2048` in both prune predicates and treat old checkpoints as implicitly truncated — replay from genesis would disagree for ~1792 heights of history, but since `meta_leaf` commits `height`, old roots remain valid; only future pruning horizon changes (forward-compatible). The activation gate is only needed if strict replay determinism from genesis is required.
 
-2. **Generalize prune predicates** — `crates/operp-state/src/lib.rs:168-176`:
+2. **Generalize prune predicates** — `crates/minuend-state/src/lib.rs:168-176`:
 
    ```rust
    pub fn prune_withdrawals_at(&mut self, at: Height, window: Height) {
@@ -245,7 +245,7 @@ If RocksDB is used, memory for dedup maps drops to near-zero (only hot keys in b
 
    This is an optimization, not required for correctness — `retain` over 65k entries per batch is ~65k comparisons × ~500 batches/s worst = ~32M compares/s, trivial.
 
-4. **Wire `Batch::from_applied` and `validate_against`** — `crates/operp-settle/src/lib.rs:130-136`:
+4. **Wire `Batch::from_applied` and `validate_against`** — `crates/minuend-settle/src/lib.rs:130-136`:
 
    ```rust
    // from_applied
@@ -260,7 +260,7 @@ If RocksDB is used, memory for dedup maps drops to near-zero (only hot keys in b
 
    `validate_against` already advances `replay.state.height = checkpoint.height` at 246 — it must also call the same `prune_*` with matching window before the final root check, otherwise a replay that prunes differently would yield a different `state_root` (different `withdrawals` / `aa_units` are not directly in `state_root`, but `withdrawn_total` and `aa_addresses` are — withdrawals map itself is not committed, only its side effects via `withdrawn_total` and account collateral are. So pruning difference does not affect `state_root` determinism — but keeping replay pruning identical avoids log divergence). Document that pruning is **not** part of root commitment.
 
-5. **No AA change** — `obyte-local/agents/operp_vault.aa` `wd_`/`wp_` logic remains global and is the ultimate fund-safety net. Add a comment documenting that sidechain window only affects DoS, not fund safety:
+5. **No AA change** — `obyte-local/agents/minuend_vault.aa` `wd_`/`wp_` logic remains global and is the ultimate fund-safety net. Add a comment documenting that sidechain window only affects DoS, not fund safety:
 
    ```js
    // sidechain dedup window = REPLAY_WINDOW_HEIGHTS (2048); AA wd_/wp_ is global
@@ -270,7 +270,7 @@ If RocksDB is used, memory for dedup maps drops to near-zero (only hot keys in b
 
 ### 2.4 Gov nonce watermark — persistent replay log for cross-restart safety
 
-Current `seen_gov_nonces: HashMap<AccountId, u64>` is a **strict watermark**: `nonce <= watermark → DuplicateNonce` (`crates/operp-exec/src/lib.rs:656-657`). This is already unbounded-time (never pruned) and bounded by account count. The gap is **durability across restarts**: if the node crashes after processing nonce `n` and restarts from a snapshot at height `h < current`, the watermark rewinds and nonce `n` can be replayed.
+Current `seen_gov_nonces: HashMap<AccountId, u64>` is a **strict watermark**: `nonce <= watermark → DuplicateNonce` (`crates/minuend-exec/src/lib.rs:656-657`). This is already unbounded-time (never pruned) and bounded by account count. The gap is **durability across restarts**: if the node crashes after processing nonce `n` and restarts from a snapshot at height `h < current`, the watermark rewinds and nonce `n` can be replayed.
 
 **Design (works with both Choice A and B, no RocksDB required):**
 
@@ -280,7 +280,7 @@ Append-only journal file `gov_nonces.journal` (or RocksDB WAL) in `state_dir`:
 record := seq:u64 LE || account:32 || nonce:u64 LE || height:u64 LE   (52 bytes)
 ```
 
-Write path (`crates/operp-exec/src/journal.rs` or inline in `gov_withdraw`):
+Write path (`crates/minuend-exec/src/journal.rs` or inline in `gov_withdraw`):
 
 ```rust
 fn gov_withdraw(&mut self, account: AccountId, amount: u128, nonce: u64) -> Result<..., RejectReason> {
@@ -343,12 +343,12 @@ If even the journal is infeasible in one shot, the absolute minimal v1 is just t
 * `Engine::deposit` / `GovDeposit` with a reused `aa_unit` at `h+300` is rejected as `DuplicateDeposit` after restart for the same reason.
 * `GovWithdraw` with `nonce=5` then `nonce=4` is rejected as `DuplicateNonce` (watermark), and after restart the watermark still holds — `nonce=4` still rejected.
 * Normal operations within the window continue to be rejected (no regression), and operations outside the new 2048 window are correctly accepted (window is bounded, not infinite — except gov nonces which are watermark-infinite).
-* **Fund safety invariant unchanged:** even if sidechain dedup were bypassed, `obyte-local/agents/operp_vault.aa` `wd_`/`wp_` still caps withdrawals at proven `W` / `perp` — demonstrated by existing `test_vault_aa.js` proof-gated withdrawal tests (no change).
+* **Fund safety invariant unchanged:** even if sidechain dedup were bypassed, `obyte-local/agents/minuend_vault.aa` `wd_`/`wp_` still caps withdrawals at proven `W` / `perp` — demonstrated by existing `test_vault_aa.js` proof-gated withdrawal tests (no change).
 
 ### Tests / E2E assertions (new)
 
 ```rust
-// crates/operp-exec/tests/replay_persist.rs (new)
+// crates/minuend-exec/tests/replay_persist.rs (new)
 #[test]
 fn duplicate_withdraw_300h_rejected_after_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -415,7 +415,7 @@ Run commands:
 
 ```bash
 cargo test --workspace -- replay_persist
-cargo test -p operp-exec --test replay_persist -- --nocapture
+cargo test -p minuend-exec --test replay_persist -- --nocapture
 # persistence feature
 cargo test --workspace --features persist-rocksdb
 ```
@@ -434,7 +434,7 @@ cargo test --workspace --features persist-rocksdb
 | **Migration** | No data migration for already-pruned entries (acceptable — forward window only). Snapshot at activation height is the migration point. Downgrade after activation re-opens DoS window but not fund safety — operator must not downgrade without resync. |
 | **Backward compat** | Wire format unchanged. Old batches replay identically (legacy 256 predicate for `height < ACTIVATION`). New batches use 2048. Peers on different versions diverge only on late duplicates (257-2048) — acceptable during rolling upgrade; after activation all peers converge. |
 | **Failure modes** | Snapshot write failure: node keeps in-memory state, retries next batch — no data loss (dedup still in RAM). Journal fsync failure: `gov_withdraw` returns `Risk` (or `EngineError::Journal`) and does not insert the nonce — safe to retry. RocksDB corruption: fall back to replay from last good snapshot + `temp_data` (same recovery path as today). |
-| **Fund-safety argument** | Even if sidechain dedup is bypassed, `operp_vault.aa: wd_ / wp_ + leaf ownership + Merkle root check` is the **final** gate. The sidechain window only controls whether a duplicate wastes batch space and forces a challenge. This is explicitly documented and not weakened by the change. |
+| **Fund-safety argument** | Even if sidechain dedup is bypassed, `minuend_vault.aa: wd_ / wp_ + leaf ownership + Merkle root check` is the **final** gate. The sidechain window only controls whether a duplicate wastes batch space and forces a challenge. This is explicitly documented and not weakened by the change. |
 
 ---
 

@@ -1,6 +1,6 @@
 # Gap 10 — AA-tree depth cap 2^16 : Scaling Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Status: DESIGN ONLY — no code edits. Parent merges after all subagents land.
 > Assignment id: `DesignAaSharding`
@@ -11,19 +11,19 @@
 
 | Area | File | Symbol / Var |
 |------|------|--------------|
-| Rust constant (single source of truth) | `crates/operp-types/src/lib.rs:31-36` | `pub const MAX_AA_TREE_DEPTH: usize = 16` |
-| Hex-domain leaf / parent helpers | `crates/operp-state/src/lib.rs:604-615` | `aa_account_leaf_str`, `aa_parent` |
-| Tree root + proof generation | `crates/operp-state/src/lib.rs:619-669` | `aa_root_of`, `aa_proof_for`, `aa_root_of_state`, `aa_proof_for_account`, `aa_pairs_of` |
-| Settle checkpoint commitment | `crates/operp-settle/src/lib.rs:17-19,143-145,255-257` | `Checkpoint.aa_root: String`, `Batch::from_applied`, `Batch::validate_against` |
-| Example proof exporter | `crates/operp-settle/examples/gen_withdraw_proof.rs` | proof JSON `proof[]` + `aa_root` |
-| Vault AA — withdrawal fold | `obyte-local/agents/operp_vault.aa:319-323` | `$fold`, `reduce(trigger.data.proof, 16, …)` |
-| Vault AA — storage keys | `obyte-local/agents/operp_vault.aa:27-40,156-157,254-255` | `aa_root_<h>`, `cand_aa_root_<h>`, `root_<h>`, `stable_at_<h>`; init `if (!$h) bounce` |
-| Vault AA base template | `obyte-local/agents/operp_vault_base.aa` (mirror of vault) | same symbols, pre-asset substitution |
+| Rust constant (single source of truth) | `crates/minuend-types/src/lib.rs:31-36` | `pub const MAX_AA_TREE_DEPTH: usize = 16` |
+| Hex-domain leaf / parent helpers | `crates/minuend-state/src/lib.rs:604-615` | `aa_account_leaf_str`, `aa_parent` |
+| Tree root + proof generation | `crates/minuend-state/src/lib.rs:619-669` | `aa_root_of`, `aa_proof_for`, `aa_root_of_state`, `aa_proof_for_account`, `aa_pairs_of` |
+| Settle checkpoint commitment | `crates/minuend-settle/src/lib.rs:17-19,143-145,255-257` | `Checkpoint.aa_root: String`, `Batch::from_applied`, `Batch::validate_against` |
+| Example proof exporter | `crates/minuend-settle/examples/gen_withdraw_proof.rs` | proof JSON `proof[]` + `aa_root` |
+| Vault AA — withdrawal fold | `obyte-local/agents/minuend_vault.aa:319-323` | `$fold`, `reduce(trigger.data.proof, 16, …)` |
+| Vault AA — storage keys | `obyte-local/agents/minuend_vault.aa:27-40,156-157,254-255` | `aa_root_<h>`, `cand_aa_root_<h>`, `root_<h>`, `stable_at_<h>`; init `if (!$h) bounce` |
+| Vault AA base template | `obyte-local/agents/minuend_vault_base.aa` (mirror of vault) | same symbols, pre-asset substitution |
 | JS E2E test | `obyte-local/test_vault_aa.js:278-489,616-893` | `aaLeafStr`, `sha256Hex`, `claim.proof`, `var['aa_root_'||h]` |
 | Operator poster | `obyte-local/post_batch.js:127-128` | payload `aa_root` |
 | Ocore limits (read-only reference) | `vendor/ocore/constants.js`, `vendor/ocore/definition.js`, `vendor/ocore/formula/evaluation.js:2345ff` | `MAX_OPS=2000`, `MAX_COMPLEXITY=100`, `reduce(expr,count,fn,init)` fatal if `arrElements.length > count`, overall ops budget |
 
-Out of scope: byte-domain `state_root` merkle tree (`merkle_root`/`verify_proof` at `operp-state:524-595`), risk engine, DAG/orphan logic.
+Out of scope: byte-domain `state_root` merkle tree (`merkle_root`/`verify_proof` at `minuend-state:524-595`), risk engine, DAG/orphan logic.
 
 ---
 
@@ -58,7 +58,7 @@ Ocore `reduce` semantics (`vendor/ocore/formula/evaluation.js:2360`):
 #### A1. Constants
 
 ```rust
-// crates/operp-types/src/lib.rs
+// crates/minuend-types/src/lib.rs
 - pub const MAX_AA_TREE_DEPTH: usize = 16;
 + pub const MAX_AA_TREE_DEPTH: usize = 20; // v1 ships 18; see recommendation 3.3
 ```
@@ -74,7 +74,7 @@ Callers `aa_proof_for_account` / `gen_withdraw_proof.rs` pick up the new cap aut
 #### A3. AA side — one integer
 
 ```oscript
-// obyte-local/agents/operp_vault.aa:319-323  (and same in _base.aa)
+// obyte-local/agents/minuend_vault.aa:319-323  (and same in _base.aa)
 - $fold = ...;
 - $root = reduce(trigger.data.proof, 16, $fold, sha256('acct:'||..., 'hex'));
 + $fold = ($acc, $i, $sib) => (!$acc OR !$sib.hash) ? false
@@ -129,11 +129,11 @@ Goal: keep per-proof depth at 16 while scaling total accounts to N × 2^16. Proo
 New API (additive; existing mono-tree symbols remain for backward compat during migration):
 
 ```rust
-// crates/operp-types/src/lib.rs
+// crates/minuend-types/src/lib.rs
 pub const AA_SHARD_COUNT: usize = 16;
 pub const MAX_AA_TREE_DEPTH: usize = 16; // stays 16 under sharding
 
-// crates/operp-state/src/lib.rs
+// crates/minuend-state/src/lib.rs
 pub fn aa_shard_of(addr: &str) -> u8; // 0..S-1 per chosen function
 
 pub fn aa_sharded_roots_of(pairs: &[(String,Usd,u128,i128)]) -> [String; 16];
@@ -292,9 +292,9 @@ Stage 3 (future, if needed): content-addressed shards with dynamic S via commitm
 **v1 patch summary (Stage 1) — minimal diff:**
 
 ```
-operp-types/src/lib.rs:  MAX_AA_TREE_DEPTH 16 -> 18
-operp_vault.aa:          reduce(...,16,...)->reduce(...,18,...)  [withdraw case only]
-operp_vault_base.aa:     same
+minuend-types/src/lib.rs:  MAX_AA_TREE_DEPTH 16 -> 18
+minuend_vault.aa:          reduce(...,16,...)->reduce(...,18,...)  [withdraw case only]
+minuend_vault_base.aa:     same
 test_vault_aa.js:        comment update 16->18
 docs:                    README Limitations #10 rewrite (see below)
 ```
@@ -305,27 +305,27 @@ That is the entire v1. No new messages, no new vars, no checkpoint field.
 
 ### 3.4 Detailed file ops (Stage 1 — what reviewer lands)
 
-1. `crates/operp-types/src/lib.rs:31-36`
+1. `crates/minuend-types/src/lib.rs:31-36`
    - Change `16` → `18`, update doc comment to reference `reduce(...,18,…)` and `vendor/ocore/formula/evaluation.js:2374` fatal on `> 18`.
-2. `crates/operp-state/src/lib.rs:638-669`
+2. `crates/minuend-state/src/lib.rs:638-669`
    - No code change (cap read from constant); optionally update the item doc on `aa_proof_for` from "16 steps" → "MAX_AA_TREE_DEPTH steps".
-3. `obyte-local/agents/operp_vault.aa:321-322`
+3. `obyte-local/agents/minuend_vault.aa:321-322`
    - Change `reduce(trigger.data.proof, 16, $fold,` → `reduce(trigger.data.proof, 18, $fold,`.
    - Keep the existing `!$acc OR !$sib.hash` guard.
-4. `obyte-local/agents/operp_vault_base.aa` — identical change.
+4. `obyte-local/agents/minuend_vault_base.aa` — identical change.
 5. `obyte-local/test_vault_aa.js:527-530` (comment `depth ≤ 16`) → `depth ≤ 18`.
 6. `README.md:298-300` — limitation #10 becomes "cap is 2^18 (262 k) via depth 18; sharded forest design for v2 targets 2^20+ via S shards".
 7. `docs/MECHANISMS.md:526-530` — same.
-8. (Optional) `crates/operp-settle/examples/gen_withdraw_proof.rs` — doc comment update.
+8. (Optional) `crates/minuend-settle/examples/gen_withdraw_proof.rs` — doc comment update.
 
 Total: 4 files changed, 1 constant, 1 AA literal. Zero new deps.
 
 ### Stage 2 detailed ops (design, not shipped this batch — for parent tracking)
 
-1. `operp-types`: add `AA_SHARD_COUNT: usize = 16`, new helper `aa_shard_of`, keep `MAX_AA_TREE_DEPTH=16` (mono cap stays 16 *inside* each shard after stage 2 ships; but stage 1 currently sets it to 18 — stage 2 will revert mono constant to 16 for per-shard depth, or keep 18 as per-shard max to allow 4 M *with* depth 18 per shard = 4 M×4 — decide at ship). This doc proposes stage 2 keeps per-shard depth 16 (clean reset) to reclaim headroom and force the forest path; mono 18 is a stepping-stone that disappears at stage 2 activation.
-2. `operp-state`: add bucketed APIs as in 3.2 B2, reuse `aa_pairs_of` bucketing.
-3. `operp-settle/lib.rs`: add `Checkpoint.aa_shard_roots`, extend `Batch::from_applied` to compute both, extend `validate_against` to check shard roots when activation height passed, update `temp_data_payload` JSON.
-4. `operp_vault.aa`: add `SHARD_ACTIVATION_HEIGHT` constant comment, branch `submit`/`lock`/`finalize` to store 16 per-shard vars, update `withdraw` to shard-select (3.2 B5). Add sweep loop for 16 vars on failure path (16× `var['aa_root_'||h||'_'||i]=0`). See Complexity 4.3 for budget fix.
+1. `minuend-types`: add `AA_SHARD_COUNT: usize = 16`, new helper `aa_shard_of`, keep `MAX_AA_TREE_DEPTH=16` (mono cap stays 16 *inside* each shard after stage 2 ships; but stage 1 currently sets it to 18 — stage 2 will revert mono constant to 16 for per-shard depth, or keep 18 as per-shard max to allow 4 M *with* depth 18 per shard = 4 M×4 — decide at ship). This doc proposes stage 2 keeps per-shard depth 16 (clean reset) to reclaim headroom and force the forest path; mono 18 is a stepping-stone that disappears at stage 2 activation.
+2. `minuend-state`: add bucketed APIs as in 3.2 B2, reuse `aa_pairs_of` bucketing.
+3. `minuend-settle/lib.rs`: add `Checkpoint.aa_shard_roots`, extend `Batch::from_applied` to compute both, extend `validate_against` to check shard roots when activation height passed, update `temp_data_payload` JSON.
+4. `minuend_vault.aa`: add `SHARD_ACTIVATION_HEIGHT` constant comment, branch `submit`/`lock`/`finalize` to store 16 per-shard vars, update `withdraw` to shard-select (3.2 B5). Add sweep loop for 16 vars on failure path (16× `var['aa_root_'||h||'_'||i]=0`). See Complexity 4.3 for budget fix.
 5. `post_batch.js` / `test_vault_aa.js`: dual path.
 
 ---
@@ -339,7 +339,7 @@ Total: 4 files changed, 1 constant, 1 AA literal. Zero new deps.
 
 ### 4.2 Required tests — Stage 1 (must pass before merge)
 
-#### Rust unit (`crates/operp-state`)
+#### Rust unit (`crates/minuend-state`)
 
 ```rust
 #[test]
@@ -418,8 +418,8 @@ The existing `test_vault_aa.js` already does `for (const s of claim.proof) lh = 
 #### Manual smoke (release gate)
 
 ```
-cargo test -p operp-state aa_proof_70k_roundtrip aa_proof_for_refuses_at_new_depth -- --nocapture
-cargo test -p operp-settle batch_with_70k_accounts_issues_valid_checkpoint
+cargo test -p minuend-state aa_proof_70k_roundtrip aa_proof_for_refuses_at_new_depth -- --nocapture
+cargo test -p minuend-settle batch_with_70k_accounts_issues_valid_checkpoint
 cd obyte-local && node test_vault_aa.js   # full lifecycle still green, plus new 70k case if enabled
 ```
 
@@ -444,7 +444,7 @@ cd obyte-local && node test_vault_aa.js   # full lifecycle still green, plus new
 
 - **Complexity (definition)**: withdraw case adds one extra string concatenation (`'_'||$shard`) → still one node. `submit`/`lock`/`finalize` grow from 1 write to 16 writes. Each `var['…'||$h||'_'||'0']=…` is one assignment node. 16 assignments add ~16 complexity points → vault AA would sit at ~40-46 / 100, still under. However `finalize` sweep clearing 16 vars pushes `finalize` case toward ~18 points — combined file might approach 60-70. Need to measure after authoring; if >100, split `submit` handling into two cases (`submit_sharded` vs `submit_mono`) to halve per-case count.
 - **Runtime ops**: withdraw stays single reduce (depth 16) → delta 0 ops for hot path. `submit` writes 16 vars → +16 state assignments per locked height. Each height permanently stores 16×64hex ≈ 1024 bytes plus key overhead — AA state grows ~16× in that var dimension (≈ 16 KB per finalized height at S=16). At 1 height/day this is benign; at 1/2s batches it is catastrophic — but checkpoints are ~512 units / 2 s; Obyte submission is batched per checkpoint and only finalized heights persist. So growth is per Obyte height, not per sidechain batch.
-- **Mitigation if complexity exceeds 100**: deploy `operp_vault_sharded.aa` as a new AA instance and migrate funds via the existing withdrawal path (no owner key — migration IS the withdrawal). Or cap S=8 (8 shards → 524 k, complexity ~+8).
+- **Mitigation if complexity exceeds 100**: deploy `minuend_vault_sharded.aa` as a new AA instance and migrate funds via the existing withdrawal path (no owner key — migration IS the withdrawal). Or cap S=8 (8 shards → 524 k, complexity ~+8).
 
 ### 5.3 Migration & backward compatibility
 
@@ -517,7 +517,7 @@ cd obyte-local && node test_vault_aa.js   # full lifecycle still green, plus new
 - `README.zh-CN.md` — same.
 - `docs/MECHANISMS.md` — update the `proof depth ≤ 16` annotation (section around line 526) and hex-tree description (line 432ff).
 - `docs/PROTOCOL.md` — same, plus any throughput note if bench changes.
-- `obyte-local/agents/operp_vault.aa` header comment block `WITHDRAWALS ARE PROOF-GATED` — update the sibling-list prose to mention depth bound and `MAX_AA_TREE_DEPTH`.
+- `obyte-local/agents/minuend_vault.aa` header comment block `WITHDRAWALS ARE PROOF-GATED` — update the sibling-list prose to mention depth bound and `MAX_AA_TREE_DEPTH`.
 - Add `local://mainnet-DesignAaSharding-design.md` (this doc) to the commit.
 
 ---

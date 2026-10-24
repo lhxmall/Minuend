@@ -1,12 +1,12 @@
 "use strict";
 
-// OPERP PERP issuance helper — Obyte MAINNET.
+// MINUEND PERP issuance helper — Obyte MAINNET.
 //
 // Posts app:"asset" defining the PERP governance asset (capless issue,
 // transferable, public) from the deployer mnemonic and prints the new
 // asset unit id — that id IS `PERP_ASSET_ID` for deploy_mainnet.js.
 //
-//   OPERP_DEPLOY_MNEMONIC="word word ... " node obyte-local/issue_perp.js
+//   MINUEND_DEPLOY_MNEMONIC="word word ... " node obyte-local/issue_perp.js
 //
 // Runs a light headless wallet against the default mainnet hub
 // (obyte.org/bb). Needs funded GBYTE for fees. No mint beyond the

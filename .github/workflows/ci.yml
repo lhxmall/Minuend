@@ -33,7 +33,7 @@ jobs:
           node-version: "20"
       - name: Install aa-testkit deps (for AA complexity gate)
         run: npm install --prefix vendor/aa-testkit --no-audit --no-fund || npm install --prefix vendor/aa-testkit
-      - run: node obyte-local/tools/check_aa_complexity.js obyte-local/agents/operp_vault.aa obyte-local/agents/operp_rollup.aa obyte-local/agents/operp_dispute.aa obyte-local/agents/operp_dispute_fill.aa
+      - run: node obyte-local/tools/check_aa_complexity.js obyte-local/agents/minuend_vault.aa obyte-local/agents/minuend_rollup.aa obyte-local/agents/minuend_dispute.aa obyte-local/agents/minuend_dispute_fill.aa
       - run: node obyte-local/golden_vector_check.js
       - run: node obyte-local/test_batch_frames.js
 
@@ -56,7 +56,7 @@ jobs:
           npm install --prefix vendor/aa-testkit --no-audit --no-fund
           npm install --prefix obyte-local --no-audit --no-fund
       - name: Regenerate fixture
-        run: cargo run -p operp-settle --example gen_withdraw_proof -- I6X2KSUJJJC5D5T6ARVT7OH5Z7XMSMYG 2000000 0 1000000
+        run: cargo run -p minuend-settle --example gen_withdraw_proof -- I6X2KSUJJJC5D5T6ARVT7OH5Z7XMSMYG 2000000 0 1000000
       - name: Run AA devnet E2E
         run: node obyte-local/test_settlement_aa.js
       - name: Run vault withdrawal E2E (#37-11 W watermark, #37-4 fold)

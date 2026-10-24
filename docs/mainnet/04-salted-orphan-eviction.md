@@ -1,28 +1,28 @@
 # Gap 6 — Salted Orphan Eviction (DESIGN-ONLY)
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Status: **design v1** · no code edits · read authoritative files only.
-> Authoritative basis: `README.md` L6, `crates/operp-dag/src/lib.rs` (Dag::insert_verified, waiting index, ORPHAN_CAP=4096), `crates/operp-state/src/lib.rs` (ChainState, merkle_root, state_root, aa_root), `crates/operp-exec/src/lib.rs` (Engine), `crates/operp-types/src/amount.rs` (sha256), `obyte-local/agents/operp_vault.aa` (last_finalized).
+> Authoritative basis: `README.md` L6, `crates/minuend-dag/src/lib.rs` (Dag::insert_verified, waiting index, ORPHAN_CAP=4096), `crates/minuend-state/src/lib.rs` (ChainState, merkle_root, state_root, aa_root), `crates/minuend-exec/src/lib.rs` (Engine), `crates/minuend-types/src/amount.rs` (sha256), `obyte-local/agents/minuend_vault.aa` (last_finalized).
 
 ## 1. Target
 
 | Crate / file | Symbol / line | Role in this gap |
 |---|---|---|
-| `operp-types` | `crates/operp-types/src/amount.rs:22` `sha256` | Reuse existing hash primitive; no new dep |
-| `operp-types` | `crates/operp-types/src/ids.rs:13` `UnitId([u8;32])` | Eviction key input |
-| `operp-dag` | `crates/operp-dag/src/lib.rs:323-336` `Dag { pending_orphans, waiting }` | Only mutating crate |
-| `operp-dag` | `...:339` `ORPHAN_CAP: usize = 4096` | Unchanged constant |
-| `operp-dag` | `...:375` `Dag::insert_verified` L402-417 eviction block | **Replace** `min()` with salted argmin |
-| `operp-dag` | `...:340-432` `Dag::known`, `pending_orphans`, `waiting` | Keep intact; eviction cleans waiting still |
-| `operp-dag` | `...:119` `genesis_id()` | Fallback salt pre-finalization |
-| `operp-state` | `crates/operp-state/src/lib.rs:18-69` `ChainState { height, last_unit, seq }` | Add field `last_finalized_root: [u8;32]` (+ height) as salt source |
-| `operp-state` | `...:401` `ChainState::state_root()` | Canonical root used for `last_finalized_root` |
-| `operp-exec` | `crates/operp-exec/src/lib.rs:18-24` `Engine { dag, state, log }` | Wiring: `Engine::note_finalized` updates Dag salt |
-| `operp-exec` | `...:111-127` `Engine::promote_finalized` | Sister call-site; same observer invokes `note_finalized` |
-| `operp-settle` | `crates/operp-settle/src/lib.rs:97-153` `Batch::from_applied`, `Checkpoint` | Finalization observer provides `(root, height)` to Engine |
-| `obyte-local` | `agents/operp_vault.aa:266` `var['last_finalized']` | Ground-truth off-engine signal; no AA change |
-| tests | `crates/operp-dag/src/lib.rs:536-706` existing `orphan_*` tests | Extend, not replace |
+| `minuend-types` | `crates/minuend-types/src/amount.rs:22` `sha256` | Reuse existing hash primitive; no new dep |
+| `minuend-types` | `crates/minuend-types/src/ids.rs:13` `UnitId([u8;32])` | Eviction key input |
+| `minuend-dag` | `crates/minuend-dag/src/lib.rs:323-336` `Dag { pending_orphans, waiting }` | Only mutating crate |
+| `minuend-dag` | `...:339` `ORPHAN_CAP: usize = 4096` | Unchanged constant |
+| `minuend-dag` | `...:375` `Dag::insert_verified` L402-417 eviction block | **Replace** `min()` with salted argmin |
+| `minuend-dag` | `...:340-432` `Dag::known`, `pending_orphans`, `waiting` | Keep intact; eviction cleans waiting still |
+| `minuend-dag` | `...:119` `genesis_id()` | Fallback salt pre-finalization |
+| `minuend-state` | `crates/minuend-state/src/lib.rs:18-69` `ChainState { height, last_unit, seq }` | Add field `last_finalized_root: [u8;32]` (+ height) as salt source |
+| `minuend-state` | `...:401` `ChainState::state_root()` | Canonical root used for `last_finalized_root` |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs:18-24` `Engine { dag, state, log }` | Wiring: `Engine::note_finalized` updates Dag salt |
+| `minuend-exec` | `...:111-127` `Engine::promote_finalized` | Sister call-site; same observer invokes `note_finalized` |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs:97-153` `Batch::from_applied`, `Checkpoint` | Finalization observer provides `(root, height)` to Engine |
+| `obyte-local` | `agents/minuend_vault.aa:266` `var['last_finalized']` | Ground-truth off-engine signal; no AA change |
+| tests | `crates/minuend-dag/src/lib.rs:536-706` existing `orphan_*` tests | Extend, not replace |
 
 Non-goals: no AA Oscript edit, no wire-format change, no `ORPHAN_CAP` tuning, no validation logic change.
 
@@ -52,8 +52,8 @@ victim              = argmin_{id in pending_orphans} salted_key(id)
 * `eviction_salt: [u8;32]` — 32-byte value stored in `Dag`.
 * Source of truth: `ChainState::last_finalized_root` — the `state_root()` of the last **AA-finalized** batch height (same height tracked by `var['last_finalized']` in the vault AA). Anchored in Obyte finality (600 s stability + 3600 s challenge ⇒ ~4200 s unforgeable), not sidechain optimism.
 * Update path: off-engine finalization observer (the same process that calls `Engine::promote_finalized`) calls new `Engine::note_finalized(root, height)` which forwards to `Dag::set_eviction_salt(root)`. Dag never reads ChainState directly — keeps dependency one-way and avoids Dag ↔ State cycle.
-* Fallback (no finalized root yet): `eviction_salt = genesis_id().0` (which is `sha256(b"operp-mvp-1-genesis")`). Chosen because:
-  - Already imported in `operp-dag` and shared across every replica deterministically.
+* Fallback (no finalized root yet): `eviction_salt = genesis_id().0` (which is `sha256(b"minuend-mvp-1-genesis")`). Chosen because:
+  - Already imported in `minuend-dag` and shared across every replica deterministically.
   - Non-zero, collision-free, and distinct from empty-root `sha256(b"empty")` used by `merkle_root(empty)`.
   - Upgrade path: when first batch finalizes, salt atomically flips to that batch's `state_root`.
 * Alternative fallback rejected: `[0u8;32]` or `sha256(b"empty")` — would be deterministic too but diverges from genesis lineage and collides with the meta-leaf empty sentinel; genesis_id is the better domain separator.
@@ -63,7 +63,7 @@ Grind resistance: to predict whether a crafted `UnitId` will survive eviction, a
 
 ### 2.3 Data model — minimal boring diff
 
-#### 2.3.1 `crates/operp-state/src/lib.rs`
+#### 2.3.1 `crates/minuend-state/src/lib.rs`
 
 Add to `ChainState`:
 
@@ -86,7 +86,7 @@ impl ChainState {
 
 No other state change. `state_root()` / `aa_root()` unaffected. Serialization: if `ChainState` is ever persisted (future), these fields serialize naturally via existing derive; old snapshots with missing fields deserialize to zero → fallback path handles it.
 
-#### 2.3.2 `crates/operp-dag/src/lib.rs`
+#### 2.3.2 `crates/minuend-dag/src/lib.rs`
 
 Add to `Dag`:
 
@@ -164,9 +164,9 @@ if self.pending_orphans.len() >= ORPHAN_CAP {
 
 *Waiting index intact*: the `waiting` cleanup loop is unchanged. No new allocation pattern; `retain` + `remove` preserves the "no leak" invariant asserted by `orphan_reverse_index_links_multi_and_chained` test. Complexity per eviction: one `sha256(64 bytes)` per buffered entry to find min → `O(CAP)` = 4096 hashes, only when at capacity and a new orphan arrives (rare path). No per-insert overhead otherwise.
 
-*Hash choice*: reuse `operp_types::sha256` (sha2 crate) — same as `unit_id` derivation, no new crypto primitive. Concatenation is `salt || id.0` (64 bytes), no length prefix needed because both inputs are fixed 32 bytes. Domain separator unnecessary; if reviewers insist, prefix `b"evict"` before salt — but bare `salt||id` is already collision domain-separated from `canonical_bytes` (variable length) and `aa_parent` (hex strings).
+*Hash choice*: reuse `minuend_types::sha256` (sha2 crate) — same as `unit_id` derivation, no new crypto primitive. Concatenation is `salt || id.0` (64 bytes), no length prefix needed because both inputs are fixed 32 bytes. Domain separator unnecessary; if reviewers insist, prefix `b"evict"` before salt — but bare `salt||id` is already collision domain-separated from `canonical_bytes` (variable length) and `aa_parent` (hex strings).
 
-#### 2.3.4 `crates/operp-exec/src/lib.rs`
+#### 2.3.4 `crates/minuend-exec/src/lib.rs`
 
 Add to `Engine`:
 
@@ -186,7 +186,7 @@ impl Engine {
 
 Construction: `Engine::new()` sets `eviction_salt = genesis_id().0` via `Dag::new()`; if `ChainState` is later hydrated from a finalized snapshot, caller must call `note_finalized` to sync.
 
-Call-site wiring (off-engine, e.g. `operp-settle` watcher or `post_batch.js` successor):
+Call-site wiring (off-engine, e.g. `minuend-settle` watcher or `post_batch.js` successor):
 
 ```rust
 // After observing AA finalize height h with root/h pair from `var['root_'||h]` / `var['aa_root_'||h]`:
@@ -201,7 +201,7 @@ Ordering matters little (both idempotent), but document as `note_finalized` firs
 * `ORPHAN_CAP` value (remains 4096).
 * `waiting: HashMap<UnitId, Vec<UnitId>>` schema.
 * `canonical_bytes`, `unit_id`, `verify_sig_by_id`, `link`, `mark_executed`, `ready_linearized`.
-* `operp_types` constants, `operp-settle` Checkpoint, vault AA Oscript.
+* `minuend_types` constants, `minuend-settle` Checkpoint, vault AA Oscript.
 
 ### 2.4 Cross-node orphan sync sketch (gossip missing parents on demand)
 
@@ -209,7 +209,7 @@ The README limits L6 to salted eviction **or** cross-node sync; the single-opera
 
 #### 2.4.1 Message types (new, not yet implemented)
 
-All messages use existing `canonical_bytes` wire format for units; no new serialization beyond a small envelope. Assume a libp2p/gossip `Topic = "operp/units/v1"` + `Topic = "operp/want/v1"`.
+All messages use existing `canonical_bytes` wire format for units; no new serialization beyond a small envelope. Assume a libp2p/gossip `Topic = "minuend/units/v1"` + `Topic = "minuend/want/v1"`.
 
 ```rust
 // Gossip (existing): Unit broadcast
@@ -222,7 +222,7 @@ struct HaveUnits { units: Vec<Unit> }      // response, bounded similarly
 
 #### 2.4.2 Initiation — who sends WantUnits
 
-* In `Engine::ingest` / `Dag::insert_verified`, when `Err(MissingParent)` occurs, the ingest path knows `missing: Vec<UnitId>` (already computed at L391-396). The P2P layer (outside `operp-dag`) observes this error and enqueues `WantUnits { missing }` to a random subset of peers (e.g. 3 peers, fanout 3). Debounce: per-`UnitId` want is rate-limited to once per 500 ms per peer to avoid amplification.
+* In `Engine::ingest` / `Dag::insert_verified`, when `Err(MissingParent)` occurs, the ingest path knows `missing: Vec<UnitId>` (already computed at L391-396). The P2P layer (outside `minuend-dag`) observes this error and enqueues `WantUnits { missing }` to a random subset of peers (e.g. 3 peers, fanout 3). Debounce: per-`UnitId` want is rate-limited to once per 500 ms per peer to avoid amplification.
 * Alternative: centralize in `Engine` helper `missing_parents(id) -> Vec<UnitId>` that reads `Dag::pending_orphans` + `waiting` — but computing `missing` at ingest time is cheaper and already done.
 
 #### 2.4.3 Response — how peers serve
@@ -323,7 +323,7 @@ Reuses `orphan_reverse_index_links_multi_and_chained` pattern but forces evictio
 
 #### 3.2.4 Integration / E2E (no network)
 
-In `crates/operp-exec/tests` (or new `tests/salted_evict.rs`):
+In `crates/minuend-exec/tests` (or new `tests/salted_evict.rs`):
 
 ```rust
 #[test]
@@ -357,7 +357,7 @@ fn two_engines_same_finalized_root_evict_same() {
 #### 3.2.6 AA / settle no-reg change
 
 * `cd obyte-local && node test_vault_aa.js` — unchanged (AA never sees orphans).
-* `cargo run -p operp-settle --example export_batch` — unchanged.
+* `cargo run -p minuend-settle --example export_batch` — unchanged.
 * `Batch::validate_against` — unchanged (eviction is local mempool policy, not consensus).
 
 ### 3.3 Manual E2E sketch (post-implementation)
@@ -408,11 +408,11 @@ fn two_engines_same_finalized_root_evict_same() {
 ## 5. Open Questions
 
 1. **Fallback salt choice**: `genesis_id().0` vs `sha256(b"empty")` vs `[0;32]`. Proposed `genesis_id`. `sha256(b"empty")` equals `merkle_root(empty)` sentinel — aliasing with empty-tree root could confuse diagnostics (two domains sharing a value). `[0;32]` is clean but less domain-separated. Any of the three is deterministic; reviewers to ratify.
-2. **Salt domain separator**: Should `eviction_key` prepend a tag `b"operp-evict-v1"` before `salt||id`? *(Update: ordering was desalted in the audit remediation — there is no ordering salt anymore, so the `b"operp-order-v1"` domain separation concern is moot; bare `salt||id` is the shipped form.)*
+2. **Salt domain separator**: Should `eviction_key` prepend a tag `b"minuend-evict-v1"` before `salt||id`? *(Update: ordering was desalted in the audit remediation — there is no ordering salt anymore, so the `b"minuend-order-v1"` domain separation concern is moot; bare `salt||id` is the shipped form.)*
 3. **Should `pending_orphans` eviction be LRU-aware as well?** Salted random is good for grind resistance but drops uniformly; an attacker flooding with fresh ids still has 4096/5000 survival rate. Rate-limit per-account orphan count (e.g. max 256 orphans per AccountId) would bound Sybil. Out of scope for this gap — propose as follow-up Gap 6b (Sybil quota).
 4. **Coordination with Gap 5 (commit-reveal / salted ordering)**: Gap 5 proposes `salt = sha256(last_finalized_root || epoch_le)` refreshed per batch for ordering, while eviction uses `salt = last_finalized_root` stable per finalization. Two salts share `last_finalized_root` source but refresh at different cadences — correct. Should we unify helper `fn eviction_salt(&self) -> [u8;32]` and `fn ordering_salt(&self)->[u8;32]` behind one `ChainState::finalization_anchor()`? Proposed yes — share `note_finalized` entry point, derive each key differently.
 5. **Cross-node sync transport**: Which P2P stack? Current deployment is single-operator (no p2p). Sketch assumes libp2p or simple TCP gossip; actual choice deferred. Should sync be incentivized (pay peer for serving missing parent) to avoid free-riding? Leave to P2P design phase.
-6. **Metrics**: Should evicted orphan count be exposed via `Engine::metrics()` or Prometheus gauge `operp_orphan_evictions_total`? Cheap and useful for alerting on storm — recommend adding as non-blocking follow-up, not required for correctness.
+6. **Metrics**: Should evicted orphan count be exposed via `Engine::metrics()` or Prometheus gauge `minuend_orphan_evictions_total`? Cheap and useful for alerting on storm — recommend adding as non-blocking follow-up, not required for correctness.
 
 ---
 
@@ -430,13 +430,13 @@ Recommended: ship Stage 0+1 together (single PR) since `ChainState` field is tri
 
 ## 7. File-Level Checklist (for implementer)
 
-- [ ] `crates/operp-types/src/amount.rs` — no change.
-- [ ] `crates/operp-state/src/lib.rs` — add `last_finalized_root: [u8;32]`, `last_finalized_height: Height`, `note_finalized()`.
-- [ ] `crates/operp-dag/src/lib.rs` — add `eviction_salt: [u8;32]` to `Dag`, `set_eviction_salt`, `eviction_key`, replace `min()` with `min_by_key(|id| eviction_key(*id))` at L405; keep waiting cleanup.
-- [ ] `crates/operp-exec/src/lib.rs` — add `Engine::note_finalized`, `Engine::eviction_salt()` getter; constructor already covers fallback.
-- [ ] `crates/operp-settle/src/lib.rs` — no code change; observer calls `note_finalized` (document).
-- [ ] `obyte-local/agents/operp_vault.aa` — no change.
-- [ ] Tests — extend `crates/operp-dag/src/lib.rs::tests` and `crates/operp-exec/tests` per §3.2.
+- [ ] `crates/minuend-types/src/amount.rs` — no change.
+- [ ] `crates/minuend-state/src/lib.rs` — add `last_finalized_root: [u8;32]`, `last_finalized_height: Height`, `note_finalized()`.
+- [ ] `crates/minuend-dag/src/lib.rs` — add `eviction_salt: [u8;32]` to `Dag`, `set_eviction_salt`, `eviction_key`, replace `min()` with `min_by_key(|id| eviction_key(*id))` at L405; keep waiting cleanup.
+- [ ] `crates/minuend-exec/src/lib.rs` — add `Engine::note_finalized`, `Engine::eviction_salt()` getter; constructor already covers fallback.
+- [ ] `crates/minuend-settle/src/lib.rs` — no code change; observer calls `note_finalized` (document).
+- [ ] `obyte-local/agents/minuend_vault.aa` — no change.
+- [ ] Tests — extend `crates/minuend-dag/src/lib.rs::tests` and `crates/minuend-exec/tests` per §3.2.
 
 ---
 

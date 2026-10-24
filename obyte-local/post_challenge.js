@@ -1,6 +1,6 @@
 "use strict";
 
-// OPERP dispute prover — posts a one-shot fraud predicate to the dispute AA
+// MINUEND dispute prover — posts a one-shot fraud predicate to the dispute AA
 // instead of the legacy pay-to-kill {challenge:1}. A failed predicate
 // bounces ('no fraud') and coins return; a proven one forwards
 // {verdict:'fraud', height, challenger} to the rollup AA which fails the
@@ -11,7 +11,7 @@
 //
 // proof.json carries everything the predicate needs: k, op, ops_proof,
 // pre_wit, pre_proof (k>0), post_wit, post_proof, pre_leaf, post_leaf,
-// pre_leaf_proof, post_leaf_proof (shape per agents/operp_dispute.aa).
+// pre_leaf_proof, post_leaf_proof (shape per agents/minuend_dispute.aa).
 // The watcher builds these from the temp_data DA package.
 
 const path = require("path");
@@ -41,9 +41,9 @@ async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const useFill = flag("fill");
   const dispute = useFill
-    ? deploy.dispute_fill_aa_address || process.env.OPERP_DISPUTE_FILL_AA
-    : deploy.dispute_aa_address || process.env.OPERP_DISPUTE_AA;
-  const rollup = deploy.rollup_aa_address || process.env.OPERP_ROLLUP_AA;
+    ? deploy.dispute_fill_aa_address || process.env.MINUEND_DISPUTE_FILL_AA
+    : deploy.dispute_aa_address || process.env.MINUEND_DISPUTE_AA;
+  const rollup = deploy.rollup_aa_address || process.env.MINUEND_ROLLUP_AA;
   if (!dispute || !rollup) throw new Error("deployment.json dispute_aa_address/rollup_aa_address missing");
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");

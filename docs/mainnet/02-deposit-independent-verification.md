@@ -1,6 +1,6 @@
 # Gap 4 — Deposit Endorsements Self-Attested  •  DesignDoc (DesignDepositIndep)
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 ## 1. Target
 
@@ -8,11 +8,11 @@
 
 | Area | Path | Symbol / key |
 |---|---|---|
-| Sidechain state | `crates/operp-state/src/lib.rs` | `ChainState { deposits_allowed: HashSet<([u8;32],bool)> , seen_aa_units, aa_addresses, perp_balances, … }`, `Withdrawal`, `proposals` |
-| Intake gate | `crates/operp-exec/src/lib.rs` | `Engine::deposit`, `Engine::gov_deposit` (both check `deposits_allowed.contains(&(aa_unit,kind))`), `RejectReason::UnbackedDeposit / DuplicateDeposit`, `Dispatch::Deposit/GovDeposit` |
-| DAG wire type | `crates/operp-dag/src/lib.rs` | `Op::Deposit{account,addr,amount,aa_unit}` tag `3`, `Op::GovDeposit{…}` tag `8`, `canonical_bytes`, `unit_id = sha256(canonical_bytes)` |
-| Batch + replay | `crates/operp-settle/src/lib.rs` | `Batch::from_applied`, `Batch::validate_against(prev_root,&mut Engine)`, `TempDataPayload {data,data_hash,data_length}`, `fills_bytes`, `SettleError::{Replay,RootMismatch,FillsMismatch}` |
-| Vault AA (Oscript) | `obyte-local/agents/operp_vault.aa` | `trigger.data.deposit` → `var['bal_'||addr]`, `trigger.data.deposit_perp` → `var['pperp_'||addr]`, `bounce_fees`, `chain_id='operp-mvp-1'`, `PERP_ASSET_ID_HERE` placeholder |
+| Sidechain state | `crates/minuend-state/src/lib.rs` | `ChainState { deposits_allowed: HashSet<([u8;32],bool)> , seen_aa_units, aa_addresses, perp_balances, … }`, `Withdrawal`, `proposals` |
+| Intake gate | `crates/minuend-exec/src/lib.rs` | `Engine::deposit`, `Engine::gov_deposit` (both check `deposits_allowed.contains(&(aa_unit,kind))`), `RejectReason::UnbackedDeposit / DuplicateDeposit`, `Dispatch::Deposit/GovDeposit` |
+| DAG wire type | `crates/minuend-dag/src/lib.rs` | `Op::Deposit{account,addr,amount,aa_unit}` tag `3`, `Op::GovDeposit{…}` tag `8`, `canonical_bytes`, `unit_id = sha256(canonical_bytes)` |
+| Batch + replay | `crates/minuend-settle/src/lib.rs` | `Batch::from_applied`, `Batch::validate_against(prev_root,&mut Engine)`, `TempDataPayload {data,data_hash,data_length}`, `fills_bytes`, `SettleError::{Replay,RootMismatch,FillsMismatch}` |
+| Vault AA (Oscript) | `obyte-local/agents/minuend_vault.aa` | `trigger.data.deposit` → `var['bal_'||addr]`, `trigger.data.deposit_perp` → `var['pperp_'||addr]`, `bounce_fees`, `chain_id='minuend-mvp-1'`, `PERP_ASSET_ID_HERE` placeholder |
 | Posting | `obyte-local/post_batch.js` | `tempDataMessage(batchData)`, `trigger(...,{submit:{height,prev_state_hash,state_root,aa_root}})` |
 | Reference | `vendor/ocore/validation.js`, `validation_utils.js`, `object_hash.js`, `chash.js` | `objectHash.getUnitHash(unit)`, `getBase64Hash`, `validateLight` (bLight), `isValidAddress` |
 
@@ -50,7 +50,7 @@ A lying operator can mint any `(aa_unit,amount,addr)` — watchers must fetch ev
 
 ### 2.2 Temp-data schema extension
 
-Extend `crates/operp-settle/src/lib.rs` — additive only, existing JSON keys untouched.
+Extend `crates/minuend-settle/src/lib.rs` — additive only, existing JSON keys untouched.
 
 New types (all `Serialize/Deserialize`, `deny_unknown_fields` off to keep forward compat):
 
@@ -86,7 +86,7 @@ pub struct DepositEvidence {
 
 ```json
 {
-  "chain_id":"operp-mvp-1",
+  "chain_id":"minuend-mvp-1",
   "height": 42,
   ...
   "units": [ {parents,op,pubkey,sig}, ... ],
@@ -98,7 +98,7 @@ Ordering: `deposit_evidences` is sorted by `aa_unit` lexicographically (BTreeMap
 
 `Batch` in-memory shape: add field `pub deposit_evidences: Vec<DepositEvidence>` (default `vec![]` for old batches). `from_applied` populates it from the operator's hub fetches (outside consensus). `temp_data_payload()` serialises it. `validate_against` consumes it.
 
-**Constants** — add to `operp-types`:
+**Constants** — add to `minuend-types`:
 
 ```rust
 pub const VAULT_AA_ADDRESS: &str = ""; // filled at deploy; checked against joint payee
@@ -107,7 +107,7 @@ pub const DEPOSIT_EVIDENCE_MAX_BYTES: usize = 1_048_576; // per-batch cap (~1 Mi
 
 ### 2.3 Rust verification hook
 
-`operp-settle/src/lib.rs`:
+`minuend-settle/src/lib.rs`:
 
 ```rust
 pub enum SettleError {
@@ -135,7 +135,7 @@ Verification steps inside `Batch::validate_against`, *before* `deposits_allowed`
 3. **For each `Deposit/GovDeposit` op**, find `ev` where `ev.aa_unit == hex(aa_unit)`; absent → `DepositAnchorMissing`. If `ev.is_perp != is_gov_kind` → `DepositKindMismatch`.
 4. **`obyte_unit_hash(ev.joint) == aa_unit`** — port of `vendor/ocore/object_hash.js:getUnitHash`. Must replicate exact field order and hash (blake2b? chash?). Reuse the JS implementation as reference test vector: add fixture of a real devnet unit from `test_vault_aa.js` and assert Rust hash equals base64 id. On mismatch → `DepositContentMismatch`.
 5. **Content check** — inspect `ev.joint["unit"]["messages"]` (or `ev.joint["messages"]` depending on hub encoding):
-   - Must contain a `trigger` / `payment` message whose `payload`/`outputs` pay `VAULT_AA_ADDRESS` with `asset = base` (for `is_perp==false`) or `asset == PERP_ASSET` (for `is_perp==true`). Amount after subtracting AA bounce headroom (`trigger.output[[asset=base]] - 10000`) must equal `op.amount` string-parsed. Use the same `PERP_ASSET` constant the AA was deployed with (share via `operp-types::PERP_ASSET`, substituted at build).
+   - Must contain a `trigger` / `payment` message whose `payload`/`outputs` pay `VAULT_AA_ADDRESS` with `asset = base` (for `is_perp==false`) or `asset == PERP_ASSET` (for `is_perp==true`). Amount after subtracting AA bounce headroom (`trigger.output[[asset=base]] - 10000`) must equal `op.amount` string-parsed. Use the same `PERP_ASSET` constant the AA was deployed with (share via `minuend-types::PERP_ASSET`, substituted at build).
    - The `joint.unit.authors[0].address` (or `unit.authors`) must correspond to the depositor's Obyte address — but sidechain `Op` does not carry that; we only bind `addr` (withdrawal leaf key). No check on depositor identity at this layer; per-unit AA var would add it in v2.
    - For `GovDeposit`, additionally assert `ev.joint` includes `trigger.data.deposit_perp` field.
    - If any field mismatched → `DepositContentMismatch`.
@@ -151,7 +151,7 @@ Verification steps inside `Batch::validate_against`, *before* `deposits_allowed`
 
 **`obyte_unit_hash` porting notes** (boring, minimal):
 
-- Copy `vendor/ocore/object_hash.js` + `chash.js` logic into `crates/operp-settle/src/obyte_hash.rs` (pure Rust, no deps beyond `blake2`, `sha2`). Keep function signatures identical to JS for test-vector parity.
+- Copy `vendor/ocore/object_hash.js` + `chash.js` logic into `crates/minuend-settle/src/obyte_hash.rs` (pure Rust, no deps beyond `blake2`, `sha2`). Keep function signatures identical to JS for test-vector parity.
 - Alternative shortcut for v1: delegate hashing to bundled JS via `boa`/`quickjs` is *not* minimal — port is ~120 LOC and avoids runtime.
 - Add `#[cfg(test)]` vectors: one base deposit joint captured from a `Network.create()` run in `obyte-local/test_vault_aa.js`, with known `aa_unit` base64→hex; assert `obyte_unit_hash(json) == aa_unit`.
 
@@ -204,15 +204,15 @@ No hub query needed in the happy-path replay; hub query only needed to *prove* a
 
 | File | Add | Modify | Remove |
 |---|---|---|---|
-| `crates/operp-types/src/lib.rs` | `VAULT_AA_ADDRESS`, `PERP_ASSET` re-export already, `DEPOSIT_EVIDENCE_MAX_BYTES` | — | — |
-| `crates/operp-settle/src/lib.rs` | `DepositEvidence`, `SettleError::Deposit*`, `Batch.deposit_evidences`, `mod obyte_hash`, `mod deposit_verify` | `TempDataPayload` gains `deposit_evidences` field (with `#[serde(default)]` for back-compat), `Batch::from_applied`/`temp_data_payload`/`validate_against` | nothing |
-| `crates/operp-settle/src/obyte_hash.rs` | **new** — `obyte_unit_hash` port of `object_hash.js` | — | — |
-| `crates/operp-settle/src/deposit_verify.rs` | **new** — `verify_all` / `verify_one` | — | — |
-| `crates/operp-state/src/lib.rs` | doc comment for `deposits_allowed` clarifying it is now populated from verified evidences, not blindly | — | — |
+| `crates/minuend-types/src/lib.rs` | `VAULT_AA_ADDRESS`, `PERP_ASSET` re-export already, `DEPOSIT_EVIDENCE_MAX_BYTES` | — | — |
+| `crates/minuend-settle/src/lib.rs` | `DepositEvidence`, `SettleError::Deposit*`, `Batch.deposit_evidences`, `mod obyte_hash`, `mod deposit_verify` | `TempDataPayload` gains `deposit_evidences` field (with `#[serde(default)]` for back-compat), `Batch::from_applied`/`temp_data_payload`/`validate_against` | nothing |
+| `crates/minuend-settle/src/obyte_hash.rs` | **new** — `obyte_unit_hash` port of `object_hash.js` | — | — |
+| `crates/minuend-settle/src/deposit_verify.rs` | **new** — `verify_all` / `verify_one` | — | — |
+| `crates/minuend-state/src/lib.rs` | doc comment for `deposits_allowed` clarifying it is now populated from verified evidences, not blindly | — | — |
 | `obyte-local/post_batch.js` | fetch `getJoint` loop, populate `deposit_evidences` | `tempDataMessage` data shape | — |
-| `obyte-local/agents/operp_vault.aa` | *v1: none* ; v2 optional `d_||trigger.unit`/`pd_||...` vars | — | — |
+| `obyte-local/agents/minuend_vault.aa` | *v1: none* ; v2 optional `d_||trigger.unit`/`pd_||...` vars | — | — |
 | `vendor/ocore/object_hash.js` | reference only | — | — |
-| `crates/operp-settle/examples/export_batch.rs` | populate `deposit_evidences` with stub joints in tests | — | — |
+| `crates/minuend-settle/examples/export_batch.rs` | populate `deposit_evidences` with stub joints in tests | — | — |
 
 Patterns respected: `canonical_bytes` stays wire authority for sidechain units; `BTreeMap` ordering for evidence sort; `otherwise` guards remain in Oscript; `MAX_AA_TREE_DEPTH=16` untouched; 256-height windows for `seen_aa_units` remain — verified `deposits_allowed` entries are transient (cleared per `validate_against` call, not persisted across batches) so no pruning change needed.
 
@@ -229,7 +229,7 @@ Patterns respected: `canonical_bytes` stays wire authority for sidechain units; 
 
 ### Test / E2E assertions
 
-**Unit tests (`crates/operp-settle`):**
+**Unit tests (`crates/minuend-settle`):**
 
 ```rust
 #[test] fn deposit_anchor_missing_fails() {
@@ -268,7 +268,7 @@ Patterns respected: `canonical_bytes` stays wire authority for sidechain units; 
 // 4. Rebuild with matching evidence → watcher asserts ok, then submit/lock/finalize.
 ```
 
-CI gate: `cargo test -p operp-settle -- --nocapture` must show the `Deposit*` tests green; `node test_vault_aa.js` extended scenario must exit 0 only when first (fake) batch is rejected and second (real) batch finalizes.
+CI gate: `cargo test -p minuend-settle -- --nocapture` must show the `Deposit*` tests green; `node test_vault_aa.js` extended scenario must exit 0 only when first (fake) batch is rejected and second (real) batch finalizes.
 
 ---
 
@@ -302,7 +302,7 @@ CI gate: `cargo test -p operp-settle -- --nocapture` must show the `Deposit*` te
 ## 5. Open Questions
 
 1. **Unit hash algorithm pinning.** `object_hash.js` uses `chash` (RIPEMD160 + base32) for addresses but `getUnitHash` is `sha256` over a specific JSON stringification (sorted keys, no whitespace, `version`/`alt` handling). We must pin the exact hub version (`vendor/ocore` at commit `X`). Should we vendor the hash function or depend on a published crate? Decision needed before porting.
-2. **PERP asset id availability.** Until PERP issuance, `is_perp==true` content checks cannot assert `asset == PERP_ASSET`; they only check `trigger.data.deposit_perp` presence. Acceptable for devnet, but mainnet activation must require real asset id substitution in both AA and `operp-types`.
+2. **PERP asset id availability.** Until PERP issuance, `is_perp==true` content checks cannot assert `asset == PERP_ASSET`; they only check `trigger.data.deposit_perp` presence. Acceptable for devnet, but mainnet activation must require real asset id substitution in both AA and `minuend-types`.
 3. **Vault AA address source of truth.** In `obyte-local` the vault address is derived deterministically from the AA definition hash. Should `VAULT_AA_ADDRESS` be computed at `Batch::verify_all` time from the AA definition, or injected as a constant? Computing avoids constant drift but needs the definition JSON in the verifier.
 4. **DoS via large joints.** Should the watcher fetch joints itself rather than trust the operator's `joint` blob? Hybrid: v1 trusts the blob for determinism but watchers *may* re-fetch from their own hub and compare `joint` equality; mismatch is also a challenge trigger. Specify whether equality check is mandatory or advisory.
 5. **Deposit ordering vs DAG total order.** Today `deposits_allowed` injection runs before `ingest` in lexical `unit_id` order. If two deposits share the same `aa_unit` (duplicate), `seen_aa_units` dedup already rejects the second. No change needed, but confirm that `verify_all` must also deduplicate evidences before ingest to preserve deterministic `DuplicateDeposit` vs `DepositDuplicateAnchor` error priority.
@@ -313,7 +313,7 @@ CI gate: `cargo test -p operp-settle -- --nocapture` must show the `Deposit*` te
 ## Appendix — Minimal v1 Code Sketch
 
 ```rust
-// crates/operp-settle/src/lib.rs (diff)
+// crates/minuend-settle/src/lib.rs (diff)
 pub struct Batch {
     pub chain_id: String,
     pub checkpoint: Checkpoint,

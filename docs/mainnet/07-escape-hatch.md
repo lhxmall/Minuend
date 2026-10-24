@@ -1,6 +1,6 @@
 # Gap 8 — No Trustless Escape Hatch if All Operators Disappear — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignEscapeHatch` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
 
@@ -12,7 +12,7 @@
 
 > _Failed heights roll back cleanly and are re-lockable (`frozen = 2` recovery), but recovery depends on operators resubmitting corrected batches; there is no trustless escape hatch if every operator disappears._
 
-Current lifecycle per height `h` in `obyte-local/agents/operp_vault.aa`:
+Current lifecycle per height `h` in `obyte-local/agents/minuend_vault.aa`:
 
 * `submit(h)` — operator posts `{height, prev_state_hash, state_root, aa_root}` with `50000`-byte `SUBMIT_BOND_NET`. Candidates are **replaceable pre-lock**; stability timer restarts only on `aa_root` change. Height must equal `last_locked+1`; `prev_state_hash` must equal `var['root_'||last_locked]`.
 * `lock(h)` — after `OBYTE_STABILITY_SECS = 600` (`submitted_at_h + 600`) any caller may lock. `last_locked = h`, `frozen_h = 0`.
@@ -35,12 +35,12 @@ README hints two concrete hatch shapes; this design specifies both as a single c
 
 | Crate | File | Symbol | What |
 |-------|------|--------|------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | `CHALLENGE_SECS`, `OBYTE_STABILITY_SECS`, `CHAIN_ID`, `MAX_AA_TREE_DEPTH` | add `ESCAPE_STALL_SECS`, `ESCAPE_STALL_SECS_TESTNET`, `ESCAPE_BOND` |
-| `operp-state` | `crates/operp-state/src/lib.rs` | `ChainState { height, last_unit, seq, ... }`, `meta_leaf`, `prune_*` | **no state change** (escape lives purely in AA); document that sidechain still prunes at 256h, AA stall window intentionally longer |
-| `operp-dag` | `crates/operp-dag/src/lib.rs` | `Op`, `canonical_bytes`, `Dag` | **no change** — batch data already posted as `temp_data` via `Batch::temp_data_payload` |
-| `operp-exec` | `crates/operp-exec/src/lib.rs` | `Engine` | **no change** — engine still produces `Batch::from_applied` |
-| `operp-settle` | `crates/operp-settle/src/lib.rs` | `Batch`, `Checkpoint`, `validate_against`, `fills_bytes` | **no change** to wire; note that `validate_against` is how escape submitters locally verify before AA `submit` |
-| `obyte-local` | `agents/operp_vault.aa` | `boot`, `last_locked`, `last_finalized`, `cand_*`, `root_*`, `aa_root_*`, `stable_at_*`, `submitted_at_*`, `frozen_*`, `active_bond_*`, `sbond_*`, `fee_winner_*`, `reward_*`, `wd_/wp_` | **add** `ESCAPE_STALL_SECS` constant + 2 new `cases` (`escape_finalize`, `escape_withdraw`; `escape_lock` folded into finalize), new var `last_progress_at` (or derive from `stable_at_last_finalized`), optional `escape_bond_<addr>` |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | `CHALLENGE_SECS`, `OBYTE_STABILITY_SECS`, `CHAIN_ID`, `MAX_AA_TREE_DEPTH` | add `ESCAPE_STALL_SECS`, `ESCAPE_STALL_SECS_TESTNET`, `ESCAPE_BOND` |
+| `minuend-state` | `crates/minuend-state/src/lib.rs` | `ChainState { height, last_unit, seq, ... }`, `meta_leaf`, `prune_*` | **no state change** (escape lives purely in AA); document that sidechain still prunes at 256h, AA stall window intentionally longer |
+| `minuend-dag` | `crates/minuend-dag/src/lib.rs` | `Op`, `canonical_bytes`, `Dag` | **no change** — batch data already posted as `temp_data` via `Batch::temp_data_payload` |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs` | `Engine` | **no change** — engine still produces `Batch::from_applied` |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs` | `Batch`, `Checkpoint`, `validate_against`, `fills_bytes` | **no change** to wire; note that `validate_against` is how escape submitters locally verify before AA `submit` |
+| `obyte-local` | `agents/minuend_vault.aa` | `boot`, `last_locked`, `last_finalized`, `cand_*`, `root_*`, `aa_root_*`, `stable_at_*`, `submitted_at_*`, `frozen_*`, `active_bond_*`, `sbond_*`, `fee_winner_*`, `reward_*`, `wd_/wp_` | **add** `ESCAPE_STALL_SECS` constant + 2 new `cases` (`escape_finalize`, `escape_withdraw`; `escape_lock` folded into finalize), new var `last_progress_at` (or derive from `stable_at_last_finalized`), optional `escape_bond_<addr>` |
 | `obyte-local` | `test_vault_aa.js`, `post_batch.js` | `trigger`, `vars`, `timetravel` | **add** E2E `escape` scenario (see §3) |
 | `obyte-local` | `post_real_batch.js` / `crowd_mainnet.js` | batch poster | document `escape_submit` as plain `submit` after stall (no code change) |
 
@@ -58,7 +58,7 @@ No wire-format change. No `Unit`/`Op`/`Checkpoint` change. Escape is an **AA-onl
 
 ### 2.1 Constants
 
-In `crates/operp-types/src/lib.rs` (single source of truth, mirrored as comments in `.aa`):
+In `crates/minuend-types/src/lib.rs` (single source of truth, mirrored as comments in `.aa`):
 
 ```rust
 /// Liveness stall: if no height finalizes for this long, trustless escape opens.
@@ -257,9 +257,9 @@ If op-count budget forbids the branch, instead document that `frozen==1` stalls 
 
 ### 2.4 Off-chain / crate changes
 
-* `crates/operp-types`: add `ESCAPE_STALL_SECS` / `ESCAPE_STALL_SECS_TESTNET` constants. Bump `CHAIN_ID`? No — escape is AA-only, no fork. Document that Rust constants are the source of truth and AA comments mirror them.
-* `crates/operp-settle`: no change. `Batch::from_applied` / `validate_against` / `gen_withdraw_proof` remain the trusted off-chain tools escape submitters use. Add a helper `fn is_escape_stalled(last_finalized_ts: u64, now: u64) -> bool` only if callers want to share the constant; otherwise keep it AA-local.
-* `crates/operp-state` / `operp-dag` / `operp-exec`: no changes. Sidechain still builds candidates identically; AA is the only liveness gate.
+* `crates/minuend-types`: add `ESCAPE_STALL_SECS` / `ESCAPE_STALL_SECS_TESTNET` constants. Bump `CHAIN_ID`? No — escape is AA-only, no fork. Document that Rust constants are the source of truth and AA comments mirror them.
+* `crates/minuend-settle`: no change. `Batch::from_applied` / `validate_against` / `gen_withdraw_proof` remain the trusted off-chain tools escape submitters use. Add a helper `fn is_escape_stalled(last_finalized_ts: u64, now: u64) -> bool` only if callers want to share the constant; otherwise keep it AA-local.
+* `crates/minuend-state` / `minuend-dag` / `minuend-exec`: no changes. Sidechain still builds candidates identically; AA is the only liveness gate.
 * `obyte-local/post_batch.js`: no change; its `temp_data` reveal is exactly what escape submitters replay. Document in `docs/PROTOCOL.md` that any watcher can rerun `post_batch.js` after stall.
 
 ### 2.5 Storage keys
@@ -304,7 +304,7 @@ After `ESCAPE_STALL_SECS` with no `finalize` progress:
 // Alice is the non-operator holder.
 
 // Submit h3 as bob (operator) with real aa_root for alice's balance at h3
-await trigger(bob, { submit: 1, chain_id: 'operp-mvp-1', height: 3, prev_state_hash: ROOT_GOOD2, state_root: ROOT_H3, aa_root: claimH3.aa_root }, 60000);
+await trigger(bob, { submit: 1, chain_id: 'minuend-mvp-1', height: 3, prev_state_hash: ROOT_GOOD2, state_root: ROOT_H3, aa_root: claimH3.aa_root }, 60000);
 // Operator vanishes: nobody locks for 7 days. Alice (watcher) could lock immediately, but to test escape_withdraw we let it sit.
 await network.timetravel({ shift: '604800s' }); // ESCAPE_STALL_SECS devnet = 7d (or 3600 on devnet override)
 
@@ -352,7 +352,7 @@ Assertions:
 
 #### Rust workspace tests (already green)
 
-* No Rust change; `cargo test --workspace` stays green. If `ESCAPE_STALL_SECS` constants added to `operp-types`, add one test asserting `ESCAPE_STALL_SECS == 604800 && ESCAPE_STALL_SECS > CHALLENGE_SECS + OBYTE_STABILITY_SECS`.
+* No Rust change; `cargo test --workspace` stays green. If `ESCAPE_STALL_SECS` constants added to `minuend-types`, add one test asserting `ESCAPE_STALL_SECS == 604800 && ESCAPE_STALL_SECS > CHALLENGE_SECS + OBYTE_STABILITY_SECS`.
 
 #### Manual devnet smoke (like `post_batch.js`)
 
