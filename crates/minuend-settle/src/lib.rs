@@ -2140,7 +2140,10 @@ mod tests {
             let mut h2 = header.clone();
             h2[key] = serde_json::json!(over);
             assert!(
-                matches!(batch_from_frames(&h2, &frames), Err(SettleError::RootMismatch)),
+                matches!(
+                    batch_from_frames(&h2, &frames),
+                    Err(SettleError::RootMismatch)
+                ),
                 "{key} above u32::MAX must be rejected, not truncated: {:?}",
                 batch_from_frames(&h2, &frames)
             );
@@ -2149,7 +2152,6 @@ mod tests {
 
     #[test]
     fn replay_prunes_identically_to_from_applied() {
-
         // M3: validate_against must prune withdrawals / seen_aa_units /
         // deposits_allowed exactly like from_applied does, else a watcher's
         // replayed state diverges from the operator's committed state once
@@ -2346,7 +2348,10 @@ mod tests {
         let batch_b = Batch::from_applied(&prev_b.state, &mut eng, &[fid]).unwrap();
 
         // Producer side: bond returned to the reporter's balance, maps wiped.
-        assert!(eng.state.oracle_unbonding.is_empty(), "unbonding entry survived");
+        assert!(
+            eng.state.oracle_unbonding.is_empty(),
+            "unbonding entry survived"
+        );
         assert!(
             !eng.state.oracle_bonds.contains_key(&acct_of(&sk(9))),
             "expired oracle bond never returned"
@@ -2355,7 +2360,12 @@ mod tests {
             eng.state.oracle_reports.is_empty() && eng.state.oracle_report_history.is_empty(),
             "reporter history survived the bond release"
         );
-        let bal = eng.state.perp_balances.get(&acct_of(&sk(9))).copied().unwrap_or(0);
+        let bal = eng
+            .state
+            .perp_balances
+            .get(&acct_of(&sk(9)))
+            .copied()
+            .unwrap_or(0);
         assert_eq!(bal, 5_000, "returned bond missing from the balance");
 
         // Replay side must land on the identical state (the prune is mirrored).

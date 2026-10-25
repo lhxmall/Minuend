@@ -1043,12 +1043,18 @@ impl Engine {
             let bid_open_qty = bid_qty - short;
             let ask_open_qty = ask_qty - long;
             let bid_im = if bid_qty > 0 && bid_open_qty > 0 {
-                bps(bid_notional / (bid_qty as Usd) * (bid_open_qty as Usd), im_bps)
+                bps(
+                    bid_notional / (bid_qty as Usd) * (bid_open_qty as Usd),
+                    im_bps,
+                )
             } else {
                 0
             };
             let ask_im = if ask_qty > 0 && ask_open_qty > 0 {
-                bps(ask_notional / (ask_qty as Usd) * (ask_open_qty as Usd), im_bps)
+                bps(
+                    ask_notional / (ask_qty as Usd) * (ask_open_qty as Usd),
+                    im_bps,
+                )
             } else {
                 0
             };
@@ -2789,11 +2795,17 @@ mod tests {
         );
         let id3 = unit_id(&bid);
         let evs = eng.ingest(bid).unwrap();
-        assert!(evs.iter().any(|e| matches!(
-            e,
-            ExecEvent::Applied { fills, .. } if !fills.is_empty()
-        )), "opening fill expected: {evs:?}");
-        assert_eq!(eng.state.accounts[&a].positions[&BTC_USD].qty, 2 * QTY_SCALE as i64);
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                ExecEvent::Applied { fills, .. } if !fills.is_empty()
+            )),
+            "opening fill expected: {evs:?}"
+        );
+        assert_eq!(
+            eng.state.accounts[&a].positions[&BTC_USD].qty,
+            2 * QTY_SCALE as i64
+        );
         // Now Alice rests an ask for ONE unit against her 2-unit long: it can
         // only reduce, so it must reserve NO opening IM. Under the old
         // whole-side notional it reserved the IM of a full 1-unit open.
@@ -2852,7 +2864,10 @@ mod tests {
                     .sum()
             })
             .unwrap_or(0);
-        assert_eq!(resting, QTY_SCALE as Usd, "sk(3) should rest exactly 1 unit");
+        assert_eq!(
+            resting, QTY_SCALE as Usd,
+            "sk(3) should rest exactly 1 unit"
+        );
         assert_eq!(
             eng.resting_open_im(b3),
             10_000 * USD_SCALE as i128,
@@ -4776,8 +4791,14 @@ mod tests {
         // Restart: the fresh engine has neither A nor B in its DAG.
         let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
         allow_all(&mut eng2);
-        assert!(eng2.dag.is_known(a), "snapshot DAG anchor A missing after restore");
-        assert!(eng2.dag.is_known(b), "snapshot DAG anchor B missing after restore");
+        assert!(
+            eng2.dag.is_known(a),
+            "snapshot DAG anchor A missing after restore"
+        );
+        assert!(
+            eng2.dag.is_known(b),
+            "snapshot DAG anchor B missing after restore"
+        );
         // A child of A (post-snapshot replay shape) must not be orphaned.
         // sk(3): the sk(2) account is already bound to its own AA address, so
         // reusing it here would be BadAccount, not the DAG path under test.
@@ -4788,8 +4809,14 @@ mod tests {
             evs_c.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
             "child of a pre-snapshot parent was not applied"
         );
-        assert!(eng2.dag.is_known(cid), "child of a pre-snapshot parent was orphaned");
-        assert!(eng2.dag.get_orphan(cid).is_none(), "cross-batch parent child stayed orphaned");
+        assert!(
+            eng2.dag.is_known(cid),
+            "child of a pre-snapshot parent was orphaned"
+        );
+        assert!(
+            eng2.dag.get_orphan(cid).is_none(),
+            "cross-batch parent child stayed orphaned"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4828,9 +4855,7 @@ mod tests {
         // A SECOND replay of the same nonce within the same stream is a real
         // duplicate and must still bounce: same nonce, a different unit shape
         // (amount differs) so the DAG does not short-circuit on duplicate id.
-        let evs2 = replayer
-            .ingest(gov_with(vec![g], &sk(1), 999, 5))
-            .unwrap();
+        let evs2 = replayer.ingest(gov_with(vec![g], &sk(1), 999, 5)).unwrap();
         assert!(evs2.iter().any(|e| matches!(
             e,
             ExecEvent::Rejected {

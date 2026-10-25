@@ -240,9 +240,7 @@ impl ReplayCursor {
     }
 
     fn next_start(&self) -> u64 {
-        self.processed_upto
-            .saturating_add(1)
-            .max(self.from_height)
+        self.processed_upto.saturating_add(1).max(self.from_height)
     }
 
     /// Record a successfully replayed height; the cursor only moves forward.
