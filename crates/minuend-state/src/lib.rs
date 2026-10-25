@@ -893,6 +893,16 @@ impl ChainState {
     }
 
     pub fn apply_fill_pair(&mut self, fill: &Fill) -> Result<(), minuend_account::AccountError> {
+        // A spot_only market has no price-oracle path, so its mark freezes at
+        // the first qualifying fill: equity, margin and liquidation are then
+        // priced against a stale mark and leveraged losses escape both. New
+        // listings must be full-collateral (`risk_params_ok`); this guards
+        // pre-existing leveraged listings by refusing to trade them at all.
+        if let Some(p) = self.markets.get(&fill.market) {
+            if p.spot_only && p.im_bps != 10_000 {
+                return Err(minuend_account::AccountError::Risk);
+            }
+        }
         let funding_usd = self
             .markets
             .get(&fill.market)

@@ -204,6 +204,13 @@ pub type Bps = u64;
 /// Funding-rate markets get the 100x gate (`im_bps >= 100`), a looser MM
 /// floor, and a per-market peg cap that IM must cover 10x over; regular
 /// markets keep today's conjuncts plus `funding_cap_bps == 0`.
+/// `spot_only` markets are FULL-COLLATERAL ONLY (`im_bps == 10_000`): they
+/// reject price reports and reporter indexes, so the mark freezes at the
+/// first qualifying fill forever. Leveraged equity there is then priced
+/// against a stale mark — the position can no longer be liquidated by the
+/// engine's margin math, and the holder withdraws collateral that unrealized
+/// losses have already consumed. Full collateral makes max loss at entry
+/// cover any move, keeping the vault solvent without an oracle.
 pub fn risk_params_ok(
     im_bps: Bps,
     mm_bps: Bps,
@@ -211,7 +218,23 @@ pub fn risk_params_ok(
     keeper_reward_bps: Bps,
     funding_rate: bool,
     funding_cap_bps: u64,
+    spot_only: bool,
 ) -> bool {
+    if spot_only {
+        // Mutually exclusive with funding-rate funding (a funding-rate
+        // market needs a reporter index, which spot_only rejects outright).
+        if funding_rate {
+            return false;
+        }
+        return im_bps == 10_000
+            && mm_bps != 0
+            && mm_bps <= 10_000
+            && im_bps > mm_bps
+            && taker_fee_bps != 0
+            && taker_fee_bps <= 200
+            && keeper_reward_bps != 0
+            && funding_cap_bps == 0;
+    }
     let shared = im_bps != 0
         && mm_bps != 0
         && taker_fee_bps != 0

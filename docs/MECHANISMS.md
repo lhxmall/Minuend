@@ -887,7 +887,9 @@ asset id。发币时只需改一个常量并重新部署 AA。
 Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（minuend-types，
 exec 与治理共用）：任一为 0 或 > 10 000、`im_bps <= mm_bps`、
 `mm_bps < 500`、`im_bps > 5000`、`taker_fee_bps > 200`、
-`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk。
+`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk；
+`spot_only` 市场另走**全额抵押**分支：`im_bps` 必须恰为 10 000
+（`mm_bps` 仍 [1, 10 000) 且 `im > mm`，`funding_rate` 必须为 false）。
 CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新，结果不
 过谓词即 Risk（提案表不写入）；FinalizePropose 落盘前同样复检——通过但
 非法的提案是 no-op（不写字段，提案仍被消耗）。
@@ -896,6 +898,14 @@ CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新�
 `spot_only` 建时定死：无 `ParamKey` 可翻转。`true` 的市场为纯合约/meme
 市场——拒收一切报价（双通道 `NotFound`，见 §6.2）、永无资金费；
 成交仍可定 mark（首笔合格 fill 写 `marks`）。可 delist 照旧（与 spot 正交）。
+
+**全额抵押不可协商**：`spot_only` 没有报价通道，`last_index` 永不写，
+mark 冻结在首笔合格成交价。杠杆仓位因此永远等不到引擎保证金意义上的
+清算——亏损方按冻结 mark 仍是正权益，`withdraw` 的 `debit` 门也读同一
+个 mark，于是把已被未实现亏损吃掉的保证金提走，赢家按真实价平仓时
+金库收不抵付。所以 `spot_only` 必须 `im_bps == 10 000`：入场即锁定
+= 名义额的最大亏损，mark 冻结不再影响偿付能力（`apply_fill_pair` 对
+存量杠杆 `spot_only` 市场一律拒绝成交，不再产生新敞口）。
 
 `funding_rate` 同样建时定死、无 `ParamKey` 翻转：资金费率市场，簿价是
 外部交易所资金费率的编码价（`encode_funding_price`，offset 域内恒正，

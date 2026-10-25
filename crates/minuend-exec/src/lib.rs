@@ -1853,6 +1853,7 @@ impl Engine {
                 keeper_reward_bps,
                 funding_rate,
                 funding_cap_bps,
+                spot_only,
             )
         {
             return Err(RejectReason::Risk);
@@ -1935,6 +1936,7 @@ impl Engine {
                 params.keeper_reward_bps,
                 params.funding_rate,
                 params.funding_cap_bps,
+                params.spot_only,
             ) {
                 return Err(RejectReason::Risk);
             }
@@ -2046,6 +2048,7 @@ impl Engine {
                         updated.keeper_reward_bps,
                         updated.funding_rate,
                         updated.funding_cap_bps,
+                        updated.spot_only,
                     );
                 if legal {
                     self.state.markets.insert(market, updated);
@@ -2242,7 +2245,9 @@ fn apply_param(params: &mut MarketParams, key: ParamKey, value: u64) {
 fn map_acct(e: AccountError) -> RejectReason {
     match e {
         AccountError::Insufficient | AccountError::NonPositive => RejectReason::Insufficient,
-        AccountError::Overflow | AccountError::QtyTooLarge => RejectReason::Risk,
+        AccountError::Overflow | AccountError::QtyTooLarge | AccountError::Risk => {
+            RejectReason::Risk
+        }
     }
 }
 
@@ -3174,7 +3179,10 @@ mod tests {
         )
     }
     /// Permissionless listing with an explicit `spot_only` flag; the new
-    /// market takes the next id (2 on a fresh engine).
+    /// market takes the next id (2 on a fresh engine). A spot_only market is
+    /// full-collateral only (`im_bps == 10_000`): its mark freezes, so any
+    /// leverage would let losses escape liquidation. A regular market keeps
+    /// the 10x default.
     fn list_market_with(parents: Vec<UnitId>, secret: &[u8; 32], spot_only: bool) -> Unit {
         let mut symbol = [0u8; 16];
         symbol[..6].copy_from_slice(b"MEMEUS");
@@ -3184,7 +3192,7 @@ mod tests {
                 creator: acct_of(secret),
                 symbol,
                 tick_size: 1,
-                im_bps: 1000,
+                im_bps: if spot_only { 10_000 } else { 1000 },
                 mm_bps: 500,
                 taker_fee_bps: 5,
                 keeper_reward_bps: 100,
@@ -4095,6 +4103,281 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// #37-F: a spot_only market has no price-oracle path (ReportPrice and the
+    /// external ring both bounce NotFound), so its mark freezes at the first
+    /// qualifying fill forever. Levered equity there can then never be
+    /// liquidated: the holder withdraws collateral that unrealized losses
+    /// already consumed and the vault cannot cover the winners. Listing a
+    /// spot_only market with leverage is therefore rejected.
+    #[test]
+    fn spot_only_market_rejects_leveraged_listing() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        for im in [100u64, 500, 999, 1000, 5000] {
+            let mut sym = [0u8; 16];
+            sym[..6].copy_from_slice(b"MEMEUS");
+            let cm = sign_unit(
+                vec![tip],
+                Op::CreateMarket {
+                    creator: acct_of(&sk(3)),
+                    symbol: sym,
+                    tick_size: 1,
+                    im_bps: im,
+                    mm_bps: 500,
+                    taker_fee_bps: 5,
+                    keeper_reward_bps: 100,
+                    spot_only: true,
+                    funding_rate: false,
+                    usd_per_unit: 0,
+                    funding_cap_bps: 0,
+                },
+                &sk(3),
+            );
+            let evs = eng.ingest(cm).unwrap();
+            assert!(
+                evs.iter().any(|e| matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::Risk,
+                        ..
+                    }
+                )),
+                "spot_only listing at im_bps={im} must be rejected"
+            );
+        }
+    }
+
+    /// #37-F: the legal spot_only listing is full collateral (im_bps ==
+    /// 10_000) with a non-zero MM below it; it takes the next market id.
+    #[test]
+    fn spot_only_full_collateral_listing_is_accepted() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let mut sym = [0u8; 16];
+        sym[..6].copy_from_slice(b"MEMEUS");
+        let cm = sign_unit(
+            vec![tip],
+            Op::CreateMarket {
+                creator: acct_of(&sk(3)),
+                symbol: sym,
+                tick_size: 1,
+                im_bps: 10_000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+            },
+            &sk(3),
+        );
+        let evs = eng.ingest(cm).unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })),
+            "full-collateral spot_only listing rejected: {evs:?}"
+        );
+        let meme = MarketId(2);
+        assert_eq!(eng.state.markets[&meme].im_bps, 10_000);
+    }
+
+    /// #37-F: the exploit the full-collateral gate removes. On a spot_only
+    /// market the mark freezes at the first qualifying fill (no oracle path),
+    /// so a leveraged position is never liquidated as the real price runs
+    /// away. The loser's equity stays positive against the frozen mark, and
+    /// `Engine::withdraw` prices its `debit` check off that same stale mark —
+    /// the collateral leaves while the unrealized loss stays uncovered.
+    /// This test drives a LEVERAGED spot_only market written directly into
+    /// state (bypassing the listing gate, i.e. a pre-fix listing) and proves
+    /// the v1 behaviour is "withdraw succeeded, vault left holding the hole".
+    /// The gate makes such listings impossible, and `apply_fill_pair` refuses
+    /// to trade one at all, so the loss can never accrue in the first place.
+    #[test]
+    fn legacy_leveraged_spot_only_market_cannot_be_traded() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        // Pre-fix shaped market: spot_only with 10x leverage, id 2, present
+        // in marks (mark frozen) — written straight into state because the
+        // listing gate now refuses it.
+        eng.state.markets.insert(
+            MarketId(2),
+            minuend_types::MarketParams {
+                symbol: [0u8; 16],
+                tick_size: 1,
+                im_bps: 1000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                delisted: false,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+            },
+        );
+        let meme = MarketId(2);
+        let alice = sk(1);
+        let bob = sk(2);
+        let d1 = deposit(vec![g], &alice, 100_000 * USD_SCALE as i128, 1);
+        let mut tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = deposit(vec![tip], &bob, 100_000 * USD_SCALE as i128, 2);
+        tip = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        // First fill freezes the mark at P0 through the OPEN gate (the
+        // defensive `apply_fill_pair` guard sees the leveraged spot_only
+        // market and refuses the fill outright).
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs = eng.ingest(bid).unwrap();
+        // The fill must NOT land: no position, no mark, no exposure.
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                ExecEvent::Applied { fills, .. } if !fills.is_empty()
+            )),
+            "leveraged spot_only market accepted a fill: {evs:?}"
+        );
+        assert!(
+            eng.state.accounts[&acct_of(&alice)].positions.is_empty()
+                && eng.state.accounts[&acct_of(&bob)].positions.is_empty(),
+            "leveraged spot_only market opened a position"
+        );
+        assert!(eng.state.marks.get(&meme).copied().unwrap_or(0) == 0);
+    }
+
+    /// #37-F: full collateral makes the max loss payable at entry, so a
+    /// frozen mark can never put either party underwater — the invariant the
+    /// leveraged form of this market breaks. Alice goes long with exactly
+    /// the notional in collateral; Bob shorts the mirror. Even a 50% adverse
+    /// move (priced off the real fill price, not the frozen mark) leaves
+    /// both collateral balances non-negative.
+    #[test]
+    fn spot_only_full_collateral_keeps_both_sides_non_negative() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(3), true);
+        tip = unit_id(&cm);
+        eng.ingest(cm).unwrap();
+        let meme = MarketId(2);
+        assert_eq!(eng.state.markets[&meme].im_bps, 10_000);
+        let alice = sk(1);
+        let bob = sk(2);
+        // Exactly one notional of collateral each: any further loss must come
+        // out of PnL, not leverage, and PnL is bounded by the notional.
+        let px = 100_000 * PRICE_SCALE as i64;
+        let notional = notional_usd(QTY_SCALE, px).unsigned_abs();
+        let d1 = deposit(vec![tip], &alice, notional as Usd, 1);
+        tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = deposit(vec![tip], &bob, notional as Usd, 2);
+        tip = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs = eng.ingest(bid).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+        )));
+        // A 50% adverse close for Alice at half the open price: PnL is
+        // exactly half the notional, which the full collateral covers.
+        let close_px = px / 2;
+        let ask2 = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            2,
+        );
+        tip = unit_id(&ask2);
+        eng.ingest(ask2).unwrap();
+        let bid2 = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            2,
+        );
+        let evs2 = eng.ingest(bid2).unwrap();
+        assert!(evs2.iter().any(|e| matches!(
+            e,
+            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+        )));
+        let a = eng.state.accounts[&acct_of(&alice)].collateral;
+        let b = eng.state.accounts[&acct_of(&bob)].collateral;
+        // Realized PnL ±fees only; no position remains (flat again).
+        assert!(
+            eng.state.accounts[&acct_of(&alice)].positions.is_empty()
+                && eng.state.accounts[&acct_of(&bob)].positions.is_empty(),
+            "positions not flat after the round trip"
+        );
+        assert!(a >= 0, "alice collateral negative: {a}");
+        assert!(b >= 0, "bob collateral negative: {b}");
     }
 
     #[test]
