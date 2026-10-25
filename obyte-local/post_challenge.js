@@ -49,6 +49,28 @@ async function main() {
   const pred = arg("pred", "deposit");
   const proofFile = arg("proof");
   if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill]");
+  // #37-2: the proof path used to be stored and never read — the script
+  // then referenced an undefined `proof` and threw ReferenceError before
+  // sending anything. Read and shape-check it here.
+  const proof = (() => {
+    const parsed = JSON.parse(fs.readFileSync(proofFile, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error(`proof file ${proofFile} must contain a JSON object`);
+    return parsed;
+  })();
+  // #37-2: this script only drives a local aa-testkit devnet. The watcher
+  // passes --hub / mnemonic for a production submit; accepting those
+  // silently would report a local drill as if it were a live challenge.
+  const hubArg = arg("hub");
+  const mnemonicArg = arg("mnemonic") || process.env.MINUEND_WATCH_MNEMONIC;
+  if (hubArg || mnemonicArg) {
+    console.error(
+      "post_challenge.js is not wired to a live hub: --hub/mnemonic are unsupported " +
+      "(this script runs a local aa-testkit network only). Refusing to run rather than " +
+      "reporting a local drill as a production challenge.",
+    );
+    process.exit(1);
+  }
 
   network = await Network.create()
     .with.wallet({ challenger: 1e7 })

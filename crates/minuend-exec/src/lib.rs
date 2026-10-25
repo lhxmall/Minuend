@@ -38,10 +38,16 @@ pub struct Engine {
     /// commits (`Batch::from_applied`); dropped (never persisted) if the
     /// batch is abandoned — no more burning nonces on uncommitted batches.
     pub pending_gov_wal: Vec<(AccountId, u64)>,
+    /// #37-14: replay-local GovWithdraw nonce watermark (see gov_withdraw).
+    pub replay_gov_nonces: std::collections::BTreeMap<AccountId, u64>,
     /// Per-unit witness roots in log order (one `wit_root` per `apply_one`,
     /// applied or rejected). `Batch::from_applied` takes the last
     /// `applied.len()` entries as the batch trace.
     pub wit_trace: Vec<String>,
+    /// #37-14: bounded ring of recently applied unit ids, persisted with
+    /// snapshots so a restarted node can treat pre-snapshot parents as
+    /// known instead of buffering every post-snapshot child as an orphan.
+    pub recent_units: std::collections::VecDeque<UnitId>,
     /// Leaf counts paired with `wit_trace` (one per `apply_one`, in order).
     /// Lets dispute predicates prove witness-tree non-membership at any unit.
     pub wit_count_trace: Vec<u32>,
@@ -126,6 +132,8 @@ impl Engine {
             store_dir: None,
             validating: false,
             pending_gov_wal: Vec::new(),
+            replay_gov_nonces: std::collections::BTreeMap::new(),
+            recent_units: std::collections::VecDeque::new(),
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
             wit_leaf_trace: Vec::new(),
@@ -140,9 +148,9 @@ impl Engine {
     /// `Batch::validate_against` by the caller, exactly as the design's
     /// recovery sequence prescribes.
     pub fn load_or_genesis(dir: &Path) -> std::io::Result<Self> {
-        let mut state = match persist::load_latest(dir)? {
-            Some((_, s)) => s,
-            None => ChainState::new(),
+        let (mut state, anchors) = match persist::load_latest_with_anchors(dir)? {
+            Some((_, s, anchors)) => (s, anchors),
+            None => (ChainState::new(), Vec::new()),
         };
         let journal = GovNonceJournal::open(dir)?;
         for GovNonceRecord { account, nonce, .. } in journal.read_all()? {
@@ -151,19 +159,40 @@ impl Engine {
                 state.seen_gov_nonces.insert(account, nonce);
             }
         }
+        // #37-14: the snapshot carries state, not the DAG. Seed every
+        // persisted anchor as an already-executed ancestor so a batch
+        // replayed after the snapshot can link parents that predate it
+        // (otherwise those children sit in the orphan buffer forever).
+        let mut dag = Dag::new();
+        let mut recent_units = std::collections::VecDeque::new();
+        for id in anchors {
+            let unit_id = UnitId(id);
+            dag.mark_ancestor_known(unit_id);
+            recent_units.push_back(unit_id);
+        }
         Ok(Self {
-            dag: Dag::new(),
+            dag,
             state,
             log: Vec::new(),
             sig_verifier: SigVerifier::new(),
             store_dir: Some(dir.to_path_buf()),
             validating: false,
             pending_gov_wal: Vec::new(),
+            replay_gov_nonces: std::collections::BTreeMap::new(),
+            recent_units,
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
             wit_leaf_trace: Vec::new(),
             liquidating: false,
         })
+    }
+
+    /// #37-14: bounded recent-unit ring feeding snapshot DAG anchors.
+    fn note_recent_unit(&mut self, id: UnitId) {
+        self.recent_units.push_back(id);
+        while self.recent_units.len() > persist::DAG_ANCHOR_LIMIT {
+            self.recent_units.pop_front();
+        }
     }
 
     /// Write a snapshot of the current state to the store dir. No-op for
@@ -173,7 +202,8 @@ impl Engine {
         let Some(dir) = self.store_dir.clone() else {
             return Ok(None);
         };
-        persist::save_snapshot(&dir, &self.state).map(Some)
+        let anchors: Vec<[u8; 32]> = self.recent_units.iter().map(|u| u.0).collect();
+        persist::save_snapshot_with_anchors(&dir, &self.state, &anchors).map(Some)
     }
 
     /// Cadence wrapper: flush every [`persist::SNAPSHOT_EVERY`] heights.
@@ -329,6 +359,7 @@ impl Engine {
         };
         self.dag.mark_executed(id);
         self.state.last_unit = id;
+        self.note_recent_unit(id);
         self.wit_trace.push(minuend_state::wit_root(&self.state));
         let leaves = minuend_state::wit_leaves(&self.state);
         self.wit_count_trace.push(leaves.len() as u32);
@@ -1751,14 +1782,25 @@ impl Engine {
     ) -> Result<Vec<Fill>, RejectReason> {
         // Strictly increasing nonce watermark per account: any nonce at or
         // below the highest consumed one is a replay, and gaps are allowed.
-        let watermark = self
-            .state
-            .seen_gov_nonces
-            .get(&account)
-            .copied()
-            .unwrap_or(0);
+        let watermark = if self.validating {
+            // #37-14: a restored snapshot+WAL can hold nonces from batches
+            // NEWER than the snapshot. Comparing against that watermark
+            // rejects the very batches being replayed, so validation keeps
+            // its own strictly-increasing watermark instead (a genuine
+            // duplicate inside the replayed stream still fails).
+            self.replay_gov_nonces.get(&account).copied().unwrap_or(0)
+        } else {
+            self.state
+                .seen_gov_nonces
+                .get(&account)
+                .copied()
+                .unwrap_or(0)
+        };
         if nonce <= watermark {
             return Err(RejectReason::DuplicateNonce);
+        }
+        if self.validating {
+            self.replay_gov_nonces.insert(account, nonce);
         }
         let bal = self.state.perp_balances.get(&account).copied().unwrap_or(0);
         if bal < amount {
@@ -4293,6 +4335,94 @@ mod tests {
         )));
         eng2.ingest(gov_with(vec![g], &sk(1), 50, 6)).unwrap();
         assert_eq!(eng2.state.seen_gov_nonces[&acct_of(&sk(1))], 6);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #37-14a: after restoring a snapshot, a batch whose units' parents
+    /// predate the snapshot (cross-batch parent) must still link instead of
+    /// sitting in the orphan buffer as MissingParent. The DAG anchors the
+    /// snapshot wrote are treated as executed ancestors.
+    #[test]
+    fn snapshot_restore_rebuilds_dag_ancestors_for_cross_batch_parents() {
+        let dir = std::env::temp_dir().join(format!("minuend-g14-dag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        // Unit A (parent = genesis) becomes a pre-snapshot ancestor.
+        let a = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
+        eng.ingest(gov_dep(vec![g], &sk(1), 10_000, 7)).unwrap();
+        // Unit B points at A and is applied AFTER the snapshot point; the
+        // fresh DAG does not know A, so it links only if A is remembered.
+        let b = unit_id(&gov_dep(vec![a], &sk(2), 20_000, 8));
+        eng.ingest(gov_dep(vec![a], &sk(2), 20_000, 8)).unwrap();
+        eng.flush_snapshot().unwrap();
+
+        // Restart: the fresh engine has neither A nor B in its DAG.
+        let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng2);
+        assert!(eng2.dag.is_known(a), "snapshot DAG anchor A missing after restore");
+        assert!(eng2.dag.is_known(b), "snapshot DAG anchor B missing after restore");
+        // A child of A (post-snapshot replay shape) must not be orphaned.
+        // sk(3): the sk(2) account is already bound to its own AA address, so
+        // reusing it here would be BadAccount, not the DAG path under test.
+        let c = gov_dep(vec![a], &sk(3), 30_000, 9);
+        let cid = unit_id(&c);
+        let evs_c = eng2.ingest(c).unwrap();
+        assert!(
+            evs_c.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "child of a pre-snapshot parent was not applied"
+        );
+        assert!(eng2.dag.is_known(cid), "child of a pre-snapshot parent was orphaned");
+        assert!(eng2.dag.get_orphan(cid).is_none(), "cross-batch parent child stayed orphaned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #37-14b: a restored snapshot+WAL may hold GovWithdraw nonces from
+    /// batches NEWER than the snapshot. Replaying those batches (validating
+    /// mode) must not spuriously DuplicateNonce against the persisted
+    /// watermark, while a true replay duplicate still bounces.
+    #[test]
+    fn validating_replay_ignores_wal_nonces_newer_than_snapshot() {
+        let dir = std::env::temp_dir().join(format!("minuend-g14-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        eng.ingest(gov_dep(vec![g], &sk(1), 10_000, 7)).unwrap();
+        eng.ingest(gov_with(vec![g], &sk(1), 1_000, 5)).unwrap();
+        eng.flush_snapshot().unwrap();
+        assert_eq!(eng.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
+        // The persisted watermark is 5. A FRESH unit (different parent so it
+        // is not the same DAG unit) carrying nonce 5 must still be accepted
+        // in validating mode: the restored watermark is from a batch newer
+        // than the snapshot, and replay is catching up to it.
+        let mut replayer = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut replayer);
+        replayer.validating = true;
+        // Use a parent that is ancestor-known (the gov_dep unit) so the
+        // fresh child links, but the unit itself is new.
+        let dep_id = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
+        let evs = replayer
+            .ingest(gov_with(vec![dep_id], &sk(1), 1_000, 5))
+            .unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "replayed gov-withdraw was wrongly rejected as DuplicateNonce"
+        );
+        // A SECOND replay of the same nonce within the same stream is a real
+        // duplicate and must still bounce: same nonce, a different unit shape
+        // (amount differs) so the DAG does not short-circuit on duplicate id.
+        let evs2 = replayer
+            .ingest(gov_with(vec![g], &sk(1), 999, 5))
+            .unwrap();
+        assert!(evs2.iter().any(|e| matches!(
+            e,
+            ExecEvent::Rejected {
+                reason: RejectReason::DuplicateNonce,
+                ..
+            }
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
