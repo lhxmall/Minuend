@@ -1,6 +1,6 @@
 # Gap 9 — Oscript Complexity Budget Exhausted & Audit Readiness
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Design-only. No crates/, obyte-local/, README edits. This doc is the full
 > implementation plan for the main merge.
@@ -11,15 +11,15 @@
 
 | Path | What |
 |---|---|
-| `obyte-local/agents/operp_vault.aa` | **only** file touched this gap. 473 lines, ~100 complexity, ~650 count_ops reported by `vendor/ocore/formula/validation.js` |
+| `obyte-local/agents/minuend_vault.aa` | **only** file touched this gap. 473 lines, ~100 complexity, ~650 count_ops reported by `vendor/ocore/formula/validation.js` |
 | `vendor/ocore/constants.js` | read-only reference: `MAX_COMPLEXITY=100`, `MAX_OPS=2000`, `MAX_AA_STRING_LENGTH=4096`, `MAX_STATE_VAR_NAME_LENGTH=128` |
 | `vendor/ocore/formula/validation.js` | read-only reference for per-`case` complexity model (`evaluate()` switch) + `reduce`/`func_declaration` multiplier |
 | `vendor/ocore/formula/evaluation.js` | read-only reference for bounce vs fatal semantics (`setFatalError` vs `bounce()`) |
 | `vendor/ocore/aa_validation.js` + `definition.js` | AA-definition validator that sums per-message `complexity`/`count_ops` and enforces `max_complexity` / `max_ops` |
-| `crates/operp-types/src/lib.rs` | constants authority: `MAX_AA_TREE_DEPTH=16`, `CHALLENGE_SECS=3600`, `OBYTE_STABILITY_SECS=600`, `PERP_ASSET_PLACEHOLDER` |
-| `crates/operp-state/src/lib.rs` | withdraw leaf format `aa_account_leaf_str` / `aa_parent` — AA leaf string must stay byte-identical |
+| `crates/minuend-types/src/lib.rs` | constants authority: `MAX_AA_TREE_DEPTH=16`, `CHALLENGE_SECS=3600`, `OBYTE_STABILITY_SECS=600`, `PERP_ASSET_PLACEHOLDER` |
+| `crates/minuend-state/src/lib.rs` | withdraw leaf format `aa_account_leaf_str` / `aa_parent` — AA leaf string must stay byte-identical |
 | `obyte-local/test_vault_aa.js` | E2E lifecycle harness — every branch must stay green; add complexity probe |
-| `obyte-local/agents/operp_vault_base.aa` | generated bootstrap artifact (placeholder substitution) — no manual edit |
+| `obyte-local/agents/minuend_vault_base.aa` | generated bootstrap artifact (placeholder substitution) — no manual edit |
 
 **Out of scope:** Rust crates, deploy scripts, `post_batch.js`, P2P, fee economics.
 
@@ -57,7 +57,7 @@ Add `obyte-local/tools/check_aa_complexity.js` (allowed as local tool, not AA):
 
 ```js
 process.env.devnet='1';
-const aa = require('fs').readFileSync('agents/operp_vault.aa','utf8');
+const aa = require('fs').readFileSync('agents/minuend_vault.aa','utf8');
 const def = JSON.parse(aa); // AA file is JSON with `messages.cases` and `definitions` if any
 const v = require('../../vendor/ocore/formula/validation');
 const constants = require('../../vendor/ocore/constants');
@@ -106,7 +106,7 @@ folding, see “how to verify”):
 > Why totals wobble: probe configured with `mci = Number.MAX_SAFE_INTEGER`
 > (post-aa3). Running with real `devnet` MCI may differ by 0–1 for `freeze`/`chash160` gates (not used here). Reproduce with `node tools/check_aa_complexity.js | tee /tmp/before.json`.
 
-**Action:** commit the printed table as a comment header in `operp_vault.aa:2-16` so future diffs visibly move the needle.
+**Action:** commit the printed table as a comment header in `minuend_vault.aa:2-16` so future diffs visibly move the needle.
 
 ### Step 2.2 — Dead code / mergeable branches
 
@@ -123,7 +123,7 @@ Estimated saving from dead branches alone: D1 (2 complexity) + D2 (3+1=4) + D3 (
 
 ### Step 2.3 — Refactors that free ≥10 complexity (ranked by ROI)
 
-All edits are inside `operp_vault.aa` JSON strings (Oscript formulas). No new storage keys except where consolidation requires one.
+All edits are inside `minuend_vault.aa` JSON strings (Oscript formulas). No new storage keys except where consolidation requires one.
 
 #### R1 — Withdraw fold: 2× sha256 → 1× sha256 (reclaim 16)
 
@@ -145,7 +145,7 @@ $root = reduce(trigger.data.proof, 16, $fold,
   sha256('acct:' || trigger.data.leaf_account || ':' || trigger.data.collateral || ':' || trigger.data.perp || ':' || trigger.data.withdrawn, 'hex'));
 ```
 
-Effect: one `sha256` node removed from func body → `func.complexity` drops from 2 to 1 → `reduce` adds `16*1=16` instead of `32`. **Δ = −16 complexity**, `count_ops` −16 as well (one fewer `sha256` node per unroll). Leaf string identical, Merkle math identical (concatenation order same). Probe confirms leaf/root vectors unchanged against `crates/operp-state` fixtures (`aa_root_of`, `aa_proof_for`).
+Effect: one `sha256` node removed from func body → `func.complexity` drops from 2 to 1 → `reduce` adds `16*1=16` instead of `32`. **Δ = −16 complexity**, `count_ops` −16 as well (one fewer `sha256` node per unroll). Leaf string identical, Merkle math identical (concatenation order same). Probe confirms leaf/root vectors unchanged against `crates/minuend-state` fixtures (`aa_root_of`, `aa_proof_for`).
 
 Migration: None. Proof format unchanged (`{hash, right}`), depth 16 unchanged.
 
@@ -166,7 +166,7 @@ Proposed:
 $bad_len = !trigger.data.state_root OR length(trigger.data.state_root)!=64
         OR !trigger.data.aa_root    OR length(trigger.data.aa_root)!=64
         OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash)!=64;
-if (trigger.data.chain_id!='operp-mvp-1' OR !$h OR $h!=$ll+1 OR $bad_len) bounce('bad submit');
+if (trigger.data.chain_id!='minuend-mvp-1' OR !$h OR $h!=$ll+1 OR $bad_len) bounce('bad submit');
 ```
 
 Effect: purely reordering; `length` is 0-complexity so no numeric drop, but removes two duplicated `!=64` comparison nodes and shortens the top-level `or` chain, saving `2` `count_ops` and making the branch cheaper to read. Counts as mergeable-branch cleanup, not headline reclaim.
@@ -294,9 +294,9 @@ The single-shot PR that applies **R1+R3+R4** together is still small
 merge: it pays the field-rename coordination cost once and lands 27 headroom
 in one devnet reset.
 
-### Exact edit plan (file: `obyte-local/agents/operp_vault.aa`)
+### Exact edit plan (file: `obyte-local/agents/minuend_vault.aa`)
 
-1. Header comment (`{ // OPERP …` block) — append complexity table from §2.1
+1. Header comment (`{ // MINUEND …` block) — append complexity table from §2.1
    and constant map `CHAIN_ID / STABILITY / CHALLENGE_WINDOW / SUBMIT_BOND /
    RACE_REWARD`.
 2. `deposit` case state — delete `var['bal_'…] = …` line; keep boot init.
@@ -312,7 +312,7 @@ in one devnet reset.
    dispatcher init (remove after one cycle).
 9. Run `tools/check_aa_complexity.js` → assert `complexity <= 80` and
    `count_ops <= 900` (headroom gate).
-10. Regenerate `operp_vault_base.aa` via test bootstrap (not checked in).
+10. Regenerate `minuend_vault_base.aa` via test bootstrap (not checked in).
 
 Diff sketch (conceptual unified diff, not literal patch yet):
 
@@ -324,9 +324,9 @@ Diff sketch (conceptual unified diff, not literal patch yet):
 -  if: "{trigger.data.deposit_perp}", messages:[…pperp_…]
 +  // (deleted — PERP credit is sidechain GovDeposit; explorer indexes temp_data)
 
--  if (trigger.data.chain_id != 'operp-mvp-1' OR … OR !trigger.data.state_root OR length…!=64 OR …)
+-  if (trigger.data.chain_id != 'minuend-mvp-1' OR … OR !trigger.data.state_root OR length…!=64 OR …)
 +  $bad_len = !trigger.data.state_root OR length(trigger.data.state_root)!=64 OR …;
-+  if (trigger.data.chain_id != 'operp-mvp-1' OR !$h OR $h!=$ll+1 OR $bad_len)
++  if (trigger.data.chain_id != 'minuend-mvp-1' OR !$h OR $h!=$ll+1 OR $bad_len)
 
 -  $fold = ($acc,$i,$sib)=> (!$acc OR !$sib.hash) ? false : ($sib.right ? sha256($acc||$sib.hash,'hex') : sha256($sib.hash||$acc,'hex'));
 +  $fold = ($acc,$i,$sib)=> (!$acc OR !$sib.hash) ? false : sha256(($sib.right ? $acc||$sib.hash : $sib.hash||$acc),'hex');
@@ -350,7 +350,7 @@ Diff sketch (conceptual unified diff, not literal patch yet):
 - **New trigger field (breaking if shipped):** `claim` string enum
   `reward|bond|sbond` replaces three booleans. Old clients must migrate.
   Document in README “Vault triggers” table and in `test_vault_aa.js`.
-- **Constants unchanged:** `CHAIN_ID='operp-mvp-1'`, `600`, `3600`, `10000`,
+- **Constants unchanged:** `CHAIN_ID='minuend-mvp-1'`, `600`, `3600`, `10000`,
   `50000`, `20000`, `MAX_AA_TREE_DEPTH=16`, reduce count `16`.
 - **Oscript messages:** payment payloads for claims unchanged except triggered
   by unified branch; withdraw payments (`base` + `PERP_ASSET_ID_HERE`) unchanged.
@@ -373,7 +373,7 @@ Diff sketch (conceptual unified diff, not literal patch yet):
   second call bounces.
 - New probe test `obyte-local/test_withdraw_merkle_equiv.js` asserts for
   10 random `(addr,collateral,perp,withdrawn)` pairs and 3 tree sizes
-  (1,16,64 leaves) that `aa_root` from `crates/operp-state` matches
+  (1,16,64 leaves) that `aa_root` from `crates/minuend-state` matches
   AA-computed `$root` for proofs of depth ≤16 using both old and new fold;
   both folds produce identical roots (R1 invariant).
 
@@ -381,7 +381,7 @@ Diff sketch (conceptual unified diff, not literal patch yet):
 
 ```js
 // 1 — complexity budget gate
-const {complexity, count_ops} = await checkAA('agents/operp_vault.aa');
+const {complexity, count_ops} = await checkAA('agents/minuend_vault.aa');
 assert(complexity <= 80, `budget exceeded: ${complexity}`);
 assert(count_ops < 1500);
 
@@ -479,7 +479,7 @@ await expectBounce(() => trigger(bob, {submit:1, height:len, state_root:'bad', /
    No — `wd_` is proof-backed, `bal_` is not authoritative. Zeroing `bal_` there costs 1 complexity with no security benefit.
 
 4. **Formal verification of Merkle fold?**  
-   Current leaf is `sha256('acct:'||addr||':'||collateral||':'||perp||':'||withdrawn,'hex')`. A symbolic equivalence proof for old vs new fold is trivial (both compute `sha256(left||right)`), but should still be machine-checked once in `operp-state` unit test using vectors exported from JS harness.
+   Current leaf is `sha256('acct:'||addr||':'||collateral||':'||perp||':'||withdrawn,'hex')`. A symbolic equivalence proof for old vs new fold is trivial (both compute `sha256(left||right)`), but should still be machine-checked once in `minuend-state` unit test using vectors exported from JS harness.
 
 5. **Complexity measurement environment?**  
    `validation.js` complexity depends on `mci` and `readGetterProps`. Our probe uses `MAX_SAFE_INTEGER` MCI. Should CI also measure at `devnet` MCI (≈ current network) and at `post-pemCurvesFix`? Recommendation: pin probe to `validation.js` with `mci=current_mci` obtained from `storage.getLastBallMci()` or fixed `6000000` — document whichever is used.
@@ -491,7 +491,7 @@ await expectBounce(() => trigger(bob, {submit:1, height:len, state_root:'bad', /
 
 ## 6. Formal Audit Checklist (ready to hand to external reviewer)
 
-Copy-paste ready. Check each item against `operp_vault.aa` after this gap.
+Copy-paste ready. Check each item against `minuend_vault.aa` after this gap.
 
 ### A. Reentrancy & state ordering
 
@@ -531,7 +531,7 @@ Copy-paste ready. Check each item against `operp_vault.aa` after this gap.
 
 ### F. Hash / Merkle correctness
 
-- [ ] Leaf preimage exactly `"acct:"||address||":"||collateral||":"||perp||":"||withdrawn` with decimal strings (no spaces), hashed via `sha256(x,'hex')`. Collateral/PERP are decimal representations of `Usd`/`u128` scaled values; compare against `crates/operp-state::aa_account_leaf_str`.
+- [ ] Leaf preimage exactly `"acct:"||address||":"||collateral||":"||perp||":"||withdrawn` with decimal strings (no spaces), hashed via `sha256(x,'hex')`. Collateral/PERP are decimal representations of `Usd`/`u128` scaled values; compare against `crates/minuend-state::aa_account_leaf_str`.
 - [ ] Proof folding order: `sha256(left||right,'hex')` where `left/right` orientation from `sib.right`. After R1, still `sha256( (sib.right?acc||hash:hash||acc), 'hex')` — verify equivalence for all `right` combos with vectors.
 - [ ] Proof length fixed-depth 16 via `reduce(...,16, $fold, leaf)` — `MAX_AA_TREE_DEPTH=16` mirrored in Rust `aa_proof_for` returns `None` when deeper needed. Confirm AA still bounces `bad merkle root` (not fatal) when proof longer than 16 cannot be reduced to root (extra siblings silently ignored by reduce up to 16, but `reduce` will only consume first 16; longer proofs must have been rejected by client preflight — document this truncation risk).
 

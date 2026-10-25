@@ -198,30 +198,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-account"
+name = "minuend-account"
 version = "0.1.0"
 dependencies = [
- "operp-types",
+ "minuend-types",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-book"
+name = "minuend-book"
 version = "0.1.0"
 dependencies = [
- "operp-types",
+ "minuend-types",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-dag"
+name = "minuend-dag"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
- "operp-types",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",
@@ -229,45 +229,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-exec"
+name = "minuend-exec"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
- "operp-account",
- "operp-book",
- "operp-dag",
- "operp-settle",
- "operp-state",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-dag",
+ "minuend-settle",
+ "minuend-state",
+ "minuend-types",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-gossip"
+name = "minuend-gossip"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "operp-dag",
- "operp-types",
+ "minuend-dag",
+ "minuend-types",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-settle"
+name = "minuend-settle"
 version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
  "flate2",
  "hex",
- "operp-account",
- "operp-book",
- "operp-dag",
- "operp-exec",
- "operp-state",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-dag",
+ "minuend-exec",
+ "minuend-state",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",
@@ -275,22 +275,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-state"
+name = "minuend-state"
 version = "0.1.0"
 dependencies = [
  "base64",
  "bincode",
  "hex",
- "operp-account",
- "operp-book",
- "operp-types",
+ "minuend-account",
+ "minuend-book",
+ "minuend-types",
  "serde",
  "sha2",
  "thiserror",
 ]
 
 [[package]]
-name = "operp-types"
+name = "minuend-types"
 version = "0.1.0"
 dependencies = [
  "hex",
@@ -300,7 +300,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "operp-watch"
+name = "minuend-watch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -308,11 +308,11 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
- "operp-dag",
- "operp-exec",
- "operp-settle",
- "operp-state",
- "operp-types",
+ "minuend-dag",
+ "minuend-exec",
+ "minuend-settle",
+ "minuend-state",
+ "minuend-types",
  "serde",
  "serde_json",
  "sha2",
@@ -384,9 +384,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
@@ -397,9 +397,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures",

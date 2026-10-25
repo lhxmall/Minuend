@@ -1,0 +1,12 @@
+[package]
+name = "minuend-book"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+minuend-types = { workspace = true }
+thiserror = { workspace = true }
+
+serde = { workspace = true }

@@ -1,6 +1,6 @@
-# OPERP 结算层：现在（纯永续）与以后升级
+# MINUEND 结算层：现在（纯永续）与以后升级
 
-> 状态：**§2「现在」已实现**（三类职责、四个 AA 实例；`CHAIN_ID=operp-v2`）。
+> 状态：**§2「现在」已实现**（三门 AA + 两个 dispute 谓词 + inbox；`CHAIN_ID=minuend-v2`）。
 > 精确规则见 [MECHANISMS.md](MECHANISMS.md) §10–11。主网部署脚本
 > `deploy_mainnet.js` 就绪，实发待助记词 + 审计。
 > 本文记录：纯永续阶段把乐观结算做成什么样，以及以后若做成图灵完备侧链怎么升级。
@@ -34,15 +34,15 @@
 
 ## 2. 现在：纯永续乐观结算
 
-### 2.1 三类职责、四个 AA 实例（第一天就拆开）
+### 2.1 三类职责、三个 AA 实例（第一天就拆开）
 
 Oscript 单次复杂度上限 100，现行金库已占约 76。共识不能再塞进托管。
 
 | 门 | AA | 现在干什么 | 以后换什么 |
 |---|---|---|---|
-| 金库 | `operp_vault.aa` | 充、提、只认 finalized 的 `aa_forest` | **几乎不改** |
-| 记账 | `operp_rollup.aa`（新） | 谁先稳定谁贴根、开窗、收判决 | 主张加 `version`，争议改派 |
-| 裁判 | `operp_dispute.aa` + `operp_dispute_fill.aa` | 充提/漏单与成交谓词分别验证 | **两扇均可换掉** 或加新 case |
+| 金库 | `minuend_vault.aa` | 充、提、只认 finalized 的 `aa_forest` | **几乎不改** |
+| 记账 | `minuend_rollup.aa`（新） | 谁先稳定谁贴根、开窗、收判决 | 主张加 `version`，争议改派 |
+| 裁判 | `minuend_dispute.aa` + `minuend_dispute_fill.aa` | 充提/漏单与成交谓词分别验证 | **两扇均可换掉** 或加新 case |
 
 金库用 `var[ROLLUP_AA]['aa_forest_'||last_finalized]` 读根，自己不记候选、不挑战、不判刑。
 
@@ -134,6 +134,21 @@ P-skip 替代「在 AA 里重放订单簿」：不必证明「这是最优」，
 链空闲（且顶高度未失败）后 poster 才可 `{claim:'pool'}` 取回常备池
 ```
 
+### 2.7 temp_data framing 的滚动升级与回滚
+
+新 producer 保持旧 watcher 可读：包内帧以 LF 分隔；首包无前缀，后续每个包
+以 LF 开头；所有包都没有尾 LF。因此旧 watcher 的 `split("\\n")` 不会得到
+尾部空 JSON frame。新 watcher 读取旧 producer 时，先对按顺序拼接的原始
+gunzip package 字节校验 `data_root`，再仅在解析副本中补上旧多包缺失的边界 LF。
+`data_root` 永远不对规范化后的文本计算；inline 单包也校验其原始字节 root。
+
+这两个方向均可滚动：watcher 可先升级，也可先升级 producer；没有 framing-version
+或强制 producer-first 停机顺序。回滚 watcher 到旧版后，新 producer 的包仍可读，
+但旧 watcher 原本就不能正确解析「旧 producer 无包间分隔符」的多包批次；回滚会
+失去新 reader 的这项旧批次兼容。不要重打已发布 package 或修改其 `data_root`。
+曾经采用“每包尾部加 LF”的中间格式不能发给旧 watcher，因为 `split("\\n")`
+会产生空尾帧；新 watcher 可读取它，但不应将其作为发布格式。
+
 ---
 
 ## 3. 以后：升到图灵完备侧链
@@ -194,7 +209,7 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 - 继续「付钱即处决」
 - 委员会签根、指定 operator、只有原 poster 应诉
 - 链下 DA（IPFS 当数据可用性）
-- 把争议塞回现行 `operp_vault.aa`
+- 把争议塞回现行 `minuend_vault.aa`
 - 把仓位 / 挂单写进提款叶子
 - 现在做 VM、现在做指令级二分
 - 靠 `validity_proof_hash` 空槽「以后接 ZK」（Oscript 没有 pairing；升级靠拆门）

@@ -1,11 +1,12 @@
 {
-  "name": "operp-obyte-local",
+  "name": "minuend-obyte-local",
   "private": true,
   "version": "0.1.0",
-  "description": "Local Obyte DAG + temp_data batch poster for operp",
+  "description": "Local Obyte DAG + temp_data batch poster for minuend",
   "main": "post_temp_data.js",
   "scripts": {
-    "post-batch": "node post_temp_data.js"
+    "post-batch": "node post_temp_data.js",
+    "test:frames": "node test_batch_frames.js"
   },
   "engines": {
     "node": ">=18"

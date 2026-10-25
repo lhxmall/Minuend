@@ -1,6 +1,6 @@
 "use strict";
 
-// OPERP dispute prover — posts a one-shot fraud predicate to the dispute AA
+// MINUEND dispute prover — posts a one-shot fraud predicate to the dispute AA
 // instead of the legacy pay-to-kill {challenge:1}. A failed predicate
 // bounces ('no fraud') and coins return; a proven one forwards
 // {verdict:'fraud', height, challenger} to the rollup AA which fails the
@@ -11,7 +11,7 @@
 //
 // proof.json carries everything the predicate needs: k, op, ops_proof,
 // pre_wit, pre_proof (k>0), post_wit, post_proof, pre_leaf, post_leaf,
-// pre_leaf_proof, post_leaf_proof (shape per agents/operp_dispute.aa).
+// pre_leaf_proof, post_leaf_proof (shape per agents/minuend_dispute.aa).
 // The watcher builds these from the temp_data DA package.
 
 const path = require("path");
@@ -41,14 +41,36 @@ async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const useFill = flag("fill");
   const dispute = useFill
-    ? deploy.dispute_fill_aa_address || process.env.OPERP_DISPUTE_FILL_AA
-    : deploy.dispute_aa_address || process.env.OPERP_DISPUTE_AA;
-  const rollup = deploy.rollup_aa_address || process.env.OPERP_ROLLUP_AA;
+    ? deploy.dispute_fill_aa_address || process.env.MINUEND_DISPUTE_FILL_AA
+    : deploy.dispute_aa_address || process.env.MINUEND_DISPUTE_AA;
+  const rollup = deploy.rollup_aa_address || process.env.MINUEND_ROLLUP_AA;
   if (!dispute || !rollup) throw new Error("deployment.json dispute_aa_address/rollup_aa_address missing");
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");
   const proofFile = arg("proof");
   if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill]");
+  // #37-2: the proof path used to be stored and never read — the script
+  // then referenced an undefined `proof` and threw ReferenceError before
+  // sending anything. Read and shape-check it here.
+  const proof = (() => {
+    const parsed = JSON.parse(fs.readFileSync(proofFile, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error(`proof file ${proofFile} must contain a JSON object`);
+    return parsed;
+  })();
+  // #37-2: this script only drives a local aa-testkit devnet. The watcher
+  // passes --hub / mnemonic for a production submit; accepting those
+  // silently would report a local drill as if it were a live challenge.
+  const hubArg = arg("hub");
+  const mnemonicArg = arg("mnemonic") || process.env.MINUEND_WATCH_MNEMONIC;
+  if (hubArg || mnemonicArg) {
+    console.error(
+      "post_challenge.js is not wired to a live hub: --hub/mnemonic are unsupported " +
+      "(this script runs a local aa-testkit network only). Refusing to run rather than " +
+      "reporting a local drill as a production challenge.",
+    );
+    process.exit(1);
+  }
 
   network = await Network.create()
     .with.wallet({ challenger: 1e7 })

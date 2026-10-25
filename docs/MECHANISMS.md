@@ -1,9 +1,9 @@
-# OPERP 机制详解（Mechanism Reference）
+# MINUEND 机制详解（Mechanism Reference）
 
-本文是 OPERP 所有运行机制的完整参考，面向需要理解或复现每一层内部行为
+本文是 MINUEND 所有运行机制的完整参考，面向需要理解或复现每一层内部行为
 的读者。概览见 [README](../README.md)；设计动机叙事版见
 [PROTOCOL.md](PROTOCOL.md)。本文按"机制 → 精确规则 → 边界情况"逐层展开，
-所有数字均可在 `crates/operp-types/src/lib.rs` 找到对应常量。
+所有数字均可在 `crates/minuend-types/src/lib.rs` 找到对应常量。
 
 ---
 
@@ -18,7 +18,7 @@
 7. [预言机与 mark 价格](#7-预言机与-mark-价格)
 8. [批次与结算验证](#8-批次与结算验证)
 9. [双 Merkle 树](#9-double-merkle-树)
-10. [结算 AA 状态机](#10-结算-aa-状态机chain_idoperp-v2)
+10. [结算 AA 状态机](#10-结算-aa-状态机chain_idminuend-v2)
 11. [Witness 树与谓词承诺](#11-witness-树与谓词承诺)
 12. [多 operator 手续费竞速](#12-multi-operator-手续费竞速)
 13. [Optimistic / Final 状态提升](#13-optimistic--final-状态提升)
@@ -145,7 +145,7 @@ orphan 缓冲容量 4096。驱逐按**盐化序**执行：对缓冲单元取
 （`DagError::AddrTooLong`）。mark_executed 时做不动点扫描：所有"父母已
 全部已知"的孤儿链式解锁。残余边界：各副本观测 finalize 的时刻不同，
 收敛前可能驱逐不同的孤儿——DA 层自愈：temp_data 全量重放可确定性重建
-缺失单元，WantUnits gossip（`crates/operp-gossip`，§2.6）可按需向同伴
+缺失单元，WantUnits gossip（`crates/minuend-gossip`，§2.6）可按需向同伴
 索取。
 
 ### 2.4 确定性线性化（去盐）
@@ -176,7 +176,7 @@ orphan 缓冲容量 4096。驱逐按**盐化序**执行：对缓冲单元取
 
 ### 2.6 WantUnits gossip（纯 P2P 层）
 
-`crates/operp-gossip` 实现 doc 04 §2.4 的按需孤儿同步：节点观测到缺失
+`crates/minuend-gossip` 实现 doc 04 §2.4 的按需孤儿同步：节点观测到缺失
 父单元后以 `WANT_FANOUT` 扇出 WantUnits（每 (peer, id) 去抖
 `WANT_DEBOUNCE_MS = 500`，单请求 ≤ 64 个 id）；收到请求的一方从 DAG 与
 orphan 缓冲两侧服务，单响应 ≤ 64 个单元且限频。本层不进共识、不影响
@@ -290,6 +290,12 @@ Op；Order/Position 各带 `isolated` 标志。跨仓单 `margin` 必须为 0。
 - **开仓门**（isolated）：`margin ≥ max(extra_im, 1)`、`margin ≤
   collateral`、`equity − margin ≥ im + resting`；无 MIN_OPEN_EQUITY
   （margin 下限即其等价物）。逐仓纯减仓带 margin → Risk。
+- **`resting` 口径**（`resting_open_im`，跨/逐仓共用）：只对**真正开仓
+  的数量**计价——bids 先减空头、asks 先减多头，超出可减量的部分才
+  按该侧加权单价 × `im_bps` 预留；每市场取 `max(bid_im, ask_im)` 后跨
+  市场累加。整侧名义额计价会把纯减仓挂单也按全额 IM 拒掉，已修
+  （#37-19）。逐仓挂单不计入（其保证金在 place 时已离开 collateral，
+  再计即双重预留）。
 - **托管**：place 时 `collateral -= margin`；每笔成交按
   `post = fill ≥ remaining_before ? margin_left : margin_left·fill/
   remaining_before`（floor，末笔吃余数）记入
@@ -519,10 +525,16 @@ header 只带标量（`chain_id`、height、各根计数、`aa_shard_roots`、
 JSON（`u,t,o,c,f?,l?,e?`）：`u` 为该单元 JSON（含签名），`t`/`o`/`c` 为
 trace/ops/counts 条目，无成交时省略 `f`，`e` 仅 Deposit/GovDeposit 携带
 （按 `aa_unit` 匹配证据），`l` 为该单元叶集（print-only 可省略）。
-package = base64(gzip（`\n` 连接 frames）)；cap 仍按
-`get_json_source({"package_blob": b64}).len() <= PACK_SOURCE_CAP` 核算；
-`data_root` = hex(sha256(拼接 **gunzip 后** blob 字节))，JS 侧
-`zlib.gunzipSync` + concat + sha256 对得上；非法 gzip → BindingMismatch。
+每包内部的多帧以 LF 分隔；第一个包不加前缀，之后每个包在 gunzip 后以一个
+LF 开头；新包都不以 LF 结尾。直接拼接新格式 package 字节后，得到无尾 LF 的
+JSON 行流（兼容旧 watcher 的 `split("\\n")`）。cap 按含包前缀的
+`get_json_source({"package_blob": b64}).len() <= PACK_SOURCE_CAP` 核算。
+`data_root` = hex(sha256(按序拼接**原样 gunzip 后** blob 字节))，gzip wrapper
+不计入；JS `zlib.gunzipSync` + 原始 concat 与 Rust 同义。watcher 先校验这个
+原始 root，再只在解析副本中为旧 writer 缺失的包间 LF 补分隔符。解析修复不得
+改写 root 输入。新 reader 支持旧单包、旧多包及尾 LF 历史包；新 writer 可由旧
+`split("\\n")` reader 解析。无需 framing-version 或强制升级次序。
+非法 gzip → BindingMismatch；单包 inline 的 `data_root` 同样按原始字节校验。
 `l` 保留在线上——`prove.rs` 的 `deposit_proof` 要拿 liar 贴过的叶子对
 committed `trace[k]` 开证明，省 `l` 会让一枪谓词开不了。多包时 `packages`
 记 package 单元的真实 Obyte unit hash 列表（poster 先发包、拿到 unit 后填，
@@ -530,20 +542,25 @@ Rust 打包时只留占位），watcher 按条目 `get_joint` 取包、gunzip �
 承载该对象的 Obyte 单元之规范 `data_hash`
 仍为 `hex(sha256(getJsonSource(header或package对象)))`。充值证据在 frame
 `e` 内，复原即拼接各 `e` 字段（无 header `deposit_evidences`）。
-超限（去 `l` 重打仍有包超 `PACK_SOURCE_CAP`）整批 print-only：超限包上不了链，
-watcher 在缺失 joints 上 backoff 放弃，绝不误挑战。
+空帧集合不是有效批次。不可拆分的单帧仍可能独自超 cap：Rust 在去 `l` 重打后
+仍超限时只供 print-only、不可提交；JS `post_batch.js` 在发包前执行同一 source
+cap 检查并拒绝超限输入。watcher 在缺失 joints 上 backoff 放弃，绝不误挑战。
 
 意义：
 
 - 数据可用性：任何观察者可在 1 天保留窗口内下载并本地重放
-- 重放结果与 checkpoint 逐字段比对 → 欺诈必然可被检测
-- 检测后的执行依赖 §10 的谓词揭发机制
+- 重放可定位本地 checkpoint 不一致；不等于每类不一致都有链上谓词可证
+- 可链上揭发的范围依赖 §10 谓词覆盖；P-omit 当前恒 bounce，生产自动提交脚本亦未接通
 
 `data_hash`/`data_length` 采用与 ocore 一致的**单一规范形**：
 `source = getJsonSource(data)`（递归字典序排序对象键的 minified JSON；
-Rust 侧移植于 `operp_settle::obyte_hash::get_json_source`），
+Rust 侧移植于 `minuend_settle::obyte_hash::get_json_source`），
 `data_hash = hex(sha256(source))`，`data_length = source 的 UTF-8 字节长`。
-Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
+数字走**失败即拒**的规范形（`canonical_number`）：可精确表示的整数照印
+十进制，但**绝对值 > 2^53 的裸整数直接 Err** —— JS 侧 `JSON.parse` 会把它
+舍到最近 f64，Rust 却保留全部比特，两边 hash 输入必分歧；`1.0`（JS 印
+`"1"`）、`-0.0`、|x| > 2^53 的非整数、|x| ≥ 1e21（指数形）、|x| < 1e-6 的
+非零小数同理。Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
 `obyteDataHash`/`obyteDataLength`）使用同一定义，黄金向量测试对拍同一
 嵌套对象得到相同 hash/length。注意区分：**链上 OIP-0007 信封**仍须满足
 ocore 校验器（base64 `getBase64Hash(data, true)` / `object_length`），
@@ -553,6 +570,8 @@ post_batch.js 把信封两字段直接委托给 ocore，不手写副本。
 
 ```
 chain_id ≠ CHAIN_ID                          → ChainMismatch
+header 计数字段 > u32::MAX（fill_count/unit_count/  → RootMismatch（拒绝截断）
+  wit_count/assertion_version；原 `as u32` 会静默回绕）
 replay 初始 root ≠ prev_root                 → PrevMismatch
 批次含 Deposit/GovDeposit → 独立验证充值证据（不再自证）：
   evidences_from_payload(data) 从 temp_data 取回证据，verify_all 以
@@ -564,8 +583,9 @@ replay 初始 root ≠ prev_root                 → PrevMismatch
 重放事件聚合 fills_root/counts_root 等承诺不符  → RootMismatch
 checkpoint.height ≠ replay.height + 1        → RootMismatch（高度绑定）
 engine.state.height 推进至 checkpoint.height 后按窗口剪枝
-(withdrawals / seen_aa_units / deposits_allowed / commits —— 与
-from_applied 完全一致的剪枝集)
+(withdrawals / seen_aa_units / deposits_allowed / commits，以及到期
+ oracle unbonding 的债券返还 —— 全部与 `from_applied` 同一 height 同一次
+序，剪枝集完全一致)
 last_unit 不符 ∨ state_root 不符 ∨ 承诺根不符  → RootMismatch
 ```
 
@@ -664,11 +684,11 @@ AA 只能做字符串拼接与 sha256——它无法解析 i128 LE、无法遍�
 
 ---
 
-## 10. 结算 AA 状态机（CHAIN_ID=operp-v2）
+## 10. 结算 AA 状态机（CHAIN_ID=minuend-v2）
 
-四个 AA 实例分属三类职责：`operp_rollup.aa`（主张链）、两个 dispute AA
-（`operp_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`operp_dispute_fill.aa` 成交）和
-`operp_vault.aa`（托管）。金库无 owner key，claim 在 rollup。
+三个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、两个 dispute AA
+（`minuend_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`minuend_dispute_fill.aa` 成交）和
+`minuend_vault.aa`（托管）。金库无 owner key，claim 在 rollup。
 
 rollup 状态变量（`<h>` 为高度后缀）：
 
@@ -693,7 +713,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.1 submit(h) — rollup
 
-前置：`chain_id=='operp-v2'` ∧ `assertion_version==1`
+前置：`chain_id=='minuend-v2'` ∧ `assertion_version==1`
 ∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 原位重提）
 ∧ 全新提交时 prev == `state_root_{h-1}`（前序高度 fraud-failed 时拒绝，
   不再豁免——失败高度之上的新链必须走重提分支）；重提时 prev 必须等于
@@ -768,7 +788,7 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
 
 ## 11. Witness 树与谓词承诺
 
-每批 checkpoint 额外携带（`operp_settle`）：`wit_root`（执行完最后单元的
+每批 checkpoint 额外携带（`minuend_settle`）：`wit_root`（执行完最后单元的
 witness 叶根）、`trace_root`（每单元 post wit_root 的 Obyte 原生 Merkle，
 按批序）、`units_root` / `units_set_root`（unit_id hex 批序/排序）、
 `ops_root`（op 描述串）、`fills_root`（成交描述串 + 尾随长度哨兵，见下）、
@@ -789,7 +809,7 @@ taker 抵押。`fills_root` 树 = 成交描述串 + 尾随长度哨兵 `n:{len}`
 的 `fills_root` 是单叶 `n:0`。当前验证路径只使用带哨兵的新编码，没有旧
 `fills_root` 编码选择/回退；用旧编码生成的离线证明材料须按当前实现重建。
 
-witness 叶（`operp_state::wit_leaves`，排序后 Obyte 原生 Merkle）：
+witness 叶（`minuend_state::wit_leaves`，排序后 Obyte 原生 Merkle）：
 
 ```
 acct:{acct_hex}:{collateral}:{perp}:{W}
@@ -821,7 +841,7 @@ submit(h) 竞速:
 ```
 
 - 同批一起稳定的平局由 ocore 内建单元排序裁决；Rust 侧
-  `pick_stable_winner`（operp-settle, mci→unit_id 双键）语义一致
+  `pick_stable_winner`（minuend-settle, mci→unit_id 双键）语义一致
 - 赢家奖励在 finalize 成功路径累加（失败高度不发放），{claim:"reward"} 提取
 - "交易按第一个稳定的填充下一个"由 prev_state_hash 链保证：
   h+1 必须引用赢家的 root_h
@@ -861,7 +881,7 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 | 偷 AA 资金 | 提款只认 finalized 分片森林的 Merkle 证明；leaf 绑定提款人地址；wd_/wp_ 累计标记防证明重放 |
 | 付钱杀根 | 已删除：`{challenge:1}` 无 case；假证明 bounce `no fraud` |
 | 审查用户单元 | rollup inbox `{force}` 钉时间戳；P-omit 已按 #23 禁用（force 只钉时间戳、不能证明单元存在，谓词一律 bounce `no fraud`） |
-| 存款凭空铸造 | deposits_allowed 白名单 + replay 交叉校验 + evidence 绑定 `OPERP_VAULT_AA` |
+| 存款凭空铸造 | deposits_allowed 白名单 + replay 交叉校验 + evidence 绑定 `MINUEND_VAULT_AA` |
 
 ## 15. 明确的已知边界
 
@@ -872,7 +892,7 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 - `temp_data` 正文 24h 后被节点剥除——揭发必须自带那一笔与证明
 - `validate_against` 对提供的充值 joint 重算哈希、核收款/金额/资产，并要求
   joint 首作者 = payer = 侧链 `addr`；它不证明 joint 已进入 Obyte DAG 或稳定。
-  `OPERP_VAULT_AA` 为空且带 evidence 会被 `validate_against` 拒
+  `MINUEND_VAULT_AA` 为空且带 evidence 会被 `validate_against` 拒
 - 预言机为债券注册制（ORACLE_BOND_PERP = 50_000 PERP，无许可）；按债券计
   的多数合谋仍可在两次罚没之间偏置中位数；外部价锚需治理切换 + keeper 喂价
 - 大载荷内联 temp_data 会触发 ocore 校验器双回调崩溃：post_batch.js 的
@@ -916,10 +936,12 @@ AA 的 PERP 付款。
 `spot_only`、`funding_rate`），
 存入 `markets[market_id]`——IM/MM/taker fee/keeper 奖励从全局常量变为
 **每市场参数**（§4.2/§5.2/§6.1 相应改为读参数）。除 tick_size 为 0 →
-Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（operp-types，
+Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（minuend-types，
 exec 与治理共用）：任一为 0 或 > 10 000、`im_bps <= mm_bps`、
 `mm_bps < 500`、`im_bps > 5000`、`taker_fee_bps > 200`、
-`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk。
+`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk；
+`spot_only` 市场另走**全额抵押**分支：`im_bps` 必须恰为 10 000
+（`mm_bps` 仍 [1, 10 000) 且 `im > mm`，`funding_rate` 必须为 false）。
 CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新，结果不
 过谓词即 Risk（提案表不写入）；FinalizePropose 落盘前同样复检——通过但
 非法的提案是 no-op（不写字段，提案仍被消耗）。
@@ -928,6 +950,14 @@ CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新�
 `spot_only` 建时定死：无 `ParamKey` 可翻转。`true` 的市场为纯合约/meme
 市场——拒收一切报价（双通道 `NotFound`，见 §6.2）、永无资金费；
 成交仍可定 mark（首笔合格 fill 写 `marks`）。可 delist 照旧（与 spot 正交）。
+
+**全额抵押不可协商**：`spot_only` 没有报价通道，`last_index` 永不写，
+mark 冻结在首笔合格成交价。杠杆仓位因此永远等不到引擎保证金意义上的
+清算——亏损方按冻结 mark 仍是正权益，`withdraw` 的 `debit` 门也读同一
+个 mark，于是把已被未实现亏损吃掉的保证金提走，赢家按真实价平仓时
+金库收不抵付。所以 `spot_only` 必须 `im_bps == 10 000`：入场即锁定
+= 名义额的最大亏损，mark 冻结不再影响偿付能力（`apply_fill_pair` 对
+存量杠杆 `spot_only` 市场一律拒绝成交，不再产生新敞口）。
 
 `funding_rate` 同样建时定死、无 `ParamKey` 翻转：资金费率市场，簿价是
 外部交易所资金费率的编码价（`encode_funding_price`，offset 域内恒正，

@@ -1,9 +1,9 @@
 # Gap 2 — Funding Rate Mark-Premium Based, Not External — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignFundingAnchor` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
-> Depends: `operp-state` `apply_report` funding tick (`last_index`, `marks`, `oracle_reports`, `oracle_bonds`), `operp-types` `FUNDING_CAP_BPS`, `operp-exec` `Op::ReportPrice`, `operp-dag` `Op`, `ChainState::meta_leaf`
+> Depends: `minuend-state` `apply_report` funding tick (`last_index`, `marks`, `oracle_reports`, `oracle_bonds`), `minuend-types` `FUNDING_CAP_BPS`, `minuend-exec` `Op::ReportPrice`, `minuend-dag` `Op`, `ChainState::meta_leaf`
 
 ---
 
@@ -11,23 +11,23 @@
 
 ### Problem restated (README L2)
 
-Current funding is peer-to-peer but the **funding index is the unclamped median of bonded reporters' latest prices** (`ChainState::last_index[market] = median` in `crates/operp-state/src/lib.rs:212`), not an external exchange price. Mark (`marks[market]`) is the same median clamped ±10% vs old mark (`:213-221`), so the premium `(spot - index)/index` is just `(capped_median - median)/median` — a self-referential pair. Oracle quality bounds funding quality (L3). L2 requires anchoring funding to an **external price TWAP vs mark premium**, still capped ±50 bps/tick, via an external-price source abstraction where bonded-oracle TWAP is v1 and later multi-source blends in.
+Current funding is peer-to-peer but the **funding index is the unclamped median of bonded reporters' latest prices** (`ChainState::last_index[market] = median` in `crates/minuend-state/src/lib.rs:212`), not an external exchange price. Mark (`marks[market]`) is the same median clamped ±10% vs old mark (`:213-221`), so the premium `(spot - index)/index` is just `(capped_median - median)/median` — a self-referential pair. Oracle quality bounds funding quality (L3). L2 requires anchoring funding to an **external price TWAP vs mark premium**, still capped ±50 bps/tick, via an external-price source abstraction where bonded-oracle TWAP is v1 and later multi-source blends in.
 
 ### Exact files / symbols touched
 
 | Crate | File | Symbol | What |
 |-------|------|--------|------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | `FUNDING_CAP_BPS`, `PRICE_SCALE`, `MarketId`, `Price`, `Seq`, `Height` | keep; add `FUNDING_TWAP_WINDOW`, `FUNDING_TWAP_MIN_SAMPLES`, `FUNDING_SOURCE_KIND` |
-| `operp-types` | same | `ParamKey` | optional gov extension `FundingTwapWindow` (append-only) |
-| `operp-state` | `crates/operp-state/src/lib.rs` | `ChainState { marks, last_index, oracle_reports, oracle_bonds, ... }` | add `funding_twap: BTreeMap<MarketId, VecDeque<TwapSample>>`, `funding_index_twap: BTreeMap<MarketId, Price>`, `funding_source: FundingSourceKind` |
-| `operp-state` | same | `ChainState::apply_report`, `meta_leaf`, `leaves`, `prune_*` | signature change + TWAP update + funding formula switch |
-| `operp-state` | same | `StateError` | add `FundingTwapUnavailable` (optional debug) |
-| `operp-dag` | `crates/operp-dag/src/lib.rs` | `Op::ReportPrice`, `canonical_bytes` tag 6 | **no change in v1** (reuse same tag/bytes) |
-| `operp-dag` | same | `Op::UpdateExternalPrice` (tag 17) | **new, gated** — reserved for future multi-source; not required for v1 but specified here |
-| `operp-exec` | `crates/operp-exec/src/lib.rs` | `Engine::dispatch` `ReportPrice` arm, `Engine::apply_ready` ordering | pass `seq`/`height` into `apply_report`; wire `UpdateExternalPrice` when active |
-| `operp-settle` | `crates/operp-settle/src/lib.rs` | `Batch::validate_against` | no wire change — deterministic replay via updated `ChainState` |
-| `obyte-local` | `agents/operp_vault.aa` | — | **no change** — funding is sidechain-internal, not AA-verified |
-| tests | `crates/operp-state`, `crates/operp-exec` | `funding_*` tests | new |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | `FUNDING_CAP_BPS`, `PRICE_SCALE`, `MarketId`, `Price`, `Seq`, `Height` | keep; add `FUNDING_TWAP_WINDOW`, `FUNDING_TWAP_MIN_SAMPLES`, `FUNDING_SOURCE_KIND` |
+| `minuend-types` | same | `ParamKey` | optional gov extension `FundingTwapWindow` (append-only) |
+| `minuend-state` | `crates/minuend-state/src/lib.rs` | `ChainState { marks, last_index, oracle_reports, oracle_bonds, ... }` | add `funding_twap: BTreeMap<MarketId, VecDeque<TwapSample>>`, `funding_index_twap: BTreeMap<MarketId, Price>`, `funding_source: FundingSourceKind` |
+| `minuend-state` | same | `ChainState::apply_report`, `meta_leaf`, `leaves`, `prune_*` | signature change + TWAP update + funding formula switch |
+| `minuend-state` | same | `StateError` | add `FundingTwapUnavailable` (optional debug) |
+| `minuend-dag` | `crates/minuend-dag/src/lib.rs` | `Op::ReportPrice`, `canonical_bytes` tag 6 | **no change in v1** (reuse same tag/bytes) |
+| `minuend-dag` | same | `Op::UpdateExternalPrice` (tag 17) | **new, gated** — reserved for future multi-source; not required for v1 but specified here |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs` | `Engine::dispatch` `ReportPrice` arm, `Engine::apply_ready` ordering | pass `seq`/`height` into `apply_report`; wire `UpdateExternalPrice` when active |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs` | `Batch::validate_against` | no wire change — deterministic replay via updated `ChainState` |
+| `obyte-local` | `agents/minuend_vault.aa` | — | **no change** — funding is sidechain-internal, not AA-verified |
+| tests | `crates/minuend-state`, `crates/minuend-exec` | `funding_*` tests | new |
 
 Wire impact **v1 = zero**: `ReportPrice` keeps tag 6 and `account[32]||market_le4||price_le8` layout. New storage is sidechain-only and covered by `meta_leaf`. Feature-gated by `height >= FUNDING_TWAP_ACTIVATION_HEIGHT` so old batches replay byte-identical before activation.
 
@@ -56,7 +56,7 @@ Wire impact **v1 = zero**: `ReportPrice` keeps tag 6 and `account[32]||market_le
 
 Ship v1 now. It satisfies L2 "(a) funding index = TWAP(external) vs mark premium" where TWAP(external) ≈ TWAP(bonded-median) under honest reporters, and (b) abstraction is in place so v2 is an additive `FundingSourceKind` switch with no funding-settlement rewrite.
 
-### 2.2 New constants (`operp-types/src/lib.rs`)
+### 2.2 New constants (`minuend-types/src/lib.rs`)
 
 ```rust
 // Existing kept verbatim:
@@ -88,7 +88,7 @@ pub fn default_funding_config() -> FundingConfig { FundingConfig { twap_window: 
 
 Keep v1 global for minimality; per-market `BTreeMap<MarketId, FundingConfig>` can be added without migration — commit`ed via `meta_leaf`.
 
-### 2.3 New ChainState fields (`operp-state/src/lib.rs`)
+### 2.3 New ChainState fields (`minuend-state/src/lib.rs`)
 
 ```rust
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +220,7 @@ impl ChainState {
 
 ### 2.5 Funding formula change — the core delta
 
-Current (`operp-state/src/lib.rs:237-285`):
+Current (`minuend-state/src/lib.rs:237-285`):
 
 ```rust
 let index = median as i128;
@@ -334,7 +334,7 @@ mark (capped median ±10%) ◄────────────────�
 **Wire & storage for future `UpdateExternalPrice` (specified, not implemented v1):**
 
 ```rust
-// operp-dag/src/lib.rs — new tag 17, gated by funding_source == AggregatedExternal
+// minuend-dag/src/lib.rs — new tag 17, gated by funding_source == AggregatedExternal
 Op::UpdateExternalPrice {
     source: AccountId,   // keeper key, allowlisted
     market: MarketId,
@@ -346,7 +346,7 @@ Op::UpdateExternalPrice {
 
 `account_matches` enforces `source == sha256(pubkey)`. Exec intake checks `external_sources_allowlist.contains(&source)`. State writes `external_price_ring[market].push_back(ExternalSample{seq,height,price,source_id})`, caps at `twap_window`, recomputes `external_twap`.
 
-### 2.7 ChainState::apply_report signature & Engine wiring (`operp-exec`)
+### 2.7 ChainState::apply_report signature & Engine wiring (`minuend-exec`)
 
 Current:
 
@@ -363,7 +363,7 @@ pub fn apply_report(&mut self, oracle: AccountId, market: MarketId, price: Price
 
 `seq` is `self.state.seq` at dispatch time (before increment, consistent with `apply_one`'s `seq` passed to `place`). Alternatively `height` is also usable; `seq` chosen because it advances per applied unit and is already committed in `meta_leaf`, while `height` only advances at batch commit. Using `seq` gives finer TWAP granularity within a batch (multiple reports in same batch get distinct seqs).
 
-Engine change (`crates/operp-exec/src/lib.rs:185-201`):
+Engine change (`crates/minuend-exec/src/lib.rs:185-201`):
 
 ```rust
 Op::ReportPrice { oracle, market, price } => {
@@ -415,7 +415,7 @@ After `height >= ACTIVATION_HEIGHT`:
 
 ### 3.2 Test/E2E assertions (must be added; they are the acceptance proof)
 
-#### Unit test — `crates/operp-state/src/lib.rs::tests` (existing module already has `funding_transfers_long_to_short_and_conserves`)
+#### Unit test — `crates/minuend-state/src/lib.rs::tests` (existing module already has `funding_transfers_long_to_short_and_conserves`)
 
 ```rust
 #[test]
@@ -502,7 +502,7 @@ fn activation_gate_preserves_legacy_replay() {
 }
 ```
 
-#### Exec-level E2E — `crates/operp-exec/src/lib.rs` (via `Engine::ingest` signed units)
+#### Exec-level E2E — `crates/minuend-exec/src/lib.rs` (via `Engine::ingest` signed units)
 
 ```rust
 #[test]
@@ -524,7 +524,7 @@ fn e2e_report_price_funding_pays_via_twap() {
 * [ ] Two-phase peer-to-peer settlement unchanged (budget, clamp, BTree order, conservation <1 USD dust, insurance participates).
 * [ ] Mark cap ±10% still gates `marks`; funding premium reflects `mark - TWAP` divergence as specified.
 * [ ] New tests above pass, plus existing `funding_transfers_long_to_short_and_conserves` passes after activation with updated expectation (or is kept as `#[cfg(not(feature="twap"))]` legacy check).
-* [ ] No `crates/operp-dag` wire change; old fixtures verify before activation.
+* [ ] No `crates/minuend-dag` wire change; old fixtures verify before activation.
 * [ ] No AA change; vault proofs unaffected (`MAX_AA_TREE_DEPTH` intact).
 
 ---
@@ -533,7 +533,7 @@ fn e2e_report_price_funding_pays_via_twap() {
 
 ### 4.1 AA op-count / Oscript budget
 
-**Delta = 0.** Funding is sidechain-engine only. Vault AA (`obyte-local/agents/operp_vault.aa`) has no new branches, no new state vars, no new `reduce` depth. Oscript complexity budget (already exhausted per L9) not touched. No new `sha256(..., 'hex')` or sibling folds.
+**Delta = 0.** Funding is sidechain-engine only. Vault AA (`obyte-local/agents/minuend_vault.aa`) has no new branches, no new state vars, no new `reduce` depth. Oscript complexity budget (already exhausted per L9) not touched. No new `sha256(..., 'hex')` or sibling folds.
 
 ### 4.2 Runtime cost (sidechain)
 

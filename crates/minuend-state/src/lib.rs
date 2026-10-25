@@ -1,0 +1,2453 @@
+pub use minuend_account::Account;
+use minuend_book::{Fill, OrderBook};
+use minuend_types::{
+    bps, funding_notional_usd, funding_rate_bps, genesis_params, notional_usd, sha256, AccountId,
+    ExternalSample, FundingSourceKind, Height, MarketId, MarketParams, OracleConfig, Price,
+    ReportSample, Seq, TwapSample, UnitId, Usd, BTC_USD, FUNDING_EXTERNAL_MAX_STALENESS,
+    FUNDING_TWAP_MIN_SAMPLES, FUNDING_TWAP_WINDOW, INSURANCE_ACCOUNT, INSURANCE_SEED, PRICE_SCALE,
+    USD_SCALE,
+};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+pub mod journal;
+pub mod obyte_merkle;
+pub mod persist;
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Withdrawal {
+    pub amount: Usd,
+    pub pending: bool,
+    /// Batch height at which this withdrawal was signed in; drives the
+    /// 2048-height replay-protection window enforced by `prune_withdrawals`.
+    pub height: Height,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ChainState {
+    pub height: Height,
+    pub last_unit: UnitId,
+    pub seq: Seq,
+    pub accounts: BTreeMap<AccountId, Account>,
+    /// Per-market parameters (permissionless markets included). BTC_USD is
+    /// seeded at genesis; CreateMarket appends.
+    pub markets: BTreeMap<MarketId, MarketParams>,
+    /// Next market id to allocate (BTC_USD=1 is taken at genesis).
+    pub next_market_id: u32,
+    pub books: BTreeMap<MarketId, OrderBook>,
+    pub marks: BTreeMap<MarketId, Price>,
+    /// Latest report per (market, reporter). Only bonded reporters get in
+    /// (apply_report ignores everyone else).
+    pub oracle_reports: BTreeMap<(MarketId, AccountId), Price>,
+    /// PERP oracle bonds currently staked. Presence = reporting eligibility.
+    pub oracle_bonds: BTreeMap<AccountId, u128>,
+    /// Unclamped median of current reports — the funding-rate index.
+    pub last_index: BTreeMap<MarketId, Price>,
+    /// Sidechain-mirrored PERP balances (governance token).
+    pub perp_balances: BTreeMap<AccountId, u128>,
+    /// Redeemable circulating PERP = Σ deposits − withdrawals − burns.
+    pub perp_supply: u128,
+    /// Cumulative PERP burned (market listing fees, future slashes). The
+    /// real tokens stay escrowed in the vault AA forever — claimable
+    /// deflation; no on-chain sweep.
+    pub perp_burned: u128,
+    /// On-chain governance proposals keyed by id.
+    pub proposals: BTreeMap<u64, Proposal>,
+    /// Next proposal id to allocate.
+    pub next_proposal_id: u64,
+    pub withdrawals: BTreeMap<(AccountId, u64), Withdrawal>,
+    pub seen_aa_units: HashMap<[u8; 32], Height>,
+    pub seen_client_seq: HashMap<AccountId, u64>,
+    /// AA deposit events observed on-chain for the pending batch window,
+    /// keyed by (unit, is_perp): a unit endorsing USDC collateral and one
+    /// endorsing PERP are distinct entries. Deposit ops referencing units
+    /// outside this set are rejected.
+    pub deposits_allowed: HashSet<([u8; 32], bool)>,
+    /// Highest consumed GovWithdraw nonce per account: strict watermark —
+    /// nonces must be strictly increasing per account (`nonce <= watermark`
+    /// bounces). Bounded by the account count, unlike a spent-nonce set.
+    pub seen_gov_nonces: HashMap<AccountId, u64>,
+    /// Obyte withdrawal address bound to each account at its first deposit.
+    /// The AA-facing tree keys leaves by this address; unbound accounts are
+    /// not representable on the AA side and are excluded from it.
+    pub aa_addresses: BTreeMap<AccountId, String>,
+    /// Cumulative sidechain-signed withdrawal amount per account (i128 to
+    /// match Usd). Committed inside the binary account leaf as `W` so the
+    /// vault AA can enforce "this claim + prior claims <= W".
+    pub withdrawn_total: BTreeMap<AccountId, i128>,
+    /// Last finalized AA root (for salted ordering). Genesis = sha256(b"minuend-mvp-1-genesis").
+    pub last_finalized_root: [u8; 32],
+    pub last_finalized_height: Height,
+    // -----------------------------------------------------------------------
+    // Oracle bonding / TWAP / funding extension (Step5)
+    /// Per-market oracle config (empty = default).
+    pub oracle_configs: BTreeMap<MarketId, OracleConfig>,
+    /// Per (market, reporter) last-K price history for streak detection. Bounded at 8.
+    pub oracle_report_history: BTreeMap<(MarketId, AccountId), VecDeque<ReportSample>>,
+    /// Per-market median TWAP ring (oracle TWAP).
+    pub oracle_twap: BTreeMap<MarketId, VecDeque<TwapSample>>,
+    /// Per-market funding TWAP ring (funding index anchor) — v1 mirrors oracle_twap.
+    pub funding_twap: BTreeMap<MarketId, VecDeque<TwapSample>>,
+    /// Cached funding TWAP per market (mean of funding_twap).
+    pub funding_index_twap: BTreeMap<MarketId, Price>,
+    /// Funding source selector.
+    pub funding_source: FundingSourceKind,
+    /// Unbonding queue: reporter -> unlock height.
+    pub oracle_unbonding: BTreeMap<AccountId, Height>,
+    /// Slash nonce counter for replay/debug (committed in meta leaf).
+    pub oracle_slash_nonce: u64,
+    /// Pending commit-reveal commits keyed by commit hash (doc 03 §2.3.3).
+    pub commits: BTreeMap<[u8; 32], CommitEntry>,
+    /// External keeper price ring (doc 06 §2.3). Empty in BondedMedianTwap.
+    pub external_price_ring: BTreeMap<MarketId, VecDeque<ExternalSample>>,
+    /// Keeper accounts allowed to post `UpdateExternalPrice` (governed).
+    pub external_sources: BTreeSet<AccountId>,
+    /// Funding settlement clock per market. Non-peg markets store the
+    /// height of the last funding consideration (dedupe: pay once per
+    /// height); peg markets store their settlement-interval clock. Empty
+    /// means that market has never considered funding.
+    pub last_funding_height: BTreeMap<MarketId, Height>,
+    /// Deposit anchor units already credited, ever (#24): unlike
+    /// `seen_aa_units` this set is never pruned, so a payment whose dedup
+    /// entry fell out of the replay window still cannot credit twice.
+    /// Committed as one `dep:{hex}` leaf per unit in `leaves`, so a second
+    /// credit necessarily changes `state_root`.
+    pub consumed_deposits: HashSet<[u8; 32]>,
+}
+
+/// A registered commit-reveal commitment (doc 03 §2.3.3). `commit_unit`
+/// records the Commit unit's id so Reveal parent-edge enforcement (doc
+/// §2.3.4) can require the reveal to descend from its commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommitEntry {
+    pub account: AccountId,
+    pub commit_unit: UnitId,
+    pub commit_height: Height,
+    pub ttl_height: Height,
+    pub revealed: bool,
+}
+
+/// An open governance proposal. `deadline_seq` and the quorum denominator
+/// snapshot (`supply_at_create`) are fixed at creation so replayed batches
+/// finalize identically. Voting weight is the voter's PERP balance snapshotted
+/// at proposal creation (`weight_snapshot`); burning after creation cannot
+/// shrink a committed vote or dodge quorum.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Proposal {
+    pub creator: AccountId,
+    pub market: MarketId,
+    pub key: minuend_types::ParamKey,
+    pub value: u64,
+    pub created_seq: Seq,
+    pub deadline_seq: Seq,
+    pub supply_at_create: u128,
+    pub yes: u128,
+    pub no: u128,
+    pub voted: HashSet<AccountId>,
+    /// PERP balances cloned when the proposal was created; vote weights read
+    /// from here, never from live balances.
+    pub weight_snapshot: BTreeMap<AccountId, u128>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error("insufficient PERP balance")]
+    InsufficientPerp,
+    #[error("unknown market")]
+    UnknownMarket,
+    #[error("already bonded")]
+    AlreadyBonded,
+    #[error("not bonded")]
+    NotBonded,
+    #[error("unbonding")]
+    Unbonding,
+    #[error("slash not eligible")]
+    SlashNotEligible,
+    #[error("not found")]
+    NotFound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MerkleProof {
+    pub leaf: [u8; 32],
+    pub siblings: Vec<([u8; 32], bool)>,
+    pub root: [u8; 32],
+    pub account: AccountId,
+    pub collateral: Usd,
+    /// Mirrored PERP balance committed by the leaf.
+    pub perp: u128,
+    /// Cumulative withdrawn amount committed by the leaf (the AA-side `W`).
+    pub withdrawn: i128,
+    /// Realized PnL committed by the leaf; carried so `check_withdraw` can
+    /// recompute the exact leaf preimage from the proof alone.
+    pub realized_pnl: Usd,
+    /// Open positions committed by the leaf (qty, entry_price per market);
+    /// carried for the same leaf-preimage recomputation.
+    pub positions: BTreeMap<MarketId, (i64, Price)>,
+    /// Escrowed isolated margin committed by the leaf; carried for the
+    /// same leaf-preimage recomputation.
+    pub isolated_margin: BTreeMap<MarketId, Usd>,
+}
+
+impl Default for ChainState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl ChainState {
+    pub fn new() -> Self {
+        let mut books = BTreeMap::new();
+        books.insert(BTC_USD, OrderBook::new(BTC_USD));
+        let mut marks = BTreeMap::new();
+        marks.insert(BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let mut accounts = BTreeMap::new();
+        // Insurance fund seeded at genesis; absorbs bad debt and pays keepers.
+        let mut insurance = Account::new(INSURANCE_ACCOUNT);
+        insurance.collateral = INSURANCE_SEED;
+        accounts.insert(INSURANCE_ACCOUNT, insurance);
+        let mut markets = BTreeMap::new();
+        markets.insert(BTC_USD, genesis_params());
+        Self {
+            withdrawals: BTreeMap::new(),
+            height: 0,
+            last_unit: minuend_book_genesis(),
+            seq: 0,
+            accounts,
+            markets,
+            next_market_id: 2,
+            books,
+            marks,
+            oracle_reports: BTreeMap::new(),
+            oracle_bonds: BTreeMap::new(),
+            last_index: BTreeMap::new(),
+            perp_balances: BTreeMap::new(),
+            perp_supply: 0,
+            perp_burned: 0,
+            proposals: BTreeMap::new(),
+            commits: BTreeMap::new(),
+            external_price_ring: BTreeMap::new(),
+            external_sources: BTreeSet::new(),
+            last_funding_height: BTreeMap::new(),
+            next_proposal_id: 1,
+            seen_aa_units: HashMap::new(),
+            seen_client_seq: HashMap::new(),
+            deposits_allowed: HashSet::new(),
+            seen_gov_nonces: HashMap::new(),
+            aa_addresses: BTreeMap::new(),
+            withdrawn_total: BTreeMap::new(),
+            last_finalized_root: sha256(b"minuend-mvp-1-genesis"),
+            last_finalized_height: 0,
+            oracle_configs: BTreeMap::new(),
+            oracle_report_history: BTreeMap::new(),
+            oracle_twap: BTreeMap::new(),
+            funding_twap: BTreeMap::new(),
+            funding_index_twap: BTreeMap::new(),
+            funding_source: FundingSourceKind::default(),
+            oracle_unbonding: BTreeMap::new(),
+            oracle_slash_nonce: 0,
+            consumed_deposits: HashSet::new(),
+        }
+    }
+    /// General window prune (new path, activation-gated). Legacy wrappers below.
+    pub fn prune_withdrawals_at(&mut self, min_height: Height, window: u64) {
+        self.withdrawals
+            .retain(|_, w| w.height + window > min_height);
+    }
+    pub fn prune_aa_units_at(&mut self, min_height: Height, window: u64) {
+        self.seen_aa_units.retain(|_, h| *h + window > min_height);
+    }
+    pub fn prune_deposits_allowed_at(&mut self, min_height: Height, window: u64) {
+        let seen = &self.seen_aa_units;
+        self.deposits_allowed.retain(|(unit, _)| {
+            if let Some(h) = seen.get(unit) {
+                *h + window > min_height
+            } else {
+                false
+            }
+        });
+    }
+    /// Window prune (2048 from genesis, mainnet launch). Same `window` on
+    /// producer and replay keeps batch commits deterministic.
+    pub fn prune_withdrawals(&mut self, min_height: Height) {
+        self.prune_withdrawals_at(min_height, minuend_types::REPLAY_WINDOW);
+    }
+    /// Bounded-window cleanup for AA unit dedup: units observed at height
+    /// `h` expire once `min_height >= h + window`. Called at batch commit.
+    pub fn prune_aa_units(&mut self, min_height: Height) {
+        self.prune_aa_units_at(min_height, minuend_types::REPLAY_WINDOW);
+    }
+    pub fn prune_deposits_allowed(&mut self, min_height: Height) {
+        // Ensure aa_units pruned first so missing-seen means expired
+        self.prune_deposits_allowed_at(min_height, minuend_types::REPLAY_WINDOW);
+    }
+    pub fn note_finalized(&mut self, root: [u8; 32], height: Height) {
+        self.last_finalized_root = root;
+        self.last_finalized_height = height;
+    }
+
+    // -----------------------------------------------------------------------
+    // Oracle config / TWAP helpers
+    pub fn oracle_config(&self, market: MarketId) -> OracleConfig {
+        self.oracle_configs
+            .get(&market)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn record_twap_sample(&mut self, market: MarketId, median: Price, seq: Seq) {
+        let cfg = self.oracle_config(market);
+        let window_len = cfg.twap_window as usize;
+        // Cap window_len to max to avoid unbounded growth if governance mis-sets
+        let cap = window_len
+            .min(minuend_types::ORACLE_TWAP_MAX as usize)
+            .max(2);
+        let q = self.oracle_twap.entry(market).or_default();
+        if q.back().map(|s| s.height == self.height).unwrap_or(false) {
+            // Same height: overwrite median if different (multiple reporters same batch)
+            if q.back().unwrap().median != median {
+                let back = q.back_mut().unwrap();
+                back.median = median;
+                back.seq = seq;
+            } else {
+                return;
+            }
+        } else {
+            q.push_back(TwapSample {
+                seq,
+                height: self.height,
+                median,
+            });
+            while q.len() > cap {
+                q.pop_front();
+            }
+        }
+        // Mirror into funding_twap and cache funding_index_twap for effective_funding_index.
+        // Doc 06 §2.4: dedup same-height-same-median so multiple reporters in one batch
+        // don't double-count; a different median at the same height overwrites (last wins).
+        let fq = self.funding_twap.entry(market).or_default();
+        if fq.back().map(|s| s.height == self.height).unwrap_or(false) {
+            if fq.back().unwrap().median != median {
+                let back = fq.back_mut().unwrap();
+                back.median = median;
+                back.seq = seq;
+            }
+        } else {
+            fq.push_back(TwapSample {
+                seq,
+                height: self.height,
+                median,
+            });
+            while fq.len() > FUNDING_TWAP_WINDOW as usize {
+                fq.pop_front();
+            }
+        }
+        if let Some(twap) = self.compute_twap(market) {
+            self.funding_index_twap.insert(market, twap);
+        }
+        if let Some(ftwap) = self.compute_funding_twap(market) {
+            self.funding_index_twap.insert(market, ftwap);
+        }
+    }
+
+    /// Record an external keeper tick (doc 06 §2.6): allowlist + live-market +
+    /// positive-price gated by the caller; ring capped at the funding window.
+    pub fn apply_external_price(
+        &mut self,
+        _source: AccountId,
+        market: MarketId,
+        price: Price,
+        source_id: u8,
+        seq: Seq,
+    ) {
+        let q = self.external_price_ring.entry(market).or_default();
+        q.push_back(ExternalSample {
+            seq,
+            height: self.height,
+            price,
+            source_id,
+        });
+        while q.len() > FUNDING_TWAP_WINDOW as usize {
+            q.pop_front();
+        }
+    }
+
+    /// Latest external ring sample that is still fresh at the current
+    /// height and non-zero. Used as the peg payment index — a dead feed
+    /// means the window pays nothing, never a stale or zero index.
+    pub fn fresh_external_index(&self, market: MarketId) -> Option<Price> {
+        let q = self.external_price_ring.get(&market)?;
+        q.iter()
+            .rev()
+            .find(|s| s.height + FUNDING_EXTERNAL_MAX_STALENESS > self.height && s.price != 0)
+            .map(|s| s.price)
+    }
+
+    /// TWAP over the external keeper ring (doc 06 §2.6 rule 2): requires
+    /// MIN_SAMPLES and freshness within FUNDING_EXTERNAL_MAX_STALENESS so a
+    /// dead feed falls back instead of freezing funding.
+    pub fn external_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.external_price_ring.get(&market)?;
+        if q.len() < FUNDING_TWAP_MIN_SAMPLES {
+            return None;
+        }
+        let last = q.back()?;
+        if last.height + FUNDING_EXTERNAL_MAX_STALENESS <= self.height {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.price), q.len())
+    }
+
+    /// Bounded cleanup for expired commit-reveal commitments: entries whose
+    /// reveal deadline has passed are dropped at batch commit (doc 03 §2.3.3
+    /// rule 4). Length is additionally bounded by the per-account cap.
+    pub fn prune_commits(&mut self, min_height: Height) {
+        self.commits.retain(|_, e| e.ttl_height >= min_height);
+    }
+
+    /// Signed mean over at most `FUNDING_TWAP_WINDOW` `i64` samples. The
+    /// `i128` sum cannot overflow (window cap 1800); `try_from` is only the
+    /// backstop. Returns `None` on `n == 0` or an impossible conversion —
+    /// never panics, never substitutes `0`.
+    fn mean_price(samples: impl Iterator<Item = i64>, n: usize) -> Option<Price> {
+        if n == 0 {
+            return None;
+        }
+        let sum: i128 = samples.map(i128::from).sum();
+        i64::try_from(sum / n as i128).ok()
+    }
+
+    /// Mark must stay within ±10% of the funding index (the external
+    /// anchor): anchor 0 means no index exists, so nothing to anchor to.
+    fn within_band(candidate: Price, anchor: Price) -> bool {
+        anchor == 0
+            || (i128::from(candidate) - i128::from(anchor)).abs() <= i128::from(anchor).abs() / 10
+    }
+
+    pub fn compute_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.oracle_twap.get(&market)?;
+        if q.len() < 2 {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.median), q.len())
+    }
+
+    pub fn compute_funding_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.funding_twap.get(&market)?;
+        if q.len() < 2 {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.median), q.len())
+    }
+    pub fn effective_funding_index(&self, market: MarketId, median: Price) -> Price {
+        match self.funding_source {
+            FundingSourceKind::BondedMedianTwap => self
+                .funding_index_twap
+                .get(&market)
+                .copied()
+                .unwrap_or(median),
+            FundingSourceKind::AggregatedExternal => {
+                // Doc 06 §2.6 rule 1: external TWAP overrides when fresh and
+                // populated; else fall back to bonded-median TWAP, then the
+                // instant median — funding never freezes.
+                self.external_twap(market).unwrap_or_else(|| {
+                    self.funding_index_twap
+                        .get(&market)
+                        .copied()
+                        .unwrap_or(median)
+                })
+            }
+        }
+    }
+
+    pub fn recompute_median(&self, market: MarketId) -> Option<Price> {
+        let mut prices: Vec<Price> = self
+            .oracle_reports
+            .iter()
+            .filter(|((m, o), _)| *m == market && self.oracle_bonds.contains_key(o))
+            .map(|(_, p)| *p)
+            .collect();
+        if prices.is_empty() {
+            return None;
+        }
+        prices.sort();
+        Some(prices[(prices.len() - 1) / 2])
+    }
+
+    // -----------------------------------------------------------------------
+    // Bonding / unbonding / slashing (height-gated by caller; state helpers assume bonded checks passed)
+    pub fn apply_stake(&mut self, account: AccountId) -> Result<(), StateError> {
+        // Caller gates height; here enforce bond invariants
+        if self.oracle_bonds.contains_key(&account) {
+            return Err(StateError::AlreadyBonded);
+        }
+        if self.oracle_unbonding.contains_key(&account) {
+            return Err(StateError::Unbonding);
+        }
+        let bal = self.perp_balances.get(&account).copied().unwrap_or(0);
+        if bal < minuend_types::ORACLE_BOND_PERP {
+            return Err(StateError::InsufficientPerp);
+        }
+        self.perp_balances
+            .insert(account, bal - minuend_types::ORACLE_BOND_PERP);
+        self.perp_supply = self.perp_supply.saturating_sub(0); // supply unchanged: bond locked, not burned
+        self.oracle_bonds
+            .insert(account, minuend_types::ORACLE_BOND_PERP);
+        Ok(())
+    }
+
+    pub fn apply_unstake(&mut self, account: AccountId) -> Result<(), StateError> {
+        if !self.oracle_bonds.contains_key(&account) {
+            return Err(StateError::NotBonded);
+        }
+        if self.oracle_unbonding.contains_key(&account) {
+            return Err(StateError::Unbonding);
+        }
+        let unlock = self
+            .height
+            .saturating_add(minuend_types::ORACLE_UNBOND_HEIGHTS);
+        self.oracle_unbonding.insert(account, unlock);
+        Ok(())
+    }
+
+    pub fn apply_slash(
+        &mut self,
+        challenger: AccountId,
+        target: AccountId,
+        market: MarketId,
+    ) -> Result<(), StateError> {
+        if !self.markets.contains_key(&market) {
+            return Err(StateError::NotFound);
+        }
+        if !self.oracle_bonds.contains_key(&target) {
+            return Err(StateError::NotBonded);
+        }
+        // Need TWAP - use compute_twap or funding twap
+        let twap = self
+            .compute_twap(market)
+            .or_else(|| self.compute_funding_twap(market))
+            .ok_or(StateError::SlashNotEligible)?;
+        if twap == 0 {
+            return Err(StateError::SlashNotEligible);
+        }
+        let hist = self
+            .oracle_report_history
+            .get(&(market, target))
+            .ok_or(StateError::SlashNotEligible)?;
+        if hist.len() < minuend_types::SLASH_TWAP_STREAK as usize {
+            return Err(StateError::SlashNotEligible);
+        }
+        // Check last N reports are consecutive heights and all deviate > threshold
+        let n = minuend_types::SLASH_TWAP_STREAK as usize;
+        let start = hist.len() - n;
+        let cfg = self.oracle_config(market);
+        let deviation_bps = cfg.deviation_bps;
+        // Also enforce window 256: last report height within window
+        let latest_height = hist.back().map(|s| s.height).unwrap_or(0);
+        if self.height.saturating_sub(latest_height) > 256 {
+            return Err(StateError::SlashNotEligible);
+        }
+        for i in 0..n {
+            let idx = start + i;
+            let sample = hist[idx];
+            if i > 0 {
+                let prev = hist[idx - 1];
+                if sample.height != prev.height + 1 {
+                    // Require consecutive heights; gaps make streak invalid
+                    return Err(StateError::SlashNotEligible);
+                }
+            }
+            // Magnitude on both sides: a negative TWAP must not flip the
+            // sign (or wrap the `as u64`) of the deviation measure.
+            let dev = ((sample.price as i128 - twap as i128).abs() * 10_000 / (twap as i128).abs())
+                as u64;
+            if dev < deviation_bps {
+                return Err(StateError::SlashNotEligible);
+            }
+        }
+        // Eligible: execute slash — burn half, reward half
+        let bond = self
+            .oracle_bonds
+            .remove(&target)
+            .unwrap_or(minuend_types::ORACLE_BOND_PERP);
+        self.oracle_unbonding.remove(&target);
+        self.oracle_reports.remove(&(market, target));
+        self.oracle_report_history.remove(&(market, target));
+        let burn = bond * (minuend_types::SLASH_REWARD_BPS as u128) / 10_000;
+        let reward = bond.saturating_sub(burn);
+        self.perp_burned = self.perp_burned.saturating_add(burn);
+        if self.perp_supply >= burn {
+            self.perp_supply = self.perp_supply.saturating_sub(burn);
+        }
+        let challenger_bal = self.perp_balances.get(&challenger).copied().unwrap_or(0);
+        self.perp_balances
+            .insert(challenger, challenger_bal.saturating_add(reward));
+        self.oracle_slash_nonce = self.oracle_slash_nonce.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn prune_oracle_unbonding(&mut self, current_height: Height) {
+        let mut to_release = Vec::new();
+        for (acct, unlock) in &self.oracle_unbonding {
+            if *unlock <= current_height {
+                to_release.push(*acct);
+            }
+        }
+        for acct in to_release {
+            self.oracle_unbonding.remove(&acct);
+            if let Some(bond) = self.oracle_bonds.remove(&acct) {
+                let bal = self.perp_balances.get(&acct).copied().unwrap_or(0);
+                self.perp_balances.insert(acct, bal.saturating_add(bond));
+                self.oracle_reports.retain(|(_, o), _| *o != acct);
+                self.oracle_report_history.retain(|(_, o), _| *o != acct);
+            }
+        }
+    }
+
+    pub fn prune_oracle_twap(&mut self, _min_height: Height) {
+        // TWAP is bounded by VecDeque length cap, not height expiry; no-op for v1
+    }
+
+    /// Apply a bonded oracle's report for `market` and recompute the effective
+    /// mark as the median of all current bonded reporters, subject to the
+    /// ±10% deviation cap vs the previous mark (the first report for a market
+    /// sets the mark unconditionally). Fills no longer move the mark for
+    /// markets where any bonded reporter has spoken. Zero prices and unbonded
+    /// reporters are ignored defensively — the exec layer pre-validates bonds.
+    pub fn apply_report(
+        &mut self,
+        oracle: AccountId,
+        market: MarketId,
+        price: Price,
+        caller_seq: Seq,
+    ) -> Result<(), StateError> {
+        if price == 0 || !self.oracle_bonds.contains_key(&oracle) {
+            return Ok(());
+        }
+        self.oracle_reports.insert((market, oracle), price);
+        // Record per-reporter history for slash streak detection (depth 8)
+        {
+            let q = self
+                .oracle_report_history
+                .entry((market, oracle))
+                .or_default();
+            // Push new sample; dedup same height by overwriting last
+            if q.back().map(|s| s.height == self.height).unwrap_or(false) {
+                if let Some(back) = q.back_mut() {
+                    back.price = price;
+                    back.seq = self.seq;
+                }
+            } else {
+                q.push_back(ReportSample {
+                    height: self.height,
+                    price,
+                    seq: self.seq,
+                });
+                while q.len() > 8 {
+                    q.pop_front();
+                }
+            }
+        }
+        // Median over reporters that hold BOTH a bond and a current report
+        // for this market. sorted[(len-1)/2] is the exact middle when the
+        // count is odd and the smaller middle when even — deterministic in
+        // both cases, no rounding drift.
+        let mut prices: Vec<Price> = self
+            .oracle_reports
+            .iter()
+            .filter(|((m, o), _)| *m == market && self.oracle_bonds.contains_key(o))
+            .map(|(_, p)| *p)
+            .collect();
+        if prices.is_empty() {
+            return Ok(());
+        }
+        prices.sort();
+        let median = prices[(prices.len() - 1) / 2];
+        // Funding index: unclamped median, so the premium reflects true
+        // reporter consensus even while the spot mark lags behind the cap.
+        self.last_index.insert(market, median);
+        // Funding-rate markets: the oracle writes the index only. The mark
+        // comes from fills, so the ±10% band and the premium block are
+        // skipped; funding settles as the peg instead. The TWAP ring is
+        // still recorded so slash sees the reporter's sample.
+        if self
+            .markets
+            .get(&market)
+            .map(|p| p.funding_rate)
+            .unwrap_or(false)
+        {
+            self.record_twap_sample(market, median, caller_seq);
+            self.settle_funding_peg(market);
+            return Ok(());
+        }
+        // Signed marks: the ±10% band is measured on the old mark's
+        // magnitude, so a negative mark can still move by capped steps.
+        let mut capped = match self.marks.get(&market) {
+            Some(&old) if old != 0 => {
+                let dev = (median as i128 - old as i128).abs();
+                if dev <= (old as i128).abs() / 10 {
+                    median
+                } else {
+                    old
+                }
+            }
+            _ => median,
+        };
+        // Index band: a median outside ±10% of the funding index must not
+        // become the mark. Keep the previous mark if one exists (do not
+        // walk a legacy out-of-band mark toward the index); with no mark,
+        // bootstrap directly to the index rather than the out-of-band
+        // median.
+        let index = self.effective_funding_index(market, median);
+        if index != 0 && !Self::within_band(capped, index) {
+            capped = self
+                .marks
+                .get(&market)
+                .copied()
+                .filter(|p| *p != 0)
+                .unwrap_or(index);
+        }
+        self.marks.insert(market, capped);
+        // Record TWAP sample after median update
+        self.record_twap_sample(market, median, caller_seq);
+        // Funding: once at least two valid reports exist, every report tick
+        // settles peer-to-peer funding.
+        // premium_bps = (spot − funding_index)/funding_index, clamped to ±FUNDING_CAP_BPS.
+        // funding_index = twap when height >= activation else median.
+        // notional = signed_notional_usd(qty, funding_index)
+        if prices.len() >= 2 {
+            let funding_index = self.effective_funding_index(market, median);
+            let index = funding_index as i128;
+            let spot = capped as i128;
+            if index != 0 {
+                // Pay at most once per height: reporters report in batch at
+                // the same height, and a non-zero premium must not transfer
+                // again for every report tick at that height.
+                if self.last_funding_height.get(&market) != Some(&self.height) {
+                    let diff_bps = ((spot - index) * 10_000 / index).clamp(
+                        -(minuend_types::FUNDING_CAP_BPS as i128),
+                        minuend_types::FUNDING_CAP_BPS as i128,
+                    );
+                    if diff_bps != 0 {
+                        self.transfer_funding(market, funding_index, diff_bps);
+                    }
+                    // Record consideration even when diff_bps == 0: a later
+                    // report at this height must not pay either.
+                    self.last_funding_height.insert(market, self.height);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Two-phase peer-to-peer funding transfer: Phase 1 collects signed
+    /// payments in ascending AccountId order, Phase 2a debits payers clamped
+    /// at non-negative collateral into a budget, Phase 2b credits receivers
+    /// until the budget is spent. Conservation is exact; insurance
+    /// participates like any account.
+    fn transfer_funding(&mut self, market: MarketId, funding_index: Price, diff_bps: i128) {
+        // Phase 1: signed payments in ascending AccountId order.
+        let payments: Vec<(AccountId, i128)> = self
+            .accounts
+            .iter()
+            .filter_map(|(id, a)| {
+                a.positions.get(&market).map(|pos| {
+                    (
+                        *id,
+                        minuend_types::signed_notional_usd(pos.qty, funding_index) * diff_bps
+                            / 10_000,
+                    )
+                })
+            })
+            .filter(|(_, p)| *p != 0)
+            .collect();
+        // Phase 2a: debit payers, clamped at non-negative collateral.
+        let mut budget: i128 = 0;
+        for (id, payment) in &payments {
+            if *payment <= 0 {
+                continue;
+            }
+            if let Some(a) = self.accounts.get_mut(id) {
+                let debit = (*payment).min(a.collateral.max(0));
+                a.collateral -= debit;
+                budget += debit;
+            }
+        }
+        // Phase 2b: credit receivers until the budget is spent.
+        for (id, payment) in &payments {
+            if budget == 0 {
+                break;
+            }
+            if *payment >= 0 {
+                continue;
+            }
+            let want = -*payment;
+            let credit = want.min(budget);
+            if let Some(a) = self.accounts.get_mut(id) {
+                a.collateral += credit;
+            }
+            budget -= credit;
+        }
+    }
+
+    /// Funding-rate peg settlement for a `funding_rate` market:
+    /// - needs a non-zero fill-written mark, else no-op (clock untouched);
+    /// - the first observation arms `last_funding_height` and pays nothing
+    ///   (no reporters and no external print required to arm);
+    /// - windows at least `FUNDING_PEG_INTERVAL_HEIGHTS` after the armed
+    ///   height always re-arm; payment happens only when a fresh external
+    ///   print exists — no fresh print means that window pays nothing;
+    /// - diff is `mark rate − index rate`, clamped to the market's
+    ///   `funding_cap_bps`, then paid rate-cash peer-to-peer.
+    pub fn settle_funding_peg(&mut self, market: MarketId) {
+        let mark = match self.marks.get(&market).copied() {
+            Some(m) if m != 0 => m,
+            _ => return,
+        };
+        let height = self.height;
+        match self.last_funding_height.get(&market).copied() {
+            // Not armed: arm the interval clock, pay nothing.
+            None => {
+                self.last_funding_height.insert(market, height);
+                return;
+            }
+            Some(last) if height < last + minuend_types::FUNDING_PEG_INTERVAL_HEIGHTS => {
+                return;
+            }
+            _ => {}
+        }
+        // Window elapsed: re-arm unconditionally, even with no fresh feed.
+        self.last_funding_height.insert(market, height);
+        let index = match self.fresh_external_index(market) {
+            Some(i) => i,
+            None => return,
+        };
+        let cap = self
+            .markets
+            .get(&market)
+            .map(|p| p.funding_cap_bps)
+            .unwrap_or(0) as i64;
+        if cap == 0 {
+            return;
+        }
+        let diff_bps = (funding_rate_bps(mark) - funding_rate_bps(index)).clamp(-cap, cap);
+        if diff_bps != 0 {
+            self.transfer_funding_rate(market, diff_bps);
+        }
+    }
+
+    /// Rate-cash sibling of `transfer_funding`: same two-phase debit/credit
+    /// conservation, but each payment is `funding_rate_cash(qty, diff_bps,
+    /// usd_per_unit)` of the market's listing-time multiplier.
+    fn transfer_funding_rate(&mut self, market: MarketId, diff_bps: i64) {
+        let usd = match self.markets.get(&market) {
+            Some(p) if p.funding_rate => p.usd_per_unit,
+            _ => return,
+        };
+        // Phase 1: signed payments in ascending AccountId order.
+        let payments: Vec<(AccountId, i128)> = self
+            .accounts
+            .iter()
+            .filter_map(|(id, a)| {
+                a.positions.get(&market).map(|pos| {
+                    (
+                        *id,
+                        minuend_types::funding_rate_cash(pos.qty, diff_bps, usd),
+                    )
+                })
+            })
+            .filter(|(_, p)| *p != 0)
+            .collect();
+        // Phase 2a: debit payers, clamped at non-negative collateral.
+        let mut budget: i128 = 0;
+        for (id, payment) in &payments {
+            if *payment <= 0 {
+                continue;
+            }
+            if let Some(a) = self.accounts.get_mut(id) {
+                let debit = (*payment).min(a.collateral.max(0));
+                a.collateral -= debit;
+                budget += debit;
+            }
+        }
+        // Phase 2b: credit receivers until the budget is spent.
+        for (id, payment) in &payments {
+            if budget == 0 {
+                break;
+            }
+            if *payment >= 0 {
+                continue;
+            }
+            let want = -*payment;
+            let credit = want.min(budget);
+            if let Some(a) = self.accounts.get_mut(id) {
+                a.collateral += credit;
+            }
+            budget -= credit;
+        }
+    }
+
+    pub fn book_mut(&mut self, market: MarketId) -> &mut OrderBook {
+        self.books
+            .entry(market)
+            .or_insert_with(|| OrderBook::new(market))
+    }
+
+    pub fn account_mut(&mut self, id: AccountId) -> &mut Account {
+        self.accounts.entry(id).or_insert_with(|| Account::new(id))
+    }
+
+    pub fn apply_fill_pair(&mut self, fill: &Fill) -> Result<(), minuend_account::AccountError> {
+        // A spot_only market has no price-oracle path, so its mark freezes at
+        // the first qualifying fill: equity, margin and liquidation are then
+        // priced against a stale mark and leveraged losses escape both. New
+        // listings must be full-collateral (`risk_params_ok`); this guards
+        // pre-existing leveraged listings by refusing to trade them at all.
+        if let Some(p) = self.markets.get(&fill.market) {
+            if p.spot_only && p.im_bps != 10_000 {
+                return Err(minuend_account::AccountError::Risk);
+            }
+        }
+        let funding_usd = self
+            .markets
+            .get(&fill.market)
+            .filter(|p| p.funding_rate)
+            .map(|p| p.usd_per_unit);
+        // Stage both account transitions before writing either one back. In
+        // particular, a maker-side overflow must not leave the taker applied.
+        let mut taker = self
+            .accounts
+            .get(&fill.taker)
+            .cloned()
+            .unwrap_or_else(|| Account::new(fill.taker));
+        taker.apply_fill(
+            fill.taker_side,
+            true,
+            fill.price,
+            fill.qty,
+            fill.market,
+            funding_usd,
+            fill.taker_post,
+            fill.taker_isolated,
+        )?;
+        if fill.taker == fill.maker {
+            taker.apply_fill(
+                fill.taker_side.opposite(),
+                false,
+                fill.price,
+                fill.qty,
+                fill.market,
+                funding_usd,
+                fill.maker_post,
+                fill.maker_isolated,
+            )?;
+            self.accounts.insert(fill.taker, taker);
+        } else {
+            let mut maker = self
+                .accounts
+                .get(&fill.maker)
+                .cloned()
+                .unwrap_or_else(|| Account::new(fill.maker));
+            maker.apply_fill(
+                fill.taker_side.opposite(),
+                false,
+                fill.price,
+                fill.qty,
+                fill.market,
+                funding_usd,
+                fill.maker_post,
+                fill.maker_isolated,
+            )?;
+            self.accounts.insert(fill.taker, taker);
+            self.accounts.insert(fill.maker, maker);
+        }
+        // Taker fee: bps of notional debited from the taker's collateral and
+        // credited to the insurance fund — the fund's income leg, offsetting
+        // bad-debt absorption and keeper payouts. The fee flows through the
+        // same Account::apply_fill path the withdrawal-proof leaf commits.
+        // The rate is a per-market parameter since permissionless listing.
+        // Funding-rate markets charge it on the multiplier notional: their
+        // encoded price is a rate, not dollars.
+        // #37-16: kind 2 (ADL transfer, not a trade) pays no taker fee —
+        // the fill AA models kind 2 with fee 0, and charging here would
+        // drift honest ADL collateral off the provable identity.
+        if fill.taker != INSURANCE_ACCOUNT && fill.kind != 2 {
+            let params = self.market_params(fill.market);
+            let notional = match funding_usd {
+                Some(usd) => funding_notional_usd(fill.qty, usd),
+                None => notional_usd(fill.qty, fill.price),
+            };
+            let fee = bps(notional, params.taker_fee_bps);
+            if fee > 0 {
+                if let Some(a) = self.accounts.get_mut(&fill.taker) {
+                    a.collateral -= fee;
+                }
+                self.account_mut(INSURANCE_ACCOUNT).collateral += fee;
+            }
+        }
+        // Insurance never pays a trading loss. A party whose collateral went
+        // negative in this fill claws back from the counterparty, capped at
+        // what the counterparty can pay: a zero-sum transfer between the two
+        // fill parties only. No snapshot equity is read — only this fill's
+        // collateral deficit counts, so the amount does not depend on other
+        // positions — and insurance is never debited (it is neither clawed
+        // from nor clawed into). Whatever the claw cannot cover stays as
+        // negative collateral on the loser and is never printed.
+        for party in [fill.taker, fill.maker] {
+            if party == INSURANCE_ACCOUNT {
+                continue;
+            }
+            let counterparty = if party == fill.taker {
+                fill.maker
+            } else {
+                fill.taker
+            };
+            // Insurance never funds a user's loss.
+            if counterparty == INSURANCE_ACCOUNT {
+                continue;
+            }
+            let pay = match (self.accounts.get(&party), self.accounts.get(&counterparty)) {
+                (Some(p), Some(cp)) if p.collateral < 0 => {
+                    (-p.collateral).min(cp.collateral.max(0))
+                }
+                _ => 0,
+            };
+            if pay > 0 {
+                if let Some(a) = self.accounts.get_mut(&party) {
+                    a.collateral += pay;
+                }
+                if let Some(a) = self.accounts.get_mut(&counterparty) {
+                    a.collateral -= pay;
+                }
+            }
+        }
+        // Funding-rate markets: fills are the mark source. Guards: the
+        // notional must be >= 100 USD (dust cannot move the peg) and the
+        // printed rate must step from the current anchor — bootstrapping
+        // from the index, then ≤10% of the old rate (min 1 bps) per fill.
+        if let Some(usd) = funding_usd {
+            let cap = self
+                .markets
+                .get(&fill.market)
+                .map(|p| p.funding_cap_bps)
+                .unwrap_or(0) as i64;
+            // The $100 gate prices the fill at the multiplier notional: the
+            // encoded rate price carries no dollar scale on this market.
+            let notional_ok = funding_notional_usd(fill.qty, usd).abs() >= 100 * USD_SCALE as i128;
+            if !notional_ok {
+                return Ok(());
+            }
+            let old = self.marks.get(&fill.market).copied().unwrap_or(0);
+            let step_ok = if old != 0 {
+                let step = (funding_rate_bps(old).unsigned_abs() / 10).max(1) as i64;
+                (funding_rate_bps(fill.price) - funding_rate_bps(old)).abs() <= step
+            } else {
+                // Bootstrap: anchor the first print to the fresh external
+                // index, gap capped at this market's peg cap.
+                match self.fresh_external_index(fill.market) {
+                    Some(index) => {
+                        (funding_rate_bps(fill.price) - funding_rate_bps(index)).abs() <= cap
+                    }
+                    _ => false,
+                }
+            };
+            if step_ok {
+                self.marks.insert(fill.market, fill.price);
+                // The mark just moved: re-evaluate the peg so its interval
+                // clock arms as soon as index + mark + fresh reports exist.
+                self.settle_funding_peg(fill.market);
+            }
+            return Ok(());
+        }
+        // Mark oracle guards: fills move the mark only for markets where NO
+        // bonded reporter has spoken yet (oracles are authoritative once
+        // present), the notional magnitude is >= 100 USD, and the move is within ±10%
+        // of the previous mark (first qualifying fill sets unconditionally).
+        if notional_usd(fill.qty, fill.price).abs() >= 100 * USD_SCALE as i128
+            && !self
+                .oracle_reports
+                .keys()
+                .any(|(m, o)| *m == fill.market && self.oracle_bonds.contains_key(o))
+        {
+            // Unoracled freeze: the first qualifying fill sets the mark
+            // unconditionally, but once a non-zero mark exists only a real
+            // reporter index (`last_index`) may keep it moving — otherwise
+            // every trade walks the mark ±10% with no external anchor.
+            let has_index = self
+                .last_index
+                .get(&fill.market)
+                .map(|i| *i != 0)
+                .unwrap_or(false);
+            let existing = self.marks.get(&fill.market).copied().unwrap_or(0);
+            if existing == 0 || has_index {
+                let capped = match existing {
+                    old if old != 0 => {
+                        let dev = (fill.price as i128 - old as i128).abs();
+                        if dev <= (old as i128).abs() / 10 {
+                            fill.price
+                        } else {
+                            old
+                        }
+                    }
+                    _ => fill.price,
+                };
+                self.marks.insert(fill.market, capped);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn leaves(&self) -> Vec<[u8; 32]> {
+        let mut leaves = Vec::new();
+        for acct in self.accounts.values() {
+            let perp = self.perp_balances.get(&acct.id).copied().unwrap_or(0);
+            let withdrawn = self.withdrawn_total.get(&acct.id).copied().unwrap_or(0);
+            leaves.push(account_leaf(acct, perp, withdrawn));
+        }
+        for book in self.books.values() {
+            leaves.push(book_leaf(book, &self.markets));
+        }
+        leaves.push(meta_leaf(self));
+        // Permanently-consumed deposit anchors (#24): one leaf per unit so
+        // a replayed credit changes state_root. Sorted for a deterministic
+        // leaves() vector (merkle_root sorts again regardless).
+        let mut deps: Vec<[u8; 32]> = self
+            .consumed_deposits
+            .iter()
+            .map(|u| {
+                let mut preimage = b"dep".to_vec();
+                preimage.extend_from_slice(u);
+                sha256(&preimage)
+            })
+            .collect();
+        deps.sort();
+        leaves.extend(deps);
+        leaves
+    }
+
+    pub fn state_root(&self) -> [u8; 32] {
+        merkle_root(self.leaves())
+    }
+    pub fn account_proof(&self, id: AccountId) -> MerkleProof {
+        let acct = self
+            .accounts
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| Account::new(id));
+        let perp = self.perp_balances.get(&id).copied().unwrap_or(0);
+        let withdrawn = self.withdrawn_total.get(&id).copied().unwrap_or(0);
+        let leaf = account_leaf(&acct, perp, withdrawn);
+        let leaves = self.leaves();
+        let (siblings, root) = merkle_proof_for(leaves, leaf);
+        MerkleProof {
+            leaf,
+            siblings,
+            root,
+            account: id,
+            collateral: acct.collateral,
+            perp,
+            withdrawn,
+            realized_pnl: acct.realized_pnl,
+            positions: acct
+                .positions
+                .values()
+                .map(|p| (p.market, (p.qty, p.entry_price)))
+                .collect(),
+            isolated_margin: acct.isolated_margin.clone(),
+        }
+    }
+
+    /// PERP balance of `who` (0 when the account never deposited).
+    pub fn perp_balance(&self, who: AccountId) -> u128 {
+        self.perp_balances.get(&who).copied().unwrap_or(0)
+    }
+
+    /// Params snapshot for `m`; panics on unknown markets, which cannot
+    /// exist for markets created at genesis or via CreateMarket, which exec
+    /// guarantees before reaching any state path that needs params.
+    pub fn market_params(&self, m: MarketId) -> MarketParams {
+        self.markets[&m]
+    }
+}
+
+pub fn account_leaf(acct: &Account, perp: u128, withdrawn: i128) -> [u8; 32] {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"acct");
+    b.extend_from_slice(&acct.id.0);
+    b.extend_from_slice(&acct.collateral.to_le_bytes());
+    b.extend_from_slice(&acct.realized_pnl.to_le_bytes());
+    b.extend_from_slice(&(acct.positions.len() as u32).to_le_bytes());
+    for (m, p) in &acct.positions {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&p.qty.to_le_bytes());
+        b.extend_from_slice(&p.entry_price.to_le_bytes());
+    }
+    // Escrowed isolated margin per market (BTreeMap order): money outside
+    // `collateral` that backs isolated positions — without it the leaf
+    // would understate the account's committed assets.
+    b.extend_from_slice(&(acct.isolated_margin.len() as u32).to_le_bytes());
+    for (m, margin) in &acct.isolated_margin {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&margin.to_le_bytes());
+    }
+    // Mirrored PERP balance: the vault AA's hex-domain leaf commits the same
+    // triple (address, collateral, perp), so both trees cover PERP claims.
+    b.extend_from_slice(&perp.to_le_bytes());
+    // Cumulative sidechain-signed withdrawals (W): committing it lets the
+    // vault AA enforce "this claim + prior claims <= W" against replay.
+    b.extend_from_slice(&withdrawn.to_le_bytes());
+    sha256(&b)
+}
+
+/// Fixed-width per-market params encoding committed by the book leaf:
+/// symbol[16] || tick le8 || im le8 || mm le8 || taker_fee le8 ||
+/// keeper_reward le8 || delisted byte || spot_only byte || funding_rate byte
+/// || usd_per_unit le8 || funding_cap_bps le8 — 75 bytes total.
+/// Books are created lazily only for markets that already have params.
+fn market_params_bytes(p: &MarketParams) -> [u8; 75] {
+    let mut b = [0u8; 75];
+    b[..16].copy_from_slice(&p.symbol);
+    b[16..24].copy_from_slice(&p.tick_size.to_le_bytes());
+    b[24..32].copy_from_slice(&p.im_bps.to_le_bytes());
+    b[32..40].copy_from_slice(&p.mm_bps.to_le_bytes());
+    b[40..48].copy_from_slice(&p.taker_fee_bps.to_le_bytes());
+    b[48..56].copy_from_slice(&p.keeper_reward_bps.to_le_bytes());
+    b[56] = p.delisted as u8;
+    b[57] = p.spot_only as u8;
+    b[58] = p.funding_rate as u8;
+    b[59..67].copy_from_slice(&p.usd_per_unit.to_le_bytes());
+    b[67..75].copy_from_slice(&p.funding_cap_bps.to_le_bytes());
+    b
+}
+
+fn book_leaf(book: &OrderBook, markets: &BTreeMap<MarketId, MarketParams>) -> [u8; 32] {
+    // Full-book commitment: every level and every live order (see
+    // OrderBook::commitment_bytes), not just best bid/ask/count — prefixed
+    // with the market's params so the root also commits governance state.
+    let p = markets
+        .get(&book.market())
+        .unwrap_or_else(|| panic!("book without params for market {}", book.market().0));
+    let mut b = Vec::with_capacity(75 + book.commitment_bytes().len());
+    b.extend_from_slice(&market_params_bytes(p));
+    b.extend_from_slice(&book.commitment_bytes());
+    sha256(&b)
+}
+
+fn meta_leaf(state: &ChainState) -> [u8; 32] {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"meta");
+    b.extend_from_slice(&state.height.to_le_bytes());
+    b.extend_from_slice(&state.seq.to_le_bytes());
+    b.extend_from_slice(&state.last_unit.0);
+    // Governance cursors: committing them removes replay ambiguity between
+    // batches that differ only in burn totals or id allocation.
+    b.extend_from_slice(&state.perp_burned.to_le_bytes());
+    b.extend_from_slice(&state.next_market_id.to_le_bytes());
+    b.extend_from_slice(&state.next_proposal_id.to_le_bytes());
+    // Per-market price state: every market's mark and oracle funding index
+    // (last_index) are committed in marks' BTreeMap order, so replays cannot
+    // diverge on price/funding state outside the account tree.
+    for (m, mark) in &state.marks {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&mark.to_le_bytes());
+        b.extend_from_slice(&state.last_index.get(m).copied().unwrap_or(0).to_le_bytes());
+    }
+    // Oracle bonding / TWAP state committed for replay determinism
+    b.extend_from_slice(&(state.oracle_bonds.len() as u32).to_le_bytes());
+    for (acct, bond) in &state.oracle_bonds {
+        b.extend_from_slice(&acct.0);
+        b.extend_from_slice(&bond.to_le_bytes());
+    }
+    b.extend_from_slice(&(state.oracle_unbonding.len() as u32).to_le_bytes());
+    for (acct, h) in &state.oracle_unbonding {
+        b.extend_from_slice(&acct.0);
+        b.extend_from_slice(&h.to_le_bytes());
+    }
+    b.extend_from_slice(&state.oracle_slash_nonce.to_le_bytes());
+    b.extend_from_slice(&(state.oracle_twap.len() as u32).to_le_bytes());
+    for (m, window) in &state.oracle_twap {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&(window.len() as u32).to_le_bytes());
+        for s in window {
+            b.extend_from_slice(&s.seq.to_le_bytes());
+            b.extend_from_slice(&s.height.to_le_bytes());
+            b.extend_from_slice(&s.median.to_le_bytes());
+        }
+    }
+    b.extend_from_slice(&(state.funding_twap.len() as u32).to_le_bytes());
+    for (m, window) in &state.funding_twap {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&(window.len() as u32).to_le_bytes());
+        for s in window {
+            b.extend_from_slice(&s.seq.to_le_bytes());
+            b.extend_from_slice(&s.height.to_le_bytes());
+            b.extend_from_slice(&s.median.to_le_bytes());
+        }
+    }
+    b.extend_from_slice(&(state.funding_index_twap.len() as u32).to_le_bytes());
+    for (m, v) in &state.funding_index_twap {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    // External keeper price ring (doc 06 §2.3): empty in v1 BondedMedianTwap
+    // (zero bytes beyond the length prefix), committed for forward compat.
+    b.extend_from_slice(&(state.external_price_ring.len() as u32).to_le_bytes());
+    for (m, ring) in &state.external_price_ring {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+        for s in ring {
+            b.extend_from_slice(&s.seq.to_le_bytes());
+            b.extend_from_slice(&s.height.to_le_bytes());
+            b.extend_from_slice(&s.price.to_le_bytes());
+            b.push(s.source_id);
+        }
+    }
+    b.extend_from_slice(&(state.external_sources.len() as u32).to_le_bytes());
+    for acct in &state.external_sources {
+        b.extend_from_slice(&acct.0);
+    }
+    // Funding settlement clock: per-market last-considered height (non-peg
+    // dedupe) or peg interval clock, so replays cannot diverge on which
+    // heights/windows settled.
+    b.extend_from_slice(&(state.last_funding_height.len() as u32).to_le_bytes());
+    for (m, h) in &state.last_funding_height {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&h.to_le_bytes());
+    }
+    // Pending commit-reveal commitments (doc 03 §2.3.3): keyed by commit
+    // hash, BTreeMap order is deterministic.
+    b.extend_from_slice(&(state.commits.len() as u32).to_le_bytes());
+    for (h, e) in &state.commits {
+        b.extend_from_slice(h);
+        b.extend_from_slice(&e.account.0);
+        b.extend_from_slice(&e.commit_unit.0);
+        b.extend_from_slice(&e.commit_height.to_le_bytes());
+        b.extend_from_slice(&e.ttl_height.to_le_bytes());
+        b.push(e.revealed as u8);
+    }
+    b.extend_from_slice(&[state.funding_source as u8]);
+    // oracle_configs
+    b.extend_from_slice(&(state.oracle_configs.len() as u32).to_le_bytes());
+    for (m, cfg) in &state.oracle_configs {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&cfg.deviation_bps.to_le_bytes());
+        b.extend_from_slice(&cfg.twap_window.to_le_bytes());
+        b.extend_from_slice(&cfg.slash_reward_bps.to_le_bytes());
+    }
+    // Latest report per (market, reporter): the effective mark median reads
+    // this map, so leaving it uncommitted let replays diverge on marks.
+    b.extend_from_slice(&(state.oracle_reports.len() as u32).to_le_bytes());
+    for ((m, acct), price) in &state.oracle_reports {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&acct.0);
+        b.extend_from_slice(&price.to_le_bytes());
+    }
+    // Per-reporter last-K report history (slash streak-detection input).
+    b.extend_from_slice(&(state.oracle_report_history.len() as u32).to_le_bytes());
+    for ((m, acct), q) in &state.oracle_report_history {
+        b.extend_from_slice(&m.0.to_le_bytes());
+        b.extend_from_slice(&acct.0);
+        b.extend_from_slice(&(q.len() as u32).to_le_bytes());
+        for s in q {
+            b.extend_from_slice(&s.height.to_le_bytes());
+            b.extend_from_slice(&s.price.to_le_bytes());
+            b.extend_from_slice(&s.seq.to_le_bytes());
+        }
+    }
+    // Open governance proposals (tallies + creation weight snapshots);
+    // HashSet membership is committed via sorted iteration for determinism.
+    b.extend_from_slice(&(state.proposals.len() as u32).to_le_bytes());
+    for (id, p) in &state.proposals {
+        b.extend_from_slice(&id.to_le_bytes());
+        b.extend_from_slice(&p.creator.0);
+        b.extend_from_slice(&p.market.0.to_le_bytes());
+        b.push(p.key as u8);
+        b.extend_from_slice(&p.value.to_le_bytes());
+        b.extend_from_slice(&p.created_seq.to_le_bytes());
+        b.extend_from_slice(&p.deadline_seq.to_le_bytes());
+        b.extend_from_slice(&p.supply_at_create.to_le_bytes());
+        b.extend_from_slice(&p.yes.to_le_bytes());
+        b.extend_from_slice(&p.no.to_le_bytes());
+        let mut voted: Vec<&AccountId> = p.voted.iter().collect();
+        voted.sort();
+        b.extend_from_slice(&(voted.len() as u32).to_le_bytes());
+        for v in voted {
+            b.extend_from_slice(&v.0);
+        }
+        b.extend_from_slice(&(p.weight_snapshot.len() as u32).to_le_bytes());
+        for (a, w) in &p.weight_snapshot {
+            b.extend_from_slice(&a.0);
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    // Mirrored PERP balances and circulating supply.
+    b.extend_from_slice(&(state.perp_balances.len() as u32).to_le_bytes());
+    for (a, bal) in &state.perp_balances {
+        b.extend_from_slice(&a.0);
+        b.extend_from_slice(&bal.to_le_bytes());
+    }
+    b.extend_from_slice(&state.perp_supply.to_le_bytes());
+    sha256(&b)
+}
+
+fn minuend_book_genesis() -> UnitId {
+    UnitId(sha256(b"minuend-mvp-1-genesis"))
+}
+
+pub fn merkle_root(mut leaves: Vec<[u8; 32]>) -> [u8; 32] {
+    if leaves.is_empty() {
+        return sha256(b"empty");
+    }
+    leaves.sort();
+    while leaves.len() > 1 {
+        if leaves.len() % 2 == 1 {
+            leaves.push(*leaves.last().unwrap());
+        }
+        let mut next = Vec::with_capacity(leaves.len() / 2);
+        for chunk in leaves.chunks(2) {
+            let mut c = [0u8; 64];
+            c[..32].copy_from_slice(&chunk[0]);
+            c[32..].copy_from_slice(&chunk[1]);
+            next.push(sha256(&c));
+        }
+        leaves = next;
+    }
+    leaves[0]
+}
+
+pub fn verify_proof(proof: &MerkleProof) -> bool {
+    let mut h = proof.leaf;
+    for (sib, right) in &proof.siblings {
+        let mut c = [0u8; 64];
+        if *right {
+            c[..32].copy_from_slice(&h);
+            c[32..].copy_from_slice(sib);
+        } else {
+            c[..32].copy_from_slice(sib);
+            c[32..].copy_from_slice(&h);
+        }
+        h = sha256(&c);
+    }
+    h == proof.root
+}
+
+fn merkle_proof_for(
+    mut leaves: Vec<[u8; 32]>,
+    leaf: [u8; 32],
+) -> (Vec<([u8; 32], bool)>, [u8; 32]) {
+    if leaves.is_empty() {
+        return (Vec::new(), sha256(b"empty"));
+    }
+    leaves.sort();
+    let mut idx = match leaves.iter().position(|l| *l == leaf) {
+        Some(i) => i,
+        None => {
+            let root = merkle_root(leaves);
+            return (Vec::new(), root);
+        }
+    };
+    let mut siblings = Vec::new();
+    let mut level = leaves;
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(*level.last().unwrap());
+        }
+        let pair = idx ^ 1;
+        let sib = level[pair];
+        let right = pair > idx;
+        siblings.push((sib, right));
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for chunk in level.chunks(2) {
+            let mut c = [0u8; 64];
+            c[..32].copy_from_slice(&chunk[0]);
+            c[32..].copy_from_slice(&chunk[1]);
+            next.push(sha256(&c));
+        }
+        idx /= 2;
+        level = next;
+    }
+
+    (siblings, level[0])
+}
+
+/// ---- AA-facing merkle tree (hex-string domain) ----
+///
+/// Oscript's `sha256()` hashes the UTF-8 string of its argument, so the vault
+///   leaf  = sha256_hex("acct:" || address || ":" || collateral_decimal
+///                      || ":" || perp_decimal || ":" || withdrawn_decimal)
+///   node  = sha256_hex(left_hex || right_hex)
+pub fn aa_account_leaf_str(addr: &str, collateral: Usd, perp: u128, withdrawn: i128) -> String {
+    let s = format!("acct:{addr}:{collateral}:{perp}:{withdrawn}");
+    hex::encode(sha256(s.as_bytes()))
+}
+
+fn aa_parent(l: &str, r: &str) -> String {
+    let mut buf = String::with_capacity(l.len() + r.len());
+    buf.push_str(l);
+    buf.push_str(r);
+    hex::encode(sha256(buf.as_bytes()))
+}
+
+/// Root of the hex-domain tree over (address, collateral, perp, withdrawn)
+/// quads.
+pub fn aa_root_of(pairs: &[(String, Usd, u128, i128)]) -> String {
+    let mut level: Vec<String> = pairs
+        .iter()
+        .map(|(addr, col, perp, w)| aa_account_leaf_str(addr, *col, *perp, *w))
+        .collect();
+    if level.is_empty() {
+        return hex::encode(sha256(b"empty"));
+    }
+    level.sort();
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            let last = level.last().unwrap().clone();
+            level.push(last);
+        }
+        level = level.chunks(2).map(|c| aa_parent(&c[0], &c[1])).collect();
+    }
+    level[0].clone()
+}
+
+/// Proof path for one address in the hex-domain tree over `pairs`. Returns
+/// `None` when the path would need more than `MAX_AA_TREE_DEPTH` siblings:
+/// the vault AA unrolls exactly 16 reduction steps (and ocore fatally errors
+/// on over-long arrays), so a deeper proof could never be evaluated on-chain.
+pub fn aa_proof_for(
+    pairs: &[(String, Usd, u128, i128)],
+    addr: &str,
+) -> Option<(Vec<(String, bool)>, String)> {
+    let mut level: Vec<String> = pairs
+        .iter()
+        .map(|(a, c, p, w)| aa_account_leaf_str(a, *c, *p, *w))
+        .collect();
+    let entry = pairs.iter().find(|(a, ..)| a == addr)?;
+    let leaf = aa_account_leaf_str(addr, entry.1, entry.2, entry.3);
+    level.sort();
+    let mut idx = level.iter().position(|l| *l == leaf)?;
+    let mut siblings = Vec::new();
+    while level.len() > 1 {
+        if siblings.len() >= minuend_types::MAX_AA_TREE_DEPTH {
+            return None;
+        }
+        if level.len() % 2 == 1 {
+            let last = level.last().unwrap().clone();
+            level.push(last);
+        }
+        let pair = idx ^ 1;
+        siblings.push((level[pair].clone(), pair > idx));
+        level = level.chunks(2).map(|c| aa_parent(&c[0], &c[1])).collect();
+        idx /= 2;
+    }
+    Some((siblings, level[0].clone()))
+}
+
+/// Root of the hex-domain tree over the sidechain accounts that are bound to
+/// an Obyte address in `aa_addresses`, keyed by the bound address string.
+/// Unbound accounts are excluded — they cannot prove identity on the AA
+/// side, so their leaves would be claimable by nobody. The withdrawn leg is
+/// the account's cumulative signed withdrawals (0 when never withdrawn).
+pub fn aa_root_of_state(state: &ChainState) -> String {
+    aa_root_of(&aa_pairs_of(state))
+}
+
+pub fn aa_proof_for_account(
+    state: &ChainState,
+    id: &AccountId,
+) -> Option<(Vec<(String, bool)>, String)> {
+    let addr = state.aa_addresses.get(id)?;
+    aa_proof_for(&aa_pairs_of(state), addr)
+}
+
+/// Hex-domain tree entries for every AA-bound account, in account-id order.
+fn aa_pairs_of(state: &ChainState) -> Vec<(String, Usd, u128, i128)> {
+    state
+        .accounts
+        .values()
+        .filter_map(|a| {
+            let addr = state.aa_addresses.get(&a.id)?;
+            Some((
+                addr.clone(),
+                a.collateral,
+                state.perp_balances.get(&a.id).copied().unwrap_or(0),
+                state.withdrawn_total.get(&a.id).copied().unwrap_or(0),
+            ))
+        })
+        .collect()
+}
+
+/// ---- Sharded AA forest (doc 10 §5.2, Phase 5.2 wire change) ----
+///
+/// The vault AA commits ONE 1024-hex `aa_forest` per batch: the 16 shard
+/// roots concatenated (shard i at offset i*64), which fits
+/// MAX_STATE_VAR_VALUE_LENGTH=1024 exactly and keeps every AA path a single
+/// var operation. Withdrawal proofs stay depth ≤ MAX_AA_TREE_DEPTH *within*
+/// their shard; the AA extracts the claimed shard's root via substring.
+pub const AA_SHARD_COUNT: usize = 16;
+
+/// Shard of an address: low 4 bits of sha256(address)[0] — deterministic,
+/// address-only, uniform (doc 10 §B1(1)). The AA never recomputes it; it
+/// trusts the claimed `shard` tag because soundness comes from the leaf
+/// preimage (a mis-claimed shard folds to that shard's root and fails).
+pub fn aa_shard_of(addr: &str) -> u8 {
+    sha256(addr.as_bytes())[0] & 0x0f
+}
+
+/// Distinct per-shard sentinel so an empty shard's committed root can never
+/// be reused as another empty shard's root (zero-proof cross-shard hopping,
+/// doc 10 §5.4). Unforgeable: deriving it requires preimaging sha256.
+fn aa_empty_shard_root(shard: usize) -> String {
+    hex::encode(sha256(format!("empty:{shard}").as_bytes()))
+}
+
+/// Roots of the 16 per-shard hex-domain trees over `pairs`, bucketed by
+/// [`aa_shard_of`]. Each bucket root reuses [`aa_root_of`] verbatim — zero
+/// new crypto. Empty shards get distinct sentinels.
+pub fn aa_sharded_roots_of(pairs: &[(String, Usd, u128, i128)]) -> [String; AA_SHARD_COUNT] {
+    let mut buckets: Vec<Vec<(String, Usd, u128, i128)>> = vec![Vec::new(); AA_SHARD_COUNT];
+    for p in pairs {
+        buckets[aa_shard_of(&p.0) as usize].push(p.clone());
+    }
+    std::array::from_fn(|i| {
+        if buckets[i].is_empty() {
+            aa_empty_shard_root(i)
+        } else {
+            aa_root_of(&buckets[i])
+        }
+    })
+}
+
+/// 64-hex hash over the concatenated forest — the checkpoint's `aa_root`.
+/// Binds the whole forest so watchers can cross-check the 1024-hex string
+/// the operator posts on-chain against one length-checked field.
+pub fn aa_forest_hash(shards: &[String; AA_SHARD_COUNT]) -> String {
+    hex::encode(sha256(shards.concat().as_bytes()))
+}
+
+/// Sharded roots over every AA-bound account (same binding rules as
+/// [`aa_root_of_state`]: unbound accounts are excluded).
+pub fn aa_sharded_roots_of_state(state: &ChainState) -> [String; AA_SHARD_COUNT] {
+    aa_sharded_roots_of(&aa_pairs_of(state))
+}
+
+/// Proof path for one address within its shard's tree:
+/// `(shard, siblings, shard_root)`. Returns `None` when the path would need
+/// more than `MAX_AA_TREE_DEPTH` siblings (the AA unrolls exactly that many
+/// reduction steps per proof). Also returns `None` when the target's shard
+/// bucket holds fewer than 2 leaves: a singleton bucket would need an EMPTY
+/// proof array and ocore fatals on empty arrays in trigger data — such a
+/// claim can never be posted, so it is refused up front. Register PAD/decoy
+/// bindings first (see `gen_withdraw_proof.rs`'s
+/// `format!("{:0<32}", format!("PAD{pad}"))` pattern).
+#[allow(clippy::type_complexity)]
+pub fn aa_sharded_proof_for(
+    pairs: &[(String, Usd, u128, i128)],
+    addr: &str,
+) -> Option<(u8, Vec<(String, bool)>, String)> {
+    let shard = aa_shard_of(addr);
+    let bucket: Vec<_> = pairs
+        .iter()
+        .filter(|(a, ..)| aa_shard_of(a) == shard)
+        .cloned()
+        .collect();
+    if bucket.len() < 2 {
+        return None;
+    }
+    let (siblings, root) = aa_proof_for(&bucket, addr)?;
+    Some((shard, siblings, root))
+}
+
+/// Sharded proof for an account by sidechain id. See [`aa_sharded_proof_for`]
+/// for the singleton-bucket (PAD decoy) requirement.
+#[allow(clippy::type_complexity)]
+pub fn aa_sharded_proof_for_account(
+    state: &ChainState,
+    id: &AccountId,
+) -> Option<(u8, Vec<(String, bool)>, String)> {
+    let addr = state.aa_addresses.get(id)?;
+    aa_sharded_proof_for(&aa_pairs_of(state), addr)
+}
+/// ---- Rollup witness tree (Obyte-merkle domain, dispute predicates) ----
+///
+/// Leaves are sorted lexicographically before `obyte_merkle::root`.
+/// Decimal strings use `format!("{}", n)` (no scientific notation).
+/// Hex is lowercase `hex::encode` of the 32-byte id.
+pub fn wit_leaves(state: &ChainState) -> Vec<String> {
+    let mut leaves = Vec::new();
+    for (id, acct) in &state.accounts {
+        let perp = state.perp_balances.get(id).copied().unwrap_or(0);
+        let w = state.withdrawn_total.get(id).copied().unwrap_or(0);
+        leaves.push(format!(
+            "acct:{}:{}:{}:{}",
+            hex::encode(id.0),
+            acct.collateral,
+            perp,
+            w
+        ));
+        for (market, pos) in &acct.positions {
+            // isolated 0/1 + the account's escrowed bucket for this market:
+            // the fill predicate needs both to recompute the proportional
+            // margin release on a close.
+            let bucket = acct.isolated_margin.get(market).copied().unwrap_or(0);
+            leaves.push(format!(
+                "pos:{}:{}:{}:{}:{}:{}",
+                hex::encode(id.0),
+                market.0,
+                pos.qty,
+                pos.entry_price,
+                if pos.isolated { 1 } else { 0 },
+                bucket
+            ));
+        }
+    }
+    for book in state.books.values() {
+        for o in book.live_orders() {
+            leaves.push(format!(
+                "ord:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                hex::encode(o.id.0),
+                o.market.0,
+                o.side.as_u8(),
+                o.price,
+                o.seq,
+                o.remaining,
+                hex::encode(o.account.0),
+                if o.isolated { 1 } else { 0 },
+                o.margin_left
+            ));
+        }
+    }
+    for (market, params) in &state.markets {
+        let mark = state.marks.get(market).copied().unwrap_or(0);
+        leaves.push(format!(
+            "meta:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            market.0,
+            params.tick_size,
+            params.im_bps,
+            params.mm_bps,
+            params.taker_fee_bps,
+            params.keeper_reward_bps,
+            if params.delisted { 1 } else { 0 },
+            mark,
+            params.usd_per_unit,
+            params.funding_cap_bps
+        ));
+    }
+    leaves.sort();
+    if leaves.is_empty() {
+        leaves.push(minuend_types::WIT_EMPTY_ELEMENT.to_string());
+    }
+    leaves
+}
+/// Witness root after the current state (Obyte-merkle domain).
+pub fn wit_root(state: &ChainState) -> String {
+    obyte_merkle::root(&wit_leaves(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minuend_types::USD_SCALE;
+
+    #[test]
+    fn mean_price_signed_samples_do_not_overflow() {
+        let mut s = ChainState::new();
+        // Negative medians: the pre-fix `u128` cast wrapped in release and
+        // panicked on overflow in debug (`cargo test` is debug).
+        let q = s.oracle_twap.entry(BTC_USD).or_default();
+        for (seq, median) in [(1, -100), (2, -300)] {
+            q.push_back(TwapSample {
+                seq,
+                height: 0,
+                median,
+            });
+        }
+        assert_eq!(s.compute_twap(BTC_USD), Some(-200));
+        // Empty / single-sample rings stay None instead of dividing by zero.
+        assert_eq!(s.compute_twap(minuend_types::MarketId(9)), None);
+    }
+
+    #[test]
+    fn peg_mark_band_rejects_dust_and_wild_steps() {
+        use minuend_types::{encode_funding_price, QTY_SCALE};
+        let mut s = ChainState::new();
+        // A fresh funding-rate market (no genesis mark) with a 12 bps
+        // reporter index.
+        let m = minuend_types::MarketId(2);
+        let mut params = s.markets[&BTC_USD];
+        params.funding_rate = true;
+        params.usd_per_unit = 10_000;
+        params.funding_cap_bps = 50;
+        s.markets.insert(m, params);
+        s.last_index.insert(m, encode_funding_price(12));
+        // Bootstrap anchors on the fresh external ring, not the reporter
+        // median: post the index print the fill will step from.
+        s.external_price_ring
+            .entry(m)
+            .or_default()
+            .push_back(ExternalSample {
+                seq: 0,
+                height: s.height,
+                price: encode_funding_price(12),
+                source_id: 0,
+            });
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        for id in [taker, maker] {
+            s.account_mut(id)
+                .credit(10_000_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let mk_fill = |price: Price, qty: minuend_types::Qty| Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: m,
+            price,
+            qty,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        // Raw price 500 with qty >= QTY_SCALE/100 (the old gate's shape):
+        // degenerate rate and negligible notional — mark never appears.
+        s.apply_fill_pair(&mk_fill(500, QTY_SCALE / 100)).unwrap();
+        assert!(s.marks.get(&m).is_none_or(|p| *p == 0));
+        // Bootstrap: encode(20) after index 12 — gap 8 <= FUNDING_CAP_BPS
+        // arms the first mark.
+        s.apply_fill_pair(&mk_fill(encode_funding_price(20), QTY_SCALE))
+            .unwrap();
+        assert_eq!(s.marks.get(&m).copied(), Some(encode_funding_price(20)));
+        // encode(5000): step would be 4980 bps vs max(20/10, 1) = 2 —
+        // rejected, mark untouched.
+        s.apply_fill_pair(&mk_fill(encode_funding_price(5_000), QTY_SCALE))
+            .unwrap();
+        assert_eq!(s.marks.get(&m).copied(), Some(encode_funding_price(20)));
+        // A 1 bps step is always allowed (min step 1).
+        s.apply_fill_pair(&mk_fill(encode_funding_price(21), QTY_SCALE))
+            .unwrap();
+        assert_eq!(s.marks.get(&m).copied(), Some(encode_funding_price(21)));
+    }
+
+    #[test]
+    fn merkle_proof_roundtrip() {
+        let mut s = ChainState::new();
+        let id = AccountId([1; 32]);
+        s.account_mut(id).credit(10 * USD_SCALE as i128).unwrap();
+        let p = s.account_proof(id);
+        assert!(verify_proof(&p));
+        assert_eq!(p.root, s.state_root());
+        let other = AccountId([2; 32]);
+        let p2 = s.account_proof(other);
+        assert_ne!(p2.leaf, p.leaf);
+    }
+
+    #[test]
+    fn taker_fee_flows_to_insurance() {
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        s.account_mut(taker)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+        s.account_mut(maker)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+        let px = 100_000 * minuend_types::PRICE_SCALE as i64;
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price: px,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        s.apply_fill_pair(&fill).unwrap();
+        // notional = 100_000 USD → fee @5bps = 50 USD credited to insurance.
+        let ins = &s.accounts[&INSURANCE_ACCOUNT];
+        assert_eq!(ins.collateral, INSURANCE_SEED + 50 * USD_SCALE as i128);
+    }
+
+    #[test]
+    fn maker_overflow_does_not_commit_taker_fill() {
+        use minuend_account::{Account, AccountError, Position};
+
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        let px = 100_000 * minuend_types::PRICE_SCALE as i64;
+        let mut maker_account = Account::new(maker);
+        maker_account.positions.insert(
+            BTC_USD,
+            Position {
+                market: BTC_USD,
+                qty: i64::MIN,
+                entry_price: px,
+                isolated: false,
+            },
+        );
+        s.accounts.insert(maker, maker_account);
+        let before = s.state_root();
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([1; 32]),
+            maker_id: minuend_types::OrderId([2; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price: px,
+            qty: 1,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+
+        assert_eq!(s.apply_fill_pair(&fill), Err(AccountError::Overflow));
+        assert_eq!(s.state_root(), before, "no taker or maker leg may commit");
+        assert!(!s.accounts.contains_key(&taker));
+    }
+
+    #[test]
+    fn mark_deviation_cap() {
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        for id in [taker, maker] {
+            s.account_mut(id)
+                .credit(10_000_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let mk_fill = |price| Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        // +200% spike: rejected by the ±10% cap — mark stays at genesis.
+        // The unoracled freeze needs a reporter index for a non-zero mark to
+        // move at all; this test exercises the band itself, so seed one.
+        s.last_index
+            .insert(BTC_USD, 100_000 * minuend_types::PRICE_SCALE as i64);
+        s.apply_fill_pair(&mk_fill(300_000 * minuend_types::PRICE_SCALE as i64))
+            .unwrap();
+        assert_eq!(
+            *s.marks.get(&BTC_USD).unwrap(),
+            100_000 * minuend_types::PRICE_SCALE as i64
+        );
+        // +5% move: within the band — mark updates.
+        s.apply_fill_pair(&mk_fill(105_000 * minuend_types::PRICE_SCALE as i64))
+            .unwrap();
+        assert_eq!(
+            *s.marks.get(&BTC_USD).unwrap(),
+            105_000 * minuend_types::PRICE_SCALE as i64
+        );
+    }
+
+    #[test]
+    fn funding_transfers_long_to_short_and_conserves() {
+        let mut s = ChainState::new();
+        let long = AccountId([9; 32]);
+        let short = AccountId([8; 32]);
+        s.account_mut(long)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+        s.account_mut(short)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+
+        // Both open 1 BTC at 100_000 via a fill (spot mark = index initially).
+        let px = 100_000 * minuend_types::PRICE_SCALE as i64;
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker: long,
+            maker: short,
+            market: BTC_USD,
+            price: px,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        s.apply_fill_pair(&fill).unwrap();
+
+        // Bonded oracles report; funding settles once >= 2 reports exist.
+        // Tick 1 at spot: single report → median 100k, mark unchanged,
+        // no funding yet.
+        let oa = AccountId([5; 32]);
+        let ob = AccountId([6; 32]);
+        s.oracle_bonds.insert(oa, minuend_types::ORACLE_BOND_PERP);
+        s.oracle_bonds.insert(ob, minuend_types::ORACLE_BOND_PERP);
+        s.apply_report(oa, BTC_USD, 100_000 * minuend_types::PRICE_SCALE as i64, 1)
+            .unwrap();
+        let pre_funding = s.accounts[&long].collateral + s.accounts[&short].collateral;
+
+        // Tick 2: reports {89k, 100k}; median = sorted[(len-1)/2] = 89k
+        // (the smaller middle when even). |89k − 100k| = 11k > 10k, so the
+        // ±10% cap holds the spot mark at 100k while the index drops to
+        // 89k: premium > 0 → long pays short.
+        s.apply_report(ob, BTC_USD, 89_000 * minuend_types::PRICE_SCALE as i64, 2)
+            .unwrap();
+
+        let long_bal = s.accounts[&long].collateral;
+        let short_bal = s.accounts[&short].collateral;
+        // Long paid, short received (premium > 0).
+        assert!(long_bal < short_bal, "long must fund short in premium");
+        // Peer-to-peer funding must conserve collateral (sub-unit dust at
+        // most): nothing leaks to or from other accounts here.
+        assert!(
+            pre_funding - (long_bal + short_bal) < USD_SCALE as i128,
+            "funding must conserve total collateral"
+        );
+    }
+    #[test]
+    fn maker_bad_debt_clamped_to_insurance() {
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        s.account_mut(taker)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+        s.account_mut(maker)
+            .credit(50_000 * USD_SCALE as i128)
+            .unwrap();
+        // Maker is long 1 BTC @ 100k.
+        s.account_mut(maker)
+            .apply_fill(
+                minuend_types::Side::Bid,
+                false,
+                100_000 * minuend_types::PRICE_SCALE as i64,
+                minuend_types::QTY_SCALE,
+                BTC_USD,
+                None,
+                0,
+                false,
+            )
+            .unwrap();
+        // Taker dumps at 10k: the maker closes with a 90k realized loss
+        // settled into only 50k of collateral → bankrupt.
+        s.marks
+            .insert(BTC_USD, 10_000 * minuend_types::PRICE_SCALE as i64);
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price: 10_000 * minuend_types::PRICE_SCALE as i64,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        s.apply_fill_pair(&fill).unwrap();
+        // Insurance never pays: only the taker's fee lands in the fund —
+        // no `SEED + fee - 40k` debit exists any more.
+        let fee = bps(notional_usd(fill.qty, fill.price), 5);
+        assert_eq!(
+            s.accounts[&INSURANCE_ACCOUNT].collateral,
+            INSURANCE_SEED + fee
+        );
+        // The maker's 40k hole is clawed from the taker (who covers all
+        // of it): the maker lands on 0 via the claw, not via insurance,
+        // and the taker is lower by exactly min(40k, its post-pnl
+        // collateral).
+        let taker_post_pnl = 1_000_000 * USD_SCALE as i128 - fee;
+        let claw = (40_000 * USD_SCALE as i128).min(taker_post_pnl.max(0));
+        assert_eq!(
+            s.accounts[&maker].collateral,
+            -40_000 * USD_SCALE as i128 + claw
+        );
+        assert_eq!(s.accounts[&taker].collateral, taker_post_pnl - claw);
+        // Claw and fee are both internal to the trio: their sum equals the
+        // post-PnL balances plus the seed — the shortfall handling moves
+        // no sum, only the fee travels from taker to insurance.
+        assert_eq!(
+            s.accounts[&taker].collateral
+                + s.accounts[&maker].collateral
+                + s.accounts[&INSURANCE_ACCOUNT].collateral,
+            1_000_000 * USD_SCALE as i128 - 40_000 * USD_SCALE as i128 + INSURANCE_SEED
+        );
+    }
+
+    /// The fill claw reads collateral only: a cross account still holding
+    /// a position gets its negative collateral raised to 0 by the
+    /// counterparty payment (insurance untouched), while the surviving
+    /// position — still underwater at the mark — keeps its leaf. The
+    /// witness leaves do not commit upnl, so the fill dispute cannot
+    /// recompute this shape: fill_math bounces `no fraud` for a negative
+    /// expected post instead of false-verdicting the honest batch (see
+    /// minuend_dispute_fill.aa's collateral leg).
+    #[test]
+    fn maker_bad_debt_clamped_with_position() {
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        s.account_mut(taker)
+            .credit(1_000_000 * USD_SCALE as i128)
+            .unwrap();
+        s.account_mut(maker)
+            .credit(50_000 * USD_SCALE as i128)
+            .unwrap();
+        // Maker is long 2 BTC @ 100k.
+        s.account_mut(maker)
+            .apply_fill(
+                minuend_types::Side::Bid,
+                false,
+                100_000 * minuend_types::PRICE_SCALE as i64,
+                2 * minuend_types::QTY_SCALE,
+                BTC_USD,
+                None,
+                0,
+                false,
+            )
+            .unwrap();
+        // Taker buys 1 BTC at 10k: the maker sells half, realizing a 90k
+        // loss against 50k collateral → pre-clamp -40k, and the surviving
+        // long 1 @ 100k is worth -90k at the 10k mark (equity -130k).
+        s.marks
+            .insert(BTC_USD, 10_000 * minuend_types::PRICE_SCALE as i64);
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price: 10_000 * minuend_types::PRICE_SCALE as i64,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Bid,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        s.apply_fill_pair(&fill).unwrap();
+        // The claw covers the maker's 40k collateral hole from the taker
+        // (who can pay it); insurance moves only by the fee. No
+        // equity-based raise to 90k exists — the surviving position's
+        // -90k upnl never touches collateral.
+        let fee = bps(notional_usd(fill.qty, fill.price), 5);
+        assert_eq!(
+            s.accounts[&maker].collateral, 0,
+            "claw covered the maker's collateral hole"
+        );
+        assert_eq!(
+            s.accounts[&taker].collateral,
+            1_000_000 * USD_SCALE as i128 - fee - 40_000 * USD_SCALE as i128,
+            "the taker paid the claw"
+        );
+        assert_eq!(
+            s.accounts[&INSURANCE_ACCOUNT].collateral,
+            INSURANCE_SEED + fee,
+            "insurance untouched but for the fee"
+        );
+        let pos = s.accounts[&maker]
+            .positions
+            .get(&BTC_USD)
+            .expect("half position survives the claw");
+        assert_eq!(
+            pos.qty,
+            minuend_types::QTY_SCALE.try_into().unwrap(),
+            "half position survives the claw"
+        );
+    }
+
+    /// Neither side can cover the hole: the claw pays 0 in both
+    /// directions, so both collaterals stay negative, insurance is
+    /// untouched (only the fee credit lands), and no balance increases.
+    #[test]
+    fn claw_cannot_cover_leaves_both_negative() {
+        let mut s = ChainState::new();
+        let taker = AccountId([9; 32]);
+        let maker = AccountId([8; 32]);
+        s.account_mut(taker)
+            .credit(20_000 * USD_SCALE as i128)
+            .unwrap();
+        s.account_mut(maker)
+            .credit(2_000 * USD_SCALE as i128)
+            .unwrap();
+        // Taker is long 1 BTC @ 100k, maker is short 1 BTC @ 5k.
+        s.account_mut(taker)
+            .apply_fill(
+                minuend_types::Side::Bid,
+                true,
+                100_000 * minuend_types::PRICE_SCALE as i64,
+                minuend_types::QTY_SCALE,
+                BTC_USD,
+                None,
+                0,
+                false,
+            )
+            .unwrap();
+        s.account_mut(maker)
+            .apply_fill(
+                minuend_types::Side::Ask,
+                false,
+                5_000 * minuend_types::PRICE_SCALE as i64,
+                minuend_types::QTY_SCALE,
+                BTC_USD,
+                None,
+                0,
+                false,
+            )
+            .unwrap();
+        // Taker sells 1 @ 10k: taker realizes −90k (20k → −70k, fee on
+        // top), maker realizes −5k buying back (2k → −3k). Both negative.
+        s.marks
+            .insert(BTC_USD, 10_000 * minuend_types::PRICE_SCALE as i64);
+        let fill = Fill {
+            taker_id: minuend_types::OrderId([0u8; 32]),
+            maker_id: minuend_types::OrderId([0u8; 32]),
+            taker,
+            maker,
+            market: BTC_USD,
+            price: 10_000 * minuend_types::PRICE_SCALE as i64,
+            qty: minuend_types::QTY_SCALE,
+            seq: 1,
+            taker_side: minuend_types::Side::Ask,
+            taker_post: 0,
+            maker_post: 0,
+            taker_isolated: false,
+            maker_isolated: false,
+            kind: 0,
+        };
+        s.apply_fill_pair(&fill).unwrap();
+        let fee = bps(notional_usd(fill.qty, fill.price), 5);
+        // Neither collateral rose: the claw moved nothing.
+        assert_eq!(
+            s.accounts[&taker].collateral,
+            -70_000 * USD_SCALE as i128 - fee,
+            "taker stays negative — no counterparty could pay"
+        );
+        assert_eq!(
+            s.accounts[&maker].collateral,
+            -3_000 * USD_SCALE as i128,
+            "maker stays negative — no counterparty could pay"
+        );
+        // Insurance gains only the fee credit; the holes are not printed.
+        assert_eq!(
+            s.accounts[&INSURANCE_ACCOUNT].collateral,
+            INSURANCE_SEED + fee
+        );
+    }
+
+    #[test]
+    fn aa_proof_for_refuses_over_deep_trees() {
+        // 2^16 leaves need exactly MAX_AA_TREE_DEPTH siblings; one more leaf
+        // pushes past the AA's fixed 16-step reduce and must yield None.
+        let mk = |n: usize| -> Vec<(String, Usd, u128, i128)> {
+            (0..n)
+                .map(|i| (format!("A{i:031}"), 1, 0u128, 0i128))
+                .collect()
+        };
+        let too_deep = mk((1 << minuend_types::MAX_AA_TREE_DEPTH) + 1);
+        assert!(aa_proof_for(&too_deep, &format!("A{:031}", 1)).is_none());
+    }
+
+    #[test]
+    fn external_twap_requires_min_samples_and_freshness() {
+        let mut s = ChainState::new();
+        let keeper = AccountId([7; 32]);
+        // One sample: below FUNDING_TWAP_MIN_SAMPLES → None.
+        s.apply_external_price(keeper, BTC_USD, 90_000 * PRICE_SCALE as i64, 0, 1);
+        assert_eq!(s.external_twap(BTC_USD), None);
+        // Second distinct-height sample: TWAP forms.
+        s.height += 1;
+        s.apply_external_price(keeper, BTC_USD, 92_000 * PRICE_SCALE as i64, 0, 2);
+        assert_eq!(
+            s.external_twap(BTC_USD),
+            Some((90_000 * PRICE_SCALE as i64 + 92_000 * PRICE_SCALE as i64) / 2)
+        );
+        // Feed dies: past FUNDING_EXTERNAL_MAX_STALENESS the ring reads as
+        // stale (None) so effective_funding_index falls back (doc 06 §2.6).
+        s.height += minuend_types::FUNDING_EXTERNAL_MAX_STALENESS + 1;
+        assert_eq!(s.external_twap(BTC_USD), None);
+        // Window cap holds the ring bounded at FUNDING_TWAP_WINDOW samples.
+        for i in 0..(minuend_types::FUNDING_TWAP_WINDOW + 10) {
+            s.height += 1;
+            s.apply_external_price(keeper, BTC_USD, 50_000 * PRICE_SCALE as i64, 0, i);
+        }
+        assert_eq!(
+            s.external_price_ring[&BTC_USD].len(),
+            minuend_types::FUNDING_TWAP_WINDOW as usize
+        );
+    }
+
+    #[test]
+    fn prune_commits_drops_expired_entries() {
+        let mut s = ChainState::new();
+        let acct = AccountId([3; 32]);
+        s.commits.insert(
+            [1u8; 32],
+            CommitEntry {
+                account: acct,
+                commit_unit: UnitId([9u8; 32]),
+                commit_height: 100,
+                ttl_height: 116,
+                revealed: false,
+            },
+        );
+        s.commits.insert(
+            [2u8; 32],
+            CommitEntry {
+                account: acct,
+                commit_unit: UnitId([8u8; 32]),
+                commit_height: 110,
+                ttl_height: 126,
+                revealed: true,
+            },
+        );
+        // At min_height <= ttl the entries stay (reveal still legal).
+        s.prune_commits(116);
+        assert_eq!(s.commits.len(), 2);
+        // Past both TTLs everything expires (doc 03 §2.3.3 rule 4).
+        s.prune_commits(127);
+        assert!(s.commits.is_empty());
+    }
+
+    #[test]
+    fn twap_samples_carry_seq_and_dedup_same_height() {
+        let mut s = ChainState::new();
+        let oa = AccountId([5; 32]);
+        let ob = AccountId([6; 32]);
+        s.oracle_bonds.insert(oa, minuend_types::ORACLE_BOND_PERP);
+        s.oracle_bonds.insert(ob, minuend_types::ORACLE_BOND_PERP);
+        // Two reporters, same height, same median → one funding sample.
+        s.apply_report(oa, BTC_USD, 90_000 * PRICE_SCALE as i64, 1)
+            .unwrap();
+        s.apply_report(ob, BTC_USD, 90_000 * PRICE_SCALE as i64, 2)
+            .unwrap();
+        assert_eq!(s.funding_twap[&BTC_USD].len(), 1);
+        // New height, new median → new sample with that height's seq.
+        s.height += 1;
+        s.apply_report(oa, BTC_USD, 91_000 * PRICE_SCALE as i64, 7)
+            .unwrap();
+        let q = &s.funding_twap[&BTC_USD];
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.back().unwrap().seq, 7);
+        assert_eq!(q.back().unwrap().height, 1);
+    }
+    #[test]
+    fn negative_mark_moves_by_capped_steps() {
+        let mut s = ChainState::new();
+        let oa = AccountId([5; 32]);
+        let ob = AccountId([6; 32]);
+        s.oracle_bonds.insert(oa, minuend_types::ORACLE_BOND_PERP);
+        s.oracle_bonds.insert(ob, minuend_types::ORACLE_BOND_PERP);
+        // Seed a negative mark directly (fills can print negative; oracles
+        // never saw this market, so no median exists yet).
+        s.marks.insert(BTC_USD, -100_000 * PRICE_SCALE as i64);
+        // Two +5%-magnitude steps: each median sits inside the ±10% band
+        // measured on |old|, so the negative mark keeps moving instead of
+        // freezing (the pre-signed bug: `dev <= negative` never held).
+        for (px, seq) in [
+            (-105_000 * PRICE_SCALE as i64, 1),
+            (-110_250 * PRICE_SCALE as i64, 2),
+        ] {
+            s.apply_report(oa, BTC_USD, px, seq).unwrap();
+            s.apply_report(ob, BTC_USD, px, seq + 10).unwrap();
+            assert_eq!(*s.marks.get(&BTC_USD).unwrap(), px);
+        }
+        // A jump beyond the band still clamps: +200% spike rejected.
+        s.apply_report(oa, BTC_USD, -300_000 * PRICE_SCALE as i64, 3)
+            .unwrap();
+        s.apply_report(ob, BTC_USD, -300_000 * PRICE_SCALE as i64, 13)
+            .unwrap();
+        assert_eq!(
+            *s.marks.get(&BTC_USD).unwrap(),
+            -110_250 * PRICE_SCALE as i64
+        );
+    }
+    #[test]
+    fn aa_shard_of_is_deterministic_and_bounded() {
+        for i in 0..200u32 {
+            let addr = format!("ADDR{i}");
+            assert_eq!(aa_shard_of(&addr), aa_shard_of(&addr));
+            assert!(aa_shard_of(&addr) < AA_SHARD_COUNT as u8);
+        }
+    }
+
+    #[test]
+    fn empty_shard_sentinels_are_distinct_and_unforgeable() {
+        // Every empty shard commits a different sentinel; none equals the
+        // plain "empty" root, so a zero-proof cannot hop shards (doc 10 §5.4).
+        let roots = aa_sharded_roots_of(&[]);
+        for i in 0..AA_SHARD_COUNT {
+            let expected = hex::encode(sha256(format!("empty:{i}").as_bytes()));
+            assert_eq!(roots[i], expected);
+            if i > 0 {
+                assert_ne!(roots[i], roots[i - 1]);
+            }
+            assert_ne!(roots[i], hex::encode(sha256(b"empty")));
+        }
+    }
+
+    #[test]
+    fn sharded_proof_folds_to_forest_slice() {
+        // Replicate the AA fold: proof within a shard's tree must land on
+        // exactly the shard's 64-hex slice of the concatenated forest.
+        let pairs: Vec<(String, Usd, u128, i128)> = (0..40u32)
+            .map(|i| (format!("OBADDR{i}X"), 100 + i as Usd, 0, 0))
+            .collect();
+        let forest_roots = aa_sharded_roots_of(&pairs);
+        let covered: std::collections::HashSet<u8> =
+            pairs.iter().map(|(a, ..)| aa_shard_of(a)).collect();
+        assert!(covered.len() > 1, "fixture must span several shards");
+        for (addr, col, perp, w) in &pairs {
+            let (shard, siblings, root) = aa_sharded_proof_for(&pairs, addr).unwrap();
+            assert_eq!(root, forest_roots[shard as usize]);
+            assert!(siblings.len() <= minuend_types::MAX_AA_TREE_DEPTH);
+            let mut acc = hex::encode(sha256(format!("acct:{addr}:{col}:{perp}:{w}").as_bytes()));
+            for (sib, right) in &siblings {
+                let buf = if *right {
+                    format!("{acc}{sib}")
+                } else {
+                    format!("{sib}{acc}")
+                };
+                acc = hex::encode(sha256(buf.as_bytes()));
+            }
+            assert_eq!(
+                acc,
+                forest_roots
+                    .concat()
+                    .get(shard as usize * 64..shard as usize * 64 + 64)
+                    .unwrap()
+            );
+        }
+        // Forest hash binds all 16 roots in order.
+        assert_eq!(
+            aa_forest_hash(&forest_roots),
+            hex::encode(sha256(forest_roots.concat().as_bytes()))
+        );
+    }
+}

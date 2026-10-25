@@ -1,9 +1,9 @@
 # Gap 3 — Oracle Bonded Reporters: No Slashing + Median without TWAP — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignOracleSlash` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
-> Depends: `operp-state` oracle median path, `operp-dag` `Op::ReportPrice`, `operp-exec` intake gate, `operp-types` `ORACLE_BOND_PERP`
+> Depends: `minuend-state` oracle median path, `minuend-dag` `Op::ReportPrice`, `minuend-exec` intake gate, `minuend-types` `ORACLE_BOND_PERP`
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### Problem restated (README L3 + L2)
 
-*Funding index = median of latest bonded-reporter prices* (`ChainState::last_index`), funding settles peer-to-peer when `reports.len() >=2`. Reports are permissionless: any account with `oracle_bonds[reporter] == 50_000 PERP` may call `Op::ReportPrice { oracle, market, price }` ( `operp-dag/src/lib.rs:39-43`, `operp-exec/src/lib.rs:185-201` ). State update is in `ChainState::apply_report` (`operp-state/src/lib.rs:185-288`) — inserts `oracle_reports[(market,oracle)] = price`, recomputes `median = sorted[(len-1)/2]`, sets `last_index[market]=median` and `marks[market]= clamped_median` (±10% vs old mark).
+*Funding index = median of latest bonded-reporter prices* (`ChainState::last_index`), funding settles peer-to-peer when `reports.len() >=2`. Reports are permissionless: any account with `oracle_bonds[reporter] == 50_000 PERP` may call `Op::ReportPrice { oracle, market, price }` ( `minuend-dag/src/lib.rs:39-43`, `minuend-exec/src/lib.rs:185-201` ). State update is in `ChainState::apply_report` (`minuend-state/src/lib.rs:185-288`) — inserts `oracle_reports[(market,oracle)] = price`, recomputes `median = sorted[(len-1)/2]`, sets `last_index[market]=median` and `marks[market]= clamped_median` (±10% vs old mark).
 
 Current gap:
 * No slashing. A `k`-of-`n` bonded majority can bias `median` arbitrarily; each bond is only an entry ticket. No burn/reward, no evidence path, no unbonding delay, no TWAP.
@@ -21,17 +21,17 @@ Current gap:
 
 | Crate | File | Symbol | What |
 |-------|------|--------|------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | `ORACLE_BOND_PERP`, `PRICE_SCALE`, `PROPOSAL_*`, `MarketId`, `Price`, `Height`, `Seq` | add oracle governance constants |
-| `operp-types` | same | `ORACLE_TWAP_WINDOW`, `ORACLE_DEVIATION_BPS_DEFAULT`, `ORACLE_SLASH_BURN_BPS`, `ORACLE_SLASH_REWARD_BPS`, `ORACLE_UNBOND_HEIGHTS`, `ORACLE_REPORT_HISTORY_DEPTH` | **new** |
-| `operp-types` | same | `ParamKey::{OracleDeviationBps,OracleTwapWindow,OracleSlashBps}` | extend enum + `as_u8/from_u8` |
-| `operp-dag` | `crates/operp-dag/src/lib.rs` | `Op` enum, `canonical_bytes` (tags 6, 14-16), `verify_sig_by_id`/`account_matches` | **new** `Op::StakeOracle`, `Op::UnstakeOracle`, `Op::SlashOracle` |
-| `operp-state` | `crates/operp-state/src/lib.rs` | `ChainState { oracle_bonds, oracle_reports, last_index, marks, perp_balances, perp_burned, perp_supply, seen_gov_nonces ... }` | extend + new fields below |
-| `operp-state` | same | `ChainState::apply_report`, `prune_*`, `meta_leaf`, `leaves` | modify |
-| `operp-state` | same | `StateError` | add `InsufficientBond`, `NotBonded`, `Unbonding`, `SlashNotEligible` |
-| `operp-exec` | `crates/operp-exec/src/lib.rs` | `Engine::dispatch`, `RejectReason`, `ExecEvent`, helpers `allow_all` | dispatch new ops, new reject reasons |
-| `operp-settle` | `crates/operp-settle/src/lib.rs` | `Batch::validate_against`, `meta_leaf` replay | no wire change beyond deterministic replay |
-| `obyte-local` | `agents/operp_vault.aa` | `pperp_`, `perp` tree | **no change in v1** — oracle bonds live in sidechain `perp_balances`/`oracle_bonds`, not in AA `base` bytes |
-| tests | `crates/operp-exec`, `crates/operp-state` | new `oracle_twap` + `oracle_slash` tests | proof |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | `ORACLE_BOND_PERP`, `PRICE_SCALE`, `PROPOSAL_*`, `MarketId`, `Price`, `Height`, `Seq` | add oracle governance constants |
+| `minuend-types` | same | `ORACLE_TWAP_WINDOW`, `ORACLE_DEVIATION_BPS_DEFAULT`, `ORACLE_SLASH_BURN_BPS`, `ORACLE_SLASH_REWARD_BPS`, `ORACLE_UNBOND_HEIGHTS`, `ORACLE_REPORT_HISTORY_DEPTH` | **new** |
+| `minuend-types` | same | `ParamKey::{OracleDeviationBps,OracleTwapWindow,OracleSlashBps}` | extend enum + `as_u8/from_u8` |
+| `minuend-dag` | `crates/minuend-dag/src/lib.rs` | `Op` enum, `canonical_bytes` (tags 6, 14-16), `verify_sig_by_id`/`account_matches` | **new** `Op::StakeOracle`, `Op::UnstakeOracle`, `Op::SlashOracle` |
+| `minuend-state` | `crates/minuend-state/src/lib.rs` | `ChainState { oracle_bonds, oracle_reports, last_index, marks, perp_balances, perp_burned, perp_supply, seen_gov_nonces ... }` | extend + new fields below |
+| `minuend-state` | same | `ChainState::apply_report`, `prune_*`, `meta_leaf`, `leaves` | modify |
+| `minuend-state` | same | `StateError` | add `InsufficientBond`, `NotBonded`, `Unbonding`, `SlashNotEligible` |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs` | `Engine::dispatch`, `RejectReason`, `ExecEvent`, helpers `allow_all` | dispatch new ops, new reject reasons |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs` | `Batch::validate_against`, `meta_leaf` replay | no wire change beyond deterministic replay |
+| `obyte-local` | `agents/minuend_vault.aa` | `pperp_`, `perp` tree | **no change in v1** — oracle bonds live in sidechain `perp_balances`/`oracle_bonds`, not in AA `base` bytes |
+| tests | `crates/minuend-exec`, `crates/minuend-state` | new `oracle_twap` + `oracle_slash` tests | proof |
 
 Wire impact: **v1 adds 3 new Op tags** (`StakeOracle`=14, `UnstakeOracle`=15, `SlashOracle`=16). `ReportPrice` tag 6 unchanged. Feature-gated by `height >= ORACLE_SLASH_ACTIVATION_HEIGHT` so old-batch replay stays byte-identical before activation.
 
@@ -53,7 +53,7 @@ Ship **stake/unstake + ring-buffer TWAP + single-report deviation slashing + med
 
 Staged future (not in this batch): external multi-source anchor (e.g., Obyte price AA or off-chain signed price with ecrecover) replacing or blending with TWAP, and partial-bond slashing curves.
 
-### 2.2 New types & constants (`operp-types`)
+### 2.2 New types & constants (`minuend-types`)
 
 ```rust
 // All integer, no floats. Matches existing PRICE_SCALE = 1e8.
@@ -95,7 +95,7 @@ pub struct OracleConfig {
 pub fn default_oracle_config() -> OracleConfig { OracleConfig { deviation_bps: 500, twap_window: 256, slash_reward_bps: 5000 } }
 ```
 
-### 2.3 New ChainState fields (`operp-state/src/lib.rs`)
+### 2.3 New ChainState fields (`minuend-state/src/lib.rs`)
 
 Add to `ChainState` (all `BTreeMap`/`VecDeque` so iteration order deterministic):
 
@@ -189,14 +189,14 @@ Pruning: `prune_oracle_twap(min_height)` mirrors `prune_withdrawals`: retain sam
 Current bonds are test-only `state.oracle_bonds.insert`. v1 introduces real ops so bonds are backed by `perp_balances`:
 
 ```rust
-// in operp-dag Op:
+// in minuend-dag Op:
 StakeOracle { account: AccountId }                // tag 14
 UnstakeOracle { account: AccountId }              // tag 15
 SlashOracle { challenger: AccountId, target: AccountId, market: MarketId } // tag 16
 ```
 
 `StakeOracle`:
-* Intake (`operp-exec`): `account == sha256(pubkey)` else `BadAccount`. Check `perp_balances[account] >= ORACLE_BOND_PERP`, `oracle_bonds` not already present, `oracle_unbonding` not present. Deduct `ORACLE_BOND_PERP` from `perp_balances[account]` (underflows → `Insufficient`), insert `oracle_bonds[account]=ORACLE_BOND_PERP`. Apply `account_matches` check already in `verify_sig_by_id`. No whitelist, permissionless. One reporter = one bond slot (future: multiple bonds per reporter = `BTreeMap<AccountId, u32>` count).
+* Intake (`minuend-exec`): `account == sha256(pubkey)` else `BadAccount`. Check `perp_balances[account] >= ORACLE_BOND_PERP`, `oracle_bonds` not already present, `oracle_unbonding` not present. Deduct `ORACLE_BOND_PERP` from `perp_balances[account]` (underflows → `Insufficient`), insert `oracle_bonds[account]=ORACLE_BOND_PERP`. Apply `account_matches` check already in `verify_sig_by_id`. No whitelist, permissionless. One reporter = one bond slot (future: multiple bonds per reporter = `BTreeMap<AccountId, u32>` count).
 
 `UnstakeOracle`:
 * Intake: caller must have `oracle_bonds[account]`. Insert `oracle_unbonding[account] = current_height + ORACLE_UNBOND_HEIGHTS` (256). Do not delete bond yet — reports still accepted until unlock height, so unbonding does not dodge in-flight slashing. At batch commit (`ChainState::prune_oracle_unbonding(min_height)` called alongside `prune_withdrawals`), any entry with `unlock_height <= current_height` is resolved: delete `oracle_bonds[account]`, delete `oracle_unbonding[account]`, credit `ORACLE_BOND_PERP` back to `perp_balances[account]` (checked_add), and remove its entries from `oracle_reports`/`oracle_report_history` so it drops out of future medians.
@@ -218,7 +218,7 @@ Op::SlashOracle { challenger, target, market } =>
   tag 16 || challenger[32] || target[32] || market_le4
 ```
 
-`account/challenger/target == sha256(pubkey)` enforced by `account_matches` (`operp-dag/src/lib.rs:290-305` pattern). No extra `evidence` vector — evidence is the report history already in state. This keeps units small (72 bytes for slash) and avoids variable-length proof parsing in Oscript (no AA change). If review prefers explicit evidence, alternative is `SlashOracle { challenger, target, market, evidence: Vec<UnitId> }` with `evidence.len() <= 8`, each verified present in `Dag` — design supports either, but v1 chooses height-based deterministic check to stay minimal.
+`account/challenger/target == sha256(pubkey)` enforced by `account_matches` (`minuend-dag/src/lib.rs:290-305` pattern). No extra `evidence` vector — evidence is the report history already in state. This keeps units small (72 bytes for slash) and avoids variable-length proof parsing in Oscript (no AA change). If review prefers explicit evidence, alternative is `SlashOracle { challenger, target, market, evidence: Vec<UnitId> }` with `evidence.len() <= 8`, each verified present in `Dag` — design supports either, but v1 chooses height-based deterministic check to stay minimal.
 
 #### 2.6.2 Slash conditions (both evaluated, either triggers)
 
@@ -259,7 +259,7 @@ Parameters:
 * `N = 3` — mirrors `MAX_AA_TREE_DEPTH` style small integer; 3 consecutive batches = 6 s of deviation, enough to ride out one bad batch but not sustained manipulation.
 * Window `256` batches (~8.5 min) — matches `256`-height replay windows and keeps memory bounded; governance may raise to `1800` (~1 h) after monitoring without code change.
 
-#### 2.6.3 Engine execution (`operp-exec`)
+#### 2.6.3 Engine execution (`minuend-exec`)
 
 ```rust
 fn slash_oracle(&mut self, challenger: AccountId, target: AccountId, market: MarketId, seq: Seq) -> Result<(), RejectReason> {
@@ -347,7 +347,7 @@ Funding queue after slash will settle on next `apply_report` from honest reporte
 
 ### 2.7 Governance params, quorum, window
 
-Reuse existing `Proposal` / `ParamKey` flow ( `operp-exec/src/lib.rs:721-842` ):
+Reuse existing `Proposal` / `ParamKey` flow ( `minuend-exec/src/lib.rs:721-842` ):
 * `CreateProposal { creator, market, key: 5/6/7, value }` creates proposal gated by `perp_balances[creator] >= PROPOSAL_MIN_STAKE_PERP` (1000 PERP), `value` range checks (`deviation_bps` 100..2000, `twap_window` 32..1800, `slash_reward` 0..5000), 20_000 seq voting window, quorum `yes * 100 >= supply_at_create * 10`.
 * Weights = `weight_snapshot` at creation (no dodge by burning/moving after).
 * `FinalizeProposal` applies: for oracle keys, mutate `oracle_configs[market]` (or global default if `market == 0` sentinel meaning "all markets").
@@ -360,7 +360,7 @@ Quorum/majority implications: deviation threshold governance is low-risk to set 
 
 **No vault AA change in v1.** Rationale:
 
-* Oracle bonds are sidechain PERP (not `base` bytes), mirroring `perp_balances` in `operp-state`. The vault AA tracks `base` (`bal_`) and diagnostic `pperp_` shadow; PERP burn/reward settlement via `perp_balances` does not need AA payments. `GovDeposit`/`GovWithdraw` remain the PERP bridge.
+* Oracle bonds are sidechain PERP (not `base` bytes), mirroring `perp_balances` in `minuend-state`. The vault AA tracks `base` (`bal_`) and diagnostic `pperp_` shadow; PERP burn/reward settlement via `perp_balances` does not need AA payments. `GovDeposit`/`GovWithdraw` remain the PERP bridge.
 * Keeper reward for slashing is PERP (sidechain), not `base`, so no AA `payment` path.
 * AA complexity budget is exhausted (L9); freeing budget by removing a legacy var is required for any AA change. Oracle logic avoids this entirely.
 
@@ -415,7 +415,7 @@ AA migration: none.
 
 ### 3.3 Test: colluding median attacker loses stake
 
-The graded E2E assertion (belongs in `crates/operp-exec/tests`):
+The graded E2E assertion (belongs in `crates/minuend-exec/tests`):
 
 ```rust
 #[test]
@@ -504,7 +504,7 @@ Additional unit tests:
 
 ### 3.4 Manual verification
 
-* `cargo test --workspace -p operp-state -p operp-exec oracle_` — all above pass; legacy `bonded_oracle_median_and_fill_mark_gated` still passes before activation height.
+* `cargo test --workspace -p minuend-state -p minuend-exec oracle_` — all above pass; legacy `bonded_oracle_median_and_fill_mark_gated` still passes before activation height.
 * Tamper test: modify one `report_history` price by 1, recompute root, assert `validate_against` fails with `RootMismatch`.
 
 ---
@@ -513,10 +513,10 @@ Additional unit tests:
 
 ### 4.1 Code delta (boring, minimal)
 
-* `operp-types`: +5 constants, +3 `ParamKey` variants, +15 lines struct.
-* `operp-state`: +3 BTreeMap fields + 2 VecDeque maps, +~120 lines (`record_twap_sample`, `twap`, `twap_pre`, `recompute_median`, `prune_*`, `oracle_config` helper, meta_leaf commits), +40 lines history maintenance inside `apply_report`.
-* `operp-dag`: +3 Op variants, +30 lines `canonical_bytes` + `account_matches`, + doc comment.
-* `operp-exec`: +1 `RejectReason` set, +80 lines dispatch + `slash_oracle`, +20 lines stake/unstake, +10 lines `apply_report` history push.
+* `minuend-types`: +5 constants, +3 `ParamKey` variants, +15 lines struct.
+* `minuend-state`: +3 BTreeMap fields + 2 VecDeque maps, +~120 lines (`record_twap_sample`, `twap`, `twap_pre`, `recompute_median`, `prune_*`, `oracle_config` helper, meta_leaf commits), +40 lines history maintenance inside `apply_report`.
+* `minuend-dag`: +3 Op variants, +30 lines `canonical_bytes` + `account_matches`, + doc comment.
+* `minuend-exec`: +1 `RejectReason` set, +80 lines dispatch + `slash_oracle`, +20 lines stake/unstake, +10 lines `apply_report` history push.
 * No new crates, no async, no float.
 
 ### 4.2 Runtime

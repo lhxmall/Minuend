@@ -1,6 +1,6 @@
 "use strict";
 
-// OPERP vault withdrawal E2E — #37 items 4 (forest↔hash fold) + 11 (W watermark).
+// MINUEND vault withdrawal E2E — #37 items 4 (forest↔hash fold) + 11 (W watermark).
 //
 // Standalone from test_settlement_aa.js: the withdraw drill needs its own
 // short chain (submit h1..h3 carrying REAL sharded forests, finalize in
@@ -69,15 +69,15 @@ function writeResolved(file, subs, out) {
 }
 
 const ROLLUP_ADDR = chashOf(
-  readDef("operp_rollup.aa")
+  readDef("minuend_rollup.aa")
     .split("DISPUTE_AA_HERE").join("00000000000000000000000000000000")
     .split("DISPUTE_FILL_AA_HERE").join("00000000000000000000000000000000")
 );
-const ROLLUP_SRC = writeResolved("operp_rollup.aa", {
+const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_AA_HERE: "00000000000000000000000000000000",
   DISPUTE_FILL_AA_HERE: "00000000000000000000000000000000",
 }, ".e2e_vault_rollup.aa");
-const VAULT_SRC = writeResolved("operp_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw.aa");
+const VAULT_SRC = writeResolved("minuend_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw.aa");
 
 const SUBMIT_FEE = 10000;
 const STATE_ROOT = sha256Hex("state-1");
@@ -88,7 +88,7 @@ const b64root = (s) => Buffer.from(sha256Hex(s), "hex").toString("base64");
 function submitData(height, stateRoot, prev, forest) {
   return {
     submit: 1,
-    chain_id: "operp-v2",
+    chain_id: "minuend-v2",
     assertion_version: 1,
     height,
     state_root: stateRoot,
@@ -151,7 +151,7 @@ function bounceDetail(res) {
   return (reason ? reason + " :: " : "") + JSON.stringify(r).slice(0, 1500);
 }
 
-// --- hex-domain sharded forest (mirrors operp_state aa_* fns) ---
+// --- hex-domain sharded forest (mirrors minuend_state aa_* fns) ---
 const wdShard = (addr) => parseInt(sha256Hex(addr).slice(0, 2), 16) & 15;
 const hexLeafOf = (addr, col, perp, w) => sha256Hex(`acct:${addr}:${col}:${perp}:${w}`);
 const foldLR = (l, r) => sha256Hex(l + r);

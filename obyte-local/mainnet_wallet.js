@@ -4,7 +4,7 @@
 // (issue_perp.js, deploy_mainnet.js).
 //
 // Boots a light headless wallet against the default mainnet hub from
-// OPERP_DEPLOY_MNEMONIC, waits for `headless_wallet_ready`, and returns
+// MINUEND_DEPLOY_MNEMONIC, waits for `headless_wallet_ready`, and returns
 // the wallet handle plus lazily-required ocore modules.
 //
 // DO NOT require("headless-obyte") for side effects: its package main
@@ -46,9 +46,9 @@ function readFirstAddress(headlessWallet) {
 
 async function boot() {
   if (cached) return cached;
-  const MNEMONIC = process.env.OPERP_DEPLOY_MNEMONIC;
+  const MNEMONIC = process.env.MINUEND_DEPLOY_MNEMONIC;
   if (!MNEMONIC || MNEMONIC.trim().split(/\s+/).length < 12)
-    throw new Error("OPERP_DEPLOY_MNEMONIC (12+ words) required");
+    throw new Error("MINUEND_DEPLOY_MNEMONIC (12+ words) required");
   delete process.env.devnet;
   delete process.env.testnet;
   process.env.mainnet = "1";

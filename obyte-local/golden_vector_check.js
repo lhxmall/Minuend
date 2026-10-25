@@ -1,7 +1,7 @@
 "use strict";
 
 // H3 golden vector — canonical batch data hash/length for ONE fixed nested
-// object. Must match the Rust side (operp_settle::obyte_hash::get_data_hash
+// object. Must match the Rust side (minuend_settle::obyte_hash::get_data_hash
 // over get_json_source) on the same input:
 //   source      = ocore getJsonSourceString(obj)  (recursively key-sorted minified JSON)
 //   data_hash   = hex(sha256(source))

@@ -1,8 +1,8 @@
 [English](README.md) | 简体中文
 
-# OPERP — 乐观 DAG 侧链永续 DEX，结算到 Obyte
+# MINUEND — 乐观 DAG 侧链永续 DEX，结算到 Obyte
 
-OPERP 是一个**永续合约交易所**的研究/MVP 实现：交易在高吞吐的乐观 DAG
+MINUEND 是一个**永续合约交易所**的研究/MVP 实现：交易在高吞吐的乐观 DAG
 侧链上执行，周期性把状态根结算到 [Obyte](https://obyte.org) 账本（通过
 autonomous agent 金库）。金库提款受 **Merkle 证明门控**——必须出示针对
 已最终化根的余额证明才能取钱。
@@ -13,10 +13,10 @@ autonomous agent 金库）。金库提款受 **Merkle 证明门控**——必须
 
 ```
 cargo test --workspace          # 测试全绿
-cargo run --release -p operp-exec --example bench_raw        # ~5.5k ops/s
-cargo run --release -p operp-exec --example hft_onedag -- 20000 8 4   # ~9k TPS, 零拒绝
-cd obyte-local && node test_settlement_aa.js  # Linux/CI：四个 AA 实例生命周期（win32 skip）
-cd obyte-local && node deploy_mainnet.js      # 主网发四个 AA（需 OPERP_DEPLOY_MNEMONIC）
+cargo run --release -p minuend-exec --example bench_raw        # ~5.5k ops/s
+cargo run --release -p minuend-exec --example hft_onedag -- 20000 8 4   # ~9k TPS, 零拒绝
+cd obyte-local && node test_settlement_aa.js  # Linux/CI：三门 AA 生命周期（win32 skip）
+cd obyte-local && node deploy_mainnet.js      # 主网发三个 AA（需 MINUEND_DEPLOY_MNEMONIC）
 ```
 
 主网脚本先部署两个 dispute AA，再把其地址嵌入 rollup 定义，随后部署
@@ -39,7 +39,7 @@ rollup 与 vault，最后将两个 dispute AA 各绑定一次并核验绑定状�
                                      │ temp_data：frames_blob 或 package 单元 + data_root
                                      ▼
                     ┌─────────────────────────────────────────────┐
-                    │  OBYTE 结算（Oscript，CHAIN_ID=operp-v2）     │
+                    │  OBYTE 结算（Oscript，CHAIN_ID=minuend-v2）     │
                     │  rollup  submit/finalize/force/verdict      │
                     │  dispute 一枪谓词（充提/漏单/成交/ghost/skip）│
                     │  vault   只托管：deposit / withdraw         │
@@ -50,16 +50,16 @@ rollup 与 vault，最后将两个 dispute AA 各绑定一次并核验绑定状�
 
 | Crate | 职责 |
 |---|---|
-| `operp-types` | 常量（单一权威来源）、id（`AccountId = sha256(pubkey)`）、整数定值运算 |
-| `operp-book` | 限价订单簿：价格-时间优先、部分成交、IOC/GTC、自成交拦截 |
-| `operp-account` | 每账户抵押/仓位、VWAP 入场价、已实现 PnL、风险快照 |
+| `minuend-types` | 常量（单一权威来源）、id（`AccountId = sha256(pubkey)`）、整数定值运算 |
+| `minuend-book` | 限价订单簿：价格-时间优先、部分成交、IOC/GTC、自成交拦截 |
+| `minuend-account` | 每账户抵押/仓位、VWAP 入场价、已实现 PnL、风险快照 |
 | | `liquidatable`：equity·10000 ≤ mm·10500；`reduce_only`：≤ 12000 |
-| `operp-state` | ChainState：账户/簿/mark/提款记录，字节域 Merkle 树（`state_root`）+ 字符串域森林（`aa_root`，供 AA 验证）；重启持久化（快照 + gov-nonce WAL） |
-| `operp-dag` | unit DAG、签名严格校验（`verify_strict`）、orphan 缓冲（4096 上限，盐化驱逐）、确定性字典序线性化（`ready_linearized`，已去盐） |
-| `operp-exec` | 引擎本体：ingest → apply → 事件流；place/cancel/deposit/withdraw/liquidate 全量入口校验 |
-| `operp-settle` | 批次 checkpoint、`validate_against` 重放审计（含独立充值证据验证）、`temp_data` 载荷、提款证明生成 |
-| `operp-gossip` | operator 之间 WantUnits/HaveUnits 按需孤儿同步（纯 P2P 层，传输无关，绝不进共识） |
-| `operp-watch` | 独立 rollup watcher：重放 `da_unit_<h>`，组谓词 proof.json，经 `post_challenge.js` 打 dispute（与 poster 分钥） |
+| `minuend-state` | ChainState：账户/簿/mark/提款记录，字节域 Merkle 树（`state_root`）+ 字符串域森林（`aa_root`，供 AA 验证）；重启持久化（快照 + gov-nonce WAL） |
+| `minuend-dag` | unit DAG、签名严格校验（`verify_strict`）、orphan 缓冲（4096 上限，盐化驱逐）、确定性字典序线性化（`ready_linearized`，已去盐） |
+| `minuend-exec` | 引擎本体：ingest → apply → 事件流；place/cancel/deposit/withdraw/liquidate 全量入口校验 |
+| `minuend-settle` | 批次 checkpoint、`validate_against` 重放审计（含独立充值证据验证）、`temp_data` 载荷、提款证明生成 |
+| `minuend-gossip` | operator 之间 WantUnits/HaveUnits 按需孤儿同步（纯 P2P 层，传输无关，绝不进共识） |
+| `minuend-watch` | 独立 rollup watcher：重放 `da_unit_<h>` 并组谓词 proof.json；当前 `post_challenge.js` 仍是本地 aa-testkit CLI，未接生产 hub 提交路径，不声称生产环境自动揭发（#37 第 2 项仍开放） |
 
 ## 协议设计原理
 
@@ -72,7 +72,7 @@ rollup 与 vault，最后将两个 dispute AA 各绑定一次并核验绑定状�
 轮换），同一 id 携带不同 canonical 字节的重试被拒
 （`DagError::RetryMismatch`），Deposit/GovDeposit 的地址在任何缓冲之前即
 受 128 字符上限约束（`DagError::AddrTooLong`）。缺失单元可通过
-WantUnits/HaveUnits gossip 层（`operp-gossip`）按需补齐——它同时服务已
+WantUnits/HaveUnits gossip 层（`minuend-gossip`）按需补齐——它同时服务已
 链接单元与缓冲孤儿，不触碰共识。
 
 签名采用 ed25519 **严格校验**（拒绝可延展签名）。每个 op 绑定持有者
@@ -169,15 +169,17 @@ operator。
 
 ### 5. 结算 AA：乐观最终性 + 证明门控出金
 
-四个 AA 实例、三类职责（rollup、两个 dispute AA、vault；`CHAIN_ID=operp-v2`）。
-**没有 lock，没有付钱否决。** 保证金是 GBYTE。
+三个 AA（`CHAIN_ID=minuend-v2`）。**没有 lock，没有付钱否决。** 保证金是 GBYTE。
 
 1. **资金池 + submit（rollup）** — 常备池 `pool_<addr> >= 1000 GBYTE`（`{pool:1}` 按净流入减 10000 fee 累加）；每次提交只付 10000 bounce 费。在途 `last_submitted-last_finalized < 50` 允许 h 未终结就发 h+1。组合单元：header `temp_data`（`frames_blob` 或 `packages`+`data_root`，gzip 帧）+ `{submit, height, 双根, trace/units/ops/fills 根}`。多包时 package 单元先发，da_unit 以一单元承载 header + submit。`h == last_submitted+1`；活高度重发 → `height taken`（欺诈重开的后续高度可自由覆盖）。窗从 `submitted_at` 起算 3600 s。
-2. **揭发（dispute / dispute_fill）** — 窗内任何人提交一枪谓词（deposit/withdraw、escrow〔仅 Cancel 退款〕、fill_math、ghost、skip；P-omit 暂不可用）。验不过 bounce `no fraud`，高度不动；验过则 `{verdict:'fraud'}`，rollup 从 operator 常备池扣 5e11、高度重开。无应诉回合。
+   帧为 UTF-8 JSON 行：首包不加前缀，后续包以一个 LF 开头；新包均无尾 LF。
+   `data_root` 哈希按序直接拼接的原始 gunzip 包字节。新 watcher 先验原始 root，
+   再只在解析副本中为旧包补缺失边界；新旧 producer/watcher 可兼容滚动，无需
+   framing version。单包也校验原始 `data_root`。
+2. **揭发（dispute / dispute_fill）** — 窗内任何人提交一枪谓词（deposit/withdraw/omit/fill_math/ghost/skip）；P-omit 当前禁用并恒 bounce `no fraud`（#23），因此目前不能链上挑战漏单。其他谓词验不过也 bounce `no fraud`，高度不动；验过则 `{verdict:'fraud'}`，rollup 从 operator 常备池扣 5e11、高度重开。无应诉回合。
 3. **finalize（rollup）** — `submitted_at+3600` 且未冻结 → `last_finalized=h`，竞速奖 20000 bytes，不再记 sbond。链空闲（`last_submitted==last_finalized`）时 `{claim:'pool'}` 取回池子。`{escape_finalize}` 为 7 天停滞门。
 4. **withdraw（vault）** — 只读 `var[ROLLUP]['aa_forest_'||last_finalized]`，原 16 深 Merkle 折叠与 W 防重放不变。`{escape_withdraw}` 在 vault AA 中无对应 case（vault 只有 `deposit` / `deposit_perp` / `withdraw`），按未匹配触发 bounce。
-5. **force（rollup inbox）** — `{force, unit_id}` 只记录时间戳，不证明该单元存在；
-   当前 P-omit 分支恒 bounce `no fraud`，尚不能用于有效的漏单挑战。
+5. **force（rollup inbox）** — `{force, unit_id}` 记录抗审查请求；P-omit 当前禁用，暂不能链上挑战漏收。
 
 | 门 | 原点 | 时长 |
 |---|---|---|
@@ -193,14 +195,14 @@ operator。
 ```
 crates/                  Rust workspace（9 crates，见表）
 obyte-local/
-  agents/operp_vault.aa          金库（deposit/withdraw）
-  agents/operp_rollup.aa         主张链
-  agents/operp_dispute.aa        充提/Cancel 托管退款；P-omit 暂不可用
-  agents/operp_dispute_fill.aa   成交谓词
-  test_settlement_aa.js          四个 AA 实例 E2E（Linux/CI；win32 skip）
+  agents/minuend_vault.aa          金库（deposit/withdraw）
+  agents/minuend_rollup.aa         主张链
+  agents/minuend_dispute.aa        充提/漏单谓词
+  agents/minuend_dispute_fill.aa   成交谓词
+  test_settlement_aa.js          三门 AA E2E（Linux/CI；win32 skip）
   deploy_mainnet.js / issue_perp.js  主网发 AA / 发 PERP
-  post_batch.js                  组合 temp_data+submit → finalize → claim
-  post_challenge.js              谓词揭发 CLI（`--pred --proof`）
+  post_batch.js                  本地 aa-testkit temp_data+submit → finalize → claim；未接生产
+  post_challenge.js              本地 aa-testkit 谓词 CLI（`--pred --proof`）；未接生产提交
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -223,12 +225,12 @@ docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 cargo test --workspace
 
 # 单节点吞吐探针
-cargo run --release -p operp-exec --example bench_raw
+cargo run --release -p minuend-exec --example bench_raw
 # 单 DAG 多市场压测：<时长ms> <市场数> <生成器线程数>
-cargo run --release -p operp-exec --example hft_onedag -- 60000 8 4
+cargo run --release -p minuend-exec --example hft_onedag -- 60000 8 4
 
 # 导出真实批次载荷
-cargo run -p operp-settle --example export_batch
+cargo run -p minuend-settle --example export_batch
 
 # AA 生命周期集成测试（本地 devnet；需 node + C++ 工具链以编译
 # vendored aa-testkit 的原生 rocksdb/sqlite3——见「验证状态」）
@@ -237,7 +239,7 @@ cd obyte-local && node test_settlement_aa.js
 # 部署结算 AA 到 Obyte 测试网（需已发行的 PERP asset id）
 cd obyte-local && node deploy_testnet.js
 
-# operator 完整流程：package 先发，组合 da_unit（header + submit）+ finalize + 领奖
+# 本地 aa-testkit 发包/最终化演练；不是生产主网流程
 cd obyte-local && node post_batch.js
 ```
 
@@ -254,7 +256,7 @@ cd obyte-local && node post_batch.js
    仍未关闭：`fill_math` 不判定任何负的预期 collateral 结果，ADL kind-2 成交
    没有链上成交证明分支；仓位 entry 比较仍有 ±1 单位容差。`temp_data` 正文
    24h 后删除。充值 evidence 由 `validate_against` 检查，AA 谓词路径不证明
-   Obyte inclusion/stability（`OPERP_VAULT_AA` 为空且带 evidence 会拒）。
+   Obyte inclusion/stability（`MINUEND_VAULT_AA` 为空且带 evidence 会拒）。
    10k 节点墙已由 frames-in-base64 关闭；剩余 DA 上限为 5MB/`PACK_SOURCE_CAP`
    与 24h 清理。P-escrow 只验证 Cancel 退款的精确抵押变化，不覆盖 Place 托管变化。
    vault 也会拒绝非零 PERP claim（`perp claim needs burn`）：侧链 `GovWithdraw`
@@ -348,7 +350,7 @@ WantUnits gossip、资金费外部锚接线。
   `slash_reward_<challenger>`、高度重开），Oscript 不做撮合重执行
 - [x] **02 充值独立验证** — blob 内 per-frame `e` 携带完整 Obyte
   joint 单元；`unit_hash(joint)` 在 `validate_against` 内经
-  `operp_settle::obyte_hash::get_unit_hash` 复算；收款人/资产以调用方提供的
+  `minuend_settle::obyte_hash::get_unit_hash` 复算；收款人/资产以调用方提供的
   `expected_vault`/`perp_asset` 绑定核对，失败映射
   `SettleError::DepositEvidence`；watcher 拼接 `e` 字段取回（完整 joint 仍在 `validate_against` 内验证）
 - [x] **03 commit-reveal 排序** — v1 盐化排序早前已发、**本轮去盐**（执行序
@@ -359,7 +361,7 @@ WantUnits gossip、资金费外部锚接线。
 - [x] **04 盐化孤儿驱逐 + WantUnits gossip** — `argmin sha256(salt‖unit_id)`，
   `Engine::note_finalized` 每 epoch 轮换盐
   （`sha256(ORDERING_SALT_DOMAIN ‖ root ‖ epoch_le)`）；**gossip 本轮落地**：
-  新 `crates/operp-gossip`（WantUnits/HaveUnits、去抖扇出、请求/响应限额），
+  新 `crates/minuend-gossip`（WantUnits/HaveUnits、去抖扇出、请求/响应限额），
   纯 operator/P2P 层——传输载体按 doc OQ5 接线
 - [x] **05 预言机罚没 + TWAP** — 50k PERP 质押/解锁（256 高度排队）/罚没、
   TWAP 环、500 bps ×3 连续采样双条件、`SlashOracle` tag 16、高度 0 起生效
@@ -403,7 +405,7 @@ WantUnits gossip、资金费外部锚接线。
 ## 验证状态
 
 - **Rust / js-checks / e2e**：CI 跑 workspace 测试、四份 AA 复杂度门（每 formula ≤100 且 Σops ≤2000）、golden vector、`test_settlement_aa.js`（win32 skip）。
-- **Watcher：** `operp-watch` 组 `proof.json` 打 dispute（`--pred --proof`，需 `OPERP_WATCH_MNEMONIC` 与 `--vault/--rollup`）。未设助记词仅报警。须与 poster 分钥。
+- **Watcher：** `minuend-watch` 组 `proof.json` 打 dispute（`--pred --proof`，需 `MINUEND_WATCH_MNEMONIC` 与 `--vault/--rollup`）。未设助记词仅报警。须与 poster 分钥。
 
 ## 许可证
 

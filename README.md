@@ -1,8 +1,8 @@
 English | [简体中文](README.zh-CN.md)
 
-# OPERP — Optimistic DAG Sidechain Perpetual DEX settling to Obyte
+# MINUEND — Optimistic DAG Sidechain Perpetual DEX settling to Obyte
 
-OPERP is a research/MVP implementation of a **perpetual futures exchange** that
+MINUEND is a research/MVP implementation of a **perpetual futures exchange** that
 executes trades on a high-throughput optimistic DAG sidechain and settles
 periodic state roots to the [Obyte](https://obyte.org) ledger through an
 autonomous agent (AA) vault. Withdrawals from the vault are **proof-gated**:
@@ -15,10 +15,10 @@ users must present a Merkle proof of their balance against a finalized root.
 
 ```
 cargo test --workspace          # all green
-cargo run --release -p operp-exec --example bench_raw        # ~5.5k ops/s
-cargo run --release -p operp-exec --example hft_onedag -- 20000 8 4   # ~9k TPS, 0 rejects
-cd obyte-local && node test_settlement_aa.js  # Linux/CI: four-AA lifecycle (win32 skips)
-cd obyte-local && node deploy_mainnet.js      # deploy the four AAs (needs OPERP_DEPLOY_MNEMONIC)
+cargo run --release -p minuend-exec --example bench_raw        # ~5.5k ops/s
+cargo run --release -p minuend-exec --example hft_onedag -- 20000 8 4   # ~9k TPS, 0 rejects
+cd obyte-local && node test_settlement_aa.js  # Linux/CI: three-AA lifecycle (win32 skips)
+cd obyte-local && node deploy_mainnet.js      # deploy the three AAs (needs MINUEND_DEPLOY_MNEMONIC)
 ```
 
 The mainnet script deploys both dispute AAs first, embeds their addresses in
@@ -43,7 +43,7 @@ definition-hash cycle.
                                      │ temp_data: frames_blob or package units + data_root
                                      ▼
                     ┌─────────────────────────────────────────────┐
-                    │  OBYTE SETTLEMENT (Oscript, CHAIN_ID=operp-v2)│
+                    │  OBYTE SETTLEMENT (Oscript, CHAIN_ID=minuend-v2)│
                     │  rollup  submit/finalize/force/verdict      │
                     │  dispute one-shot predicates (deposits/     │
                     │  omissions/fills/ghost/skip)                │
@@ -55,16 +55,16 @@ definition-hash cycle.
 
 | Crate | Role |
 |---|---|
-| `operp-types` | Constants (single source of truth), ids (`AccountId = sha256(pubkey)`), fixed-point math |
-| `operp-book` | Central limit order book: price-time priority, partial fills, IOC/GTC, self-trade protection (escrowed own maker → reject the incoming order, cross maker → cancel-maker) |
-| `operp-account` | Per-account collateral/positions, VWAP entry price, realized PnL, risk snapshot |
+| `minuend-types` | Constants (single source of truth), ids (`AccountId = sha256(pubkey)`), fixed-point math |
+| `minuend-book` | Central limit order book: price-time priority, partial fills, IOC/GTC, self-trade protection (escrowed own maker → reject the incoming order, cross maker → cancel-maker) |
+| `minuend-account` | Per-account collateral/positions, VWAP entry price, realized PnL, risk snapshot |
 | | `liquidatable` at equity·10000 ≤ mm·10500, `reduce_only` at ≤ 12000 |
-| `operp-state` | ChainState: accounts/books/marks/withdrawals, byte-level Merkle tree (`state_root`) + hex-string tree (`aa_root`) for the AA |
-| `operp-dag` | Unit DAG with signature verification (`verify_strict`), orphan buffer (4096 cap, salted eviction), lexicographic linearization (`ready_linearized`; salt is eviction-only) |
-| `operp-exec` | The engine: ingest → apply → events; place/cancel/deposit/withdraw/liquidate with full intake validation |
-| `operp-settle` | Batch checkpoints, `validate_against` replay verification, `temp_data` payloads, proof generation |
-| `operp-gossip` | WantUnits/HaveUnits on-demand orphan sync between operators (pure P2P layer, transport-agnostic, never consensus) |
-| `operp-watch` | Independent rollup watcher: replays `da_unit_<h>`, builds predicate `proof.json`, posts via `post_challenge.js` (separate key from the poster) |
+| `minuend-state` | ChainState: accounts/books/marks/withdrawals, byte-level Merkle tree (`state_root`) + hex-string tree (`aa_root`) for the AA |
+| `minuend-dag` | Unit DAG with signature verification (`verify_strict`), orphan buffer (4096 cap, salted eviction), lexicographic linearization (`ready_linearized`; salt is eviction-only) |
+| `minuend-exec` | The engine: ingest → apply → events; place/cancel/deposit/withdraw/liquidate with full intake validation |
+| `minuend-settle` | Batch checkpoints, `validate_against` replay verification, `temp_data` payloads, proof generation |
+| `minuend-gossip` | WantUnits/HaveUnits on-demand orphan sync between operators (pure P2P layer, transport-agnostic, never consensus) |
+| `minuend-watch` | Independent rollup watcher: replays `da_unit_<h>` and builds predicate `proof.json`; `post_challenge.js` is currently a local aa-testkit CLI, not a production hub submitter, so automatic production challenges are not claimed (#37 item 2 remains open) |
 
 ## Protocol principles
 
@@ -80,7 +80,7 @@ epoch), duplicate retries carrying different canonical bytes under one id
 are rejected (`DagError::RetryMismatch`), and Deposit/GovDeposit addresses
 are capped at 128 chars (`DagError::AddrTooLong`) before any buffering.
 Missing units can be recovered on demand through the WantUnits/HaveUnits
-gossip layer (`operp-gossip`), which serves both linked units and buffered
+gossip layer (`minuend-gossip`), which serves both linked units and buffered
 orphans without touching consensus.
 
 Signatures use ed25519 **strict verification** (rejects malleable
@@ -203,8 +203,8 @@ replica can audit the operator.
 
 ### 5. Settlement AAs: optimistic finality + proof-gated exits
 
-Four AA instances across three roles (`operp_rollup`, two dispute AAs, and
-`operp_vault`; `CHAIN_ID=operp-v2`). **No lock, no pay-to-kill.** Collateral is GBYTE.
+Three AA instances across three roles (`minuend_rollup`, two dispute AAs, and
+`minuend_vault`; `CHAIN_ID=minuend-v2`). **No lock, no pay-to-kill.** Collateral is GBYTE.
 
 1. **pool + submit (rollup)** — standing pool `pool_<addr> >= 1000 GBYTE`
    (`{pool:1}` funds net inbound minus 10000 fee); each submit pays only the
@@ -214,6 +214,11 @@ Four AA instances across three roles (`operp_rollup`, two dispute AAs, and
    `{submit, height, roots, trace/units/ops/fills roots}`.
    Multi-package heights post package units first; the da_unit carries the
    header + submit in one unit.
+   Frame bytes are UTF-8 JSON lines: packages after the first begin with one LF,
+   and no new package ends with LF. `data_root` hashes the exact concatenated
+   gunzipped package bytes. New watchers verify that raw root before adding any
+   missing legacy package separator to a parse-only copy; this keeps old and new
+   writers/readers compatible without a framing-version rollout.
    `h == last_submitted+1`; a live height re-submit bounces
    `height taken` (fraud-reopened successors overwrite freely). Window:
    `submitted_at + 3600 s`.
@@ -252,14 +257,14 @@ no automatic migration path is provided.
 ```
 crates/                  Rust workspace (9 crates, see table above)
 obyte-local/
-  agents/operp_vault.aa          custody (deposit/withdraw)
-  agents/operp_rollup.aa         assertion chain
-  agents/operp_dispute.aa        deposit/withdraw/Cancel-escrow; P-omit disabled
-  agents/operp_dispute_fill.aa   fill predicates
-  test_settlement_aa.js          four-AA E2E (Linux/CI; win32 skips)
+  agents/minuend_vault.aa          custody (deposit/withdraw)
+  agents/minuend_rollup.aa         assertion chain
+  agents/minuend_dispute.aa        deposit/withdraw/Cancel-escrow; P-omit disabled
+  agents/minuend_dispute_fill.aa   fill predicates
+  test_settlement_aa.js          three-AA E2E (Linux/CI; win32 skips)
   deploy_mainnet.js / issue_perp.js  mainnet AA deploy / PERP issuance
-  post_batch.js                  combined temp_data+submit → finalize → claim
-  post_challenge.js              predicate CLI (`--pred --proof`)
+  post_batch.js                  local aa-testkit temp_data+submit → finalize → claim; not production-connected
+  post_challenge.js              local aa-testkit predicate CLI (`--pred --proof`); not production-connected
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -281,12 +286,12 @@ docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 cargo test --workspace
 
 # single-node throughput probe
-cargo run --release -p operp-exec --example bench_raw
+cargo run --release -p minuend-exec --example bench_raw
 # one-DAG multi-market stress: <run_ms> <markets> <generators>
-cargo run --release -p operp-exec --example hft_onedag -- 60000 8 4
+cargo run --release -p minuend-exec --example hft_onedag -- 60000 8 4
 
 # export a real batch payload
-cargo run -p operp-settle --example export_batch
+cargo run -p minuend-settle --example export_batch
 
 # AA lifecycle on local devnet (needs node + a C++ toolchain for the
 # vendored aa-testkit's native rocksdb/sqlite3; see Verification status)
@@ -295,8 +300,7 @@ cd obyte-local && node test_settlement_aa.js
 # deploy settlement AAs to Obyte testnet (requires an issued PERP asset id)
 cd obyte-local && node deploy_testnet.js
 
-# operator flow: package posts then combined da_unit (header + submit) +
-# finalize + claim race reward (the complete mainnet sequence)
+# local aa-testkit poster/finalization drill only; not a production mainnet flow
 cd obyte-local && node post_batch.js
 ```
 
@@ -317,7 +321,7 @@ This codebase meets the plan's bar of *"deployable to Obyte testnet"*. It is
    escrow changes have no equivalent proof branch. `temp_data` bodies vanish
    after 24 h. Deposit evidence
    is checked by `validate_against`, not by an Obyte inclusion/stability proof
-   in the AA predicate path (an empty `OPERP_VAULT_AA` with evidences present
+   in the AA predicate path (an empty `MINUEND_VAULT_AA` with evidences present
    is rejected). The 10k-node wall is closed by frames-in-base64; remaining DA
    bound is 5MB/`PACK_SOURCE_CAP` and the 24h purge.
    The vault also rejects non-zero PERP claims (`perp claim needs burn`): a
@@ -440,9 +444,9 @@ track does not mean every proposed sub-feature is available or audited;
 disabled cases and deferred work are listed below and in the mechanism docs:
 
 - [x] **01 Fraud slashing** — `01-fraud-slashing.md`: `validity_proof_hash` plug + dispute-verdict slashing (5e11 off the operator's standing pool to `slash_reward_<challenger>`, height reopens), no matcher re-execution in Oscript
-- [x] **02 Deposit independent verification** — `temp_data.deposit_evidences` carries FULL Obyte joint units; `unit_hash(joint)` recomputed inside `validate_against` via `operp_settle::obyte_hash::get_unit_hash`; payee/asset checked against caller-supplied `expected_vault`/`perp_asset`, failures map to `SettleError::DepositEvidence`; watchers rehydrate via `evidences_from_payload`
+- [x] **02 Deposit independent verification** — `temp_data.deposit_evidences` carries FULL Obyte joint units; `unit_hash(joint)` recomputed inside `validate_against` via `minuend_settle::obyte_hash::get_unit_hash`; payee/asset checked against caller-supplied `expected_vault`/`perp_asset`, failures map to `SettleError::DepositEvidence`; watchers rehydrate via `evidences_from_payload`
 - [x] **03 Commit-reveal ordering** — v1 salted sort shipped earlier and **desalted this round** (execution order is deterministic lex; the salt remains for orphan eviction only — Limitations #13); **v2 additive landed this round**: `Op::Commit` (tag 18) / `Op::Reveal` (tag 19), TTL `COMMIT_TTL_HEIGHTS = 16`, ≤ 8 live commits/account, `reveal_commit_hash = sha256(inner_op_bytes ‖ salt)`, live at height 0
-- [x] **04 Salted orphan eviction + WantUnits gossip** — `argmin sha256(salt‖unit_id)` with `Engine::note_finalized` rotating the salt per epoch (`sha256(ORDERING_SALT_DOMAIN ‖ root ‖ epoch_le)`); **gossip landed this round**: new `crates/operp-gossip` (WantUnits/HaveUnits, debounced fanout, bounded requests/responses) as a pure operator/P2P layer — wire transport per doc OQ5
+- [x] **04 Salted orphan eviction + WantUnits gossip** — `argmin sha256(salt‖unit_id)` with `Engine::note_finalized` rotating the salt per epoch (`sha256(ORDERING_SALT_DOMAIN ‖ root ‖ epoch_le)`); **gossip landed this round**: new `crates/minuend-gossip` (WantUnits/HaveUnits, debounced fanout, bounded requests/responses) as a pure operator/P2P layer — wire transport per doc OQ5
 - [x] **05 Oracle slashing + TWAP** — 50k PERP stake/unstake (256-height unbond)/slash, TWAP rings, 500 bps ×3-streak double condition, `SlashOracle` tag 16, live at height 0
 - [x] **06 Funding external anchor** — funding-index abstraction + activation height 0 (live at genesis); **operator wiring landed this round**: `Op::UpdateExternalPrice` (tag 17), source allowlist, `AggregatedExternal` mode, staleness fallback external TWAP → bonded-median TWAP → instant median (`FUNDING_EXTERNAL_MAX_STALENESS = 32`)
 - [x] **07 Escape hatch** — **landed this round**, folded into existing cases for budget: `{escape_finalize: 1}` rides the finalize handler (any caller, `ESCAPE_STALL_SECS = 604800` mainnet / 3600 testnet), `{escape_withdraw}` removed (no such case; unmatched triggers bounce); deviation per doc07 §4 waiver: escape_finalize enforces only the LOCAL stall gate
@@ -468,8 +472,8 @@ records) and [ROLLUP-UPGRADE.md](docs/ROLLUP-UPGRADE.md). Validation:
 * **CI** runs workspace tests, the four-AA complexity gate (per-formula
   ≤ 100 and Σops ≤ 2000), the golden vector, and `test_settlement_aa.js`
   (win32 skips).
-* **Watcher:** `operp-watch` builds `proof.json` and posts to the dispute AA
-  (`--pred --proof`; requires `OPERP_WATCH_MNEMONIC`, `--vault` and
+* **Watcher:** `minuend-watch` builds `proof.json` and posts to the dispute AA
+  (`--pred --proof`; requires `MINUEND_WATCH_MNEMONIC`, `--vault` and
   `--rollup`). Without a mnemonic it prints alerts only. Use a key separate
   from the poster.
 

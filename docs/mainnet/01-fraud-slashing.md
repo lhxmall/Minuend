@@ -1,9 +1,9 @@
 # Gap 1 — Fraud Response: Freeze-and-Rollback → Slashing + Validity-Proof Stub — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignFraudSlash` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
-> Depends: `operp_vault.aa` challenge/respond/finalize, `crates/operp-settle` Batch/Checkpoint, `crates/operp-state` aa_root/state_root
+> Depends: `minuend_vault.aa` challenge/respond/finalize, `crates/minuend-settle` Batch/Checkpoint, `crates/minuend-state` aa_root/state_root
 
 ---
 
@@ -22,13 +22,13 @@ Trade data **is** posted on-chain so any watcher can re-execute and detect a bad
 
 | Crate | File | Symbol | What |
 |-------|------|--------|------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | `SUBMIT_BOND_NET=50_000`, `CHALLENGE_SECS=3600`, `OBYTE_STABILITY_SECS=600`, `CHAIN_ID` | add `SLASH_CHALLENGER_SHARE_BPS=5000`, `SLASH_BURN_SHARE_BPS=5000`, `VALIDITY_PROOF_HASH_LEN=64` |
-| `operp-settle` | `crates/operp-settle/src/lib.rs` | `Checkpoint { height, prev_state_hash, state_root, aa_root, last_unit, seq, unit_ids, fills_hash, fill_count }`, `Batch::from_applied`, `Batch::validate_against`, `TempDataPayload` | **add** `validity_proof_hash: Option<String>` to `Checkpoint`, wire through `from_applied`/`temp_data_payload`/`validate_against` |
-| `operp-state` | `crates/operp-state/src/lib.rs` | `ChainState::state_root()`, `aa_root_of_state()`, `meta_leaf` | no consensus change; only diagnostic exposure of `validity_proof_hash` in meta_leaf if desired (optional) |
-| `operp-exec` | `crates/operp-exec/src/lib.rs` | `Engine`, `Batch` | no change; `validate_against` is off-chain watcher primitive |
-| `obyte-local` | `agents/operp_vault.aa` | `submit` / `challenge` / `respond` / `finalize` / `claim_bond` / `claim_submit_bond` / `claim_reward` handlers + state vars `active_bond_h`, `sbond_addr`, `bond_addr`, `bond_height_addr`, `challenger_h`, `frozen_h`, `submitted_at_h`, `cand_*`, `root_h`, `aa_root_h`, `stable_at_h`, `last_locked`, `last_finalized`, `reward_addr`, `fee_winner_h` | **core change**: new vars `valid_proof_h`, `slash_reward_addr`, `burned` diagnostic, new handler `claim_slash`, modified `submit`/`finalize`/`respond` economics |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | `SUBMIT_BOND_NET=50_000`, `CHALLENGE_SECS=3600`, `OBYTE_STABILITY_SECS=600`, `CHAIN_ID` | add `SLASH_CHALLENGER_SHARE_BPS=5000`, `SLASH_BURN_SHARE_BPS=5000`, `VALIDITY_PROOF_HASH_LEN=64` |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs` | `Checkpoint { height, prev_state_hash, state_root, aa_root, last_unit, seq, unit_ids, fills_hash, fill_count }`, `Batch::from_applied`, `Batch::validate_against`, `TempDataPayload` | **add** `validity_proof_hash: Option<String>` to `Checkpoint`, wire through `from_applied`/`temp_data_payload`/`validate_against` |
+| `minuend-state` | `crates/minuend-state/src/lib.rs` | `ChainState::state_root()`, `aa_root_of_state()`, `meta_leaf` | no consensus change; only diagnostic exposure of `validity_proof_hash` in meta_leaf if desired (optional) |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs` | `Engine`, `Batch` | no change; `validate_against` is off-chain watcher primitive |
+| `obyte-local` | `agents/minuend_vault.aa` | `submit` / `challenge` / `respond` / `finalize` / `claim_bond` / `claim_submit_bond` / `claim_reward` handlers + state vars `active_bond_h`, `sbond_addr`, `bond_addr`, `bond_height_addr`, `challenger_h`, `frozen_h`, `submitted_at_h`, `cand_*`, `root_h`, `aa_root_h`, `stable_at_h`, `last_locked`, `last_finalized`, `reward_addr`, `fee_winner_h` | **core change**: new vars `valid_proof_h`, `slash_reward_addr`, `burned` diagnostic, new handler `claim_slash`, modified `submit`/`finalize`/`respond` economics |
 | `obyte-local` | `post_batch.js`, `test_vault_aa.js`, `gen_withdraw_proof` example | operator flow + e2e test | extended to test slash path |
-| tests | `crates/operp-settle/tests`, `obyte-local/test_vault_aa.js` | `validate_against` mismatch cases | new `bad_root_challenged_slash` e2e |
+| tests | `crates/minuend-settle/tests`, `obyte-local/test_vault_aa.js` | `validate_against` mismatch cases | new `bad_root_challenged_slash` e2e |
 
 No wire-format break before activation height (new checkpoint field is `Option`, omitted = legacy). AA change is backward-compatible: old `submit` payloads without `validity_proof_hash` continue to validate (stored as empty).
 
@@ -76,7 +76,7 @@ Rules:
 * `meta_leaf` may optionally commit the proof hash (hash it into state root if we want proofs to be committed). **v1 recommendation: do NOT commit into `meta_leaf`/`state_root`** — keep proof as AA-only commitment so lock semantics unchanged. Document that phase 2 may include it in `meta_leaf` once verification is added, gated by activation height.
 * AA stores the hash (see 2.3). Future plug-in: add Oscript `if (var['valid_proof_' || h] && !valid_zk(...)) bounce` — no code now, just storage slot reserved.
 
-Constant in `operp-types`:
+Constant in `minuend-types`:
 
 ```rust
 pub const SLASH_CHALLENGER_SHARE_BPS: u64 = 5000; // 50%
@@ -115,7 +115,7 @@ case: trigger.data.submit
 init: {
   $h = trigger.data.height;
   $ll = var['last_locked'];
-  if (trigger.data.chain_id != 'operp-mvp-1' OR !$h OR $h != $ll + 1
+  if (trigger.data.chain_id != 'minuend-mvp-1' OR !$h OR $h != $ll + 1
     OR !trigger.data.state_root OR length(...)!=64
     OR !trigger.data.aa_root OR length(...)!=64
     OR !trigger.data.prev_state_hash OR length(...)!=64)
@@ -515,6 +515,6 @@ fn bad_aa_root_is_fraud_even_when_state_root_ok() {
 * Add `ParamKey::SlashChallengerShare` governance over split ratio + `submit_bond` amount governance.
 * Wire real verification into `finalize` or `respond`: `valid_proof_h` ZK verifier call or validator BLS threshold check; success unfreezes without timeout, failure triggers same slash path but automatically (watcher need not wait 3600s if proof is provided).
 * Per-height challenge bonds, challenge window shortening, and AA-side `valid_proof` mandatory after activation height.
-* IPFS/p2p archiving for `temp_data` with `data_hash` pinning and `operp-exec` fallback fetcher.
+* IPFS/p2p archiving for `temp_data` with `data_hash` pinning and `minuend-exec` fallback fetcher.
 
 

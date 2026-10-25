@@ -1,12 +1,12 @@
 # Mainnet Roadmap — 11 Gap Designs (2026-08-25)
 
 > **HISTORICAL DESIGN RECORD (pre-v2).** These 11 docs were written against
-> the original `operp-mvp-1` single-vault-AA settlement (submit/lock/
-> challenge/respond/finalize/withdraw all inside `operp_vault.aa`,
+> the original `minuend-mvp-1` single-vault-AA settlement (submit/lock/
+> challenge/respond/finalize/withdraw all inside `minuend_vault.aa`,
 > `SUBMIT_BOND_NET = 50 000` bytes, 64-hex `aa_root`). The code has since
-> been restructured to **settlement v2**: `chain_id = 'operp-v2'`, four AAs
-> (`operp_rollup` assertion log + `operp_dispute`/`operp_dispute_fill`
-> one-shot predicates + pure-custody `operp_vault`), standing pool
+> been restructured to **settlement v2**: `chain_id = 'minuend-v2'`, four AAs
+> (`minuend_rollup` assertion log + `minuend_dispute`/`minuend_dispute_fill`
+> one-shot predicates + pure-custody `minuend_vault`), standing pool
 > (`pool >= 1e12`), no lock / no pay-to-kill, and a 1024-hex sharded
 > `aa_forest`. File:line references, AA variable names, bond amounts and
 > E2E file names in the docs below describe the OLD architecture — treat
@@ -37,9 +37,9 @@ authoritative narrative lives in `README.md` "Mainnet Roadmap"):**
 | # | Status in today's code |
 |---|---|
 | 01 Fraud slashing | ✅ shipped — dispute verdict path: proven predicate → rollup slashes `5e11` off the operator's standing pool into `slash_reward_<challenger>`, height reopens. `Checkpoint.validity_proof_hash` exists but is carried as an optional header field (not AA-gated). Doc's failed-finalize 50/50 bond split / `claim_slash` handler is the old model |
-| 02 Deposit verification | ✅ shipped — per-frame `e` carries FULL Obyte joint units; `unit_hash(joint)` recomputed in `validate_against` via `operp_settle::obyte_hash::get_unit_hash`; post_batch.js builds the joints. Doc's AA-side deposit gates superseded (vault AA is pure custody) |
+| 02 Deposit verification | ✅ shipped — per-frame `e` carries FULL Obyte joint units; `unit_hash(joint)` recomputed in `validate_against` via `minuend_settle::obyte_hash::get_unit_hash`; post_batch.js builds the joints. Doc's AA-side deposit gates superseded (vault AA is pure custody) |
 | 03 Ordering | ✅ shipped, **desalted** — deterministic lex execution; **commit-reveal v2 landed** (`Op::Commit` tag 18 / `Op::Reveal` tag 19, `COMMIT_TTL_HEIGHTS = 16`, ≤ 8 live commits/account, live at height 0) |
-| 04 Salted eviction + gossip | ✅ shipped — `argmin sha256(salt‖unit_id)` eviction, epoch-rotated salt via `Engine::note_finalized`; WantUnits gossip in `crates/operp-gossip` |
+| 04 Salted eviction + gossip | ✅ shipped — `argmin sha256(salt‖unit_id)` eviction, epoch-rotated salt via `Engine::note_finalized`; WantUnits gossip in `crates/minuend-gossip` |
 | 05 Oracle slashing/TWAP | ✅ shipped — stake/unstake (256-height unbond)/slash, TWAP rings, 500 bps ×3-streak + 256-height freshness, `SlashOracle` tag 16; per-market `OracleConfig` |
 | 06 Funding anchor | ✅ shipped — funding-index abstraction live at height 0; operator wiring landed (`Op::UpdateExternalPrice` tag 17, allowlist, staleness fallback) |
 | 07 Escape hatch | ✅ partially shipped — `{escape_finalize: 1}` rides the rollup finalize case (`submitted_at + 604800`, frozen≠0 bounces 'challenged'); **`{escape_withdraw}` was dropped** (vault AA is pure custody; no such case) |

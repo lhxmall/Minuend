@@ -1,6 +1,6 @@
 # Gap 5 — UnitId-Lexicographic Grindable Ordering — Design
 
-> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`operp-mvp-1`, submit/lock/challenge in `operp_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = operp-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
+> **HISTORICAL DESIGN RECORD (pre-v2).** Written 2026-08 against the original single-vault-AA settlement (`minuend-mvp-1`, submit/lock/challenge in `minuend_vault.aa`, 50 000-byte submit bond, 64-hex `aa_root`). The code is now settlement v2: `chain_id = minuend-v2`, four AAs, standing pool, no lock / no pay-to-kill, 1024-hex sharded `aa_forest`. File:line refs and AA symbols below describe the OLD architecture — design rationale only. Current state machine: [`../MECHANISMS.md`](../MECHANISMS.md) §10 and `README.md` "Mainnet Roadmap".
 
 > Owner: `DesignCommitReveal` · Status: DESIGN-ONLY · Batch: Mainnet-1..5
 
@@ -16,14 +16,14 @@
 
 | Crate | File | Symbol |
 |-------|------|--------|
-| `operp-types` | `crates/operp-types/src/lib.rs` | constants `ORDERING_SALT_DOMAIN`, `ORDERING_EPOCH` |
-| `operp-types` | `crates/operp-types/src/amount.rs` | `sha256` (reuse) |
-| `operp-dag` | `crates/operp-dag/src/lib.rs` | `Unit` (no field change in v1; optional fields in v2), `canonical_bytes`, `unit_id`, `Dag::ready_linearized` (**desalted**: plain lex tie-break — the salt no longer orders execution, see audit-remediation note below), `set_eviction_salt` (eviction only), `ORPHAN_CAP` eviction site (L403-405, note cross-gap), `sign_unit` docs |
-| `operp-exec` | `crates/operp-exec/src/lib.rs` | `Engine::apply_ready`, `Engine::ingest`, new `Engine::ordering_salt` / `Engine::last_finalized_root` plumbing |
-| `operp-state` | `crates/operp-state/src/lib.rs` | `ChainState::last_finalized_root` (new field if not derivable), `ChainState::state_root` / `height` usage |
-| `operp-settle` | `crates/operp-settle/src/lib.rs` | `Batch::from_applied`, `Batch::validate_against` (ordering replay check), `Checkpoint` no change, `PostedBatch` selection unaffected |
-| `obyte-local` | `agents/operp_vault.aa` | **no change in v1**; v2 optional annotation/comment with ordering domain |
-| tests | `crates/operp-dag/tests` / `crates/operp-exec/tests` | new `ordering_grind` tests |
+| `minuend-types` | `crates/minuend-types/src/lib.rs` | constants `ORDERING_SALT_DOMAIN`, `ORDERING_EPOCH` |
+| `minuend-types` | `crates/minuend-types/src/amount.rs` | `sha256` (reuse) |
+| `minuend-dag` | `crates/minuend-dag/src/lib.rs` | `Unit` (no field change in v1; optional fields in v2), `canonical_bytes`, `unit_id`, `Dag::ready_linearized` (**desalted**: plain lex tie-break — the salt no longer orders execution, see audit-remediation note below), `set_eviction_salt` (eviction only), `ORPHAN_CAP` eviction site (L403-405, note cross-gap), `sign_unit` docs |
+| `minuend-exec` | `crates/minuend-exec/src/lib.rs` | `Engine::apply_ready`, `Engine::ingest`, new `Engine::ordering_salt` / `Engine::last_finalized_root` plumbing |
+| `minuend-state` | `crates/minuend-state/src/lib.rs` | `ChainState::last_finalized_root` (new field if not derivable), `ChainState::state_root` / `height` usage |
+| `minuend-settle` | `crates/minuend-settle/src/lib.rs` | `Batch::from_applied`, `Batch::validate_against` (ordering replay check), `Checkpoint` no change, `PostedBatch` selection unaffected |
+| `obyte-local` | `agents/minuend_vault.aa` | **no change in v1**; v2 optional annotation/comment with ordering domain |
+| tests | `crates/minuend-dag/tests` / `crates/minuend-exec/tests` | new `ordering_grind` tests |
 
 No wire-format change in v1. v2 touches `canonical_bytes`.
 
@@ -84,18 +84,18 @@ pub last_finalized_root: [u8; 32], // zeroed until first finalization
 pub last_finalized_height: Height,
 ```
 
-Updated only via a new `Engine::note_finalized(root, height)` called by the off-engine finalization observer (same path that calls `promote_finalized`). Before first finalization, `salt = sha256(genesis_id().0 || epoch_le)` so all replicas share `genesis_id()` (already imported in `operp-dag`).
+Updated only via a new `Engine::note_finalized(root, height)` called by the off-engine finalization observer (same path that calls `promote_finalized`). Before first finalization, `salt = sha256(genesis_id().0 || epoch_le)` so all replicas share `genesis_id()` (already imported in `minuend-dag`).
 
-**Constant** in `operp-types`:
+**Constant** in `minuend-types`:
 
 ```rust
-pub const ORDERING_SALT_DOMAIN: &[u8] = b"operp-order-v1";
+pub const ORDERING_SALT_DOMAIN: &[u8] = b"minuend-order-v1";
 pub const ORDERING_EPOCH_UNITS: u64 = 512; // == BATCH_MAX_UNITS
 ```
 
 #### 2.2.2 Ordering function
 
-Add in `operp-types` or `operp-dag`:
+Add in `minuend-types` or `minuend-dag`:
 
 ```rust
 pub fn ordering_key(salt: &[u8; 32], id: &UnitId) -> [u8; 32] {
@@ -271,7 +271,7 @@ ADVANTAGE = Pr[ min_i rank(k_i) == 0 ]  // attacker wins queue front
 
 **Property:** Under salted ordering, `ADVANTAGE → (N)/(M+N)` expectation for random keys, versus `→1` as N→∞ under lexicographic ordering with unlimited grind budget (attacker can always mine a smaller UnitId than any fixed honest set).
 
-**Concrete test (must be in `crates/operp-dag` and/or `crates/operp-exec`):**
+**Concrete test (must be in `crates/minuend-dag` and/or `crates/minuend-exec`):**
 
 ```rust
 #[test]
@@ -326,14 +326,14 @@ fn unknown_salt_unpredictable() {
 
 **E2E assertion (run in `cargo test --workspace`):**
 
-* `operp-dag::tests::grind_lottery_property` passes with <1% flake at fixed seed.
-* `operp-exec::tests::batch_replay_with_salted_order` — craft two `Engine` replicas, ingest same units in different arrival orders, call `apply_ready`, assert identical `state_root` and identical `aa_root`. Duplicate with two different salts, assert roots differ (ordering matters).
+* `minuend-dag::tests::grind_lottery_property` passes with <1% flake at fixed seed.
+* `minuend-exec::tests::batch_replay_with_salted_order` — craft two `Engine` replicas, ingest same units in different arrival orders, call `apply_ready`, assert identical `state_root` and identical `aa_root`. Duplicate with two different salts, assert roots differ (ordering matters).
 * Benchmark not required to pass thresholds; assert no >5% throughput regression on `bench_raw` vs baseline (ordering key hashes 512×32 bytes per batch — negligible).
 
 ### 3.3 System-level acceptance (operator visible)
 
 * `cargo test --workspace` green.
-* `cargo run -p operp-settle --example export_batch` produces a batch whose `Checkpoint.unit_ids` are salted-ordered; re-running `Batch::validate_against` on a fresh `Engine` initialized at `prev.height` and `prev.last_finalized_root` succeeds.
+* `cargo run -p minuend-settle --example export_batch` produces a batch whose `Checkpoint.unit_ids` are salted-ordered; re-running `Batch::validate_against` on a fresh `Engine` initialized at `prev.height` and `prev.last_finalized_root` succeeds.
 * `obyte-local/test_vault_aa.js` unchanged (AA does not enforce ordering; sidechain batch data `temp_data` reveals units in checkpoint order, watcher replay validates same salted order).
 * No new AA complexity consumed (v1).
 
@@ -368,7 +368,7 @@ fn unknown_salt_unpredictable() {
 | Salt derivation bug (replicas disagree) | High | Salt is pure function of `ChainState { last_finalized_root, height }` — both part of state, no wall-clock, no RNG. Unit tests cover cross-replica determinism. |
 | Salt manipulable by operator (controls finalization) | Medium | Salt anchored in `last_finalized_root` (Obyte-finalized, requires 600 s stability + 3600 s challenge). Operator can *choose* which valid batch to finalize, but cannot craft arbitrary salt without also crafting a valid state_root that passes watcher replay — bounded. Mixing in `epoch` prevents reuse. |
 | Grinding still possible within epoch (lottery not elimination) | Low (accepted) | Documented limitation; expected win rate quantified in test. Acceptable for MVP; v2 eliminates. Rate-limit per-account commits if abused. |
-| Activation height misconfig causes fork | High | Activation height is single constant `ORDERING_ACTIVATION_HEIGHT: Height` in `operp-types`; both `Batch::from_applied` and `validate_against` derive it. Integration test asserts pre/post boundary. |
+| Activation height misconfig causes fork | High | Activation height is single constant `ORDERING_ACTIVATION_HEIGHT: Height` in `minuend-types`; both `Batch::from_applied` and `validate_against` derive it. Integration test asserts pre/post boundary. |
 | Replay attack on ordering (replay old batch with new salt) | Low | `Checkpoint { prev_state_hash, height }` binds salt to height; `validate_against` checks `replay.state.height + 1 == checkpoint.height` — old salt cannot be replayed at new height. |
 
 ### 4.5 What this batch would NOT ship (explicit non-goals)
@@ -388,7 +388,7 @@ fn unknown_salt_unpredictable() {
 
 2. **Finalized-root vs previous-batch-root:** Using `last_finalized_root` (Obyte-finalized) has ~1 h staleness, which makes the salt stable for ~1800 batches — larger grind window. Using `prev_state_hash` (optimistic, updates every 2 s) gives fresher salt but is operator-influenceable before finalization. **Proposed compromise:** `salt = sha256(last_finalized_root || prev_state_hash || epoch)` — combines finality anchor with freshness; operator influence is limited because `prev_state_hash` is replay-validated.
 
-3. **Activation coordination:** If we ship with `ACTIVATION_HEIGHT = 0` on testnet but defer mainnet activation, the constant needs per-network config (env / genesis file), not a hardcoded value. Should `CHAIN_ID` already distinguish networks? **Proposed:** `ORDERING_ACTIVATION_HEIGHT` defaults to `0` for `CHAIN_ID == "operp-mvp-1"` (test), overridden by deploy script for mainnet genesis via `ChainState::new_with_config`.
+3. **Activation coordination:** If we ship with `ACTIVATION_HEIGHT = 0` on testnet but defer mainnet activation, the constant needs per-network config (env / genesis file), not a hardcoded value. Should `CHAIN_ID` already distinguish networks? **Proposed:** `ORDERING_ACTIVATION_HEIGHT` defaults to `0` for `CHAIN_ID == "minuend-mvp-1"` (test), overridden by deploy script for mainnet genesis via `ChainState::new_with_config`.
 
 4. **Orphan eviction alignment:** After v1 lands, should Gap 6 adopt the same `ordering_key` for eviction to close the arrival-order sensitivity note? Doing both now would be a 5-line diff but expands scope. **Proposed:** leave eviction lexicographic in this batch, link Gap 6 design to reuse `ordering_key`.
 
@@ -413,12 +413,12 @@ Stage 2 (future, if needed): commit = H(op || salt32), reveal = (commit_ref, op,
 
 ## 7. References
 
-* `crates/operp-dag/src/lib.rs:492-533` — `ready_linearized` Kahn + BTreeSet tie-break
-* `crates/operp-dag/src/lib.rs:376-426` — `insert_verified` orphan buffering
-* `crates/operp-exec/src/lib.rs:79-99` — `ingest` / `apply_ready`
-* `crates/operp-state/src/lib.rs:120-170` — `ChainState` fields, `prune_*` windows (256 h, pattern for new pruning)
-* `crates/operp-settle/src/lib.rs:97-153` — `Batch::from_applied` height commitment & fills hash
-* `crates/operp-types/src/lib.rs` — `BATCH_MAX_UNITS = 512`, `MAX_AA_TREE_DEPTH = 16`, `CHAIN_ID`
+* `crates/minuend-dag/src/lib.rs:492-533` — `ready_linearized` Kahn + BTreeSet tie-break
+* `crates/minuend-dag/src/lib.rs:376-426` — `insert_verified` orphan buffering
+* `crates/minuend-exec/src/lib.rs:79-99` — `ingest` / `apply_ready`
+* `crates/minuend-state/src/lib.rs:120-170` — `ChainState` fields, `prune_*` windows (256 h, pattern for new pruning)
+* `crates/minuend-settle/src/lib.rs:97-153` — `Batch::from_applied` height commitment & fills hash
+* `crates/minuend-types/src/lib.rs` — `BATCH_MAX_UNITS = 512`, `MAX_AA_TREE_DEPTH = 16`, `CHAIN_ID`
 * `README.md:250-305` — L5 (this gap) + L6 orphan note
 
 

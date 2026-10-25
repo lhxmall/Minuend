@@ -1,0 +1,20 @@
+[package]
+name = "minuend-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+minuend-types = { workspace = true }
+minuend-book = { workspace = true }
+minuend-account = { workspace = true }
+minuend-dag = { workspace = true }
+minuend-state = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+minuend-settle = { path = "../minuend-settle" }
