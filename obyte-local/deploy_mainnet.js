@@ -157,16 +157,29 @@ async function main() {
   fs.writeFileSync(path.join(__dirname, "deployment.json"), JSON.stringify(info, null, 2));
   console.log("deployment.json written");
 
-  // Smoke: 10000+1 byte {deposit:1} to vault; bounce or accept both OK as
-  // long as the AA responds.
+  // Smoke: 10000+1 byte {deposit:1} to vault. #37-2: a send/network error
+  // is NOT evidence the AA responded — the old catch-all printed OK either
+  // way. Record the real outcome and only claim the deployment verified
+  // when the AA actually accepted the deposit.
+  let smokeOutcome;
   try {
-    const r = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1 } }, "vault smoke");
-    console.log("vault smoke responded:", r);
+    const unit = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1 } }, "vault smoke");
+    // Wait a beat, then confirm the vault AA state still answers (the AA
+    // existed before the smoke, so a bounced deposit is not detectable from
+    // state; the honest claim is "submitted and propagated").
+    await waitBeat(unit, "vault smoke");
+    smokeOutcome = "submitted";
+    console.log("vault smoke submitted:", unit);
   } catch (e) {
-    console.log("vault smoke bounced (AA responded):", String(e).slice(0, 200));
+    smokeOutcome = "unknown";
+    console.warn("vault smoke NOT VERIFIED:", String(e).slice(0, 200));
   }
-  console.log("OK: mainnet deploy complete. Fund the 1000 GBYTE standing pool with {pool:1} before submitting.");
-  process.exit(0);
+  if (smokeOutcome === "submitted") {
+    console.log("OK: mainnet deploy complete (vault smoke submitted). Fund the 1000 GBYTE standing pool with {pool:1} before submitting.");
+  } else {
+    console.warn("PARTIAL: definitions deployed and deployment.json written, but the vault smoke did not go through — verify the vault AA manually.");
+  }
+  process.exit(smokeOutcome === "submitted" ? 0 : 2);
 }
 
 main().catch((e) => {

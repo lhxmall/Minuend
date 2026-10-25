@@ -49,6 +49,11 @@ pub enum AccountError {
     QtyTooLarge,
     #[error("non-positive amount")]
     NonPositive,
+    /// A market-level risk rejection raised outside the account itself (a
+    /// legacy leveraged `spot_only` market whose mark is frozen). Maps to
+    /// `RejectReason::Risk` at the engine boundary.
+    #[error("risk")]
+    Risk,
 }
 
 impl Account {

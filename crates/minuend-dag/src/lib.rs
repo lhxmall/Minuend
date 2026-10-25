@@ -530,6 +530,12 @@ pub struct Dag {
     /// Salt for orphan eviction + ordering tie-breaks (Step9): genesis id
     /// until the first AA finalization, then the finalized state root.
     eviction_salt: [u8; 32],
+    /// #37-14: ids known to have been executed BEFORE a restored snapshot.
+    /// Their full units are gone (the snapshot carries state, not the DAG),
+    /// but children must still link and become ready rather than being
+    /// buffered as orphans forever. `ready_linearized` already ignores
+    /// parents outside `pending`, so an ancestor id is exactly "executed".
+    ancestors: HashSet<UnitId>,
 }
 
 /// Max buffered orphan units. Beyond this the orphan with the smallest
@@ -554,6 +560,7 @@ impl Dag {
             pending: HashSet::new(),
             pending_orphans: HashMap::new(),
             eviction_salt: genesis_id().0,
+            ancestors: HashSet::new(),
         }
     }
 
@@ -694,7 +701,20 @@ impl Dag {
     }
 
     fn known(&self, id: UnitId) -> bool {
-        id == genesis_id() || self.units.contains_key(&id)
+        id == genesis_id() || self.units.contains_key(&id) || self.ancestors.contains(&id)
+    }
+
+    /// #37-14: seed an id that was executed before the restored snapshot.
+    /// Idempotent; never overrides a full unit if one is already present.
+    pub fn mark_ancestor_known(&mut self, id: UnitId) {
+        if !self.units.contains_key(&id) {
+            self.ancestors.insert(id);
+        }
+    }
+
+    /// Number of seeded pre-snapshot ancestors (test/diagnostic aid).
+    pub fn ancestor_count(&self) -> usize {
+        self.ancestors.len()
     }
 
     pub fn mark_executed(&mut self, id: UnitId) {

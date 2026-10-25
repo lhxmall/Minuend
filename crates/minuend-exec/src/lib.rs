@@ -38,10 +38,16 @@ pub struct Engine {
     /// commits (`Batch::from_applied`); dropped (never persisted) if the
     /// batch is abandoned — no more burning nonces on uncommitted batches.
     pub pending_gov_wal: Vec<(AccountId, u64)>,
+    /// #37-14: replay-local GovWithdraw nonce watermark (see gov_withdraw).
+    pub replay_gov_nonces: std::collections::BTreeMap<AccountId, u64>,
     /// Per-unit witness roots in log order (one `wit_root` per `apply_one`,
     /// applied or rejected). `Batch::from_applied` takes the last
     /// `applied.len()` entries as the batch trace.
     pub wit_trace: Vec<String>,
+    /// #37-14: bounded ring of recently applied unit ids, persisted with
+    /// snapshots so a restarted node can treat pre-snapshot parents as
+    /// known instead of buffering every post-snapshot child as an orphan.
+    pub recent_units: std::collections::VecDeque<UnitId>,
     /// Leaf counts paired with `wit_trace` (one per `apply_one`, in order).
     /// Lets dispute predicates prove witness-tree non-membership at any unit.
     pub wit_count_trace: Vec<u32>,
@@ -126,6 +132,8 @@ impl Engine {
             store_dir: None,
             validating: false,
             pending_gov_wal: Vec::new(),
+            replay_gov_nonces: std::collections::BTreeMap::new(),
+            recent_units: std::collections::VecDeque::new(),
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
             wit_leaf_trace: Vec::new(),
@@ -140,9 +148,9 @@ impl Engine {
     /// `Batch::validate_against` by the caller, exactly as the design's
     /// recovery sequence prescribes.
     pub fn load_or_genesis(dir: &Path) -> std::io::Result<Self> {
-        let mut state = match persist::load_latest(dir)? {
-            Some((_, s)) => s,
-            None => ChainState::new(),
+        let (mut state, anchors) = match persist::load_latest_with_anchors(dir)? {
+            Some((_, s, anchors)) => (s, anchors),
+            None => (ChainState::new(), Vec::new()),
         };
         let journal = GovNonceJournal::open(dir)?;
         for GovNonceRecord { account, nonce, .. } in journal.read_all()? {
@@ -151,19 +159,40 @@ impl Engine {
                 state.seen_gov_nonces.insert(account, nonce);
             }
         }
+        // #37-14: the snapshot carries state, not the DAG. Seed every
+        // persisted anchor as an already-executed ancestor so a batch
+        // replayed after the snapshot can link parents that predate it
+        // (otherwise those children sit in the orphan buffer forever).
+        let mut dag = Dag::new();
+        let mut recent_units = std::collections::VecDeque::new();
+        for id in anchors {
+            let unit_id = UnitId(id);
+            dag.mark_ancestor_known(unit_id);
+            recent_units.push_back(unit_id);
+        }
         Ok(Self {
-            dag: Dag::new(),
+            dag,
             state,
             log: Vec::new(),
             sig_verifier: SigVerifier::new(),
             store_dir: Some(dir.to_path_buf()),
             validating: false,
             pending_gov_wal: Vec::new(),
+            replay_gov_nonces: std::collections::BTreeMap::new(),
+            recent_units,
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
             wit_leaf_trace: Vec::new(),
             liquidating: false,
         })
+    }
+
+    /// #37-14: bounded recent-unit ring feeding snapshot DAG anchors.
+    fn note_recent_unit(&mut self, id: UnitId) {
+        self.recent_units.push_back(id);
+        while self.recent_units.len() > persist::DAG_ANCHOR_LIMIT {
+            self.recent_units.pop_front();
+        }
     }
 
     /// Write a snapshot of the current state to the store dir. No-op for
@@ -173,7 +202,8 @@ impl Engine {
         let Some(dir) = self.store_dir.clone() else {
             return Ok(None);
         };
-        persist::save_snapshot(&dir, &self.state).map(Some)
+        let anchors: Vec<[u8; 32]> = self.recent_units.iter().map(|u| u.0).collect();
+        persist::save_snapshot_with_anchors(&dir, &self.state, &anchors).map(Some)
     }
 
     /// Cadence wrapper: flush every [`persist::SNAPSHOT_EVERY`] heights.
@@ -329,6 +359,7 @@ impl Engine {
         };
         self.dag.mark_executed(id);
         self.state.last_unit = id;
+        self.note_recent_unit(id);
         self.wit_trace.push(minuend_state::wit_root(&self.state));
         let leaves = minuend_state::wit_leaves(&self.state);
         self.wit_count_trace.push(leaves.len() as u32);
@@ -946,6 +977,14 @@ impl Engine {
     /// them on top. Per market, only the larger side can ultimately be
     /// open (fills net the book against the position), so reserve
     /// `max(bid_im, ask_im)`, not the sum.
+    ///
+    /// #37-19: the OPENING quantity is what costs margin, so the notional is
+    /// priced on the open-only qty difference, not the whole resting side.
+    /// Bids reduce a short and asks reduce a long, so the reservable qty on
+    /// each side is `resting - reducible`; the whole-side qty (and notional)
+    /// was over-reserving IM and rejecting legitimate reduce-only style
+    /// resting orders. Per-order notional still uses each order's own price,
+    /// so the per-qty rate is a weighted average across the side.
     fn resting_open_im(&self, account: AccountId) -> Usd {
         let mut total: Usd = 0;
         for (market, book) in &self.state.books {
@@ -993,18 +1032,29 @@ impl Engine {
                 .and_then(|a| a.positions.get(market))
                 .map(|p| p.qty)
                 .unwrap_or(0);
-            // Bids reduce only a short, asks reduce only a long: whichever
-            // side's remaining qty exceeds what it can reduce opens.
-            let bid_opens = bid_qty > (-pos_qty).max(0);
-            let ask_opens = ask_qty > pos_qty.max(0);
+            // Bids reduce only a short, asks reduce only a long: only the qty
+            // beyond what the position absorbs actually opens.
+            let short = (-pos_qty).max(0);
+            let long = pos_qty.max(0);
             let im_bps = self.state.market_params(*market).im_bps;
-            let bid_im = if bid_opens {
-                bps(bid_notional, im_bps)
+            // Open-only notional: the reducible slice is priced out, the rest
+            // keeps the side's per-qty rate. A side with nothing to reduce
+            // prices the whole side; one that only reduces prices zero.
+            let bid_open_qty = bid_qty - short;
+            let ask_open_qty = ask_qty - long;
+            let bid_im = if bid_qty > 0 && bid_open_qty > 0 {
+                bps(
+                    bid_notional / (bid_qty as Usd) * (bid_open_qty as Usd),
+                    im_bps,
+                )
             } else {
                 0
             };
-            let ask_im = if ask_opens {
-                bps(ask_notional, im_bps)
+            let ask_im = if ask_qty > 0 && ask_open_qty > 0 {
+                bps(
+                    ask_notional / (ask_qty as Usd) * (ask_open_qty as Usd),
+                    im_bps,
+                )
             } else {
                 0
             };
@@ -1751,14 +1801,25 @@ impl Engine {
     ) -> Result<Vec<Fill>, RejectReason> {
         // Strictly increasing nonce watermark per account: any nonce at or
         // below the highest consumed one is a replay, and gaps are allowed.
-        let watermark = self
-            .state
-            .seen_gov_nonces
-            .get(&account)
-            .copied()
-            .unwrap_or(0);
+        let watermark = if self.validating {
+            // #37-14: a restored snapshot+WAL can hold nonces from batches
+            // NEWER than the snapshot. Comparing against that watermark
+            // rejects the very batches being replayed, so validation keeps
+            // its own strictly-increasing watermark instead (a genuine
+            // duplicate inside the replayed stream still fails).
+            self.replay_gov_nonces.get(&account).copied().unwrap_or(0)
+        } else {
+            self.state
+                .seen_gov_nonces
+                .get(&account)
+                .copied()
+                .unwrap_or(0)
+        };
         if nonce <= watermark {
             return Err(RejectReason::DuplicateNonce);
+        }
+        if self.validating {
+            self.replay_gov_nonces.insert(account, nonce);
         }
         let bal = self.state.perp_balances.get(&account).copied().unwrap_or(0);
         if bal < amount {
@@ -1811,6 +1872,7 @@ impl Engine {
                 keeper_reward_bps,
                 funding_rate,
                 funding_cap_bps,
+                spot_only,
             )
         {
             return Err(RejectReason::Risk);
@@ -1893,6 +1955,7 @@ impl Engine {
                 params.keeper_reward_bps,
                 params.funding_rate,
                 params.funding_cap_bps,
+                params.spot_only,
             ) {
                 return Err(RejectReason::Risk);
             }
@@ -2004,6 +2067,7 @@ impl Engine {
                         updated.keeper_reward_bps,
                         updated.funding_rate,
                         updated.funding_cap_bps,
+                        updated.spot_only,
                     );
                 if legal {
                     self.state.markets.insert(market, updated);
@@ -2200,7 +2264,9 @@ fn apply_param(params: &mut MarketParams, key: ParamKey, value: u64) {
 fn map_acct(e: AccountError) -> RejectReason {
     match e {
         AccountError::Insufficient | AccountError::NonPositive => RejectReason::Insufficient,
-        AccountError::Overflow | AccountError::QtyTooLarge => RejectReason::Risk,
+        AccountError::Overflow | AccountError::QtyTooLarge | AccountError::Risk => {
+            RejectReason::Risk
+        }
     }
 }
 
@@ -2681,6 +2747,134 @@ mod tests {
         assert_eq!(ins, ins_before, "ADL leg must not move insurance");
     }
 
+    /// #37-19: resting IM was priced on the WHOLE resting side's notional
+    /// even though the open/reduce BOOLEAN already used the open-only
+    /// quantity. A long holder resting an ask for half its position therefore
+    /// reserved the IM of a full short-sized open, and the order was rejected
+    /// as under-collateralized. Reserve the open-only quantity difference.
+    #[test]
+    fn resting_im_prices_open_only_not_reduce_only_quantity() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let d1 = deposit(vec![g], &alice, 100_000 * USD_SCALE as i128, 1);
+        let id1 = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let px = 100_000 * PRICE_SCALE as i64;
+        // Alice opens long 2 @ 100k. Collateral is sized so the position IM
+        // (2 x 100k x 5% = 10k) plus the open IM of ONE more unit fits, but
+        // not the IM of the whole 2-unit resting side (which is what the old
+        // whole-side notional would reserve for a HALF-size ask).
+        // sk(2) needs collateral to rest the ask; give it a deposit first.
+        let d2 = deposit(vec![id1], &sk(2), 100_000 * USD_SCALE as i128, 2);
+        let id_d2 = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        let ask = place(
+            vec![id_d2],
+            &sk(2),
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            2 * QTY_SCALE,
+            1,
+        );
+        let id2 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place(
+            vec![id2],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            2 * QTY_SCALE,
+            1,
+        );
+        let id3 = unit_id(&bid);
+        let evs = eng.ingest(bid).unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                ExecEvent::Applied { fills, .. } if !fills.is_empty()
+            )),
+            "opening fill expected: {evs:?}"
+        );
+        assert_eq!(
+            eng.state.accounts[&a].positions[&BTC_USD].qty,
+            2 * QTY_SCALE as i64
+        );
+        // Now Alice rests an ask for ONE unit against her 2-unit long: it can
+        // only reduce, so it must reserve NO opening IM. Under the old
+        // whole-side notional it reserved the IM of a full 1-unit open.
+        let reduce_ask = place(
+            vec![id3],
+            &alice,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            2,
+        );
+        let evs2 = eng.ingest(reduce_ask).unwrap();
+        assert!(
+            evs2.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "reduce-only resting ask rejected by whole-side IM: {evs2:?}"
+        );
+        // And the reserve really is zero for a fully-reducing side, non-zero
+        // once the same side would open.
+        assert_eq!(eng.resting_open_im(a), 0, "reducing side reserved IM");
+        // Resting one unit on a fresh account reserves exactly that unit's
+        // IM (1 x 100k x 10% = 10k), not a larger reserve.
+        // sk(3) has no position and no resting order, so nothing reduces.
+        let d3 = deposit(vec![id3], &sk(3), 100_000 * USD_SCALE as i128, 3);
+        let id5 = unit_id(&d3);
+        eng.ingest(d3).unwrap();
+        // Priced above the resting ask so it RESTS instead of trading into
+        // alice's reduce order.
+        // An ask rests against nothing (no bid is on the book), so it cannot
+        // trade and sk(3) has no position to reduce: the whole side opens.
+        let open_ask = place(
+            vec![id5],
+            &sk(3),
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs4 = eng.ingest(open_ask).unwrap();
+        assert!(
+            evs4.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "opening ask rejected: {evs4:?}"
+        );
+        let b3 = acct_of(&sk(3));
+        let resting: Usd = eng
+            .state
+            .books
+            .get(&BTC_USD)
+            .map(|bk| {
+                bk.live_orders()
+                    .filter(|o| o.account == b3)
+                    .map(|o| o.remaining as Usd)
+                    .sum()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            resting, QTY_SCALE as Usd,
+            "sk(3) should rest exactly 1 unit"
+        );
+        assert_eq!(
+            eng.resting_open_im(b3),
+            10_000 * USD_SCALE as i128,
+            "open-only resting IM mismatch"
+        );
+    }
+
     /// No opposite-sign holder exists: the ADL candidate list is empty, so
     /// the liquidatable position stays on the account — the target is not
     /// credited, nothing is printed, and insurance is unchanged.
@@ -3132,7 +3326,10 @@ mod tests {
         )
     }
     /// Permissionless listing with an explicit `spot_only` flag; the new
-    /// market takes the next id (2 on a fresh engine).
+    /// market takes the next id (2 on a fresh engine). A spot_only market is
+    /// full-collateral only (`im_bps == 10_000`): its mark freezes, so any
+    /// leverage would let losses escape liquidation. A regular market keeps
+    /// the 10x default.
     fn list_market_with(parents: Vec<UnitId>, secret: &[u8; 32], spot_only: bool) -> Unit {
         let mut symbol = [0u8; 16];
         symbol[..6].copy_from_slice(b"MEMEUS");
@@ -3142,7 +3339,7 @@ mod tests {
                 creator: acct_of(secret),
                 symbol,
                 tick_size: 1,
-                im_bps: 1000,
+                im_bps: if spot_only { 10_000 } else { 1000 },
                 mm_bps: 500,
                 taker_fee_bps: 5,
                 keeper_reward_bps: 100,
@@ -4055,6 +4252,281 @@ mod tests {
         )));
     }
 
+    /// #37-F: a spot_only market has no price-oracle path (ReportPrice and the
+    /// external ring both bounce NotFound), so its mark freezes at the first
+    /// qualifying fill forever. Levered equity there can then never be
+    /// liquidated: the holder withdraws collateral that unrealized losses
+    /// already consumed and the vault cannot cover the winners. Listing a
+    /// spot_only market with leverage is therefore rejected.
+    #[test]
+    fn spot_only_market_rejects_leveraged_listing() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        for im in [100u64, 500, 999, 1000, 5000] {
+            let mut sym = [0u8; 16];
+            sym[..6].copy_from_slice(b"MEMEUS");
+            let cm = sign_unit(
+                vec![tip],
+                Op::CreateMarket {
+                    creator: acct_of(&sk(3)),
+                    symbol: sym,
+                    tick_size: 1,
+                    im_bps: im,
+                    mm_bps: 500,
+                    taker_fee_bps: 5,
+                    keeper_reward_bps: 100,
+                    spot_only: true,
+                    funding_rate: false,
+                    usd_per_unit: 0,
+                    funding_cap_bps: 0,
+                },
+                &sk(3),
+            );
+            let evs = eng.ingest(cm).unwrap();
+            assert!(
+                evs.iter().any(|e| matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::Risk,
+                        ..
+                    }
+                )),
+                "spot_only listing at im_bps={im} must be rejected"
+            );
+        }
+    }
+
+    /// #37-F: the legal spot_only listing is full collateral (im_bps ==
+    /// 10_000) with a non-zero MM below it; it takes the next market id.
+    #[test]
+    fn spot_only_full_collateral_listing_is_accepted() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let mut sym = [0u8; 16];
+        sym[..6].copy_from_slice(b"MEMEUS");
+        let cm = sign_unit(
+            vec![tip],
+            Op::CreateMarket {
+                creator: acct_of(&sk(3)),
+                symbol: sym,
+                tick_size: 1,
+                im_bps: 10_000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+            },
+            &sk(3),
+        );
+        let evs = eng.ingest(cm).unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })),
+            "full-collateral spot_only listing rejected: {evs:?}"
+        );
+        let meme = MarketId(2);
+        assert_eq!(eng.state.markets[&meme].im_bps, 10_000);
+    }
+
+    /// #37-F: the exploit the full-collateral gate removes. On a spot_only
+    /// market the mark freezes at the first qualifying fill (no oracle path),
+    /// so a leveraged position is never liquidated as the real price runs
+    /// away. The loser's equity stays positive against the frozen mark, and
+    /// `Engine::withdraw` prices its `debit` check off that same stale mark —
+    /// the collateral leaves while the unrealized loss stays uncovered.
+    /// This test drives a LEVERAGED spot_only market written directly into
+    /// state (bypassing the listing gate, i.e. a pre-fix listing) and proves
+    /// the v1 behaviour is "withdraw succeeded, vault left holding the hole".
+    /// The gate makes such listings impossible, and `apply_fill_pair` refuses
+    /// to trade one at all, so the loss can never accrue in the first place.
+    #[test]
+    fn legacy_leveraged_spot_only_market_cannot_be_traded() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        // Pre-fix shaped market: spot_only with 10x leverage, id 2, present
+        // in marks (mark frozen) — written straight into state because the
+        // listing gate now refuses it.
+        eng.state.markets.insert(
+            MarketId(2),
+            minuend_types::MarketParams {
+                symbol: [0u8; 16],
+                tick_size: 1,
+                im_bps: 1000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                delisted: false,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+            },
+        );
+        let meme = MarketId(2);
+        let alice = sk(1);
+        let bob = sk(2);
+        let d1 = deposit(vec![g], &alice, 100_000 * USD_SCALE as i128, 1);
+        let mut tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = deposit(vec![tip], &bob, 100_000 * USD_SCALE as i128, 2);
+        tip = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        // First fill freezes the mark at P0 through the OPEN gate (the
+        // defensive `apply_fill_pair` guard sees the leveraged spot_only
+        // market and refuses the fill outright).
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs = eng.ingest(bid).unwrap();
+        // The fill must NOT land: no position, no mark, no exposure.
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                ExecEvent::Applied { fills, .. } if !fills.is_empty()
+            )),
+            "leveraged spot_only market accepted a fill: {evs:?}"
+        );
+        assert!(
+            eng.state.accounts[&acct_of(&alice)].positions.is_empty()
+                && eng.state.accounts[&acct_of(&bob)].positions.is_empty(),
+            "leveraged spot_only market opened a position"
+        );
+        assert!(eng.state.marks.get(&meme).copied().unwrap_or(0) == 0);
+    }
+
+    /// #37-F: full collateral makes the max loss payable at entry, so a
+    /// frozen mark can never put either party underwater — the invariant the
+    /// leveraged form of this market breaks. Alice goes long with exactly
+    /// the notional in collateral; Bob shorts the mirror. Even a 50% adverse
+    /// move (priced off the real fill price, not the frozen mark) leaves
+    /// both collateral balances non-negative.
+    #[test]
+    fn spot_only_full_collateral_keeps_both_sides_non_negative() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(3), true);
+        tip = unit_id(&cm);
+        eng.ingest(cm).unwrap();
+        let meme = MarketId(2);
+        assert_eq!(eng.state.markets[&meme].im_bps, 10_000);
+        let alice = sk(1);
+        let bob = sk(2);
+        // Exactly one notional of collateral each: any further loss must come
+        // out of PnL, not leverage, and PnL is bounded by the notional.
+        let px = 100_000 * PRICE_SCALE as i64;
+        let notional = notional_usd(QTY_SCALE, px).unsigned_abs();
+        let d1 = deposit(vec![tip], &alice, notional as Usd, 1);
+        tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = deposit(vec![tip], &bob, notional as Usd, 2);
+        tip = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs = eng.ingest(bid).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+        )));
+        // A 50% adverse close for Alice at half the open price: PnL is
+        // exactly half the notional, which the full collateral covers.
+        let close_px = px / 2;
+        let ask2 = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            2,
+        );
+        tip = unit_id(&ask2);
+        eng.ingest(ask2).unwrap();
+        let bid2 = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            2,
+        );
+        let evs2 = eng.ingest(bid2).unwrap();
+        assert!(evs2.iter().any(|e| matches!(
+            e,
+            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+        )));
+        let a = eng.state.accounts[&acct_of(&alice)].collateral;
+        let b = eng.state.accounts[&acct_of(&bob)].collateral;
+        // Realized PnL ±fees only; no position remains (flat again).
+        assert!(
+            eng.state.accounts[&acct_of(&alice)].positions.is_empty()
+                && eng.state.accounts[&acct_of(&bob)].positions.is_empty(),
+            "positions not flat after the round trip"
+        );
+        assert!(a >= 0, "alice collateral negative: {a}");
+        assert!(b >= 0, "bob collateral negative: {b}");
+    }
+
     #[test]
     fn rejected_unit_does_not_consume_seq() {
         let mut eng = Engine::new();
@@ -4293,6 +4765,104 @@ mod tests {
         )));
         eng2.ingest(gov_with(vec![g], &sk(1), 50, 6)).unwrap();
         assert_eq!(eng2.state.seen_gov_nonces[&acct_of(&sk(1))], 6);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #37-14a: after restoring a snapshot, a batch whose units' parents
+    /// predate the snapshot (cross-batch parent) must still link instead of
+    /// sitting in the orphan buffer as MissingParent. The DAG anchors the
+    /// snapshot wrote are treated as executed ancestors.
+    #[test]
+    fn snapshot_restore_rebuilds_dag_ancestors_for_cross_batch_parents() {
+        let dir = std::env::temp_dir().join(format!("minuend-g14-dag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        // Unit A (parent = genesis) becomes a pre-snapshot ancestor.
+        let a = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
+        eng.ingest(gov_dep(vec![g], &sk(1), 10_000, 7)).unwrap();
+        // Unit B points at A and is applied AFTER the snapshot point; the
+        // fresh DAG does not know A, so it links only if A is remembered.
+        let b = unit_id(&gov_dep(vec![a], &sk(2), 20_000, 8));
+        eng.ingest(gov_dep(vec![a], &sk(2), 20_000, 8)).unwrap();
+        eng.flush_snapshot().unwrap();
+
+        // Restart: the fresh engine has neither A nor B in its DAG.
+        let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng2);
+        assert!(
+            eng2.dag.is_known(a),
+            "snapshot DAG anchor A missing after restore"
+        );
+        assert!(
+            eng2.dag.is_known(b),
+            "snapshot DAG anchor B missing after restore"
+        );
+        // A child of A (post-snapshot replay shape) must not be orphaned.
+        // sk(3): the sk(2) account is already bound to its own AA address, so
+        // reusing it here would be BadAccount, not the DAG path under test.
+        let c = gov_dep(vec![a], &sk(3), 30_000, 9);
+        let cid = unit_id(&c);
+        let evs_c = eng2.ingest(c).unwrap();
+        assert!(
+            evs_c.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "child of a pre-snapshot parent was not applied"
+        );
+        assert!(
+            eng2.dag.is_known(cid),
+            "child of a pre-snapshot parent was orphaned"
+        );
+        assert!(
+            eng2.dag.get_orphan(cid).is_none(),
+            "cross-batch parent child stayed orphaned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #37-14b: a restored snapshot+WAL may hold GovWithdraw nonces from
+    /// batches NEWER than the snapshot. Replaying those batches (validating
+    /// mode) must not spuriously DuplicateNonce against the persisted
+    /// watermark, while a true replay duplicate still bounces.
+    #[test]
+    fn validating_replay_ignores_wal_nonces_newer_than_snapshot() {
+        let dir = std::env::temp_dir().join(format!("minuend-g14-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        eng.ingest(gov_dep(vec![g], &sk(1), 10_000, 7)).unwrap();
+        eng.ingest(gov_with(vec![g], &sk(1), 1_000, 5)).unwrap();
+        eng.flush_snapshot().unwrap();
+        assert_eq!(eng.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
+        // The persisted watermark is 5. A FRESH unit (different parent so it
+        // is not the same DAG unit) carrying nonce 5 must still be accepted
+        // in validating mode: the restored watermark is from a batch newer
+        // than the snapshot, and replay is catching up to it.
+        let mut replayer = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut replayer);
+        replayer.validating = true;
+        // Use a parent that is ancestor-known (the gov_dep unit) so the
+        // fresh child links, but the unit itself is new.
+        let dep_id = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
+        let evs = replayer
+            .ingest(gov_with(vec![dep_id], &sk(1), 1_000, 5))
+            .unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "replayed gov-withdraw was wrongly rejected as DuplicateNonce"
+        );
+        // A SECOND replay of the same nonce within the same stream is a real
+        // duplicate and must still bounce: same nonce, a different unit shape
+        // (amount differs) so the DAG does not short-circuit on duplicate id.
+        let evs2 = replayer.ingest(gov_with(vec![g], &sk(1), 999, 5)).unwrap();
+        assert!(evs2.iter().any(|e| matches!(
+            e,
+            ExecEvent::Rejected {
+                reason: RejectReason::DuplicateNonce,
+                ..
+            }
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -221,6 +221,36 @@ fn challenge_window_open(submitted_at: u64, now: u64, frozen: u64) -> bool {
     submitted_at != 0 && now < submitted_at.saturating_add(CHALLENGE_WINDOW_SECS) && frozen == 0
 }
 
+/// #37-13: cross-round replay cursor. `processed_upto` is the last height
+/// whose replay advanced the engine; the next round starts right after it
+/// (never below the configured `from_height`). In-memory by design: a staler
+/// restart just replays from the configured start once.
+#[derive(Debug)]
+struct ReplayCursor {
+    processed_upto: u64,
+    from_height: u64,
+}
+
+impl ReplayCursor {
+    fn new(from_height: u64) -> Self {
+        Self {
+            processed_upto: from_height.saturating_sub(1),
+            from_height,
+        }
+    }
+
+    fn next_start(&self) -> u64 {
+        self.processed_upto.saturating_add(1).max(self.from_height)
+    }
+
+    /// Record a successfully replayed height; the cursor only moves forward.
+    fn record(&mut self, height: u64) {
+        if height > self.processed_upto {
+            self.processed_upto = height;
+        }
+    }
+}
+
 /// Replay one height and advance the engine; surface only actionable alerts.
 /// Returns `Ok(None)` = nothing actionable (no da_unit, or replay clean),
 /// `Ok(Some(alert))` = a mismatch worth surfacing.
@@ -230,6 +260,7 @@ fn check_height(
     engine: &mut Engine,
     h: u64,
     now: u64,
+    advanced: &mut bool,
 ) -> anyhow::Result<Option<String>> {
     let sa_key = format!("submitted_at_{h}");
     let frozen_key = format!("frozen_{h}");
@@ -323,7 +354,14 @@ fn check_height(
         prove::build_proof(&batch, &mut scratch, &inbox, sa_val)
     })();
     match replay_and_check(&da, prev_root, engine) {
-        Ok(()) => Ok(None),
+        Ok(()) => {
+            // #37-13: the engine now sits at this height — the poll loop
+            // advances its in-memory cursor so the next round does not
+            // re-scan old heights against an advanced engine (PrevMismatch
+            // noise) and does not skip a gap.
+            *advanced = true;
+            Ok(None)
+        }
         Err(e) => {
             if in_window {
                 let alert = format!(
@@ -428,6 +466,11 @@ fn main() -> anyhow::Result<()> {
         config.rollup_address, args.hub, config.poll_interval_secs
     );
 
+    // #37-13: cross-round replay cursor. Only a height whose replay ADVANCED
+    // the engine moves it, so a gap or a mismatch is retried next round
+    // instead of being silently skipped or re-checked against stale state.
+    let mut cursor = ReplayCursor::new(args.from_height);
+
     loop {
         let now = now_secs();
         let ll = hub
@@ -436,11 +479,19 @@ fn main() -> anyhow::Result<()> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        for h in args.from_height..=ll {
-            match check_height(&hub, &config, &mut engine, h, now) {
+        for h in cursor.next_start()..=ll {
+            let mut advanced = false;
+            match check_height(&hub, &config, &mut engine, h, now, &mut advanced) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
                 Err(e) => println!("WATCH ERROR at h={h}: {e}"),
+            }
+            if advanced {
+                cursor.record(h);
+            } else {
+                // No DA yet, or a mismatch this round: retry from here next
+                // round (never advance past an unreplayed height).
+                break;
             }
         }
 
@@ -450,7 +501,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::challenge_window_open;
+    use super::{challenge_window_open, ReplayCursor};
 
     #[test]
     fn normal_seconds_timestamp_is_inside_challenge_window() {
@@ -460,6 +511,22 @@ mod tests {
             submitted_at_secs + 1_800,
             0
         ));
+    }
+
+    #[test]
+    fn replay_cursor_starts_at_configured_height_and_advances_monotonically() {
+        let mut cursor = ReplayCursor::new(1);
+        assert_eq!(cursor.next_start(), 1);
+        cursor.record(3);
+        assert_eq!(cursor.next_start(), 4);
+        // Stale/out-of-order records never move it backwards.
+        cursor.record(2);
+        assert_eq!(cursor.next_start(), 4);
+        // A cursor constructed above 1 honours its own floor.
+        let mut later = ReplayCursor::new(10);
+        assert_eq!(later.next_start(), 10);
+        later.record(11);
+        assert_eq!(later.next_start(), 12);
     }
 
     #[test]

@@ -398,6 +398,12 @@ impl Batch {
         engine.state.prune_aa_units(height);
         engine.state.prune_deposits_allowed(height);
         engine.state.prune_commits(height);
+        // #37-15: an oracle bond that finished unbonding is returned to the
+        // reporter's PERP balance here (and removed from the bond/report
+        // maps), so the lock cannot outlive its unlock height. Batches are
+        // the only height clock, so this is the one point where the release
+        // can happen deterministically.
+        engine.state.prune_oracle_unbonding(height);
         // H2: gov-nonce WAL hits disk exactly here, at batch commit — not at
         // ingest. If the batch is abandoned, the buffered nonces are dropped
         // with it (nothing burned on uncommitted batches).
@@ -759,6 +765,9 @@ impl Batch {
         replay.state.prune_aa_units(replay.state.height);
         replay.state.prune_deposits_allowed(replay.state.height);
         replay.state.prune_commits(replay.state.height);
+        // #37-15: same bond release as `from_applied` (same height), or the
+        // replay would hash a state that still holds an expired bond.
+        replay.state.prune_oracle_unbonding(replay.state.height);
         if self.checkpoint.last_unit != replay.state.last_unit {
             return Err(SettleError::RootMismatch);
         }
@@ -1065,11 +1074,19 @@ pub fn batch_from_frames(
             .and_then(|v| v.as_u64())
             .ok_or(SettleError::RootMismatch)
     };
+    // #37-20: a header count is an untrusted u64 from the batch JSON. A
+    // truncating `as u32` would silently wrap (> 2^32 units/fills hashes a
+    // different corpus than the one committed), so the cast is checked and
+    // the header is rejected instead. `seq` stays u64 by construction.
+    let get_u32 = |k: &str| {
+        let v = get_u(k)?;
+        u32::try_from(v).map_err(|_| SettleError::RootMismatch)
+    };
     let seq = get_u("seq")?;
-    let fill_count = get_u("fill_count")? as u32;
-    let assertion_version = get_u("assertion_version")? as u32;
-    let unit_count = get_u("unit_count")? as u32;
-    let wit_count = get_u("wit_count")? as u32;
+    let fill_count = get_u32("fill_count")?;
+    let assertion_version = get_u32("assertion_version")?;
+    let unit_count = get_u32("unit_count")?;
+    let wit_count = get_u32("wit_count")?;
     let last_unit_s = get_s("last_unit")?;
     let last_unit_b = hex::decode(&last_unit_s).map_err(|_| SettleError::RootMismatch)?;
     if last_unit_b.len() != 32 {
@@ -2086,6 +2103,53 @@ mod tests {
             .is_empty());
     }
 
+    /// #37-20: header counts are untrusted u64 from the batch JSON. A
+    /// truncating `as u32` wrapped silently (> 2^32 fills/units), so a
+    /// tampered header could post a count the committed corpus does not
+    /// match while still parsing. The parse must reject it.
+    #[test]
+    fn oversized_header_counts_are_rejected_not_wrapped() {
+        let (mut eng, pre, _, id, ev) = one_deposit_fixture();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
+        batch.deposit_evidences = vec![ev];
+        let (header, blobs) = batch.temp_data_packages().unwrap();
+        let raw = decode_package_blob(&blobs[0]).unwrap();
+        let text = String::from_utf8(raw).unwrap();
+        let frames: Vec<String> = text.lines().map(str::to_string).collect();
+
+        // Baseline: the untouched header round-trips.
+        assert!(batch_from_frames(&header, &frames).is_ok());
+
+        // 2^32 and 2^32-1 both matter: the boundary stays legal, one past it
+        // does not (that is where the old `as u32` wrapped to 0).
+        for (key, at_max, over) in [
+            ("fill_count", u32::MAX, u64::from(u32::MAX) + 1),
+            ("unit_count", u32::MAX, u64::from(u32::MAX) + 1),
+            ("wit_count", u32::MAX, u64::from(u32::MAX) + 1),
+            ("assertion_version", u32::MAX, u64::from(u32::MAX) + 1),
+        ] {
+            let mut h = header.clone();
+            h[key] = serde_json::json!(at_max);
+            let legal = batch_from_frames(&h, &frames);
+            // u32::MAX parses (it is a valid count); downstream root checks
+            // may still reject, but it must NOT be a truncation artifact.
+            assert!(
+                legal.is_ok() || matches!(legal, Err(SettleError::RootMismatch)),
+                "{key}={at_max} rejected for the wrong reason"
+            );
+            let mut h2 = header.clone();
+            h2[key] = serde_json::json!(over);
+            assert!(
+                matches!(
+                    batch_from_frames(&h2, &frames),
+                    Err(SettleError::RootMismatch)
+                ),
+                "{key} above u32::MAX must be rejected, not truncated: {:?}",
+                batch_from_frames(&h2, &frames)
+            );
+        }
+    }
+
     #[test]
     fn replay_prunes_identically_to_from_applied() {
         // M3: validate_against must prune withdrawals / seen_aa_units /
@@ -2203,6 +2267,117 @@ mod tests {
             "height-0 entries must be gone"
         );
         assert_eq!(rp.state.state_root(), eng.state.state_root());
+    }
+
+    /// #37-15: `prune_oracle_unbonding` was dead code. An oracle bond whose
+    /// unlock height passed stayed locked in `oracle_bonds` forever and its
+    /// `oracle_unbonding` entry never cleared, so the reporter could neither
+    /// re-bond nor spend the returned PERP. Both the batch commit path and
+    /// the replay path now call it; this pins the release, the history wipe
+    /// and the producer/replay agreement.
+    #[test]
+    fn oracle_unbonding_release_is_wired_on_both_paths() {
+        use minuend_types::{BTC_USD as MKT, PRICE_SCALE};
+        let build = || -> (Engine, Engine, Vec<UnitId>) {
+            let mut eng = Engine::new();
+            eng.state
+                .markets
+                .insert(MKT, minuend_types::genesis_params());
+            let g = genesis_id();
+            let secret = sk(6);
+            let acct = acct_of(&secret);
+            let d = sign_unit(
+                vec![g],
+                Op::Deposit {
+                    account: acct,
+                    addr: test_addr(6),
+                    amount: 10_000 * USD_SCALE as i128,
+                    aa_unit: [6u8; 32],
+                },
+                &secret,
+            );
+            let did = unit_id(&d);
+            eng.state.deposits_allowed.insert(([6u8; 32], false));
+            eng.ingest(d).unwrap();
+            // Bond an oracle, then queue it for unbonding at a low height so
+            // the very next batch commit is past due.
+            let oracle = acct_of(&sk(9));
+            eng.state.oracle_bonds.insert(oracle, 5_000);
+            eng.state.oracle_unbonding.insert(oracle, 5);
+            eng.state
+                .oracle_reports
+                .insert((MKT, oracle), PRICE_SCALE as i64);
+            eng.state
+                .oracle_report_history
+                .insert((MKT, oracle), Default::default());
+            let pre = eng.clone();
+            (eng, pre, vec![did])
+        };
+
+        // --- Batch A: commit at height 1 (oracle still locked). ---
+        let (mut eng, pre_a, units_a) = build();
+        assert_eq!(pre_a.state.oracle_bonds.len(), 1);
+        let batch_a = Batch::from_applied(&pre_a.state, &mut eng, &units_a).unwrap();
+        assert!(
+            !eng.state.oracle_unbonding.is_empty(),
+            "unbonding entry cleared before its unlock height"
+        );
+
+        // --- Fast-forward past the unlock height and commit a filler batch. ---
+        eng.state.height = 100;
+        let prev_b = eng.clone();
+        let prev_root_b = prev_b.state.state_root();
+        let f = sign_unit(
+            vec![*units_a.last().unwrap()],
+            Op::Place {
+                account: acct_of(&sk(6)),
+                market: MKT,
+                side: Side::Bid,
+                typ: OrderType::Limit,
+                tif: TimeInForce::Gtc,
+                price: PRICE_SCALE as i64,
+                qty: QTY_SCALE,
+                client_seq: 99,
+                isolated: false,
+                margin: 0,
+            },
+            &sk(6),
+        );
+        let fid = unit_id(&f);
+        eng.ingest(f).unwrap();
+        let batch_b = Batch::from_applied(&prev_b.state, &mut eng, &[fid]).unwrap();
+
+        // Producer side: bond returned to the reporter's balance, maps wiped.
+        assert!(
+            eng.state.oracle_unbonding.is_empty(),
+            "unbonding entry survived"
+        );
+        assert!(
+            !eng.state.oracle_bonds.contains_key(&acct_of(&sk(9))),
+            "expired oracle bond never returned"
+        );
+        assert!(
+            eng.state.oracle_reports.is_empty() && eng.state.oracle_report_history.is_empty(),
+            "reporter history survived the bond release"
+        );
+        let bal = eng
+            .state
+            .perp_balances
+            .get(&acct_of(&sk(9)))
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(bal, 5_000, "returned bond missing from the balance");
+
+        // Replay side must land on the identical state (the prune is mirrored).
+        let mut rp = prev_b.clone();
+        batch_b.validate_against(prev_root_b, &mut rp).unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert!(rp.state.oracle_bonds.is_empty());
+        assert_eq!(
+            rp.state.perp_balances.get(&acct_of(&sk(9))).copied(),
+            Some(5_000)
+        );
+        let _ = batch_a;
     }
 
     #[test]

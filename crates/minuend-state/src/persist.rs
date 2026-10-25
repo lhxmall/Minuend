@@ -26,7 +26,11 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// Version header prefixing every snapshot body. Old formats are not
 /// migrated (mainnet is not live); [`load_latest`] skips unknown versions
 /// and falls back to genesis rather than failing startup (#11).
-const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+/// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
+/// restored engine cannot rebuild the DAG, so these ids are treated as
+/// already-executed ancestors when replaying post-snapshot batches.
+pub const DAG_ANCHOR_LIMIT: usize = 4096;
 
 /// Durability of directory entries (rename) needs a directory fsync on unix;
 /// Windows has no equivalent API, so this is a no-op there.
@@ -44,9 +48,23 @@ fn snapshot_name(height: Height) -> String {
 /// Persist `state` atomically (tmp file + rename), then prune old snapshots.
 /// Returns the snapshot path.
 pub fn save_snapshot(dir: &Path, state: &ChainState) -> io::Result<PathBuf> {
+    save_snapshot_with_anchors(dir, state, &[])
+}
+
+/// #37-14: persist the state together with the bounded list of unit ids that
+/// were executed before this snapshot (DAG anchors for restart recovery).
+/// Anchors are pure recovery metadata: they are not committed in state_root
+/// and never influence consensus.
+pub fn save_snapshot_with_anchors(
+    dir: &Path,
+    state: &ChainState,
+    anchors: &[[u8; 32]],
+) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
+    let keep = anchors.len().min(DAG_ANCHOR_LIMIT);
+    let body = (state, anchors[anchors.len() - keep..].to_vec());
     let bytes =
-        bincode::serialize(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        bincode::serialize(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let path = dir.join(snapshot_name(state.height));
     let tmp = dir.join(format!("{}.tmp", snapshot_name(state.height)));
     {
@@ -69,8 +87,17 @@ pub fn save_snapshot(dir: &Path, state: &ChainState) -> io::Result<PathBuf> {
 /// `Ok(None)` and recovers from genesis (#11) — real io errors surface only
 /// from listing the directory itself. Returns Ok(None) on a fresh dir.
 pub fn load_latest(dir: &Path) -> io::Result<Option<(Height, ChainState)>> {
+    Ok(load_latest_with_anchors(dir)?.map(|(h, s, _)| (h, s)))
+}
+
+/// #37-14: a loaded snapshot plus its DAG anchors (empty for older/absent
+/// data). The anchors are execution-log metadata, not consensus state.
+pub type LoadedSnapshot = (Height, ChainState, Vec<[u8; 32]>);
+
+/// #37-14: newest snapshot plus its DAG anchors (empty for older/absent data).
+pub fn load_latest_with_anchors(dir: &Path) -> io::Result<Option<LoadedSnapshot>> {
     for (_, path) in snapshot_candidates(dir)? {
-        let parsed = (|| -> io::Result<ChainState> {
+        let parsed = (|| -> io::Result<(ChainState, Vec<[u8; 32]>)> {
             let bytes = fs::read(&path)?;
             if bytes.len() < 4
                 || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != SNAPSHOT_FORMAT_VERSION
@@ -83,8 +110,8 @@ pub fn load_latest(dir: &Path) -> io::Result<Option<(Height, ChainState)>> {
             bincode::deserialize(&bytes[4..])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })();
-        if let Ok(state) = parsed {
-            return Ok(Some((state.height, state)));
+        if let Ok((state, anchors)) = parsed {
+            return Ok(Some((state.height, state, anchors)));
         }
     }
     Ok(None)

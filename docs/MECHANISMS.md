@@ -286,6 +286,12 @@ Op；Order/Position 各带 `isolated` 标志。跨仓单 `margin` 必须为 0。
 - **开仓门**（isolated）：`margin ≥ max(extra_im, 1)`、`margin ≤
   collateral`、`equity − margin ≥ im + resting`；无 MIN_OPEN_EQUITY
   （margin 下限即其等价物）。逐仓纯减仓带 margin → Risk。
+- **`resting` 口径**（`resting_open_im`，跨/逐仓共用）：只对**真正开仓
+  的数量**计价——bids 先减空头、asks 先减多头，超出可减量的部分才
+  按该侧加权单价 × `im_bps` 预留；每市场取 `max(bid_im, ask_im)` 后跨
+  市场累加。整侧名义额计价会把纯减仓挂单也按全额 IM 拒掉，已修
+  （#37-19）。逐仓挂单不计入（其保证金在 place 时已离开 collateral，
+  再计即双重预留）。
 - **托管**：place 时 `collateral -= margin`；每笔成交按
   `post = fill ≥ remaining_before ? margin_left : margin_left·fill/
   remaining_before`（floor，末笔吃余数）记入
@@ -542,7 +548,11 @@ cap 检查并拒绝超限输入。watcher 在缺失 joints 上 backoff 放弃，
 `source = getJsonSource(data)`（递归字典序排序对象键的 minified JSON；
 Rust 侧移植于 `minuend_settle::obyte_hash::get_json_source`），
 `data_hash = hex(sha256(source))`，`data_length = source 的 UTF-8 字节长`。
-Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
+数字走**失败即拒**的规范形（`canonical_number`）：可精确表示的整数照印
+十进制，但**绝对值 > 2^53 的裸整数直接 Err** —— JS 侧 `JSON.parse` 会把它
+舍到最近 f64，Rust 却保留全部比特，两边 hash 输入必分歧；`1.0`（JS 印
+`"1"`）、`-0.0`、|x| > 2^53 的非整数、|x| ≥ 1e21（指数形）、|x| < 1e-6 的
+非零小数同理。Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
 `obyteDataHash`/`obyteDataLength`）使用同一定义，黄金向量测试对拍同一
 嵌套对象得到相同 hash/length。注意区分：**链上 OIP-0007 信封**仍须满足
 ocore 校验器（base64 `getBase64Hash(data, true)` / `object_length`），
@@ -552,6 +562,8 @@ post_batch.js 把信封两字段直接委托给 ocore，不手写副本。
 
 ```
 chain_id ≠ CHAIN_ID                          → ChainMismatch
+header 计数字段 > u32::MAX（fill_count/unit_count/  → RootMismatch（拒绝截断）
+  wit_count/assertion_version；原 `as u32` 会静默回绕）
 replay 初始 root ≠ prev_root                 → PrevMismatch
 批次含 Deposit/GovDeposit → 独立验证充值证据（不再自证）：
   evidences_from_payload(data) 从 temp_data 取回证据，verify_all 以
@@ -563,8 +575,9 @@ replay 初始 root ≠ prev_root                 → PrevMismatch
 重放事件聚合 fills_root/counts_root 等承诺不符  → RootMismatch
 checkpoint.height ≠ replay.height + 1        → RootMismatch（高度绑定）
 engine.state.height 推进至 checkpoint.height 后按窗口剪枝
-(withdrawals / seen_aa_units / deposits_allowed / commits —— 与
-from_applied 完全一致的剪枝集)
+(withdrawals / seen_aa_units / deposits_allowed / commits，以及到期
+ oracle unbonding 的债券返还 —— 全部与 `from_applied` 同一 height 同一次
+序，剪枝集完全一致)
 last_unit 不符 ∨ state_root 不符 ∨ 承诺根不符  → RootMismatch
 ```
 
@@ -887,7 +900,9 @@ asset id。发币时只需改一个常量并重新部署 AA。
 Risk 拒绝外，四个 bps 参数统一过 `risk_params_ok` 谓词（minuend-types，
 exec 与治理共用）：任一为 0 或 > 10 000、`im_bps <= mm_bps`、
 `mm_bps < 500`、`im_bps > 5000`、`taker_fee_bps > 200`、
-`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk。
+`keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk；
+`spot_only` 市场另走**全额抵押**分支：`im_bps` 必须恰为 10 000
+（`mm_bps` 仍 [1, 10 000) 且 `im > mm`，`funding_rate` 必须为 false）。
 CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新，结果不
 过谓词即 Risk（提案表不写入）；FinalizePropose 落盘前同样复检——通过但
 非法的提案是 no-op（不写字段，提案仍被消耗）。
@@ -896,6 +911,14 @@ CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新�
 `spot_only` 建时定死：无 `ParamKey` 可翻转。`true` 的市场为纯合约/meme
 市场——拒收一切报价（双通道 `NotFound`，见 §6.2）、永无资金费；
 成交仍可定 mark（首笔合格 fill 写 `marks`）。可 delist 照旧（与 spot 正交）。
+
+**全额抵押不可协商**：`spot_only` 没有报价通道，`last_index` 永不写，
+mark 冻结在首笔合格成交价。杠杆仓位因此永远等不到引擎保证金意义上的
+清算——亏损方按冻结 mark 仍是正权益，`withdraw` 的 `debit` 门也读同一
+个 mark，于是把已被未实现亏损吃掉的保证金提走，赢家按真实价平仓时
+金库收不抵付。所以 `spot_only` 必须 `im_bps == 10 000`：入场即锁定
+= 名义额的最大亏损，mark 冻结不再影响偿付能力（`apply_fill_pair` 对
+存量杠杆 `spot_only` 市场一律拒绝成交，不再产生新敞口）。
 
 `funding_rate` 同样建时定死、无 `ParamKey` 翻转：资金费率市场，簿价是
 外部交易所资金费率的编码价（`encode_funding_price`，offset 域内恒正，

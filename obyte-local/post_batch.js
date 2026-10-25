@@ -328,6 +328,25 @@ async function main() {
   // 2. challenge window then finalize (no lock in minuend-v2)
   await network.timetravel({ shift: "3600s" });
   await trigger(poster, { finalize: 1, height: header.height }, undefined, rollup);
+  // #37-21: the finalize trigger alone proved nothing — an AA that bounced
+  // (window still open, wrong height, frozen height) left the script printing
+  // OK. Read last_finalized back and require it to equal the height.
+  let finalizedOk = false;
+  for (let attempt = 0; attempt < 5 && !finalizedOk; attempt++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const varsNow = await poster.readAAStateVars(rollup);
+    const vv = varsNow.vars || varsNow;
+    const lf = Number(vv["last_finalized"]);
+    finalizedOk = lf === Number(header.height);
+    if (!finalizedOk)
+      console.log(`finalize not yet reflected (last_finalized=${lf}, want ${header.height}); retry ${attempt + 1}`);
+  }
+  if (!finalizedOk) {
+    const varsNow = await poster.readAAStateVars(rollup);
+    const lf = Number((varsNow.vars || varsNow)["last_finalized"]);
+    throw new Error(`finalize did not advance last_finalized to ${header.height} (got ${lf})`);
+  }
+  console.log("finalize confirmed on chain: last_finalized =", header.height);
 
   // 3. claim the operator race reward
   const claim = await poster.triggerAaWithData({
