@@ -286,6 +286,12 @@ Op；Order/Position 各带 `isolated` 标志。跨仓单 `margin` 必须为 0。
 - **开仓门**（isolated）：`margin ≥ max(extra_im, 1)`、`margin ≤
   collateral`、`equity − margin ≥ im + resting`；无 MIN_OPEN_EQUITY
   （margin 下限即其等价物）。逐仓纯减仓带 margin → Risk。
+- **`resting` 口径**（`resting_open_im`，跨/逐仓共用）：只对**真正开仓
+  的数量**计价——bids 先减空头、asks 先减多头，超出可减量的部分才
+  按该侧加权单价 × `im_bps` 预留；每市场取 `max(bid_im, ask_im)` 后跨
+  市场累加。整侧名义额计价会把纯减仓挂单也按全额 IM 拒掉，已修
+  （#37-19）。逐仓挂单不计入（其保证金在 place 时已离开 collateral，
+  再计即双重预留）。
 - **托管**：place 时 `collateral -= margin`；每笔成交按
   `post = fill ≥ remaining_before ? margin_left : margin_left·fill/
   remaining_before`（floor，末笔吃余数）记入
@@ -542,7 +548,11 @@ cap 检查并拒绝超限输入。watcher 在缺失 joints 上 backoff 放弃，
 `source = getJsonSource(data)`（递归字典序排序对象键的 minified JSON；
 Rust 侧移植于 `minuend_settle::obyte_hash::get_json_source`），
 `data_hash = hex(sha256(source))`，`data_length = source 的 UTF-8 字节长`。
-Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
+数字走**失败即拒**的规范形（`canonical_number`）：可精确表示的整数照印
+十进制，但**绝对值 > 2^53 的裸整数直接 Err** —— JS 侧 `JSON.parse` 会把它
+舍到最近 f64，Rust 却保留全部比特，两边 hash 输入必分歧；`1.0`（JS 印
+`"1"`）、`-0.0`、|x| > 2^53 的非整数、|x| ≥ 1e21（指数形）、|x| < 1e-6 的
+非零小数同理。Rust `temp_data_payload` 与 JS 工具链（post_batch.js 的
 `obyteDataHash`/`obyteDataLength`）使用同一定义，黄金向量测试对拍同一
 嵌套对象得到相同 hash/length。注意区分：**链上 OIP-0007 信封**仍须满足
 ocore 校验器（base64 `getBase64Hash(data, true)` / `object_length`），
@@ -552,6 +562,8 @@ post_batch.js 把信封两字段直接委托给 ocore，不手写副本。
 
 ```
 chain_id ≠ CHAIN_ID                          → ChainMismatch
+header 计数字段 > u32::MAX（fill_count/unit_count/  → RootMismatch（拒绝截断）
+  wit_count/assertion_version；原 `as u32` 会静默回绕）
 replay 初始 root ≠ prev_root                 → PrevMismatch
 批次含 Deposit/GovDeposit → 独立验证充值证据（不再自证）：
   evidences_from_payload(data) 从 temp_data 取回证据，verify_all 以
@@ -563,8 +575,9 @@ replay 初始 root ≠ prev_root                 → PrevMismatch
 重放事件聚合 fills_root/counts_root 等承诺不符  → RootMismatch
 checkpoint.height ≠ replay.height + 1        → RootMismatch（高度绑定）
 engine.state.height 推进至 checkpoint.height 后按窗口剪枝
-(withdrawals / seen_aa_units / deposits_allowed / commits —— 与
-from_applied 完全一致的剪枝集)
+(withdrawals / seen_aa_units / deposits_allowed / commits，以及到期
+ oracle unbonding 的债券返还 —— 全部与 `from_applied` 同一 height 同一次
+序，剪枝集完全一致)
 last_unit 不符 ∨ state_root 不符 ∨ 承诺根不符  → RootMismatch
 ```
 

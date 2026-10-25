@@ -82,15 +82,26 @@ fn to_well_formed_json_string(s: &str) -> String {
 /// Ocore's JS number-to-string rules, fail-closed. JS observers and this
 /// Rust port must never disagree on hash input, so any Number whose serde
 /// textual form could diverge from JavaScript's output is rejected outright:
-/// - integers representable as i64/u64 print as bare decimal digits;
-/// - non-integral f64 within safe range prints via `to_string()`;
+/// - integers representable as i64/u64 print as bare decimal digits, but a
+///   magnitude above 2^53 is an error (JS rounds it to an f64;
+///   #37-18);
 /// - everything else (`1.0` → JS `"1"`, `-0.0`, |x| > 2^53 precision loss,
 ///   |x| >= 1e21 exponential-form divergence) is an error.
 fn canonical_number(n: &serde_json::Number) -> Result<String, String> {
+    // #37-18: a bare integer above 2^53 also loses precision on the JS side
+    // (`JSON.parse` yields the nearest f64), so `12345678901234567` hashes
+    // differently from the observer it must agree with. Rust keeps every bit
+    // here, which is exactly the disagreement. Reject instead of guessing.
     if let Some(i) = n.as_i64() {
+        if i.unsigned_abs() > 9_007_199_254_740_992 {
+            return Err(format!("integer {n} exceeds the JS-safe 2^53 range"));
+        }
         return Ok(i.to_string());
     }
     if let Some(u) = n.as_u64() {
+        if u > 9_007_199_254_740_992 {
+            return Err(format!("integer {n} exceeds the JS-safe 2^53 range"));
+        }
         return Ok(u.to_string());
     }
     let f = n.as_f64().ok_or_else(|| format!("invalid number: {n}"))?;
@@ -369,8 +380,22 @@ mod tests {
             Ok("0.001")
         );
         assert_eq!(
-            canonical_number(json!(12345678901234567u64).as_number().unwrap()).as_deref(),
-            Ok("12345678901234567")
+            canonical_number(json!(12345678901234567u64).as_number().unwrap()),
+            Err("integer 12345678901234567 exceeds the JS-safe 2^53 range".to_string())
+        );
+        // #37-18: the 2^53 boundary itself is still exact in f64 and fine;
+        // one past it is not, on either sign.
+        assert_eq!(
+            canonical_number(json!(9_007_199_254_740_992u64).as_number().unwrap()).as_deref(),
+            Ok("9007199254740992")
+        );
+        assert_eq!(
+            canonical_number(json!(-9_007_199_254_740_992i64).as_number().unwrap()).as_deref(),
+            Ok("-9007199254740992")
+        );
+        assert!(
+            canonical_number(json!(-9_007_199_254_740_993i64).as_number().unwrap()).is_err(),
+            "a bare integer one past -2^53 must be rejected"
         );
         // Both hash entry points propagate the rejection.
         let bad = json!({"x": 1.0});

@@ -977,6 +977,14 @@ impl Engine {
     /// them on top. Per market, only the larger side can ultimately be
     /// open (fills net the book against the position), so reserve
     /// `max(bid_im, ask_im)`, not the sum.
+    ///
+    /// #37-19: the OPENING quantity is what costs margin, so the notional is
+    /// priced on the open-only qty difference, not the whole resting side.
+    /// Bids reduce a short and asks reduce a long, so the reservable qty on
+    /// each side is `resting - reducible`; the whole-side qty (and notional)
+    /// was over-reserving IM and rejecting legitimate reduce-only style
+    /// resting orders. Per-order notional still uses each order's own price,
+    /// so the per-qty rate is a weighted average across the side.
     fn resting_open_im(&self, account: AccountId) -> Usd {
         let mut total: Usd = 0;
         for (market, book) in &self.state.books {
@@ -1024,18 +1032,23 @@ impl Engine {
                 .and_then(|a| a.positions.get(market))
                 .map(|p| p.qty)
                 .unwrap_or(0);
-            // Bids reduce only a short, asks reduce only a long: whichever
-            // side's remaining qty exceeds what it can reduce opens.
-            let bid_opens = bid_qty > (-pos_qty).max(0);
-            let ask_opens = ask_qty > pos_qty.max(0);
+            // Bids reduce only a short, asks reduce only a long: only the qty
+            // beyond what the position absorbs actually opens.
+            let short = (-pos_qty).max(0);
+            let long = pos_qty.max(0);
             let im_bps = self.state.market_params(*market).im_bps;
-            let bid_im = if bid_opens {
-                bps(bid_notional, im_bps)
+            // Open-only notional: the reducible slice is priced out, the rest
+            // keeps the side's per-qty rate. A side with nothing to reduce
+            // prices the whole side; one that only reduces prices zero.
+            let bid_open_qty = bid_qty - short;
+            let ask_open_qty = ask_qty - long;
+            let bid_im = if bid_qty > 0 && bid_open_qty > 0 {
+                bps(bid_notional / (bid_qty as Usd) * (bid_open_qty as Usd), im_bps)
             } else {
                 0
             };
-            let ask_im = if ask_opens {
-                bps(ask_notional, im_bps)
+            let ask_im = if ask_qty > 0 && ask_open_qty > 0 {
+                bps(ask_notional / (ask_qty as Usd) * (ask_open_qty as Usd), im_bps)
             } else {
                 0
             };
@@ -2726,6 +2739,125 @@ mod tests {
         // unchanged across the liquidation leg (keeper reward is a
         // separate seize from the target, capped by its collateral).
         assert_eq!(ins, ins_before, "ADL leg must not move insurance");
+    }
+
+    /// #37-19: resting IM was priced on the WHOLE resting side's notional
+    /// even though the open/reduce BOOLEAN already used the open-only
+    /// quantity. A long holder resting an ask for half its position therefore
+    /// reserved the IM of a full short-sized open, and the order was rejected
+    /// as under-collateralized. Reserve the open-only quantity difference.
+    #[test]
+    fn resting_im_prices_open_only_not_reduce_only_quantity() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let d1 = deposit(vec![g], &alice, 100_000 * USD_SCALE as i128, 1);
+        let id1 = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let px = 100_000 * PRICE_SCALE as i64;
+        // Alice opens long 2 @ 100k. Collateral is sized so the position IM
+        // (2 x 100k x 5% = 10k) plus the open IM of ONE more unit fits, but
+        // not the IM of the whole 2-unit resting side (which is what the old
+        // whole-side notional would reserve for a HALF-size ask).
+        // sk(2) needs collateral to rest the ask; give it a deposit first.
+        let d2 = deposit(vec![id1], &sk(2), 100_000 * USD_SCALE as i128, 2);
+        let id_d2 = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        let ask = place(
+            vec![id_d2],
+            &sk(2),
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            2 * QTY_SCALE,
+            1,
+        );
+        let id2 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = place(
+            vec![id2],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            2 * QTY_SCALE,
+            1,
+        );
+        let id3 = unit_id(&bid);
+        let evs = eng.ingest(bid).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+        )), "opening fill expected: {evs:?}");
+        assert_eq!(eng.state.accounts[&a].positions[&BTC_USD].qty, 2 * QTY_SCALE as i64);
+        // Now Alice rests an ask for ONE unit against her 2-unit long: it can
+        // only reduce, so it must reserve NO opening IM. Under the old
+        // whole-side notional it reserved the IM of a full 1-unit open.
+        let reduce_ask = place(
+            vec![id3],
+            &alice,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            2,
+        );
+        let evs2 = eng.ingest(reduce_ask).unwrap();
+        assert!(
+            evs2.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "reduce-only resting ask rejected by whole-side IM: {evs2:?}"
+        );
+        // And the reserve really is zero for a fully-reducing side, non-zero
+        // once the same side would open.
+        assert_eq!(eng.resting_open_im(a), 0, "reducing side reserved IM");
+        // Resting one unit on a fresh account reserves exactly that unit's
+        // IM (1 x 100k x 10% = 10k), not a larger reserve.
+        // sk(3) has no position and no resting order, so nothing reduces.
+        let d3 = deposit(vec![id3], &sk(3), 100_000 * USD_SCALE as i128, 3);
+        let id5 = unit_id(&d3);
+        eng.ingest(d3).unwrap();
+        // Priced above the resting ask so it RESTS instead of trading into
+        // alice's reduce order.
+        // An ask rests against nothing (no bid is on the book), so it cannot
+        // trade and sk(3) has no position to reduce: the whole side opens.
+        let open_ask = place(
+            vec![id5],
+            &sk(3),
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        let evs4 = eng.ingest(open_ask).unwrap();
+        assert!(
+            evs4.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "opening ask rejected: {evs4:?}"
+        );
+        let b3 = acct_of(&sk(3));
+        let resting: Usd = eng
+            .state
+            .books
+            .get(&BTC_USD)
+            .map(|bk| {
+                bk.live_orders()
+                    .filter(|o| o.account == b3)
+                    .map(|o| o.remaining as Usd)
+                    .sum()
+            })
+            .unwrap_or(0);
+        assert_eq!(resting, QTY_SCALE as Usd, "sk(3) should rest exactly 1 unit");
+        assert_eq!(
+            eng.resting_open_im(b3),
+            10_000 * USD_SCALE as i128,
+            "open-only resting IM mismatch"
+        );
     }
 
     /// No opposite-sign holder exists: the ADL candidate list is empty, so
