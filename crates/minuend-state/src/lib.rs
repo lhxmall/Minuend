@@ -1197,10 +1197,11 @@ pub fn account_leaf(acct: &Account, perp: u128, withdrawn: i128) -> [u8; 32] {
 /// Fixed-width per-market params encoding committed by the book leaf:
 /// symbol[16] || tick le8 || im le8 || mm le8 || taker_fee le8 ||
 /// keeper_reward le8 || delisted byte || spot_only byte || funding_rate byte
-/// || usd_per_unit le8 || funding_cap_bps le8 — 75 bytes total.
+/// || usd_per_unit le8 || funding_cap_bps le8 || min_price le8 ||
+/// max_price le8 — 91 bytes total.
 /// Books are created lazily only for markets that already have params.
-fn market_params_bytes(p: &MarketParams) -> [u8; 75] {
-    let mut b = [0u8; 75];
+fn market_params_bytes(p: &MarketParams) -> [u8; 91] {
+    let mut b = [0u8; 91];
     b[..16].copy_from_slice(&p.symbol);
     b[16..24].copy_from_slice(&p.tick_size.to_le_bytes());
     b[24..32].copy_from_slice(&p.im_bps.to_le_bytes());
@@ -1212,6 +1213,8 @@ fn market_params_bytes(p: &MarketParams) -> [u8; 75] {
     b[58] = p.funding_rate as u8;
     b[59..67].copy_from_slice(&p.usd_per_unit.to_le_bytes());
     b[67..75].copy_from_slice(&p.funding_cap_bps.to_le_bytes());
+    b[75..83].copy_from_slice(&p.min_price.to_le_bytes());
+    b[83..91].copy_from_slice(&p.max_price.to_le_bytes());
     b
 }
 
@@ -1222,7 +1225,7 @@ fn book_leaf(book: &OrderBook, markets: &BTreeMap<MarketId, MarketParams>) -> [u
     let p = markets
         .get(&book.market())
         .unwrap_or_else(|| panic!("book without params for market {}", book.market().0));
-    let mut b = Vec::with_capacity(75 + book.commitment_bytes().len());
+    let mut b = Vec::with_capacity(91 + book.commitment_bytes().len());
     b.extend_from_slice(&market_params_bytes(p));
     b.extend_from_slice(&book.commitment_bytes());
     sha256(&b)

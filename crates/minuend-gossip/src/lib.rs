@@ -256,6 +256,8 @@ fn decode_op(r: &mut Reader, depth: u32) -> Result<minuend_dag::Op, GossipError>
             },
             usd_per_unit: r.u64()?,
             funding_cap_bps: r.u64()?,
+            min_price: r.i64()?,
+            max_price: r.i64()?,
         },
         11 => Op::CreateProposal {
             creator: AccountId(r.arr32()?),
@@ -662,6 +664,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
             },
             Op::CreateProposal {
                 creator: acct,

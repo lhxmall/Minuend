@@ -100,7 +100,7 @@ Unit {
 | Liquidate | 7 | caller, target, market_le4 |
 | GovDeposit | 8 | account, amount_le16, aa_unit_32 |
 | GovWithdraw | 9 | account, amount_le16, nonce_le8 |
-| CreateMarket | 10 | creator, symbol16, tick_size_le8, im_bps_le8, mm_bps_le8, taker_fee_bps_le8, keeper_reward_bps_le8, spot_only_u8（0/1）, funding_rate_u8（0/1） |
+| CreateMarket | 10 | creator, symbol16, tick_size_le8, im_bps_le8, mm_bps_le8, taker_fee_bps_le8, keeper_reward_bps_le8, spot_only_u8（0/1）, funding_rate_u8（0/1）, usd_per_unit_le8, funding_cap_bps_le8, min_price_le8, max_price_le8 |
 | CreateProposal | 11 | creator, market_le4, key_u8（ParamKey）, value_le8 |
 | Vote | 12 | voter, proposal_id_le8, approve_u8（0/1） |
 | FinalizeProposal | 13 | caller, proposal_id_le8 |
@@ -609,11 +609,13 @@ account_leaf = sha256("acct" ‖ id32 ‖ collateral_i128le16
                #   collateral，漏承诺会低估账户资产
                # perp 取自 perp_balances（PERP 治理余额，§16），
                # 与 collateral 并列进入承诺
-book_leaf    = sha256(params_59B ‖ b"book" ‖ market_le4 ‖ [price_le8 ‖
+book_leaf    = sha256(params_91B ‖ b"book" ‖ market_le4 ‖ [price_le8 ‖
                (order_id32 ‖ remaining_le8 ‖ isolated_u8 ‖ margin_left_le8)*]*)
-               # params_59B = symbol16 ‖ tick_size_le8 ‖ im_bps_le8
+               # params_91B = symbol16 ‖ tick_size_le8 ‖ im_bps_le8
                #   ‖ mm_bps_le8 ‖ taker_fee_bps_le8 ‖ keeper_reward_bps_le8
-               #   ‖ delisted_u8 ‖ spot_only_u8 ‖ funding_rate_u8（定宽 59 字节）
+               #   ‖ delisted_u8 ‖ spot_only_u8 ‖ funding_rate_u8
+               #   ‖ usd_per_unit_le8 ‖ funding_cap_bps_le8
+               #   ‖ min_price_le8 ‖ max_price_le8（定宽 91 字节）
                #   ——市场参数本身成为被承诺
                #   的共识状态；同时提交每一个价格档与每个活单，
                #   簿深度与参数都逃不过审计
@@ -955,9 +957,19 @@ CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新�
 mark 冻结在首笔合格成交价。杠杆仓位因此永远等不到引擎保证金意义上的
 清算——亏损方按冻结 mark 仍是正权益，`withdraw` 的 `debit` 门也读同一
 个 mark，于是把已被未实现亏损吃掉的保证金提走，赢家按真实价平仓时
-金库收不抵付。所以 `spot_only` 必须 `im_bps == 10 000`：入场即锁定
+金库收不抵付。所以 `spot_only` 必须 `im_bps == 10_000`：入场即锁定
 = 名义额的最大亏损，mark 冻结不再影响偿付能力（`apply_fill_pair` 对
 存量杠杆 `spot_only` 市场一律拒绝成交，不再产生新敞口）。
+
+**价格区间锁**：带符号价格下多头的最大亏损可超过名义额（价格能跌破 0
+时 `qty × |entry|` 只是其一部分），因此 `spot_only` 建市**必须同时声明**
+`[min_price, max_price]`（`0` 表示该侧无界，而 spot_only 两侧都禁止为 0；
+下界确为 0 的市场须写成 `min_price = tick_size`）。区间是**准入门而非钳制**：
+越界限价单直接 `Risk` 拒绝（market 单成交价取自对手限价，天然落在带内）。
+该区间可证明 `max_loss ≤ qty × (max_price − min_price)`，正是全额抵押充分
+的条件。区间须落在 tick 网格上且 `min < max`；`min ≥ max` 或离网格 → Risk。
+`min_price`/`max_price` 建时定死，随 `params_91B` 进 book_leaf 承诺，
+`ParamKey` 不可翻转。
 
 `funding_rate` 同样建时定死、无 `ParamKey` 翻转：资金费率市场，簿价是
 外部交易所资金费率的编码价（`encode_funding_price`，offset 域内恒正，
