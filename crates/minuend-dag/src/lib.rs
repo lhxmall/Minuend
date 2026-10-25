@@ -92,6 +92,18 @@ pub enum Op {
         /// `funding_rate`. Fixed at creation.
         #[serde(default)]
         funding_cap_bps: u64,
+        /// Tradeable price floor for this market (signed price grid); 0 =
+        /// unbounded below. For a `spot_only` market — no oracle, so the mark
+        /// freezes — a listing price range bounds a long's worst-case loss
+        /// (which can exceed the notional when prices may go negative) to
+        /// `qty × (max_price − min_price)`. Fixed at creation; old JSON
+        /// parses as 0.
+        #[serde(default)]
+        min_price: Price,
+        /// Tradeable price ceiling for this market (signed price grid); 0 =
+        /// unbounded above. Fixed at creation; old JSON parses as 0.
+        #[serde(default)]
+        max_price: Price,
     },
     /// On-chain parameter proposal for `market`; `key` is a `ParamKey` u8.
     CreateProposal {
@@ -303,6 +315,8 @@ fn encode_op(b: &mut Vec<u8>, op: &Op) {
             funding_rate,
             usd_per_unit,
             funding_cap_bps,
+            min_price,
+            max_price,
         } => {
             b.push(10);
             b.extend_from_slice(&creator.0);
@@ -316,6 +330,8 @@ fn encode_op(b: &mut Vec<u8>, op: &Op) {
             b.push(*funding_rate as u8);
             b.extend_from_slice(&usd_per_unit.to_le_bytes());
             b.extend_from_slice(&funding_cap_bps.to_le_bytes());
+            b.extend_from_slice(&min_price.to_le_bytes());
+            b.extend_from_slice(&max_price.to_le_bytes());
         }
         Op::CreateProposal {
             creator,

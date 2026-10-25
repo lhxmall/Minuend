@@ -466,6 +466,8 @@ impl Engine {
                 funding_rate,
                 usd_per_unit,
                 funding_cap_bps,
+                min_price,
+                max_price,
             } => self.create_market(
                 *creator,
                 *symbol,
@@ -478,6 +480,8 @@ impl Engine {
                 *funding_rate,
                 *usd_per_unit,
                 *funding_cap_bps,
+                *min_price,
+                *max_price,
             ),
             Op::CreateProposal {
                 creator,
@@ -611,6 +615,25 @@ impl Engine {
                 if p.tick_size != 0 && price % p.tick_size != 0 {
                     return Err(RejectReason::Risk);
                 }
+            }
+        }
+        // Tradeable price range (#37 follow-up): a market may declare a
+        // [min_price, max_price] band at listing (0 = unbounded on that
+        // side). It is an ADMISSION gate, not a clamp — out-of-band limits
+        // are rejected, and market orders (price 0) are gated below against
+        // the band instead of being silently allowed to print outside it.
+        // Bounding the band is what keeps a `spot_only` long's worst-case
+        // loss finite: its mark is frozen, so the range is the only cap on
+        // how far the real price can run against the position.
+        {
+            let p = self.state.market_params(market);
+            if (p.min_price != 0 || p.max_price != 0)
+                && typ == OrderType::Limit
+                && price != 0
+                && ((p.min_price != 0 && price < p.min_price)
+                    || (p.max_price != 0 && price > p.max_price))
+            {
+                return Err(RejectReason::Risk);
             }
         }
         // Funding band (#7): an encoded rate beyond ±100% is a broken feed,
@@ -1855,11 +1878,36 @@ impl Engine {
         funding_rate: bool,
         usd_per_unit: u64,
         funding_cap_bps: u64,
+        min_price: minuend_types::Price,
+        max_price: minuend_types::Price,
     ) -> Result<Vec<Fill>, RejectReason> {
         // A funding-rate market needs a reporter index, which spot_only
         // rejects outright — mutually exclusive kinds, rejected before any
         // PERP changes hands.
         if spot_only && funding_rate {
+            return Err(RejectReason::Risk);
+        }
+        // Tradeable price range (#37 follow-up): when set, `min < max` and
+        // both must sit on the tick grid (limits align by `price % tick`).
+        // A bound of 0 means "unbounded on that side", so a min of exactly 0
+        // with a non-zero max is the bottom-unbounded case, not a zero-width
+        // band; `min >= max` only fails when both are non-zero (or when the
+        // max is set to a value the min already covers).
+        if (min_price != 0 || max_price != 0)
+            && (min_price >= max_price || min_price % tick_size != 0 || max_price % tick_size != 0)
+        {
+            return Err(RejectReason::Risk);
+        }
+        // A spot_only market has no oracle: its mark freezes at the first
+        // qualifying fill, so a long's loss can run past the notional when
+        // the real price moves below entry. Declaring a [min_price,
+        // max_price] band bounds that loss to `qty × (max - min)`, which is
+        // what makes full collateral sufficient. Listing one WITHOUT a range
+        // would leave the solvency hole open, so it is required — and since
+        // 0 doubles as "unbounded", a market whose floor really is zero must
+        // state it as `min_price = tick_size` (the smallest positive grid
+        // point), never 0.
+        if spot_only && (min_price == 0 || max_price == 0) {
             return Err(RejectReason::Risk);
         }
         // Signed price grid: tick stays strictly positive; a zero or
@@ -1914,6 +1962,8 @@ impl Engine {
                 funding_rate,
                 usd_per_unit,
                 funding_cap_bps,
+                min_price,
+                max_price,
                 delisted: false,
             },
         );
@@ -3321,6 +3371,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
             },
             secret,
         )
@@ -3347,6 +3399,21 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                // A spot_only listing must declare a range (its frozen mark
+                // needs a bounded worst case); a regular market stays
+                // unbounded. The band is wide enough for the tests' price
+                // grid — they trade at ±100k * PRICE_SCALE, i.e. a signed
+                // range — while still being a real bound.
+                min_price: if spot_only {
+                    -10_000_000 * minuend_types::PRICE_SCALE as i64
+                } else {
+                    0
+                },
+                max_price: if spot_only {
+                    10_000_000 * minuend_types::PRICE_SCALE as i64
+                } else {
+                    0
+                },
             },
             secret,
         )
@@ -3873,6 +3940,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
             },
             &sk(1),
         );
@@ -4203,6 +4272,216 @@ mod tests {
         assert_eq!(eng.state.marks.get(&meme).copied(), Some(px));
         assert!(!eng.state.last_index.contains_key(&meme));
     }
+    /// #37 follow-up (price range): a spot_only listing MUST declare a
+    /// [min_price, max_price] band. Its mark is frozen (no oracle), so a
+    /// long worst case is qty x (entry - min); without a declared floor
+    /// that is unbounded and full collateral no longer guarantees solvency.
+    #[test]
+    fn spot_only_listing_requires_a_price_range() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let mut sym = [0u8; 16];
+        sym[..6].copy_from_slice(b"MEMEUS");
+        for (lo, hi, label) in [
+            (0i64, 1000i64, "missing floor"),
+            (1i64, 0i64, "missing ceiling"),
+            (0i64, 0i64, "no range at all"),
+        ] {
+            let cm = sign_unit(
+                vec![tip],
+                Op::CreateMarket {
+                    creator: acct_of(&sk(3)),
+                    symbol: sym,
+                    tick_size: 1,
+                    im_bps: 10_000,
+                    mm_bps: 500,
+                    taker_fee_bps: 5,
+                    keeper_reward_bps: 100,
+                    spot_only: true,
+                    funding_rate: false,
+                    usd_per_unit: 0,
+                    funding_cap_bps: 0,
+                    min_price: lo,
+                    max_price: hi,
+                },
+                &sk(3),
+            );
+            let evs = eng.ingest(cm).unwrap();
+            assert!(
+                evs.iter().any(|e| matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::Risk,
+                        ..
+                    }
+                )),
+                "spot_only listing accepted with {label}"
+            );
+        }
+        let ok = sign_unit(
+            vec![tip],
+            Op::CreateMarket {
+                creator: acct_of(&sk(3)),
+                symbol: sym,
+                tick_size: 1,
+                im_bps: 10_000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+                min_price: 1,
+                max_price: 1000,
+            },
+            &sk(3),
+        );
+        let evs = eng.ingest(ok).unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })),
+            "valid ranged spot_only listing rejected: {evs:?}"
+        );
+    }
+
+    /// #37 follow-up (price range): malformed ranges are refused - min >= max
+    /// and off-grid bounds.
+    #[test]
+    fn malformed_price_range_is_rejected() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let mut sym = [0u8; 16];
+        sym[..6].copy_from_slice(b"MEMEUS");
+        let list = |lo: i64, hi: i64, tick: i64| {
+            sign_unit(
+                vec![tip],
+                Op::CreateMarket {
+                    creator: acct_of(&sk(3)),
+                    symbol: sym,
+                    tick_size: tick,
+                    im_bps: 1000,
+                    mm_bps: 500,
+                    taker_fee_bps: 5,
+                    keeper_reward_bps: 100,
+                    spot_only: false,
+                    funding_rate: false,
+                    usd_per_unit: 0,
+                    funding_cap_bps: 0,
+                    min_price: lo,
+                    max_price: hi,
+                },
+                &sk(3),
+            )
+        };
+        // (500, 100) inverts the band; the last two sit off the 100 grid.
+        for (lo, hi, tick) in [(500i64, 100i64, 1i64), (101, 500, 100), (100, 501, 100)] {
+            let evs = eng.ingest(list(lo, hi, tick)).unwrap();
+            assert!(
+                evs.iter().any(|e| matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::Risk,
+                        ..
+                    }
+                )),
+                "malformed range ({lo}, {hi}, tick {tick}) accepted"
+            );
+        }
+    }
+
+    /// #37 follow-up (price range): a declared band is an ADMISSION gate -
+    /// out-of-band limit orders are rejected, so the frozen mark worst case
+    /// stays inside the range that full collateral covers.
+    #[test]
+    fn out_of_band_limits_are_rejected() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(3), true);
+        tip = unit_id(&cm);
+        eng.ingest(cm).unwrap();
+        let meme = MarketId(2);
+        let alice = sk(1);
+        let d1 = deposit(vec![tip], &alice, 1_000_000 * USD_SCALE as i128, 1);
+        tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let in_band = 100_000 * PRICE_SCALE as i64;
+        let lo = eng.state.markets[&meme].min_price;
+        let hi = eng.state.markets[&meme].max_price;
+        assert!(lo < in_band && in_band < hi);
+        let ok = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            in_band,
+            QTY_SCALE,
+            1,
+        );
+        let ok_evs = eng.ingest(ok).unwrap();
+        assert!(
+            ok_evs
+                .iter()
+                .any(|e| matches!(e, ExecEvent::Applied { .. })),
+            "in-band limit rejected: {ok_evs:?}"
+        );
+        let too_low = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            lo - 1,
+            QTY_SCALE,
+            2,
+        );
+        let evs2 = eng.ingest(too_low).unwrap();
+        assert!(
+            evs2.iter().any(|e| matches!(
+                e,
+                ExecEvent::Rejected {
+                    reason: RejectReason::Risk,
+                    ..
+                }
+            )),
+            "below-floor limit accepted"
+        );
+        let too_high = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            hi + 1,
+            QTY_SCALE,
+            // A rejected order does not consume the account's client_seq,
+            // so the next unit reuses the last number.
+            2,
+        );
+        let evs3 = eng.ingest(too_high).unwrap();
+        assert!(
+            evs3.iter().any(|e| matches!(
+                e,
+                ExecEvent::Rejected {
+                    reason: RejectReason::Risk,
+                    ..
+                }
+            )),
+            "above-ceiling limit accepted"
+        );
+    }
 
     #[test]
     fn misaligned_tick_limit_rejected() {
@@ -4222,6 +4501,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
             },
         );
         eng.state
@@ -4282,6 +4563,8 @@ mod tests {
                     funding_rate: false,
                     usd_per_unit: 0,
                     funding_cap_bps: 0,
+                    min_price: 0,
+                    max_price: 0,
                 },
                 &sk(3),
             );
@@ -4324,6 +4607,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 1,
+                max_price: 1000,
             },
             &sk(3),
         );
@@ -4368,6 +4653,8 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
             },
         );
         let meme = MarketId(2);
@@ -5805,6 +6092,8 @@ mod tests {
                 funding_rate: true,
                 usd_per_unit: 10_000,
                 funding_cap_bps: 50,
+                min_price: 0,
+                max_price: 0,
             },
             &sk(1),
         );
@@ -5991,6 +6280,8 @@ mod tests {
                 funding_rate: true,
                 usd_per_unit: 10_000,
                 funding_cap_bps: 50,
+                min_price: 0,
+                max_price: 0,
             },
             &sk(1),
         );
@@ -6037,6 +6328,8 @@ mod tests {
                 funding_rate: true,
                 usd_per_unit: 10_000,
                 funding_cap_bps: 50,
+                min_price: 0,
+                max_price: 0,
             },
             &sk(1),
         );
@@ -6171,8 +6464,10 @@ mod tests {
         eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
         let mut symbol = [0u8; 16];
         symbol[..4].copy_from_slice(b"BAND");
-        eng.create_market(creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10)
-            .unwrap();
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
         let m = MarketId(2);
         let alice = sk(2);
         let d = deposit(vec![genesis_id()], &alice, 1_000_000 * USD_SCALE as i128, 2);
@@ -6253,8 +6548,9 @@ mod tests {
         symbol[..6].copy_from_slice(b"HUNDRD");
         eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
         // 100x gate: im 100 / mm 50 / cap 10 / usd 10_000 / keeper 10 applies.
-        let applied =
-            eng.create_market(creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10);
+        let applied = eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        );
         assert!(
             applied.is_ok(),
             "100x funding listing must apply: {applied:?}"
@@ -6270,17 +6566,17 @@ mod tests {
         assert!(eng.state.external_sources.contains(&creator));
         // 200x (im 50) is Risk — every other conjunct passes.
         assert!(matches!(
-            eng.create_market(creator, symbol, 1, 50, 40, 5, 5, false, true, 10_000, 5),
+            eng.create_market(creator, symbol, 1, 50, 40, 5, 5, false, true, 10_000, 5, 0, 0),
             Err(RejectReason::Risk)
         ));
         // A regular market keeps the mm 500 floor: mm 50 is Risk.
         assert!(matches!(
-            eng.create_market(creator, symbol, 1, 1000, 50, 5, 100, false, false, 0, 0),
+            eng.create_market(creator, symbol, 1, 1000, 50, 5, 100, false, false, 0, 0, 0, 0),
             Err(RejectReason::Risk)
         ));
         // A regular market may not carry a money multiplier: usd 1 is Risk.
         assert!(matches!(
-            eng.create_market(creator, symbol, 1, 1000, 500, 5, 100, false, false, 1, 0),
+            eng.create_market(creator, symbol, 1, 1000, 500, 5, 100, false, false, 1, 0, 0, 0),
             Err(RejectReason::Risk)
         ));
         // Rejected listings burned no fee and allocated no id.
@@ -6316,6 +6612,8 @@ mod tests {
                 funding_rate: true,
                 usd_per_unit: 10_000,
                 funding_cap_bps: 50,
+                min_price: 0,
+                max_price: 0,
             },
             &sk(1),
         );
@@ -6413,8 +6711,10 @@ mod tests {
         symbol[..5].copy_from_slice(b"OICAP");
         eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
         // notional(1.0) = $10_000, cap 10 bps → worst payout $10.
-        eng.create_market(creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10)
-            .unwrap();
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
         let mkt = MarketId(2);
         let alice = acct_of(&sk(2));
         eng.state
@@ -6517,8 +6817,10 @@ mod tests {
         let mut symbol = [0u8; 16];
         symbol[..6].copy_from_slice(b"FUNDLQ");
         eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
-        eng.create_market(creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10)
-            .unwrap();
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
         let mkt = MarketId(2);
         let alice = acct_of(&sk(2));
         let bob = acct_of(&sk(3));
@@ -6639,8 +6941,10 @@ mod tests {
         let mut symbol = [0u8; 16];
         symbol[..5].copy_from_slice(b"HAIRC");
         eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
-        eng.create_market(creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10)
-            .unwrap();
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
         let mkt = MarketId(2);
         let alice = acct_of(&sk(2));
         let bob = acct_of(&sk(3));

@@ -362,6 +362,19 @@ pub struct MarketParams {
     /// `funding_rate`. Fixed at creation.
     #[serde(default)]
     pub funding_cap_bps: u64,
+    /// Lowest price this market may ever trade at (signed price grid).
+    /// `0` = unbounded below. For a `spot_only` market (no oracle, so the
+    /// mark freezes) the max loss of a long is `qty × (entry − min_price)`,
+    /// which can exceed the notional when prices may go negative; listing a
+    /// range bounds it. Fixed at creation. Old JSON parses as `0`.
+    #[serde(default)]
+    pub min_price: Price,
+    /// Highest price this market may ever trade at (signed price grid).
+    /// `0` = unbounded above (a limit order may not exceed it: the range is
+    /// an admission gate, not a clamp). Fixed at creation. Old JSON parses
+    /// as `0`.
+    #[serde(default)]
+    pub max_price: Price,
 }
 
 /// Genesis market BTC_USD: same values as the pre-governance globals.
@@ -380,6 +393,8 @@ pub fn genesis_params() -> MarketParams {
         funding_rate: false,
         usd_per_unit: 0,
         funding_cap_bps: 0,
+        min_price: 0,
+        max_price: 0,
     }
 }
 
