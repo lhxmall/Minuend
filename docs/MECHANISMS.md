@@ -682,25 +682,52 @@ shard 根后折叠兄弟路径比对——AA **信任 shard 标签**，但叶子
 可靠性：错报 shard 只会折到错误的根上。经探针 AA 对拍验证 root 逐字节
 一致。
 
-### 9.3 为什么提款用字符串域森林
+> **#47 A2 变更**：aa_forest 仍随每批提交（submit / finalize 时复核
+> `sha256(aa_forest,'hex') == aa_root`），但**不再是金库的付款依据**。
+> 森林叶子从不公开，任何 dispute 谓词都无法指向一片伪造的森林叶——
+> 运营者若在森林里写假余额，没人能证伪。金库改为对已 finalize 高度的
+> **witness 根 `wit_root_<h>`**（§11，Obyte 原生 Merkle）付款：该根的每个
+> 单元都可经 `trace_root` 被 dispute AA 逐单元挑战。
+
+### 9.3 为什么提款用字符串域承诺（#47 起：witness 树而非森林）
 
 AA 只能做字符串拼接与 sha256——它无法解析 i128 LE、无法遍历仓位数组。
-字符串域森林把"证明我有多少钱"压缩成 AA 能完成的两次 sha256 调用
-（叶子重算 + 兄弟折叠）。字节域树则继续承担完整状态承诺（撮合簿、仓位、
-进度），供 Rust 观察者全量审计。
+字符串叶子把"证明我有多少钱"压缩成 AA 能完成的一次
+`is_valid_merkle_proof`（叶子重算 + 兄弟折叠）。字节域树则继续承担完整
+状态承诺（撮合簿、仓位、进度），供 Rust 观察者全量审计。
+
+#47 之前用的是 aa_forest；#47 A2 起改用 witness 树（§11），原因是**可挑战
+性**：witness 树的叶子随 trace 逐单元公开、可被 dispute / dispute_fill /
+dispute_bind 三个 AA 逐单元判定，而森林叶子没有任何谓词能指向。提款
+需要同一个 `wit_root_<lf>` 下的两片叶子：
+
+```
+adr:{obyte_address}:{account_hex_64}            # 付款地址 → 账户 绑定
+acct:{account_hex_64}:{collateral}:{perp}:{W}   # W = 累计已借记提款
+```
+
+`adr:` 叶由引擎在该地址的**第一笔** `d:`/`D:` 存款时写入，一个地址终身
+只绑定一个账户、一个账户只有一个地址（`d:`/`D:` op 现在携带地址：
+`d:{acct}:{amount}:{addr}`）。其它地址向同一账户存款被引擎拒绝。
 
 ---
 
 ## 10. 结算 AA 状态机（CHAIN_ID=minuend-v2）
 
-三个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、两个 dispute AA
-（`minuend_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`minuend_dispute_fill.aa` 成交）和
+五个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、三个 dispute AA
+（`minuend_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`minuend_dispute_fill.aa` 成交、
+`minuend_dispute_bind.aa`（#47 A2 新增）W 列与地址绑定）和
 `minuend_vault.aa`（托管）。金库无 owner key，claim 在 rollup。
+
+部署 op 预算（ocore `MAX_OPS = 2000`，`tools/check_aa_complexity.js`，
+部署时替换地址后的定义与源文件一致）：vault 221、rollup 770、dispute 1855、
+dispute_fill 1975、dispute_bind 530。dispute_fill 余量只剩 25 ops，新增
+判定须先腾出预算。
 
 rollup 状态变量（`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa
 submitted_at_h, state_root_h, aa_forest_h(1024 hex), prev_h
 wit_root_h, trace_root_h, units_root_h, units_set_root_h
 ops_root_h, fills_root_h, unit_count_h, wit_count_h, fill_count_h
@@ -746,6 +773,27 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | fill_math | dispute_fill | 普通受支持成交的账户/订单身份与 collateral 恒等式（含逐仓 post、释放、PnL、taker fee）；任何负的预期 collateral 都 bounce `no fraud`，不作欺诈判定；仓位 entry 比较容差为 ±1 个最小单位。#47：kind 0/1 taker 腿把 fill 绑定到本 unit 的 `p:` op（账户/市场/方向/数量），链上按 `book.rs` pro-rata 重算 `taker_post`（±1），按 op 的 typ/tif 推出剩余挂单是否留簿及其 `margin_left`，并校验逐仓 bucket；kind 2（ADL）/3（清算）只在 `L:` 单元订单簿路径（taker==target、caller≠maker、target 为 cross、对手方 post 抵押 > 0）上判定，target 腿扣除 keeper 奖励；资金费率场外 ADL 一律 bounce |
 | ghost | dispute_fill | 成交的 maker 订单 id 前缀区间不在 pre_wit |
 | skip | dispute | pre_wit 中存在更优活单未成交（#47 B3：只判 unit 的第一笔 fill，多 fill unit 也可判；B7：taker 自己的 cross 挂单豁免，自己的逐仓托管挂单在 Place 成交（kind 0/1）上不豁免） |
+| wpin（P-wpin） | dispute_bind | #47 A2：某账户 `acct:` 叶的 W 列在 unit k 发生变化，但该 unit 的 op 不是**该账户自己的** `w:{acct}:{amount}:{nonce}`；合法结果只有 W1 == W0（含被拒）或 W1 == W0 + amount。新账户用 pre 非成员证明（左右邻叶）代替 pre 叶 |
+| adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑） |
+
+**"被拒 = 不变"规则（#47 跨 PR）**：被拒的 unit 同样进入批次（每个执行
+过的 unit 在 trace 中占一项）。#49 让更多提款/存款被拒（现货储备、nonce
+水位、无对应入账/重复入账、地址规则），因此 deposit / withdraw / wpin /
+adr 谓词一律把"相关列保持不变"视为诚实结果并 bounce `no fraud`；只有
+"既不等于 pre、也不等于 pre ± amount"的第三个值才判欺诈。引擎对不存在
+账户的被拒提款不再创建账户（因此 post 中不会凭空出现空叶；若出现
+col 0 的空叶也按不变处理）。Rust 观察者 `prove.rs` 同步镜像该规则。
+
+**claw 守卫（#47，dispute_fill 全部 kind）**：成交后某方 fill 阶段 collateral
+为负时，引擎把窟窿从**另一方**（赢家）身上扣回（零和，保险基金不动），
+扣不完的部分仍为负。仅凭叶子无法还原这一过程，所以：
+- 被判定腿的预期 collateral 为负 → 一律 bounce `no fraud`；
+- 判定**赢家腿**的 collateral 不符时，必须另附对手方 post `acct:` 叶
+  （`cp_acct` + 证明，root == post_wit）且其 collateral **严格为正**——
+  对手方若曾为负，claw 之后它只会 ≤ 0，正值即证明本腿未被 claw；
+- kind 0/1 的 maker 腿还要求 taker 的 op 是 **cross** Place（逐仓 taker 的
+  托管退款落在 claw 之后，叶子无法区分）；
+- 否则 bounce `no fraud`（保守：宁漏判，不误判诚实数据）。
 
 公共门：`frozen`/`submitted_at+3600`、stale-root 对比 rollup 变量、
 所有成员证明 `.root` 必须等于对应 pre_wit/post_wit/roots。
@@ -754,7 +802,9 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 `{verdict:'fraud', height, challenger}` 给 rollup。
 ### 10.3 verdict(h) — rollup
 
-`trigger.address ∈ {dispute_aa, dispute_fill_aa}` ∧ verdict=='fraud'
+`trigger.address ∈ {dispute_aa, dispute_fill_aa, dispute_bind_aa}`
+（第三个地址经 `{set_dispute_bind:1}` 由 bind AA 自己一次性登记，rollup
+硬编码 bind AA 地址、bind AA 不硬编码 rollup，避免 chash 循环） ∧ verdict=='fraud'
 ∧ 高度 live ∧ 窗内 ∧ challenger 是合法 32 字符地址
 → frozen_h=2、清 state_root/aa_forest/aa_root/active_bond/fee_winner、
   last_submitted = **min(last_submitted, h)**（失败高度钉住，不再回退 h-1——回退会让
@@ -774,10 +824,14 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.5 withdraw — vault
 
-`$lf = var[ROLLUP]['last_finalized']`；`$src = var[ROLLUP]['aa_forest_'||$lf]`，
-先复核 `sha256($src,'hex') == var[ROLLUP]['aa_root_'||$lf]`
-（错配 bounce 'bad forest hash'）。
-叶子 `acct:addr:col:perp:W`（hex 域），16 深折叠，
+`$lf = var[ROLLUP]['last_finalized']`；`$wr = var[ROLLUP]['wit_root_'||$lf]`
+（缺失 bounce 'no root'）。#47 A2：不再读 aa_forest。
+请求携带 `amount, account(64 hex), collateral, perp, withdrawn, adr_proof,
+acct_proof`，两份证明都必须 `root == $wr` 且 `is_valid_merkle_proof` 通过：
+`adr:{trigger.address}:{account}`（错 bounce 'bad binding proof'）与
+`acct:{account}:{collateral}:{perp}:{withdrawn}`（错 bounce 'bad merkle root'）。
+付款人身份由 `adr:` 叶决定，不再由账户字段推出；该绑定与 W 列由
+dispute_bind 的 P-adr / P-wpin 逐单元守护。
 `amount + wd_ <= withdrawn`（W=侧链累计借记提款，是唯一的付款依据；
 旧 `min(collateral, withdrawn)` 双重计数会永久锁死 W>col 账户）；
 一律 `bounce('perp claim needs burn')`（#12：侧链仅 GovWithdraw 减
