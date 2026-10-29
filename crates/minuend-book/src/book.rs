@@ -1,7 +1,7 @@
 use crate::{BookError, Fill, MatchResult, Order, SelfTrade};
 use minuend_types::{AccountId, MarketId, OrderId, OrderType, Price, Qty, Side, TimeInForce, Usd};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Share of an order's escrowed isolated margin consumed by one fill:
 /// pro-rata of quantity, floored. The fill that exhausts the order's
@@ -18,7 +18,7 @@ fn pro_rata_post(margin_left: u64, fill_qty: u64, remaining_before: u64) -> u64 
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OrderBook {
     market: MarketId,
     bids: BTreeMap<Reverse<Price>, VecDeque<OrderId>>,
@@ -28,6 +28,21 @@ pub struct OrderBook {
     bid_qty: BTreeMap<Reverse<Price>, Qty>,
     /// Incrementally-maintained visible qty per price level (asks).
     ask_qty: BTreeMap<Price, Qty>,
+}
+
+/// #47 B4: undo log for one `submit`. Holds the first-touch pre-image of
+/// every order and price level the match changed, so the book can be put
+/// back exactly as it was without cloning the whole book up front. Cost is
+/// proportional to what the match touched, not to the book size.
+/// (is_bid, price, level deque, level visible qty) before the first touch.
+type LevelPreImage = (bool, Price, Option<VecDeque<OrderId>>, Option<Qty>);
+
+#[derive(Debug, Default)]
+pub struct BookJournal {
+    orders: Vec<(OrderId, Option<Order>)>,
+    seen_orders: HashSet<OrderId>,
+    levels: Vec<LevelPreImage>,
+    seen_levels: HashSet<(bool, Price)>,
 }
 
 impl OrderBook {
@@ -145,21 +160,100 @@ impl OrderBook {
         self.submit_with(order, SelfTrade::CancelMaker)
     }
 
+    /// Atomic: on `Err` the book is exactly as before the call. #47 B4:
+    /// atomicity comes from an undo journal of the touched orders/levels
+    /// instead of a deep clone of the whole book per submit.
     pub fn submit_with(
         &mut self,
         order: Order,
         self_trade: SelfTrade,
     ) -> Result<MatchResult, BookError> {
-        let mut candidate = self.clone();
-        let result = candidate.submit_inner(order, self_trade)?;
-        *self = candidate;
-        Ok(result)
+        self.submit_journaled(order, self_trade).map(|(r, _)| r)
+    }
+
+    /// Like [`OrderBook::submit_with`], but also returns the undo journal
+    /// so a caller whose LATER step fails (e.g. applying the fills to
+    /// accounts) can put the book back with [`OrderBook::rollback`].
+    pub fn submit_journaled(
+        &mut self,
+        order: Order,
+        self_trade: SelfTrade,
+    ) -> Result<(MatchResult, BookJournal), BookError> {
+        let mut j = BookJournal::default();
+        match self.submit_inner(order, self_trade, &mut j) {
+            Ok(r) => Ok((r, j)),
+            Err(e) => {
+                self.rollback(j);
+                Err(e)
+            }
+        }
+    }
+
+    /// Undo everything recorded in `j` (restores each first-touch
+    /// pre-image; entries that did not exist before are removed).
+    pub fn rollback(&mut self, j: BookJournal) {
+        for (id, pre) in j.orders {
+            match pre {
+                Some(o) => {
+                    self.orders.insert(id, o);
+                }
+                None => {
+                    self.orders.remove(&id);
+                }
+            }
+        }
+        for (is_bid, price, dq, qty) in j.levels {
+            if is_bid {
+                match dq {
+                    Some(d) => self.bids.insert(Reverse(price), d),
+                    None => self.bids.remove(&Reverse(price)),
+                };
+                match qty {
+                    Some(q) => self.bid_qty.insert(Reverse(price), q),
+                    None => self.bid_qty.remove(&Reverse(price)),
+                };
+            } else {
+                match dq {
+                    Some(d) => self.asks.insert(price, d),
+                    None => self.asks.remove(&price),
+                };
+                match qty {
+                    Some(q) => self.ask_qty.insert(price, q),
+                    None => self.ask_qty.remove(&price),
+                };
+            }
+        }
+    }
+
+    fn save_order(&self, j: &mut BookJournal, id: OrderId) {
+        if j.seen_orders.insert(id) {
+            j.orders.push((id, self.orders.get(&id).cloned()));
+        }
+    }
+
+    fn save_level(&self, j: &mut BookJournal, side: Side, price: Price) {
+        let is_bid = side == Side::Bid;
+        if j.seen_levels.insert((is_bid, price)) {
+            let (dq, qty) = if is_bid {
+                (
+                    self.bids.get(&Reverse(price)).cloned(),
+                    self.bid_qty.get(&Reverse(price)).copied(),
+                )
+            } else {
+                (
+                    self.asks.get(&price).cloned(),
+                    self.ask_qty.get(&price).copied(),
+                )
+            };
+            j.levels.push((is_bid, price, dq, qty));
+        }
     }
 
     fn submit_inner(
         &mut self,
         mut order: Order,
         self_trade: SelfTrade,
+        j: &mut BookJournal,
     ) -> Result<MatchResult, BookError> {
         if order.market != self.market {
             return Err(BookError::WrongMarket);
@@ -180,8 +274,8 @@ impl OrderBook {
 
         while order.remaining > 0 {
             let head = match order.side {
-                Side::Bid => self.next_ask_head(),
-                Side::Ask => self.next_bid_head(),
+                Side::Bid => self.next_ask_head(j),
+                Side::Ask => self.next_bid_head(j),
             };
             let (maker_id, maker_price) = match head {
                 Some(v) => v,
@@ -202,6 +296,9 @@ impl OrderBook {
                 break;
             }
 
+            // Every mutation below touches only this maker and its level.
+            self.save_level(j, order.side.opposite(), maker_price);
+            self.save_order(j, maker_id);
             let (maker_account, maker_side, maker_remaining) = match self.orders.get(&maker_id) {
                 Some(m) => (m.account, m.side, m.remaining),
                 None => {
@@ -302,6 +399,8 @@ impl OrderBook {
         let taker_margin_left = order.margin_left;
         if rest {
             let (order_side, order_price, q) = (order.side, order.price, order.remaining);
+            self.save_level(j, order_side, order_price);
+            self.save_order(j, order.id);
             self.enqueue(order);
             // Cache: resting order adds visible qty at its level.
             self.level_add(order_side, order_price, q as i64);
@@ -371,36 +470,50 @@ impl OrderBook {
         self.orders.insert(order.id, order);
     }
 
-    fn next_ask_head(&mut self) -> Option<(OrderId, Price)> {
+    /// Best live ask, discarding stale queue entries on the way. Stale
+    /// pops are journaled (level + order pre-images) before they happen.
+    fn next_ask_head(&mut self, j: &mut BookJournal) -> Option<(OrderId, Price)> {
         loop {
             let price = *self.asks.keys().next()?;
-            let dq = self.asks.get_mut(&price)?;
-            while let Some(id) = dq.front().copied() {
+            while let Some(id) = self.asks.get(&price).and_then(|dq| dq.front().copied()) {
                 match self.orders.get(&id) {
                     Some(o) if o.remaining > 0 => return Some((id, price)),
                     _ => {
-                        dq.pop_front();
+                        self.save_level(j, Side::Ask, price);
+                        self.save_order(j, id);
+                        if let Some(dq) = self.asks.get_mut(&price) {
+                            dq.pop_front();
+                        }
                         self.orders.remove(&id);
                     }
                 }
             }
+            self.save_level(j, Side::Ask, price);
             self.asks.remove(&price);
         }
     }
 
-    fn next_bid_head(&mut self) -> Option<(OrderId, Price)> {
+    fn next_bid_head(&mut self, j: &mut BookJournal) -> Option<(OrderId, Price)> {
         loop {
             let Reverse(price) = *self.bids.keys().next()?;
-            let dq = self.bids.get_mut(&Reverse(price))?;
-            while let Some(id) = dq.front().copied() {
+            while let Some(id) = self
+                .bids
+                .get(&Reverse(price))
+                .and_then(|dq| dq.front().copied())
+            {
                 match self.orders.get(&id) {
                     Some(o) if o.remaining > 0 => return Some((id, price)),
                     _ => {
-                        dq.pop_front();
+                        self.save_level(j, Side::Bid, price);
+                        self.save_order(j, id);
+                        if let Some(dq) = self.bids.get_mut(&Reverse(price)) {
+                            dq.pop_front();
+                        }
                         self.orders.remove(&id);
                     }
                 }
             }
+            self.save_level(j, Side::Bid, price);
             self.bids.remove(&Reverse(price));
         }
     }

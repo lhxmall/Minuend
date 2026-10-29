@@ -300,9 +300,13 @@ cd obyte-local && node post_batch.js
     finalize-batch 确定性设计落地后回归。
 14. gov nonce WAL 在批次提交（`from_applied`）时持久化；未提交的批次
     不烧毁 nonce。
-15. 快照格式头当前为 v3；未知/旧版或不可读候选会被跳过，不做跨版本迁移。
-    若没有可加载快照，`load_or_genesis` 从 genesis 初始化，调用方须从 genesis
-    重放 finalized 批次；重启时另将 gov-nonce WAL 按最大 nonce 合并。
+15. 快照格式头当前为 v5（快照内容是 bincode 编码的 `(ChainState, DAG 锚点)`
+    元组；v5 对应 `MarketParams` 新增的价格区间字段）；未知/旧版或不可读候选
+    会被跳过，不做跨版本迁移。若没有可加载快照，`load_or_genesis` 从 genesis
+    初始化，调用方须从 genesis（或最近可读快照之后的批次）重放 finalized 批次。
+    重启时 gov-nonce WAL 不再并入快照里已提交的 `seen_gov_nonces`，而是单独
+    保存：出块路径拒绝 ≤ 两者任一的 nonce；验证重放（`validate_against`）只看
+    已提交状态，并在每次成功的 `GovWithdraw` 后推进（失败的提现不推进水位）。
 
 近期关闭：存款白名单、溢出防护、市场白名单、严格签名、孤儿恢复
 （确定性驱逐 + 缺失父反向索引）、日志按批裁剪、已实现 PnL 即时结算进
