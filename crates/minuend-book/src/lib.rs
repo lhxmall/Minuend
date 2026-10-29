@@ -1,6 +1,6 @@
 mod book;
 
-pub use book::OrderBook;
+pub use book::{BookJournal, OrderBook};
 
 use minuend_types::{
     AccountId, MarketId, OrderId, OrderType, Price, Qty, Seq, Side, TimeInForce, Usd,
@@ -643,5 +643,83 @@ mod tests {
         );
         book.cancel(b1.id).unwrap();
         assert_eq!(book.best_bid(), None);
+    }
+
+    /// #47 B4: the undo journal must restore the book EXACTLY — both when
+    /// `submit_with` fails mid-match (self-trade reject after earlier
+    /// fills) and when a caller rolls back a successful submit. Drives a
+    /// deterministic pseudo-random order flow (several accounts, both
+    /// sides, limit/market, GTC/IOC, escrowed makers, cancels, stale queue
+    /// entries) and checks `rollback(journal) == clone-before` every step.
+    #[test]
+    fn journal_rollback_restores_book_exactly() {
+        let mut book = OrderBook::new(BTC_USD);
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut live: Vec<OrderId> = Vec::new();
+        let (mut errs, mut fills) = (0usize, 0usize);
+        for step in 0..3000u64 {
+            let r = next();
+            if r % 7 == 0 && !live.is_empty() {
+                let id = live[(r as usize / 7) % live.len()];
+                let _ = book.cancel(id);
+                continue;
+            }
+            let account = acct((r % 4) as u8 + 1);
+            let side = if (r >> 8) % 2 == 0 {
+                Side::Bid
+            } else {
+                Side::Ask
+            };
+            let market = (r >> 12) % 6 == 0;
+            let typ = if market {
+                OrderType::Market
+            } else {
+                OrderType::Limit
+            };
+            let tif = if market || (r >> 16) % 3 == 0 {
+                TimeInForce::Ioc
+            } else {
+                TimeInForce::Gtc
+            };
+            let price = if market {
+                0
+            } else {
+                (95 + ((r >> 20) % 10) as i64) * PRICE_SCALE as i64
+            };
+            let qty = (1 + (r >> 28) % 5) * QTY_SCALE;
+            let mut o = order(account, step, side, typ, tif, price, qty, step);
+            if (r >> 36) % 4 == 0 && !market {
+                o.isolated = true;
+                o.margin_left = 1_000;
+            }
+            let before = book.clone();
+            match book.submit_journaled(o.clone(), SelfTrade::Reject) {
+                Ok((res, j)) => {
+                    fills += res.fills.len();
+                    let after = book.clone();
+                    book.rollback(j);
+                    assert_eq!(book, before, "rollback after Ok diverged at step {step}");
+                    book = after;
+                    if res.taker_resting {
+                        live.push(o.id);
+                    }
+                }
+                Err(_) => {
+                    errs += 1;
+                    assert_eq!(
+                        book, before,
+                        "failed submit mutated the book at step {step}"
+                    );
+                }
+            }
+        }
+        // The flow must actually exercise both paths.
+        assert!(errs > 0 && fills > 0, "errs={errs} fills={fills}");
     }
 }

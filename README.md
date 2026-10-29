@@ -380,11 +380,17 @@ This codebase meets the plan's bar of *"deployable to Obyte testnet"*. It is
     finalize-batch determinization design lands.
 14. Gov nonce WAL persists at batch commit (`from_applied`); uncommitted
     batches do not burn nonces.
-15. Snapshots carry format version 3. Unknown/older or unreadable candidates
-    are skipped; there is no cross-version migration. If none can be loaded,
-    `load_or_genesis` initializes genesis and the caller must replay finalized
-    history from genesis (or batches newer than a valid snapshot); the gov-nonce
-    WAL is max-merged on restart.
+15. Snapshots carry format version 5 (a snapshot is the bincode tuple
+    `(ChainState, DAG anchors)`; v5 follows the `MarketParams` price-range
+    fields). Unknown/older or unreadable candidates are skipped; there is no
+    cross-version migration. If none can be loaded, `load_or_genesis`
+    initializes genesis and the caller must replay finalized history from
+    genesis (or batches newer than a valid snapshot). On restart the gov-nonce
+    WAL is kept as a separate watermark beside the snapshot's committed
+    `seen_gov_nonces`: producing ops reject any nonce at or below either one,
+    while validation replays (`validate_against`) judge only against committed
+    state, which the replay advances on every successful `GovWithdraw` (a
+    failed withdraw never moves the watermark).
 
 Recently closed: deposit whitelisting, overflow guards, market whitelist,
 strict signatures, orphan recovery with deterministic eviction plus a
