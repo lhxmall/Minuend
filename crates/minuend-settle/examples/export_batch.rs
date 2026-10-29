@@ -110,7 +110,7 @@ fn main() {
 
     let batch = Batch::from_applied(&prev, &mut eng, &applied).expect("batch");
     let mut header = batch.header_json();
-    let frames = batch.frames();
+    let frames = batch.frames().expect("frames");
     header["frames"] = serde_json::to_value(&frames).unwrap();
     let out: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../obyte-local/batch.json")

@@ -109,6 +109,12 @@ impl Account {
         if old == 0 || same_sign(old, delta) {
             produced_open = true;
             let new_qty = old.checked_add(delta).ok_or(AccountError::Overflow)?;
+            // R2-E-10: |qty| must stay ≤ i64::MAX. `-1 + -i64::MAX` is
+            // exactly i64::MIN (no checked_add error), and every later
+            // `abs()`/negation of it overflows (debug panic, release wrap).
+            if new_qty == i64::MIN {
+                return Err(AccountError::Overflow);
+            }
             let entry = if old == 0 {
                 price
             } else {

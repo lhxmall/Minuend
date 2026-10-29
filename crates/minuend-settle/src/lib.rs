@@ -162,6 +162,9 @@ pub struct WithdrawClaim {
 pub enum SettleError {
     #[error("empty batch")]
     Empty,
+    /// R2-R-3: a frame could not be JSON-encoded.
+    #[error("frame encode failed")]
+    FrameEncode,
     #[error("too many units")]
     TooManyUnits,
     #[error("chain id mismatch")]
@@ -492,7 +495,12 @@ impl Batch {
     /// unit has no fills; include `e` iff Deposit/GovDeposit with a matching
     /// evidence by `aa_unit`; omit `l` iff that unit's leaf-trace entry is
     /// empty.
-    pub fn frames(&self) -> Vec<String> {
+    ///
+    /// R2-R-3: fallible instead of panicking. A unit whose op cannot be
+    /// encoded (an out-of-range 128-bit amount) is refused at ingest
+    /// (`minuend_exec::op_amounts_encodable`), so on any engine-built batch
+    /// this never errs; a hand-built batch gets `FrameEncode`, not a panic.
+    pub fn frames(&self) -> Result<Vec<String>, SettleError> {
         let mut evidence_by_anchor: HashMap<String, &DepositEvidence> = HashMap::new();
         for ev in &self.deposit_evidences {
             evidence_by_anchor.insert(ev.aa_unit.to_lowercase(), ev);
@@ -501,7 +509,7 @@ impl Batch {
         for (k, u) in self.units.iter().enumerate() {
             let unit_json = serde_json::json!({
                 "parents": u.parents.iter().map(|p| hex::encode(p.0)).collect::<Vec<_>>(),
-                "op": serde_json::to_value(&u.op).unwrap(),
+                "op": serde_json::to_value(&u.op).map_err(|_| SettleError::FrameEncode)?,
                 "pubkey": hex::encode(u.pubkey),
                 "sig": hex::encode(u.sig),
             });
@@ -518,12 +526,18 @@ impl Batch {
             }
             if let Some(f) = self.fills_per_unit.get(k) {
                 if !f.is_empty() {
-                    frame.insert("f".to_string(), serde_json::to_value(f).unwrap());
+                    frame.insert(
+                        "f".to_string(),
+                        serde_json::to_value(f).map_err(|_| SettleError::FrameEncode)?,
+                    );
                 }
             }
             if let Some(l) = self.leaf_trace.get(k) {
                 if !l.is_empty() {
-                    frame.insert("l".to_string(), serde_json::to_value(l).unwrap());
+                    frame.insert(
+                        "l".to_string(),
+                        serde_json::to_value(l).map_err(|_| SettleError::FrameEncode)?,
+                    );
                 }
             }
             let anchor: Option<[u8; 32]> = match &u.op {
@@ -533,12 +547,15 @@ impl Batch {
             };
             if let Some(a) = anchor {
                 if let Some(ev) = evidence_by_anchor.get(&hex::encode(a).to_lowercase()) {
-                    frame.insert("e".to_string(), serde_json::to_value(ev).unwrap());
+                    frame.insert(
+                        "e".to_string(),
+                        serde_json::to_value(ev).map_err(|_| SettleError::FrameEncode)?,
+                    );
                 }
             }
-            out.push(serde_json::to_string(&frame).unwrap());
+            out.push(serde_json::to_string(&frame).map_err(|_| SettleError::FrameEncode)?);
         }
-        out
+        Ok(out)
     }
     /// Header scalars for the new wire: per-unit arrays are gone, only
     /// unchanged scalars plus blob/package pointers.
@@ -580,7 +597,7 @@ impl Batch {
     /// is an empty placeholder array of the right length; the poster
     /// replaces it with real unit hashes before submitting the header.
     pub fn temp_data_packages(&self) -> Result<(serde_json::Value, Vec<String>), SettleError> {
-        let frames = self.frames();
+        let frames = self.frames()?;
         if frames.is_empty() {
             return Err(SettleError::Empty);
         }
@@ -637,6 +654,12 @@ impl Batch {
         let mut scratch = replay.clone();
         let result = self.validate_inner(prev_root, &mut scratch);
         if result.is_ok() {
+            // R2-E-12: `validate_inner` forces `validating = true` on the
+            // scratch engine; that mode belongs to the replay only. Restore
+            // the caller's own mode so a node that catches up via this call
+            // and then produces is back in producing mode (gov nonces are
+            // journaled again).
+            scratch.validating = replay.validating;
             *replay = scratch;
         }
         result
@@ -2484,7 +2507,7 @@ mod tests {
         let (mut eng, pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
         batch.deposit_evidences = evidences;
-        let frames = batch.frames();
+        let frames = batch.frames().unwrap();
         assert_eq!(frames.len(), batch.units.len());
         let (header, blobs) = batch.temp_data_packages().unwrap();
         assert_eq!(blobs.len(), 1);

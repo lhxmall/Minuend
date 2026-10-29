@@ -14,10 +14,19 @@ use minuend_types::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Withdrawal ledger bound: once this many (account, nonce) entries are
-/// pending, further withdrawals are rejected with Risk until entries clear.
-/// Keeps ChainState.withdrawals bounded.
-const WITHDRAWALS_CAP: usize = 65_536;
+/// R2-E-5: withdrawal ledger bound, PER ACCOUNT. Once an account has this
+/// many (account, nonce) entries inside the replay window, its further
+/// withdrawals are rejected with Risk until its own entries are pruned.
+/// The old GLOBAL 65 536 cap let one account fill the table with dust
+/// withdrawals and freeze every user's exit; a per-account cap (plus the
+/// minimum amount below) keeps `ChainState.withdrawals` bounded by
+/// `cap × funded accounts` without any cross-account interference.
+pub const MAX_PENDING_WITHDRAWALS_PER_ACCOUNT: usize = 64;
+
+/// R2-E-5: smallest withdrawal (1 USD, `USD_SCALE` units). A smaller amount
+/// is accepted only when it sweeps the account's ENTIRE collateral, so
+/// dust balances can still leave but table entries cost real money.
+pub const MIN_WITHDRAW_AMOUNT: Usd = minuend_types::USD_SCALE as Usd;
 
 #[derive(Clone, Debug)]
 pub struct Engine {
@@ -112,6 +121,28 @@ pub enum ExecError {
     BadSig,
     #[error("dag: {0}")]
     Dag(#[from] DagError),
+    /// R2-R-3: an amount the batch frame encoder cannot represent.
+    #[error("amount out of encodable range")]
+    AmountOutOfRange,
+}
+
+/// R2-R-3: whether every 128-bit amount in `op` fits the batch frame's JSON
+/// number range. `serde_json` (no `arbitrary_precision`) refuses an i128
+/// outside `[i64::MIN, u64::MAX]` and a u128 above `u64::MAX`, so such a unit,
+/// once in the DAG, would make `Batch::frames()` fail and the batch could
+/// never be exported. Such units are refused at ingest, before the DAG (and
+/// therefore before any batch) ever sees them. Recurses into a Reveal.
+pub fn op_amounts_encodable(op: &Op) -> bool {
+    match op {
+        Op::Deposit { amount, .. } | Op::Withdraw { amount, .. } => {
+            *amount >= i128::from(i64::MIN) && *amount <= i128::from(u64::MAX)
+        }
+        Op::GovDeposit { amount, .. } | Op::GovWithdraw { amount, .. } => {
+            *amount <= u128::from(u64::MAX)
+        }
+        Op::Reveal { op, .. } => op_amounts_encodable(op),
+        _ => true,
+    }
 }
 
 impl Default for Engine {
@@ -127,12 +158,12 @@ impl Default for Engine {
 /// per-unit rate is not truncated away. `0 < open_qty <= side_qty`. On the
 /// (absurd) overflow of the product it saturates high: over-reserving
 /// rejects an order, under-reserving would hand out free leverage.
-fn open_share(notional: Usd, open_qty: i64, side_qty: i64) -> Usd {
+fn open_share(notional: Usd, open_qty: i128, side_qty: i128) -> Usd {
     if side_qty <= 0 {
         return 0;
     }
-    match notional.checked_mul(open_qty as Usd) {
-        Some(v) => v / side_qty as Usd,
+    match notional.checked_mul(open_qty) {
+        Some(v) => v / side_qty,
         None => Usd::MAX / 4,
     }
 }
@@ -228,25 +259,35 @@ impl Engine {
     /// Effective GovWithdraw nonce watermark for `account`: a nonce at or
     /// below it is a replay.
     ///
-    /// * Producing (`!validating`): committed state OR the WAL, whichever
-    ///   is higher — never reuse a nonce this node has already committed.
-    /// * Validating: committed state only (#47 H3). This is the snapshot's
-    ///   committed watermark advanced by every GovWithdraw the replay has
-    ///   applied so far, i.e. exactly what the producer saw. The old code
-    ///   used a replay-local map that started EMPTY, so a restored
-    ///   validator accepted nonces the snapshot had already consumed.
+    /// R2-E-7: committed state only, in BOTH modes. This is the snapshot's
+    /// committed watermark advanced by every GovWithdraw applied since, i.e.
+    /// exactly what any validator replaying the same units sees (#47 H3).
+    /// The producer used to also read the WAL (`wal_gov_nonces`), but the
+    /// WAL is written when a batch is CUT, not when it lands on chain: after
+    /// a restart that dropped an un-posted batch, the producer rejected a
+    /// unit every validator accepted, so honest batches replayed to a
+    /// different state root. Execution must be a pure function of committed
+    /// state. Double use of a nonce from a batch that DID land is prevented
+    /// by the recovery sequence (replay posted batches via
+    /// `Batch::validate_against` before producing) and enforced by the
+    /// rollup AA's `prev_state_hash` chain check: a producer building on a
+    /// stale state cannot post. `wal_gov_nonces` is kept as recovery
+    /// information only (see [`Engine::gov_wal_ahead`]).
     pub fn gov_nonce_watermark(&self, account: &AccountId) -> u64 {
-        let committed = self
-            .state
+        self.state
             .seen_gov_nonces
             .get(account)
             .copied()
-            .unwrap_or(0);
-        if self.validating {
-            committed
-        } else {
-            committed.max(self.wal_gov_nonces.get(account).copied().unwrap_or(0))
-        }
+            .unwrap_or(0)
+    }
+
+    /// R2-E-7: whether the gov-nonce WAL records a nonce for `account`
+    /// above the committed watermark — i.e. this node cut a batch newer
+    /// than its restored state. Informational for the node's recovery
+    /// logic (resync posted batches before producing); it never changes
+    /// execution.
+    pub fn gov_wal_ahead(&self, account: &AccountId) -> bool {
+        self.wal_gov_nonces.get(account).copied().unwrap_or(0) > self.gov_nonce_watermark(account)
     }
 
     /// #37-14: bounded recent-unit ring feeding snapshot DAG anchors.
@@ -331,6 +372,9 @@ impl Engine {
     pub fn ingest(&mut self, unit: Unit) -> Result<Vec<ExecEvent>, ExecError> {
         // Hash exactly once: the signature is verified against this id and
         // the same id is handed to the DAG, skipping its recomputation.
+        if !op_amounts_encodable(&unit.op) {
+            return Err(ExecError::AmountOutOfRange);
+        }
         let id = unit_id(&unit);
         if !self.sig_verifier.verify_by_id(&unit, &id) {
             return Err(ExecError::BadSig);
@@ -667,7 +711,7 @@ impl Engine {
         }
         // Signed prices: margin must cover the larger *magnitude* — a plain
         // max() would let a short at -100 post margin against mark -1.
-        let px_est = if px_for_notional.abs() >= mark.abs() {
+        let px_est = if px_for_notional.unsigned_abs() >= mark.unsigned_abs() {
             px_for_notional
         } else {
             mark
@@ -791,7 +835,9 @@ impl Engine {
             Side::Ask => -(qty as i64),
         };
         let open_qty = if pos_qty != 0 && signed.signum() != pos_qty.signum() {
-            signed + pos_qty.abs().min(signed.abs()) * pos_qty.signum()
+            // R2-E-10: unsigned_abs never overflows (|i64::MIN| fits u64);
+            // the min() with |signed| ≤ i64::MAX keeps the cast exact.
+            signed + (pos_qty.unsigned_abs().min(signed.unsigned_abs()) as i64) * pos_qty.signum()
         } else {
             signed
         };
@@ -813,6 +859,16 @@ impl Engine {
                 return Err(RejectReason::Risk);
             }
             let params = self.state.market_params(market);
+            // R2-E-8: opening exposure on a spot_only market must be
+            // ISOLATED. A cross spot reserve is only subtracted from pooled
+            // equity, so the same account's perp losses, keeper rewards and
+            // funding payments (all paid from cross collateral) could eat
+            // it and break the band-solvency guarantee. An isolated bucket
+            // escrows the band worst case out of collateral instead. Pure
+            // reduces of a pre-existing cross spot position stay allowed.
+            if params.spot_only && !isolated {
+                return Err(RejectReason::Risk);
+            }
             // Funding-rate markets price money off the listing multiplier:
             // the encoded book price there is a rate, not dollars.
             let open_notional = match params.funding_rate {
@@ -954,6 +1010,56 @@ impl Engine {
                 f.kind = 1;
             }
         }
+        // R2-E-6: an isolated taker's fee is charged to its CROSS collateral
+        // (the fill identity the dispute AA mirrors), not to its bucket. If
+        // that fee is what drives the collateral negative, the claw would
+        // bill the MAKER for the taker's fee. Simulate the taker leg of each
+        // fill exactly as `apply_fill_pair` does (fill, then fee) and reject
+        // the order (rolled back) when a fee takes non-negative collateral
+        // below zero. Pure isolated closes are unaffected whenever the
+        // released bucket covers the fee.
+        if isolated {
+            let params = self.state.market_params(market);
+            let funding_usd = params.funding_rate.then_some(params.usd_per_unit);
+            let mut sim = self
+                .state
+                .accounts
+                .get(&account)
+                .cloned()
+                .unwrap_or_else(|| minuend_account::Account::new(account));
+            for f in result.fills.iter().filter(|f| f.taker == account) {
+                if sim
+                    .apply_fill(
+                        f.taker_side,
+                        true,
+                        f.price,
+                        f.qty,
+                        f.market,
+                        funding_usd,
+                        f.taker_post,
+                        f.taker_isolated,
+                    )
+                    .is_err()
+                {
+                    // The real apply below fails the same way and rolls back.
+                    break;
+                }
+                if f.kind == 2 {
+                    continue;
+                }
+                let notional = match funding_usd {
+                    Some(usd) => funding_notional_usd(f.qty, usd),
+                    None => notional_usd(f.qty, f.price),
+                };
+                let fee = bps(notional, params.taker_fee_bps);
+                let pre = sim.collateral;
+                sim.collateral = sim.collateral.saturating_sub(fee);
+                if fee > 0 && pre >= 0 && sim.collateral < 0 {
+                    self.state.rollback(journal);
+                    return Err(RejectReason::Risk);
+                }
+            }
+        }
         for fill in &result.fills {
             if let Err(e) = self.state.apply_fill_pair_journaled(&mut journal, fill) {
                 self.state.rollback(journal);
@@ -1085,7 +1191,8 @@ impl Engine {
                     Side::Ask => ask_qty += o.remaining as u128,
                 }
             }
-            let short = (-pos_qty).max(0) as u128;
+            // R2-E-10: no i64 negation (overflows at i64::MIN).
+            let short = if pos_qty < 0 { pos_qty.unsigned_abs() as u128 } else { 0 };
             let long = pos_qty.max(0) as u128;
             oi += bid_qty.saturating_sub(short);
             oi += ask_qty.saturating_sub(long);
@@ -1112,8 +1219,11 @@ impl Engine {
     fn resting_open_im(&self, account: AccountId) -> Usd {
         let mut total: Usd = 0;
         for (market, book) in &self.state.books {
-            let mut bid_qty: i64 = 0;
-            let mut ask_qty: i64 = 0;
+            // R2-E-9: i128 accumulators — up to 64 orders of qty ≤ i64::MAX
+            // each overflow an i64 sum (debug panic / release wrap to a
+            // zero reserve).
+            let mut bid_qty: i128 = 0;
+            let mut ask_qty: i128 = 0;
             let mut bid_notional: Usd = 0;
             let mut ask_notional: Usd = 0;
             for o in book
@@ -1144,11 +1254,11 @@ impl Engine {
                 };
                 match o.side {
                     Side::Bid => {
-                        bid_qty += o.remaining as i64;
+                        bid_qty += i128::from(o.remaining);
                         bid_notional = bid_notional.saturating_add(n);
                     }
                     Side::Ask => {
-                        ask_qty += o.remaining as i64;
+                        ask_qty += i128::from(o.remaining);
                         ask_notional = ask_notional.saturating_add(n);
                     }
                 }
@@ -1165,8 +1275,8 @@ impl Engine {
                 .unwrap_or(0);
             // Bids reduce only a short, asks reduce only a long: only the qty
             // beyond what the position absorbs actually opens.
-            let short = (-pos_qty).max(0);
-            let long = pos_qty.max(0);
+            let short = (-i128::from(pos_qty)).max(0);
+            let long = i128::from(pos_qty).max(0);
             let im_bps = self.state.market_params(*market).im_bps;
             // Open-only notional: the reducible slice is priced out, the rest
             // keeps the side's per-qty rate. A side with nothing to reduce
@@ -1269,17 +1379,34 @@ impl Engine {
         if self.state.withdrawals.contains_key(&(account, nonce)) {
             return Err(RejectReason::DuplicateNonce);
         }
-        if self.state.withdrawals.len() >= WITHDRAWALS_CAP {
+        let pending = self
+            .state
+            .withdrawals
+            .range((account, 0)..=(account, u64::MAX))
+            .count();
+        if pending >= MAX_PENDING_WITHDRAWALS_PER_ACCOUNT {
             return Err(RejectReason::Risk);
         }
+        // R2-E-3: cash reserved by this account's resting cross opening
+        // orders (spot band worst cases, perp IM) is not withdrawable —
+        // otherwise an order placed against collateral could be filled after
+        // that collateral already left, leaving an unbacked position.
+        let resting = self.resting_open_im(account);
         // #47 (cross-PR): an unknown account has nothing to withdraw. The
         // old `account_mut(..).debit(..)` created an empty account first and
         // left it behind on the Insufficient reject.
         let Some(acct) = self.state.accounts.get_mut(&account) else {
             return Err(RejectReason::Insufficient);
         };
+        if amount > 0 && amount < MIN_WITHDRAW_AMOUNT && amount != acct.collateral {
+            return Err(RejectReason::Risk);
+        }
         acct.debit(amount, &self.state.marks, &self.state.markets)
             .map_err(map_acct)?;
+        if resting > 0 && acct.snapshot(&self.state.marks, &self.state.markets).equity < resting {
+            acct.collateral += amount;
+            return Err(RejectReason::Insufficient);
+        }
         // Cumulative signed-withdrawal ledger committed as `W` in the AA
         // leaf: the vault AA enforces "this claim + prior claims <= W".
         *self.state.withdrawn_total.entry(account).or_insert(0) += amount;
@@ -1377,13 +1504,44 @@ impl Engine {
             .map(|p| p.funding_rate)
             .unwrap_or(false)
         {
-            return self.liquidate_funding_off_book(unit, seq, caller, target, market, pos_qty);
+            // R2-E-11: the off-book close mutates the target, every ADL
+            // counterparty (holders of this market), and the keeper; any
+            // `?` mid-way used to leave half of it applied. Journal all of
+            // them and roll back on Err (all-or-nothing, B4).
+            let mut journal = minuend_state::StateJournal::default();
+            self.state.journal_account(&mut journal, target);
+            self.state.journal_account(&mut journal, caller);
+            let holders: Vec<AccountId> = self
+                .state
+                .accounts
+                .iter()
+                .filter(|(_, a)| a.positions.contains_key(&market))
+                .map(|(id, _)| *id)
+                .collect();
+            for h in holders {
+                self.state.journal_account(&mut journal, h);
+            }
+            let out = self.liquidate_funding_off_book(unit, seq, caller, target, market, pos_qty);
+            if out.is_err() {
+                self.state.rollback(journal);
+            }
+            return out;
         }
         // #47 L1: a legacy spot listing (see `spot_market_tradeable`) can
         // never fill — `apply_fill_pair` returns `Risk` for it. Refuse
         // BEFORE the book is touched instead of matching makers first.
         if !minuend_types::spot_market_tradeable(&self.state.market_params(market)) {
             return Err(RejectReason::Risk);
+        }
+        // R2-E-4: a (tradeable) spot_only position is never liquidated —
+        // neither by a keeper `Liquidate` nor by force-sell. Its mark is
+        // frozen, so the ADL fallback would close honest opposite holders
+        // at a stale price; its band worst case is already reserved (cross)
+        // or escrowed (isolated), so there is nothing for a liquidation to
+        // protect. A distressed account is liquidated through its non-spot
+        // positions instead. Refused before any state is touched.
+        if self.state.market_params(market).spot_only {
+            return Err(RejectReason::NotLiquidatable);
         }
         // #47 L1/B4: everything below (book IOC, fills, refunds, ADL, keeper
         // payout) is journaled and rolled back on any Err, so a failing
@@ -2382,6 +2540,15 @@ impl Engine {
             Some(e) => *e,
             None => return Err(RejectReason::BadCommit),
         };
+        // R2-E-1: the inner op must be signed "as" the Reveal's own account
+        // (and must not nest Commit/Reveal) — same rule ingest enforces in
+        // `account_matches`; re-checked here so no path executes a foreign
+        // account's op. Checked before anything is consumed.
+        if matches!(inner, Op::Commit { .. } | Op::Reveal { .. })
+            || minuend_dag::op_signer(inner) != account
+        {
+            return Err(RejectReason::BadAccount);
+        }
         if entry.revealed
             || entry.account != account
             || self.state.height > entry.ttl_height
@@ -2404,7 +2571,15 @@ impl Engine {
         // execute the inner op; both steps are deterministic on replay.
         self.state.commits.get_mut(&commit_ref).unwrap().revealed = true;
         let seq = self.state.seq;
-        self.dispatch(id, seq, inner)
+        let out = self.dispatch(id, seq, inner);
+        // R2-E-11: "rejected = unchanged" — an inner reject must not leave
+        // the commit consumed (the Reveal unit is recorded as Rejected).
+        if out.is_err() {
+            if let Some(e) = self.state.commits.get_mut(&commit_ref) {
+                e.revealed = false;
+            }
+        }
+        out
     }
 
     /// External keeper price intake (doc 06 §2.6): gated on the
