@@ -1,7 +1,15 @@
 "use strict";
 
 const assert = require("assert");
-const { envCompat, finalizeReached } = require("./script_helpers");
+const {
+  envCompat,
+  finalizeReached,
+  challengeGate,
+  disputeTarget,
+  buildChallengeData,
+  hubFor,
+  CHALLENGE_SAFETY_MARGIN_SECS,
+} = require("./script_helpers");
 
 // B9: new name wins; legacy falls back with one deprecation warning.
 {
@@ -30,5 +38,39 @@ assert.strictEqual(finalizeReached("7", 5), true, "concurrent finalize past our 
 assert.strictEqual(finalizeReached(4, 5), false);
 assert.strictEqual(finalizeReached(undefined, 5), false);
 assert.strictEqual(finalizeReached("NaN", 5), false);
+
+// L5 (#47): live challenge gate keeps the 600 s safety margin.
+{
+  assert.strictEqual(CHALLENGE_SAFETY_MARGIN_SECS, 600);
+  const sa = 1_000_000;
+  assert.strictEqual(challengeGate({ now: sa + 10, submittedAt: sa, frozen: 0 }).ok, true);
+  assert.strictEqual(challengeGate({ now: sa + 3600 - 601, submittedAt: sa, frozen: 0 }).ok, true);
+  const edge = challengeGate({ now: sa + 3600 - 600, submittedAt: sa, frozen: 0 });
+  assert.strictEqual(edge.ok, false);
+  assert.ok(/600s/.test(edge.reason));
+  assert.strictEqual(challengeGate({ now: sa + 3600, submittedAt: sa, frozen: 0 }).reason, "challenge window closed");
+  assert.strictEqual(challengeGate({ now: sa + 10, submittedAt: sa, frozen: 2 }).ok, false);
+  assert.strictEqual(challengeGate({ now: sa + 10, submittedAt: 0, frozen: 0 }).ok, false);
+  assert.strictEqual(challengeGate({ now: sa + 10, submittedAt: undefined, frozen: 0 }).ok, false);
+}
+{
+  const silent = () => {};
+  const deploy = { dispute_aa_address: "M".repeat(32), dispute_bind_aa_address: null };
+  assert.strictEqual(disputeTarget("main", deploy, {}, silent).address, "M".repeat(32));
+  assert.strictEqual(disputeTarget("bind", deploy, { MINUEND_DISPUTE_BIND_AA: "B".repeat(32) }, silent).address, "B".repeat(32));
+  assert.deepStrictEqual(disputeTarget("fill", {}, {}, silent).bind, { bind_fill: 1 });
+  assert.strictEqual(disputeTarget("fill", {}, {}, silent).address, null);
+  assert.throws(() => disputeTarget("other", {}, {}, silent));
+  const rollup = "R".repeat(32);
+  const d = buildChallengeData({ height: 4, pred: "wpin", rollup, proof: { k: 1, op: "x" } });
+  assert.deepStrictEqual(d, { k: 1, op: "x", height: 4, pred: "wpin", rollup });
+  assert.throws(() => buildChallengeData({ height: 4, pred: "wpin", rollup, proof: { height: 5 } }), /overrides/);
+  assert.throws(() => buildChallengeData({ height: 4, pred: "wpin", rollup, proof: [] }));
+  assert.throws(() => buildChallengeData({ height: 0, pred: "wpin", rollup, proof: {} }));
+  assert.strictEqual(hubFor("mainnet"), "obyte.org/bb");
+  assert.strictEqual(hubFor("testnet"), "obyte.org/bb-test");
+  assert.strictEqual(hubFor("testnet", "my.hub/bb"), "my.hub/bb");
+  assert.throws(() => hubFor("devnet"));
+}
 
 console.log("script helper checks passed");

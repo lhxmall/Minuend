@@ -16,7 +16,7 @@
 
 const path = require("path");
 const fs = require("fs");
-const { envCompat } = require("./script_helpers");
+const { envCompat, disputeTarget } = require("./script_helpers");
 
 const aaRoot = path.join(__dirname, "..", "vendor", "aa-testkit");
 const nm = path.join(aaRoot, "node_modules");
@@ -40,16 +40,16 @@ let network;
 
 async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
-  const useFill = flag("fill");
-  const dispute = useFill
-    ? deploy.dispute_fill_aa_address || envCompat("MINUEND_DISPUTE_FILL_AA")
-    : deploy.dispute_aa_address || envCompat("MINUEND_DISPUTE_AA");
+  // --fill → fill_math AA, --bind → #47 A2 binding AA (wpin/adr).
+  const target = flag("bind") ? "bind" : flag("fill") ? "fill" : "main";
+  const t = disputeTarget(target, deploy);
+  const dispute = t.address;
   const rollup = deploy.rollup_aa_address || envCompat("MINUEND_ROLLUP_AA");
   if (!dispute || !rollup) throw new Error("deployment.json dispute_aa_address/rollup_aa_address missing");
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");
   const proofFile = arg("proof");
-  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill]");
+  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill|--bind]");
   // #37-2: the proof path used to be stored and never read — the script
   // then referenced an undefined `proof` and threw ReferenceError before
   // sending anything. Read and shape-check it here.
@@ -61,10 +61,10 @@ async function main() {
   })();
   // #37-2: this script only drives a local aa-testkit devnet; accepting
   // --hub / a mnemonic silently would report a local drill as if it were a
-  // live challenge. L5 (#47): the watcher no longer spawns this script in
-  // live mode at all (it reports "NOT posted" loudly instead) and only
-  // calls it for an explicit MINUEND_WATCH_DEVNET_CHALLENGE=1 drill, without
-  // --hub and with the mnemonic stripped from the child environment.
+  // live challenge. L5 (#47): live challenges go through
+  // post_challenge_live.js; the watcher calls THIS script only for an
+  // explicit MINUEND_WATCH_DEVNET_CHALLENGE=1 drill, without --hub and with
+  // the mnemonic stripped from the child environment.
   const hubArg = arg("hub");
   const mnemonicArg = arg("mnemonic") || envCompat("MINUEND_WATCH_MNEMONIC");
   if (hubArg || mnemonicArg) {
@@ -86,12 +86,12 @@ async function main() {
   // bind bounces 'not authorized' — the rollup keeps the first binder).
   const rv = await challenger.readAAStateVars(rollup);
   const rvars = rv.vars || rv;
-  const boundKey = useFill ? "dispute_fill_aa" : "dispute_aa";
+  const boundKey = t.rollupVar;
   if (!rvars[boundKey]) {
     const bind = await challenger.triggerAaWithData({
       toAddress: dispute,
       amount: 20000,
-      data: Object.assign({ rollup }, useFill ? { bind_fill: 1 } : { bind: 1 }),
+      data: Object.assign({ rollup }, t.bind),
     });
     if (bind.error) throw new Error("bind failed: " + bind.error);
     await network.witnessUntilStable(bind.unit);

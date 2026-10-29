@@ -93,11 +93,14 @@ function writeResolved(file, subs, out) {
 // chash cycle (each address would otherwise be a hash input of the other).
 const DISPUTE_SRC = writeResolved("minuend_dispute.aa", {}, ".e2e_dispute.aa");
 const FILL_SRC = writeResolved("minuend_dispute_fill.aa", {}, ".e2e_fill.aa");
+const BIND_SRC = writeResolved("minuend_dispute_bind.aa", {}, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
 const FILL_ADDR = chashOf(fs.readFileSync(FILL_SRC, "utf8"));
+const BIND_ADDR = chashOf(fs.readFileSync(BIND_SRC, "utf8"));
 const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_AA_HERE: DISPUTE_ADDR,
   DISPUTE_FILL_AA_HERE: FILL_ADDR,
+  DISPUTE_BIND_AA_HERE: BIND_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
 const VAULT_SRC = writeResolved("minuend_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: PERP_ASSET }, ".e2e_vault.aa");
@@ -294,6 +297,7 @@ async function main() {
     .with.agent({ rollup: ROLLUP_SRC })
     .with.agent({ dispute: DISPUTE_SRC })
     .with.agent({ fill: FILL_SRC })
+    .with.agent({ bind: BIND_SRC })
     .with.agent({ vault: VAULT_SRC })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
@@ -302,6 +306,7 @@ async function main() {
   const rollup = network.agent.rollup;
   const dispute = network.agent.dispute;
   const fill = network.agent.fill;
+  const bindAa = network.agent.bind;
   const vault = network.agent.vault;
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
   console.log("network up:", { rollup, dispute, fill, vault });
@@ -309,7 +314,9 @@ async function main() {
   // ---- 1. bind dispute + fill ------------------------------------------------
   await trigger(operator, dispute, { bind: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, fill, { bind_fill: 1, rollup: ROLLUP_ADDR }, 20000);
+  await trigger(operator, bindAa, { bind_bind: 1, rollup: ROLLUP_ADDR }, 20000);
   let st = await vars(rollup);
+  if (String(st.dispute_bind_aa) !== bindAa) throw new Error("dispute_bind_aa not set: " + JSON.stringify(st.dispute_bind_aa));
   if (String(st.dispute_aa) !== dispute) throw new Error("dispute_aa not set: " + JSON.stringify(st.dispute_aa));
   if (String(st.dispute_fill_aa) !== fill) throw new Error("dispute_fill_aa not set: " + JSON.stringify(st.dispute_fill_aa));
   console.log("1. bind ok — dispute_aa + dispute_fill_aa set");
@@ -317,6 +324,7 @@ async function main() {
   // the rollup only accepts the two addresses hardcoded into its def.
   await triggerBounce(operator, rollup, { set_dispute: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_fill: 1 }, 20000, "not authorized");
+  await triggerBounce(operator, rollup, { set_dispute_bind: 1 }, 20000, "not authorized");
   // A second bind succeeds on the dispute AA (it just re-forwards), but the
   // rollup bounces the secondary 'not authorized' verdict — dispute_aa var
   // must be unchanged afterwards.
@@ -438,7 +446,9 @@ async function main() {
   // ---- 6. omit: force empty hole (#23) → 'no fraud', height stays live ----
   // The LIAR trace commits here once: scenario 6 cannot freeze, and 7 must
   // not re-submit the same live height ('height taken').
-  const LIAR_POST1 = pad2([`acct:${acct}:1000000:0:0`], "liar1");
+  // #47: col 1050000 is neither pre (1000000 = the honest REJECTED-deposit
+  // shape, which now bounces) nor pre+amount (1100000).
+  const LIAR_POST1 = pad2([`acct:${acct}:1050000:0:0`], "liar1");
   const LIAR_WIT1 = merkle.getMerkleRoot(LIAR_POST1);
   const LIAR_TRACE1 = pad2([LIAR_WIT1], "liartrace1");
   const LIAR_TRACE_ROOT1 = merkle.getMerkleRoot(LIAR_TRACE1);
@@ -476,7 +486,7 @@ async function main() {
     post_wit: LIAR_WIT1,
     post_proof: merkle.getMerkleProof(LIAR_TRACE1, 0),
     pre_leaf: preLeaf,
-    post_leaf: LIAR_POST1[0], // col unchanged despite +100 deposit
+    post_leaf: LIAR_POST1[0], // col off by 50000 from pre+amount
     pre_leaf_proof: merkle.getMerkleProof(GENESIS_LEAVES, depPreIdx),
     post_leaf_proof: merkle.getMerkleProof(LIAR_POST1, 0),
   };
@@ -805,7 +815,7 @@ async function main() {
   const PKG_OP = "d:" + DEP_ACCT + ":100000";
   const PKG_OPS = pad2([PKG_OP], "pkgops");
   const PKG_OPS_ROOT = merkle.getMerkleRoot(PKG_OPS);
-  const PKG_POST = pad2([`acct:${DEP_ACCT}:1000000:0:0`], "pkgpost");
+  const PKG_POST = pad2([`acct:${DEP_ACCT}:1050000:0:0`], "pkgpost");
   const PKG_WIT = merkle.getMerkleRoot(PKG_POST);
   const PKG_TRACE = pad2([PKG_WIT], "pkgtrace");
   const PKG_TRACE_ROOT = merkle.getMerkleRoot(PKG_TRACE);
@@ -955,7 +965,10 @@ async function main() {
   const ISO_UNITS = pad2([isoUnit], "isounits");
   const ISO_UNITS_ROOT = merkle.getMerkleRoot(ISO_UNITS);
   const ISO_UNITS_PROOF = merkle.getMerkleProof(ISO_UNITS, 0);
-  const isoPostTree = (col) => [`acct:${DEP_ACCT}:${col}:0:0`, META1, isoPos].sort();
+  // #47 claw guard: a collateral verdict needs the counterparty's proven
+  // POSITIVE post collateral (no claw can then have moved this leg).
+  const CP_LEAF = `acct:${"c".repeat(64)}:1000500:0:0`;
+  const isoPostTree = (col) => [`acct:${DEP_ACCT}:${col}:0:0`, CP_LEAF, META1, isoPos].sort();
   const ISO_POST = isoPostTree(499500);
   const ISO_POST_WIT = merkle.getMerkleRoot(ISO_POST);
   const ISO_TRACE = pad2([ISO_POST_WIT], "isotrace");
@@ -1004,6 +1017,8 @@ async function main() {
       oleft_proof: merkle.getMerkleProof(postTree, postTree.indexOf(META1)),
       oright: isoPos,
       oright_proof: merkle.getMerkleProof(postTree, postTree.indexOf(isoPos)),
+      cp_acct: CP_LEAF,
+      cp_acct_proof: merkle.getMerkleProof(postTree, postTree.indexOf(CP_LEAF)),
       who: "taker",
     };
   };
@@ -1031,7 +1046,7 @@ async function main() {
       throw new Error("h9 submit bounced: " + bounceDetail(res));
   }
   // 19a. LIAR isolated open: col 499501 (identity + 1) -> verdict.
-  await submitIsoH(ISO_LIAR_TRACE_ROOT, ISO_FILLS_ROOT, ISO_OPS_ROOT, 3);
+  await submitIsoH(ISO_LIAR_TRACE_ROOT, ISO_FILLS_ROOT, ISO_OPS_ROOT, 4);
   await triggerVerdict(
     challenger,
     fill,
@@ -1054,11 +1069,11 @@ async function main() {
   const crossOp = `p:${DEP_ACCT}:1:0:100000000:100000000:0:0:0:0`;
   const CROSS_OPS = pad2([crossOp], "crossops");
   const CROSS_OPS_ROOT = merkle.getMerkleRoot(CROSS_OPS);
-  const CROSS_POST = [`acct:${DEP_ACCT}:999501:0:0`, META1].sort();
+  const CROSS_POST = [`acct:${DEP_ACCT}:999501:0:0`, CP_LEAF, META1].sort();
   const CROSS_POST_WIT = merkle.getMerkleRoot(CROSS_POST);
   const CROSS_TRACE = pad2([CROSS_POST_WIT], "crosstrace");
   const CROSS_TRACE_ROOT = merkle.getMerkleRoot(CROSS_TRACE);
-  await submitIsoH(CROSS_TRACE_ROOT, CROSS_FILLS_ROOT, CROSS_OPS_ROOT, 2);
+  await submitIsoH(CROSS_TRACE_ROOT, CROSS_FILLS_ROOT, CROSS_OPS_ROOT, 3);
   const crossPayload = {
     rollup: ROLLUP_ADDR,
     k: 0,
@@ -1090,6 +1105,8 @@ async function main() {
     // Empty post range (final tree, k+1==n): only a left neighbor below.
     eleft: META1,
     eleft_proof: merkle.getMerkleProof(CROSS_POST, CROSS_POST.indexOf(META1)),
+    cp_acct: CP_LEAF,
+    cp_acct_proof: merkle.getMerkleProof(CROSS_POST, CROSS_POST.indexOf(CP_LEAF)),
     who: "taker",
   };
   await triggerVerdict(
@@ -1106,7 +1123,7 @@ async function main() {
   // 19c. HONEST isolated open: same payload shape, matching post col —
   // completeness rides the `n:1` sentinel right neighbor, then the exact
   // identity bounces 'no fraud'.
-  await submitIsoH(ISO_TRACE_ROOT, ISO_FILLS_ROOT, ISO_OPS_ROOT, 3);
+  await submitIsoH(ISO_TRACE_ROOT, ISO_FILLS_ROOT, ISO_OPS_ROOT, 4);
   await triggerBounce(
     challenger,
     fill,
@@ -1792,6 +1809,169 @@ async function main() {
   st = await vars(rollup);
   if (Number(st.last_finalized) !== 28) throw new Error("A1 drill finalize stalled at " + st.last_finalized);
   console.log("33. stale verdict keeps ls at the failed tip; gap resubmit refused; chain recovers to 28");
+  // ===== #47 integration: cross-PR consistency + A2 binding predicates ====
+  async function submitAt(hh, o) {
+    const sd = submitData(hh, STATE_ROOT, STATE_ROOT);
+    sd.ops_root = o.opsRoot;
+    sd.trace_root = o.traceRoot;
+    sd.units_root = o.unitsRoot || UNITS_SET_ROOT;
+    sd.units_set_root = SET_ROOT1;
+    sd.fills_root = o.fillsRoot || FILLS_ROOT;
+    sd.fill_count = o.fillCount || 0;
+    sd.wit_root = WIT_ROOT; // every k=0 drill below anchors on the genesis tree
+    sd.wit_count = GEN_WIT_COUNT;
+    const header = headerFromSubmit(sd);
+    const r = await operator.sendMulti({
+      messages: [tempDataMsg(header), { app: "data", payload: sd }],
+      base_outputs: [{ address: rollup, amount: SUBMIT_FEE }],
+    });
+    if (r.error) throw new Error(`h${hh} submit failed: ` + r.error);
+    await network.witnessUntilStable(r.unit);
+    const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+    if (res && res.response && res.response.bounced)
+      throw new Error(`h${hh} submit bounced: ` + bounceDetail(res));
+  }
+  const oneUnit = (tag, op, postLeaves) => {
+    const ops = pad2([op], tag + "-ops");
+    const post = pad2(postLeaves.slice().sort(), tag + "-post");
+    const wit = merkle.getMerkleRoot(post);
+    const trace = pad2([wit], tag + "-trace");
+    return {
+      op, ops, post, wit, trace,
+      opsRoot: merkle.getMerkleRoot(ops),
+      traceRoot: merkle.getMerkleRoot(trace),
+      leafProof: (leaf) => merkle.getMerkleProof(post, post.indexOf(leaf)),
+    };
+  };
+  const genProof = (leaf) => merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(leaf));
+  const depositPayload = (u, postLeaf) => ({
+    rollup: ROLLUP_ADDR,
+    k: 0,
+    op: u.op,
+    ops_proof: merkle.getMerkleProof(u.ops, 0),
+    trace_root: u.traceRoot,
+    ops_root: u.opsRoot,
+    units_root: UNITS_SET_ROOT,
+    units_set_root: SET_ROOT1,
+    fills_root: FILLS_ROOT,
+    pre_wit: WIT_ROOT,
+    post_wit: u.wit,
+    post_proof: merkle.getMerkleProof(u.trace, 0),
+    pre_leaf: DEP_PRE,
+    pre_leaf_proof: genProof(DEP_PRE),
+    post_leaf: postLeaf,
+    post_leaf_proof: u.leafProof(postLeaf),
+  });
+
+  // ---- 34. a REJECTED withdraw is committed too: unchanged leaf = honest --
+  // Rejected units are part of every batch (one trace entry per executed
+  // unit). #49 made more withdraws reject (spot reserve, nonce watermark);
+  // the pre-fix predicate verdicted every one of them (post != pre - amt).
+  {
+    const opW = `w:${DEP_ACCT}:5000000:1`;
+    const liarLeaf = `acct:${DEP_ACCT}:999999:0:0`;
+    const liar = oneUnit("rejw-liar", opW, [liarLeaf]);
+    await submitAt(29, liar);
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "withdraw", height: 29 }, depositPayload(liar, liarLeaf)), 20000, "withdraw liar predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_29) !== 2) throw new Error("withdraw liar (neither pre nor pre-amt) did not freeze h29");
+    const honest = oneUnit("rejw", opW, [DEP_PRE]);
+    await submitAt(29, honest);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "withdraw", height: 29 }, depositPayload(honest, DEP_PRE)), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_29 || 0) !== 0) throw new Error("honest rejected withdraw froze h29!");
+    console.log("34. rejected withdraw (leaf unchanged) bounces 'no fraud'; a third value verdicts");
+  }
+
+  // ---- 35. claw guard (owner item): winner leg clawed by a negative party --
+  // Isolated open (identity 499500) whose maker ended the fill negative and
+  // clawed 100 back: taker 499400, maker leaf at 0. Pre-fix: verdict on an
+  // honest unit. Now: no proven positive counterparty -> 'no fraud'.
+  {
+    const CLAW_CP = `acct:${"c".repeat(64)}:0:0:0`;
+    const tree = [`acct:${DEP_ACCT}:499400:0:0`, CLAW_CP, META1, isoPos].sort();
+    const wit = merkle.getMerkleRoot(tree);
+    const trace = pad2([wit], "claw-trace");
+    const traceRoot = merkle.getMerkleRoot(trace);
+    await submitAt(30, { opsRoot: ISO_OPS_ROOT, traceRoot, fillsRoot: ISO_FILLS_ROOT, unitsRoot: ISO_UNITS_ROOT, fillCount: 1 });
+    const payload = Object.assign(isoFillPayload(traceRoot, trace, wit, tree, 499400), {
+      cp_acct: CLAW_CP,
+      cp_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(CLAW_CP)),
+    });
+    await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: 30 }, payload), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_30 || 0) !== 0) throw new Error("honest clawed winner leg froze h30!");
+    console.log("35. clawed winner leg (counterparty at 0) bounces 'no fraud'");
+  }
+
+  // ---- 36. A2 P-wpin: W moved outside the account's own withdraw ----------
+  {
+    const forged = `acct:${DEP_ACCT}:1000000:0:777`;
+    const liar = oneUnit("wpin-liar", "x:" + sha256Hex("wpin-unit"), [forged]);
+    await submitAt(31, liar);
+    const wpin = (u, leaf) => ({
+      rollup: ROLLUP_ADDR,
+      k: 0,
+      op: u.op,
+      ops_proof: merkle.getMerkleProof(u.ops, 0),
+      trace_root: u.traceRoot,
+      ops_root: u.opsRoot,
+      pre_wit: WIT_ROOT,
+      post_wit: u.wit,
+      post_proof: merkle.getMerkleProof(u.trace, 0),
+      post_leaf: leaf,
+      post_leaf_proof: u.leafProof(leaf),
+      pre_leaf: DEP_PRE,
+      pre_leaf_proof: genProof(DEP_PRE),
+    });
+    await triggerVerdict(challenger, bindAa, Object.assign({ pred: "wpin", height: 31 }, wpin(liar, forged)), 20000, "wpin liar predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_31) !== 2) throw new Error("forged W did not freeze h31");
+    const paid = `acct:${DEP_ACCT}:999900:0:100`;
+    const honest = oneUnit("wpin", `w:${DEP_ACCT}:100:1`, [paid]);
+    await submitAt(31, honest);
+    await triggerBounce(challenger, bindAa, Object.assign({ pred: "wpin", height: 31 }, wpin(honest, paid)), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_31 || 0) !== 0) throw new Error("honest withdraw W froze h31!");
+    console.log("36. P-wpin: forged W -> frozen; own withdraw W+amount -> 'no fraud'");
+  }
+
+  // ---- 37. A2 P-adr: a new address binding needs the account's deposit ----
+  {
+    const PAYEE = "Q".repeat(32);
+    const adr = `adr:${PAYEE}:${DEP_ACCT}`;
+    const li = GENESIS_LEAVES.indexOf(FILL_TAKER_PRE);
+    const ri = GENESIS_LEAVES.indexOf(META1);
+    if (ri !== li + 1) throw new Error("fixture: adr neighbors not adjacent");
+    const adrPayload = (u) => ({
+      rollup: ROLLUP_ADDR,
+      k: 0,
+      op: u.op,
+      ops_proof: merkle.getMerkleProof(u.ops, 0),
+      trace_root: u.traceRoot,
+      ops_root: u.opsRoot,
+      pre_wit: WIT_ROOT,
+      post_wit: u.wit,
+      post_proof: merkle.getMerkleProof(u.trace, 0),
+      post_leaf: adr,
+      post_leaf_proof: u.leafProof(adr),
+      left: GENESIS_LEAVES[li],
+      left_proof: genProof(GENESIS_LEAVES[li]),
+      right: GENESIS_LEAVES[ri],
+      right_proof: genProof(GENESIS_LEAVES[ri]),
+    });
+    const liar = oneUnit("adr-liar", "x:" + sha256Hex("adr-unit"), [adr, DEP_PRE]);
+    await submitAt(32, liar);
+    await triggerVerdict(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(liar)), 20000, "adr liar predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_32) !== 2) throw new Error("unbacked adr binding did not freeze h32");
+    const honest = oneUnit("adr", `d:${DEP_ACCT}:100:${PAYEE}`, [adr, `acct:${DEP_ACCT}:1000100:0:0`]);
+    await submitAt(32, honest);
+    await triggerBounce(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(honest)), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_32 || 0) !== 0) throw new Error("honest first binding froze h32!");
+    console.log("37. P-adr: binding without its deposit -> frozen; d: with that address -> 'no fraud'");
+  }
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
   // test_vault_withdraw_aa.js: its own short chain (h1..h3 with REAL
   // forests) keeps this suite inside the 20-minute CI job.

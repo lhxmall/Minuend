@@ -20,7 +20,8 @@
 	// (trace/ops/fills arrays); da_unit_<h> pins that unit. The AA does NOT
 	// inspect unit[trigger.unit].messages (fragile at eval time).
 	// State vars:
-	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa
+	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa,
+	//   dispute_bind_aa (#47 A2)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
@@ -33,7 +34,7 @@
 	messages: {
 		cases: [
 			{
-				// #13 anti-hijack: only the two addresses hardcoded into this
+				// #13 anti-hijack: only the three addresses hardcoded into this
 				// definition may bind — first-come is irrelevant, nobody can
 				// squat the verdict channel. The dispute AAs carry this rollup
 				// address in their bind trigger data instead of their own
@@ -63,6 +64,23 @@
 						app: "state",
 						state: "{
 							var['dispute_fill_aa'] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
+				// #47 A2: the binding dispute AA (W / address-binding pins of
+				// the witness leaves the vault now pays against).
+				if: "{trigger.data.set_dispute_bind}",
+				init: "{
+					if (trigger.address != 'DISPUTE_BIND_AA_HERE' OR var['dispute_bind_aa'])
+						bounce('not authorized');
+				}",
+				messages: [
+					{
+						app: "state",
+						state: "{
+							var['dispute_bind_aa'] = trigger.address;
 						}"
 					}
 				]
@@ -130,6 +148,10 @@
 						OR trigger.data.assertion_version != 2
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
+						// #47 A2: the vault no longer pays from the forest —
+						// it proves adr:/acct: leaves against wit_root_<h>,
+						// which the dispute AAs can judge. The forest stays
+						// an informational, hash-bound commitment.
 						// #37-4: the 1024-hex forest is bound to one 64-hex
 						// forest hash at SUBMIT time (sha256 over its
 						// concatenation, same domain as Rust's
@@ -274,7 +296,8 @@
 				init: "{
 					$da = (var['dispute_aa'] otherwise 0);
 					$df = (var['dispute_fill_aa'] otherwise 0);
-					if (trigger.address != $da AND trigger.address != $df)
+					$db = (var['dispute_bind_aa'] otherwise 0);
+					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');

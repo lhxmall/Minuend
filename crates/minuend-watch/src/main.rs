@@ -244,12 +244,11 @@ fn challenge_postable(submitted_at: u64, now: u64, frozen: u64) -> bool {
 enum ChallengeMode {
     /// No watcher key configured: print the alert only.
     PrintOnly,
-    /// A key is configured, but there is no live-hub challenge poster yet
-    /// (`post_challenge.js` only drives a local aa-testkit devnet and
-    /// refuses `--hub`/mnemonic). Never spawn it — that used to fail every
-    /// time with only a one-line log — and instead report loudly that the
-    /// challenge was NOT posted, keeping the proof file for a manual post.
-    LiveUnsupported,
+    /// `MINUEND_WATCH_MNEMONIC` set: post the challenge on the live network
+    /// through `obyte-local/post_challenge_live.js` (light headless wallet;
+    /// it re-checks the window and the safety margin against the rollup's
+    /// own `submitted_at_<h>` with a fresh clock right before sending).
+    Live,
     /// Explicit local-devnet drill (`MINUEND_WATCH_DEVNET_CHALLENGE=1`, no
     /// key): spawn `post_challenge.js` without `--hub`.
     DevnetDrill,
@@ -257,7 +256,7 @@ enum ChallengeMode {
 
 fn challenge_mode(has_mnemonic: bool, devnet_drill: bool) -> ChallengeMode {
     match (has_mnemonic, devnet_drill) {
-        (true, _) => ChallengeMode::LiveUnsupported,
+        (true, _) => ChallengeMode::Live,
         (false, true) => ChallengeMode::DevnetDrill,
         (false, false) => ChallengeMode::PrintOnly,
     }
@@ -268,6 +267,33 @@ fn current_challenge_mode() -> ChallengeMode {
         env_var_compat("MINUEND_WATCH_MNEMONIC").is_some(),
         env_var_compat("MINUEND_WATCH_DEVNET_CHALLENGE").as_deref() == Some("1"),
     )
+}
+
+/// L5 (#47): exit code of `post_challenge_live.js` when its own fresh
+/// window/margin/frozen gate refused to send (nothing was broadcast).
+const LIVE_EXIT_REFUSED: i32 = 3;
+
+/// L5 (#47): argv for `node post_challenge_live.js` (pure, unit-tested).
+fn live_challenge_args(
+    script: &std::path::Path,
+    h: u64,
+    p: &prove::BuiltProof,
+    proof_path: &std::path::Path,
+    network: &str,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        script.as_os_str().to_owned(),
+        "--height".into(),
+        h.to_string().into(),
+        "--pred".into(),
+        p.pred.clone().into(),
+        "--proof".into(),
+        proof_path.as_os_str().to_owned(),
+        "--target".into(),
+        p.target().into(),
+        "--network".into(),
+        network.into(),
+    ]
 }
 
 /// #37-13: cross-round replay cursor. `processed_upto` is the last height
@@ -540,10 +566,12 @@ fn check_height(
 }
 
 /// Act on a challengeable alert according to [`ChallengeMode`] (L5, #47).
-/// A built proof is always written to a temp `proof.json` so an operator can
-/// post it by hand. Only the explicit devnet drill spawns
-/// `obyte-local/post_challenge.js` (`--pred/--proof`, plus `--fill` for the
-/// fill AA, never `--hub`); without a proof nothing is spawned.
+/// A built proof is always written to a temp `proof.json` first, so an
+/// operator can still post it by hand if the automatic post fails. `Live`
+/// spawns `obyte-local/post_challenge_live.js` (mnemonic inherited; the
+/// script refuses inside the 600 s margin itself); the devnet drill spawns
+/// `post_challenge.js` (never `--hub`, mnemonic stripped). Without a proof
+/// nothing is spawned.
 fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) {
     let mode = current_challenge_mode();
     if mode == ChallengeMode::PrintOnly {
@@ -559,42 +587,65 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
         eprintln!("WATCH CRITICAL (NOT CHALLENGED: proof write failed): {alert}");
         return;
     }
-    let script =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/post_challenge.js");
-    if mode == ChallengeMode::LiveUnsupported {
+    let obyte_local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local");
+    if mode == ChallengeMode::Live {
+        let network =
+            env_var_compat("MINUEND_WATCH_NETWORK").unwrap_or_else(|| "mainnet".to_string());
+        let script = obyte_local.join("post_challenge_live.js");
+        let args = live_challenge_args(&script, h, p, &path, &network);
         eprintln!(
-            "WATCH CRITICAL: challenge for h={h} was NOT posted — automatic live-hub challenge \
-             posting is not implemented (post_challenge.js only drives a local aa-testkit devnet). \
-             Post it manually before the window closes: pred={} proof={} fill_aa={}. Alert: {alert}",
+            "posting live challenge: pred={} target={} h={h} network={network} proof={}",
             p.pred,
-            path.display(),
-            p.fill_aa,
+            p.target(),
+            path.display()
         );
+        match Command::new("node").args(args).status() {
+            Ok(st) if st.success() => eprintln!("WATCH: challenge for h={h} broadcast ({alert})"),
+            Ok(st) if st.code() == Some(LIVE_EXIT_REFUSED) => eprintln!(
+                "WATCH CRITICAL: challenge for h={h} was NOT posted — the live poster's fresh \
+                 window/margin check refused it. proof={} Alert: {alert}",
+                path.display()
+            ),
+            Ok(st) => eprintln!(
+                "WATCH CRITICAL: challenge for h={h} was NOT confirmed (post_challenge_live.js \
+                 exited {st}). Post it manually before the window closes: pred={} target={} \
+                 proof={}. Alert: {alert}",
+                p.pred,
+                p.target(),
+                path.display()
+            ),
+            Err(e) => eprintln!(
+                "WATCH CRITICAL: challenge for h={h} was NOT posted (spawn failed: {e}). \
+                 proof={} Alert: {alert}",
+                path.display()
+            ),
+        }
         return;
     }
     // DevnetDrill: local aa-testkit only, so no --hub and no mnemonic in the
     // child's environment (post_challenge.js refuses both by design).
+    let script = obyte_local.join("post_challenge.js");
     let h_s = h.to_string();
-    eprintln!(
-        "spawning (devnet drill): node {} --height {} --pred {} --proof {} {}",
-        script.display(),
-        h,
-        p.pred,
-        path.display(),
-        if p.fill_aa { "--fill" } else { "" },
-    );
     let mut args: Vec<std::ffi::OsString> = vec![
         script.as_os_str().to_owned(),
-        std::ffi::OsStr::new("--height").to_owned(),
-        std::ffi::OsStr::new(&h_s).to_owned(),
-        std::ffi::OsStr::new("--pred").to_owned(),
-        std::ffi::OsStr::new(&p.pred).to_owned(),
-        std::ffi::OsStr::new("--proof").to_owned(),
+        "--height".into(),
+        h_s.into(),
+        "--pred".into(),
+        p.pred.clone().into(),
+        "--proof".into(),
         path.as_os_str().to_owned(),
     ];
-    if p.fill_aa {
-        args.push(std::ffi::OsStr::new("--fill").to_owned());
+    match p.target() {
+        "fill" => args.push("--fill".into()),
+        "bind" => args.push("--bind".into()),
+        _ => {}
     }
+    eprintln!(
+        "spawning (devnet drill): node {} pred={} target={}",
+        script.display(),
+        p.pred,
+        p.target()
+    );
     match Command::new("node")
         .args(args)
         .env_remove("MINUEND_WATCH_MNEMONIC")
@@ -640,10 +691,11 @@ fn main() -> anyhow::Result<()> {
         ChallengeMode::PrintOnly => eprintln!(
             "minuend-watch: no MINUEND_WATCH_MNEMONIC — alerts are print-only"
         ),
-        ChallengeMode::LiveUnsupported => eprintln!(
-            "WATCH CRITICAL: MINUEND_WATCH_MNEMONIC is set but automatic live-hub challenge \
-             posting is NOT implemented; every challengeable alert will be reported as NOT \
-             posted together with a proof file to post manually"
+        ChallengeMode::Live => eprintln!(
+            "minuend-watch: MINUEND_WATCH_MNEMONIC set — challenges are posted live via \
+             obyte-local/post_challenge_live.js (network {}, stop {}s before the deadline)",
+            env_var_compat("MINUEND_WATCH_NETWORK").unwrap_or_else(|| "mainnet".to_string()),
+            CHALLENGE_SAFETY_MARGIN_SECS
         ),
         ChallengeMode::DevnetDrill => eprintln!(
             "minuend-watch: MINUEND_WATCH_DEVNET_CHALLENGE=1 — challenges are local aa-testkit drills only"
@@ -704,8 +756,8 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        challenge_mode, challenge_postable, challenge_window_open, ChallengeMode, ReplayCursor,
-        CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS,
+        challenge_mode, challenge_postable, challenge_window_open, live_challenge_args,
+        ChallengeMode, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS,
     };
 
     /// B10 (#47): posting stops CHALLENGE_SAFETY_MARGIN_SECS before the AA
@@ -732,14 +784,53 @@ mod tests {
         const { assert!(CHALLENGE_SAFETY_MARGIN_SECS < CHALLENGE_WINDOW_SECS) };
     }
 
-    /// L5 (#47): a configured key no longer spawns a script that always
-    /// exits 1; it is reported as an unsupported live mode instead.
+    /// L5 (#47): a configured key selects the live poster (a key always
+    /// wins over the devnet drill); no key and no drill = print only.
     #[test]
-    fn challenge_mode_never_spawns_live_poster() {
+    fn challenge_mode_selects_live_poster_with_a_key() {
         assert_eq!(challenge_mode(false, false), ChallengeMode::PrintOnly);
-        assert_eq!(challenge_mode(true, false), ChallengeMode::LiveUnsupported);
-        assert_eq!(challenge_mode(true, true), ChallengeMode::LiveUnsupported);
+        assert_eq!(challenge_mode(true, false), ChallengeMode::Live);
+        assert_eq!(challenge_mode(true, true), ChallengeMode::Live);
         assert_eq!(challenge_mode(false, true), ChallengeMode::DevnetDrill);
+    }
+
+    /// L5 (#47): the live poster gets the height, predicate, proof file,
+    /// dispute-AA target and network — and never a `--hub` URL or key.
+    #[test]
+    fn live_challenge_args_name_the_target_aa() {
+        let mk = |fill_aa: bool, bind_aa: bool| minuend_watch::prove::BuiltProof {
+            pred: "wpin".into(),
+            fill_aa,
+            bind_aa,
+            data: serde_json::json!({}),
+        };
+        let script = std::path::Path::new("/x/post_challenge_live.js");
+        let proof = std::path::Path::new("/tmp/p.json");
+        let args: Vec<String> = live_challenge_args(script, 7, &mk(false, true), proof, "testnet")
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "/x/post_challenge_live.js",
+                "--height",
+                "7",
+                "--pred",
+                "wpin",
+                "--proof",
+                "/tmp/p.json",
+                "--target",
+                "bind",
+                "--network",
+                "testnet"
+            ]
+        );
+        let fill = live_challenge_args(script, 7, &mk(true, false), proof, "mainnet");
+        assert!(fill.iter().any(|a| a == "fill"));
+        let main = live_challenge_args(script, 7, &mk(false, false), proof, "mainnet");
+        assert!(main.iter().any(|a| a == "main"));
+        assert!(!main.iter().any(|a| a == "--hub"));
     }
 
     /// L4 (#47): a stuck height is tracked and reported (after the second

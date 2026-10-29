@@ -37,8 +37,15 @@ function resolveAa(agentFile, subs, outName) {
   fs.writeFileSync(out, src);
   return out;
 }
-function resolveRollupAa(disputeAddr, fillAddr) {
-  return resolveAa("minuend_rollup.aa", { DISPUTE_AA_HERE: disputeAddr, DISPUTE_FILL_AA_HERE: fillAddr }, ".minuend_rollup.resolved.aa");
+function resolveRollupAa(disputeAddr, fillAddr, bindAddr) {
+  return resolveAa("minuend_rollup.aa", {
+    DISPUTE_AA_HERE: disputeAddr,
+    DISPUTE_FILL_AA_HERE: fillAddr,
+    DISPUTE_BIND_AA_HERE: bindAddr,
+  }, ".minuend_rollup.resolved.aa");
+}
+function resolveBindAa() {
+  return resolveAa("minuend_dispute_bind.aa", {}, ".minuend_dispute_bind.resolved.aa");
 }
 function resolveDisputeAa() {
   return resolveAa("minuend_dispute.aa", {}, ".minuend_dispute.resolved.aa");
@@ -81,7 +88,9 @@ async function main() {
   };
   const disputeAddr = chashOf(disputePath);
   const fillAddr = chashOf(fillPath);
-  const rollupPath = resolveRollupAa(disputeAddr, fillAddr);
+  const bindPath = resolveBindAa();
+  const bindAddr = chashOf(bindPath);
+  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr);
 
   const network = await Network.create()
     .with.agent({ rollup: rollupPath })
@@ -94,11 +103,13 @@ async function main() {
   const network2 = await Network.create()
     .with.agent({ dispute: disputePath })
     .with.agent({ fill: fillPath })
+    .with.agent({ bind: bindPath })
     .with.agent({ vault: resolveVaultAa(rollup, PERP_ASSET_ID) })
     .with.wallet({ operator: 1e14 })
     .run();
   const dispute = network2.agent.dispute;
   const fill = network2.agent.fill;
+  const bindAa = network2.agent.bind;
   const vault = network2.agent.vault;
   console.log("dispute AA address:", dispute);
   console.log("fill AA address   :", fill);
@@ -122,6 +133,14 @@ async function main() {
   if (fb.error || !fb.unit) throw new Error("fill bind failed: " + fb.error);
   await network2.witnessUntilStable(fb.unit);
   console.log("fill bound; unit =", fb.unit);
+  const bb = await op2.triggerAaWithData({
+    toAddress: bindAa,
+    amount: 20000,
+    data: { bind_bind: 1, rollup },
+  });
+  if (bb.error || !bb.unit) throw new Error("binding-dispute bind failed: " + bb.error);
+  await network2.witnessUntilStable(bb.unit);
+  console.log("binding dispute bound; unit =", bb.unit);
 
   const v = await operator.readAAStateVars(rollup);
   const vars_ = v.vars || v;
@@ -129,6 +148,8 @@ async function main() {
     throw new Error("dispute_aa not bound: " + JSON.stringify(vars_.dispute_aa));
   if (String(vars_.dispute_fill_aa) !== String(fill))
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(vars_.dispute_fill_aa));
+  if (String(vars_.dispute_bind_aa) !== String(bindAa))
+    throw new Error("dispute_bind_aa not bound: " + JSON.stringify(vars_.dispute_bind_aa));
   if (Number(vars_.last_submitted || 0) !== 0)
     throw new Error("boot last_submitted wrong");
   if (Number(vars_.last_finalized || 0) !== 0)
@@ -140,13 +161,19 @@ async function main() {
     rollup_aa_address: rollup,
     dispute_aa_address: dispute,
     dispute_fill_aa_address: fill,
+    dispute_bind_aa_address: bindAa,
     vault_aa_address: vault,
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
+    assertion_version: 2,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };
+  // #47 B5: the info object used to be built and never written, leaving a
+  // stale pre-#44 record in deployment.json.
+  fs.writeFileSync(path.join(__dirname, "deployment.json"), JSON.stringify(info, null, 2) + "\n");
+  console.log("deployment.json written");
   console.log("NOTE: mainnet deployment requires a formal AA audit.");
   await network.stop();
   await network2.stop();

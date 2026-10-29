@@ -19,9 +19,25 @@ pub struct BuiltProof {
     pub pred: String,
     /// True → post to the fill dispute AA (`--fill`); false → main dispute AA.
     pub fill_aa: bool,
+    /// #47 A2: true → post to the binding dispute AA (`--bind`: `wpin`,
+    /// `adr`). Never set together with `fill_aa`.
+    pub bind_aa: bool,
     /// Exact `trigger.data` supplement (merged with `height`/`pred` by the
     /// poster): `k`, `op`, proofs, leaves, roots the AA stale-checks.
     pub data: serde_json::Value,
+}
+
+impl BuiltProof {
+    /// Which dispute AA takes this proof: `main`, `fill` or `bind`.
+    pub fn target(&self) -> &'static str {
+        if self.bind_aa {
+            "bind"
+        } else if self.fill_aa {
+            "fill"
+        } else {
+            "main"
+        }
+    }
 }
 
 fn proof_json(elements: &[String], index: usize) -> serde_json::Value {
@@ -113,8 +129,145 @@ pub fn build_proof(
                 return Some(p);
             }
         }
+        // #47 A2: the two witness columns the vault pays against (W and
+        // the adr: binding), pinned on EVERY unit by the binding dispute AA.
+        if let Some(p) = binding_proof(batch, k, &op, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
     }
     None
+}
+
+/// #47 A2 mirror of `minuend_dispute_bind.aa` for one leaf: `None` = the AA
+/// accepts the transition (bounces 'no fraud').
+fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
+    let p: Vec<&str> = post_leaf.split(':').collect();
+    let o: Vec<&str> = op.split(':').collect();
+    if p.len() == 5 && p[0] == "acct" && p[1].len() == 64 {
+        let key = format!("acct:{}:", p[1]);
+        let w0 = match pre.iter().find(|l| l.starts_with(&key)) {
+            Some(l) => l.split(':').nth(4)?.to_string(),
+            None => "0".to_string(),
+        };
+        if p[4] == w0 {
+            return None;
+        }
+        let own = o.len() == 4 && o[0] == "w" && o[1] == p[1];
+        let sum = w0
+            .parse::<i128>()
+            .ok()
+            .zip(o.get(2).and_then(|a| a.parse::<i128>().ok()))
+            .and_then(|(a, b)| a.checked_add(b));
+        if own && sum.is_some() && p[4].parse::<i128>().ok() == sum {
+            return None;
+        }
+        return Some(());
+    }
+    if p.len() == 3 && p[0] == "adr" && p[2].len() == 64 {
+        let key = format!("adr:{}:", p[1]);
+        return match pre.iter().find(|l| l.starts_with(&key)) {
+            Some(l) if l == post_leaf => None,
+            Some(_) => Some(()),
+            None => {
+                let ok = o.len() == 4
+                    && (o[0] == "d" || o[0] == "D")
+                    && o[1] == p[2]
+                    && o[3] == p[1];
+                if ok {
+                    None
+                } else {
+                    Some(())
+                }
+            }
+        };
+    }
+    None
+}
+
+/// Prefix non-membership of `key` in the sorted `leaves`, in the AA's three
+/// shapes (adjacent straddle, before-min, after-max at k == 0 only).
+fn prefix_absence(leaves: &[String], key: &str, after_max_ok: bool) -> Option<serde_json::Value> {
+    let pos = leaves
+        .iter()
+        .position(|l| l.as_str() >= key)
+        .unwrap_or(leaves.len());
+    if leaves.get(pos).is_some_and(|l| l.starts_with(key)) {
+        return None;
+    }
+    if pos > 0 && pos < leaves.len() {
+        Some(serde_json::json!({
+            "left": leaves[pos - 1], "left_proof": proof_json(leaves, pos - 1),
+            "right": leaves[pos], "right_proof": proof_json(leaves, pos),
+        }))
+    } else if pos == 0 && !leaves.is_empty() {
+        Some(serde_json::json!({"left": leaves[0], "left_proof": proof_json(leaves, 0)}))
+    } else if pos == leaves.len() && pos > 0 && after_max_ok {
+        Some(serde_json::json!({
+            "left": leaves[pos - 1], "left_proof": proof_json(leaves, pos - 1),
+        }))
+    } else {
+        None
+    }
+}
+
+/// #47 A2: P-wpin / P-adr proof for unit `k`, emitted only when the POSTED
+/// post tree breaks the binding AA's rule and the honest replay does not
+/// (a rule the honest engine itself broke would be a model bug — stay
+/// silent rather than challenge an honest batch).
+fn binding_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let posted_post = batch.leaf_trace.get(k)?;
+    let liar = posted_post.iter().find(|l| {
+        binding_violation(op, pre_leaves, l).is_some() && !post_leaves.iter().any(|h| h == *l)
+    })?;
+    if post_leaves
+        .iter()
+        .any(|l| binding_violation(op, pre_leaves, l).is_some())
+    {
+        return None;
+    }
+    let wpin = liar.starts_with("acct:");
+    let key = if wpin {
+        format!("acct:{}:", liar.split(':').nth(1)?)
+    } else {
+        format!("adr:{}:", liar.split(':').nth(1)?)
+    };
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "k": k,
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+        "post_wit": batch.trace.get(k)?.clone(),
+        "post_proof": proof_json(&batch.trace, k),
+        "post_leaf": liar,
+        "post_leaf_proof": proof_json(posted_post, index_of(posted_post, liar)?),
+    });
+    let pre_fields = pre_wit_fields(batch, k, pre_leaves);
+    let obj = data.as_object_mut()?;
+    obj.extend(pre_fields.as_object()?.clone());
+    match pre_leaves.iter().position(|l| l.starts_with(&key)) {
+        Some(i) => {
+            obj.insert("pre_leaf".into(), pre_leaves[i].clone().into());
+            obj.insert("pre_leaf_proof".into(), proof_json(pre_leaves, i));
+        }
+        None => {
+            let after_max_ok = k == 0 && batch.checkpoint.height > 1;
+            let absent = prefix_absence(pre_leaves, &key, after_max_ok)?;
+            obj.extend(absent.as_object()?.clone());
+        }
+    }
+    Some(BuiltProof {
+        pred: if wpin { "wpin".into() } else { "adr".into() },
+        fill_aa: false,
+        bind_aa: true,
+        data,
+    })
 }
 
 fn trace_roots(batch: &Batch) -> serde_json::Value {
@@ -290,6 +443,7 @@ fn deposit_proof(
             "withdraw".into()
         },
         fill_aa: false,
+        bind_aa: false,
         data,
     })
 }
@@ -321,6 +475,7 @@ fn omit_proof(batch: &Batch, unit_hexes: &[String], id: &str) -> Option<BuiltPro
     Some(BuiltProof {
         pred: "omit".into(),
         fill_aa: false,
+        bind_aa: false,
         data,
     })
 }
@@ -691,6 +846,7 @@ fn fill_proof(
             return Some(BuiltProof {
                 pred: "ghost".into(),
                 fill_aa: false,
+                bind_aa: false,
                 data,
             });
         }
@@ -795,6 +951,7 @@ fn fill_proof(
                 return Some(BuiltProof {
                     pred: "skip".into(),
                     fill_aa: false,
+                    bind_aa: false,
                     data,
                 });
             }
@@ -1398,6 +1555,7 @@ fn fill_proof(
             return Some(BuiltProof {
                 pred: "fill_math".into(),
                 fill_aa: true,
+                bind_aa: false,
                 data,
             });
         }
@@ -1507,6 +1665,69 @@ mod tests {
         let mut replay = Engine::new();
         replay.state.deposits_allowed.insert((aa, false));
         assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    fn honest_deposit_batch() -> (Batch, AccountId, [u8; 32]) {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(u).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let batch = Batch::from_applied(&prev, &mut eng, &[id]).expect("batch");
+        (batch, acct, aa)
+    }
+
+    /// #47 A2: W moved without the account's own withdraw → P-wpin on the
+    /// binding dispute AA (the deposit leg itself is honest).
+    #[test]
+    fn forged_withdrawn_builds_wpin_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        for l in batch.leaf_trace[0].iter_mut() {
+            if l.starts_with(&format!("acct:{}:", hex::encode(acct.0))) {
+                *l = format!("acct:{}:100:0:777", hex::encode(acct.0));
+            }
+        }
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "wpin");
+        assert_eq!(proof.target(), "bind");
+        assert!(proof.data.get("left").is_some(), "fresh account: pre absence");
+    }
+
+    /// #47 A2: an address binding re-pointed to another account → P-adr.
+    #[test]
+    fn forged_address_binding_builds_adr_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let adr = format!("adr:{}:{}", test_addr(), hex::encode(acct.0));
+        assert!(
+            batch.leaf_trace[0].contains(&adr),
+            "deposit binds the address in the witness tree"
+        );
+        for l in batch.leaf_trace[0].iter_mut() {
+            if *l == adr {
+                *l = format!("adr:{}:{}", test_addr(), "ee".repeat(32));
+            }
+        }
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "adr");
+        assert!(proof.bind_aa && !proof.fill_aa);
     }
 
     #[test]

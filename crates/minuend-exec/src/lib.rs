@@ -8948,9 +8948,7 @@ mod tests {
         let mut eng = Engine::new();
         allow_all(&mut eng);
         let g = genesis_id();
-        let evs = eng
-            .ingest(withdraw_unit(vec![g], &sk(9), 100, 1))
-            .unwrap();
+        let evs = eng.ingest(withdraw_unit(vec![g], &sk(9), 100, 1)).unwrap();
         assert!(evs.iter().any(|e| matches!(
             e,
             ExecEvent::Rejected {

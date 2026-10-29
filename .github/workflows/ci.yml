@@ -33,7 +33,7 @@ jobs:
           node-version: "20"
       - name: Install aa-testkit deps (for AA complexity gate)
         run: npm install --prefix vendor/aa-testkit --no-audit --no-fund || npm install --prefix vendor/aa-testkit
-      - run: node obyte-local/tools/check_aa_complexity.js obyte-local/agents/minuend_vault.aa obyte-local/agents/minuend_rollup.aa obyte-local/agents/minuend_dispute.aa obyte-local/agents/minuend_dispute_fill.aa
+      - run: node obyte-local/tools/check_aa_complexity.js obyte-local/agents/minuend_vault.aa obyte-local/agents/minuend_rollup.aa obyte-local/agents/minuend_dispute.aa obyte-local/agents/minuend_dispute_fill.aa obyte-local/agents/minuend_dispute_bind.aa
       - run: node obyte-local/golden_vector_check.js
       - run: node obyte-local/test_batch_frames.js
       - run: node obyte-local/test_script_helpers.js

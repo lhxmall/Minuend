@@ -41,4 +41,70 @@ function finalizeReached(lastFinalized, height) {
   return Number.isFinite(lf) && Number.isFinite(h) && lf >= h;
 }
 
-module.exports = { envCompat, finalizeReached, LEGACY_ENV_PREFIX, ENV_PREFIX };
+// L5 (#47): live challenge posting gate. The dispute AAs compare the
+// challenge unit's own timestamp against submitted_at + 3600, so a
+// challenge is only worth broadcasting while `now + margin` is still before
+// the deadline (B10: 600 s margin covers composing, broadcasting and the
+// unit becoming stable). Evaluate with a FRESH clock right before sending.
+const CHALLENGE_WINDOW_SECS = 3600;
+const CHALLENGE_SAFETY_MARGIN_SECS = 600;
+function challengeGate({ now, submittedAt, frozen, windowSecs = CHALLENGE_WINDOW_SECS, marginSecs = CHALLENGE_SAFETY_MARGIN_SECS }) {
+  const sa = Number(submittedAt);
+  const t = Number(now);
+  if (!Number.isFinite(sa) || sa <= 0) return { ok: false, reason: "height not submitted" };
+  if (Number(frozen || 0) !== 0) return { ok: false, reason: "height already frozen" };
+  if (!Number.isFinite(t)) return { ok: false, reason: "bad clock" };
+  const deadline = sa + windowSecs;
+  if (t >= deadline) return { ok: false, reason: "challenge window closed" };
+  if (t + marginSecs >= deadline)
+    return { ok: false, reason: `less than ${marginSecs}s left in the challenge window` };
+  return { ok: true, reason: `${deadline - t}s left`, deadline };
+}
+
+// Which dispute AA a proof goes to: main (deposit/withdraw/escrow/omit/
+// ghost/skip), fill (fill_math) or bind (#47 A2: wpin/adr).
+const TARGETS = {
+  main: { deployKey: "dispute_aa_address", env: "MINUEND_DISPUTE_AA", bind: { bind: 1 }, rollupVar: "dispute_aa" },
+  fill: { deployKey: "dispute_fill_aa_address", env: "MINUEND_DISPUTE_FILL_AA", bind: { bind_fill: 1 }, rollupVar: "dispute_fill_aa" },
+  bind: { deployKey: "dispute_bind_aa_address", env: "MINUEND_DISPUTE_BIND_AA", bind: { bind_bind: 1 }, rollupVar: "dispute_bind_aa" },
+};
+function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
+  const t = TARGETS[target];
+  if (!t) throw new Error(`unknown dispute target '${target}' (main|fill|bind)`);
+  const address = (deploy && deploy[t.deployKey]) || envCompat(t.env, env, warn);
+  return Object.assign({ address: address || null }, t);
+}
+
+// Challenge trigger data: the proof file's fields plus height/pred/rollup.
+// The proof must not override those three (a stale or foreign proof file
+// would otherwise redirect the challenge).
+function buildChallengeData({ height, pred, rollup, proof }) {
+  if (!Number.isInteger(height) || height < 1) throw new Error("bad height");
+  if (typeof pred !== "string" || !pred) throw new Error("bad pred");
+  if (typeof rollup !== "string" || rollup.length !== 32) throw new Error("bad rollup address");
+  if (!proof || typeof proof !== "object" || Array.isArray(proof)) throw new Error("proof must be a JSON object");
+  for (const k of ["height", "pred", "rollup"])
+    if (k in proof && proof[k] !== { height, pred, rollup }[k]) throw new Error(`proof overrides '${k}'`);
+  return Object.assign({}, proof, { height, pred, rollup });
+}
+
+// Default light hubs per network (override with MINUEND_WATCH_HUB).
+function hubFor(network, override) {
+  if (override) return override;
+  if (network === "mainnet") return "obyte.org/bb";
+  if (network === "testnet") return "obyte.org/bb-test";
+  throw new Error(`unknown network '${network}' (mainnet|testnet)`);
+}
+
+module.exports = {
+  envCompat,
+  finalizeReached,
+  challengeGate,
+  disputeTarget,
+  buildChallengeData,
+  hubFor,
+  CHALLENGE_WINDOW_SECS,
+  CHALLENGE_SAFETY_MARGIN_SECS,
+  LEGACY_ENV_PREFIX,
+  ENV_PREFIX,
+};

@@ -102,14 +102,19 @@ async function main() {
   const fillSrc = readAa("minuend_dispute_fill.aa");
   const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "minuend_dispute.aa")];
   const fillDef = ["autonomous agent", await parseAa(fillSrc, "minuend_dispute_fill.aa")];
+  // #47 A2: the binding dispute AA (W / adr: witness pins).
+  const bindSrc = readAa("minuend_dispute_bind.aa");
+  const bindDef = ["autonomous agent", await parseAa(bindSrc, "minuend_dispute_bind.aa")];
   const dispute = await postDefinition(disputeDef, "dispute");
   const fill = await postDefinition(fillDef, "fill");
+  const bindAa = await postDefinition(bindDef, "bind");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
   const rollupSrc = substitute(readAa("minuend_rollup.aa"), {
     DISPUTE_AA_HERE: dispute.address,
     DISPUTE_FILL_AA_HERE: fill.address,
+    DISPUTE_BIND_AA_HERE: bindAa.address,
   });
   const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
@@ -133,13 +138,19 @@ async function main() {
     { to: fill.address, amount: 20000, data: { bind_fill: 1, rollup: rollup.address } },
     "fill bind"
   );
+  await triggerAa(
+    { to: bindAa.address, amount: 20000, data: { bind_bind: 1, rollup: rollup.address } },
+    "binding-dispute bind"
+  );
   await waitBeat("binds", "bind");
   const state = await readAaState(rollup.address);
   if (String(state.dispute_aa) !== String(dispute.address))
     throw new Error("dispute_aa not bound: " + JSON.stringify(state.dispute_aa));
   if (String(state.dispute_fill_aa) !== String(fill.address))
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(state.dispute_fill_aa));
-  console.log("both dispute AAs bound");
+  if (String(state.dispute_bind_aa) !== String(bindAa.address))
+    throw new Error("dispute_bind_aa not bound: " + JSON.stringify(state.dispute_bind_aa));
+  console.log("all three dispute AAs bound");
 
   // 4. Write deployment.json.
   const info = {
@@ -147,9 +158,11 @@ async function main() {
     rollup_aa_address: rollup.address,
     dispute_aa_address: dispute.address,
     dispute_fill_aa_address: fill.address,
+    dispute_bind_aa_address: bindAa.address,
     vault_aa_address: vault.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
+    assertion_version: 2,
     pool_fund_gross: POOL_FUND_GROSS,
     challenge_secs: CHALLENGE_SECS,
     deployed_at: new Date().toISOString(),
