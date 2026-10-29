@@ -18,15 +18,15 @@ pub use minuend_state::obyte_merkle;
 #[cfg(test)]
 pub const TEST_VAULT_ADDRESS: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 /// Expected vault AA payee for deposit evidences. Env `MINUEND_VAULT_AA`
-/// wins (operator-set at deploy); else the baked `VAULT_AA_ADDRESS` when
+/// (legacy `OPERP_VAULT_AA` accepted with a deprecation warning) wins
+/// (operator-set at deploy); else the baked `VAULT_AA_ADDRESS` when
 /// non-empty; else "" (pre-deploy: batches without evidences skip the
 /// check, batches carrying evidences are rejected). Tests fall back to
 /// `TEST_VAULT_ADDRESS` instead of "" so fixtures stay deterministic.
 pub fn expected_vault() -> String {
-    if let Ok(v) = std::env::var("MINUEND_VAULT_AA") {
-        if !v.is_empty() {
-            return v;
-        }
+    // B9 (#47): falls back to the pre-#44 `OPERP_VAULT_AA` with a warning.
+    if let Some(v) = minuend_types::env_compat::env_var_compat("MINUEND_VAULT_AA") {
+        return v;
     }
     if !VAULT_AA_ADDRESS.is_empty() {
         return VAULT_AA_ADDRESS.to_string();

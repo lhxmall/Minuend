@@ -1,21 +1,23 @@
 //! `minuend-watch` — independent MINUEND vault-AA watcher binary.
 //!
 //! Polls a live Obyte hub for the vault's `last_submitted` / `submitted_at_<h>` /
-//! `frozen_<h>` state, then for every submitted height undefined`
+//! `frozen_<h>` state, then for every submitted height inside its
 //! challenge window (and not already frozen) fetches `da_unit_<h>`, verifies
 //! the unit↔data binding, and replays the batch. A replay/verify failure is a
 //! mismatched root that a watcher-owned wallet should challenge on-chain.
 //!
 //! The watch contract is read-only: the only AA transaction a watcher may
-//! eventually emit is a dispute predicate via post_challenge.js. The Obyte signing/unit
-//! construction backend for that broadcast is a separate deployment concern
-//! (the workspace README + MECHANISMS declare the watcher as not-yet-verified
-//! until it is run with an independent key against a live hub).
+//! eventually emit is a dispute predicate. There is no live-hub signing
+//! backend yet: with a key configured every challengeable alert is reported
+//! loudly as NOT posted (proof file kept for a manual post); only an explicit
+//! `MINUEND_WATCH_DEVNET_CHALLENGE=1` drill spawns post_challenge.js against
+//! a local aa-testkit network (#47 L5).
 
 use minuend_exec::Engine;
+use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
-    batch_from_data, fetch_da_unit, prove, replay_and_check, verify_da_binding, HubClient,
-    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
+    batch_from_committed, committed_frame_bytes, fetch_da_unit, prove, verify_da_binding,
+    HubClient, WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
 };
 use std::env;
 use std::io::{Read, Write};
@@ -209,6 +211,12 @@ wallet to challenge via post_challenge.js (one-shot fraud predicates, no bond)."
 }
 
 const CHALLENGE_WINDOW_SECS: u64 = 3600;
+/// B10 (#47): the dispute AAs compare the challenge unit's own `timestamp`
+/// against `submitted_at + 3600`. Building the proof, broadcasting and
+/// getting the unit stable all take time, so the watcher stops *posting*
+/// this many seconds before the deadline (inside the margin it only alerts,
+/// rather than paying for a challenge that would bounce as too late).
+const CHALLENGE_SAFETY_MARGIN_SECS: u64 = 600;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -217,18 +225,68 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Is the height still inside the AA's dispute window at all?
 fn challenge_window_open(submitted_at: u64, now: u64, frozen: u64) -> bool {
     submitted_at != 0 && now < submitted_at.saturating_add(CHALLENGE_WINDOW_SECS) && frozen == 0
+}
+
+/// B10 (#47): may the watcher still *post* a challenge? Same as
+/// [`challenge_window_open`] but keeps [`CHALLENGE_SAFETY_MARGIN_SECS`]
+/// clear of the AA deadline. Always evaluate with a freshly read clock.
+fn challenge_postable(submitted_at: u64, now: u64, frozen: u64) -> bool {
+    challenge_window_open(submitted_at, now, frozen)
+        && now.saturating_add(CHALLENGE_SAFETY_MARGIN_SECS)
+            < submitted_at.saturating_add(CHALLENGE_WINDOW_SECS)
+}
+
+/// L5 (#47): what the watcher does with a challengeable alert.
+#[derive(Debug, PartialEq, Eq)]
+enum ChallengeMode {
+    /// No watcher key configured: print the alert only.
+    PrintOnly,
+    /// A key is configured, but there is no live-hub challenge poster yet
+    /// (`post_challenge.js` only drives a local aa-testkit devnet and
+    /// refuses `--hub`/mnemonic). Never spawn it — that used to fail every
+    /// time with only a one-line log — and instead report loudly that the
+    /// challenge was NOT posted, keeping the proof file for a manual post.
+    LiveUnsupported,
+    /// Explicit local-devnet drill (`MINUEND_WATCH_DEVNET_CHALLENGE=1`, no
+    /// key): spawn `post_challenge.js` without `--hub`.
+    DevnetDrill,
+}
+
+fn challenge_mode(has_mnemonic: bool, devnet_drill: bool) -> ChallengeMode {
+    match (has_mnemonic, devnet_drill) {
+        (true, _) => ChallengeMode::LiveUnsupported,
+        (false, true) => ChallengeMode::DevnetDrill,
+        (false, false) => ChallengeMode::PrintOnly,
+    }
+}
+
+fn current_challenge_mode() -> ChallengeMode {
+    challenge_mode(
+        env_var_compat("MINUEND_WATCH_MNEMONIC").is_some(),
+        env_var_compat("MINUEND_WATCH_DEVNET_CHALLENGE").as_deref() == Some("1"),
+    )
 }
 
 /// #37-13: cross-round replay cursor. `processed_upto` is the last height
 /// whose replay advanced the engine; the next round starts right after it
 /// (never below the configured `from_height`). In-memory by design: a staler
 /// restart just replays from the configured start once.
+///
+/// L4 (#47): a height that does not replay still stops the *replay* (the
+/// engine cannot skip a height), but it is now recorded as a stall so the
+/// loop keeps surfacing it every round and keeps running the replay-free
+/// checks (DA binding, `data_root`, frame decoding) on every later height
+/// that is still inside its dispute window, instead of going silent.
 #[derive(Debug)]
 struct ReplayCursor {
     processed_upto: u64,
     from_height: u64,
+    /// First height that failed to advance the engine, and since which
+    /// round count it has been stuck there.
+    stalled_at: Option<(u64, u64)>,
 }
 
 impl ReplayCursor {
@@ -236,6 +294,7 @@ impl ReplayCursor {
         Self {
             processed_upto: from_height.saturating_sub(1),
             from_height,
+            stalled_at: None,
         }
     }
 
@@ -248,7 +307,168 @@ impl ReplayCursor {
         if height > self.processed_upto {
             self.processed_upto = height;
         }
+        if matches!(self.stalled_at, Some((h, _)) if h <= height) {
+            self.stalled_at = None;
+        }
     }
+
+    /// Record that `height` did not advance the engine this round. Returns
+    /// how many consecutive rounds the cursor has been stuck there.
+    fn note_stall(&mut self, height: u64) -> u64 {
+        let rounds = match self.stalled_at {
+            Some((h, n)) if h == height => n + 1,
+            _ => 1,
+        };
+        self.stalled_at = Some((height, rounds));
+        rounds
+    }
+
+    /// Alert text for a stall that leaves later submitted heights unreplayed.
+    /// A single round without DA is normal (the package may not be visible
+    /// yet), so nothing is reported until the same height fails twice.
+    fn stall_alert(&self, last_submitted: u64) -> Option<String> {
+        let (h, rounds) = self.stalled_at?;
+        if rounds < 2 {
+            return None;
+        }
+        let unverified = if last_submitted > h {
+            format!(
+                "heights {}..={} are NOT replay-verified (only DA/data_root checks run)",
+                h + 1,
+                last_submitted
+            )
+        } else {
+            "no later heights submitted yet".to_string()
+        };
+        Some(format!(
+            "WATCH STALLED at h={h} for {rounds} rounds: replay cannot advance past it; {unverified}"
+        ))
+    }
+}
+
+/// Per-height on-chain window facts read from the rollup AA.
+#[derive(Clone, Copy)]
+struct WindowFacts {
+    submitted_at: u64,
+    frozen: u64,
+}
+
+fn read_window(hub: &HttpHubClient, config: &WatchConfig, h: u64) -> anyhow::Result<WindowFacts> {
+    let sa = hub
+        .get_aa_state_var(&config.rollup_address, &format!("submitted_at_{h}"))
+        .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
+    let frozen = hub
+        .get_aa_state_var(&config.rollup_address, &format!("frozen_{h}"))
+        .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
+    Ok(WindowFacts {
+        submitted_at: sa.and_then(|v| v.as_u64()).unwrap_or(0),
+        frozen: frozen.and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
+/// B10 (#47): decide on a FRESH clock reading whether to post, and annotate
+/// the alert accordingly. Called right before any challenge is attempted,
+/// not once per poll round.
+fn alert_and_maybe_challenge(
+    h: u64,
+    win: WindowFacts,
+    alert: String,
+    proof: Option<&prove::BuiltProof>,
+) -> String {
+    let now = now_secs();
+    if challenge_postable(win.submitted_at, now, win.frozen) {
+        maybe_post_challenge(h, &alert, proof);
+        alert
+    } else if challenge_window_open(win.submitted_at, now, win.frozen) {
+        format!(
+            "{alert} — NOT challenged: less than {CHALLENGE_SAFETY_MARGIN_SECS}s left in the dispute window"
+        )
+    } else {
+        format!("{alert} — outside challenge window (informational)")
+    }
+}
+
+/// Fetch a height's DA unit and its exact committed frame bytes (B11).
+/// `Ok(None)` = nothing to judge yet (no da_unit / hub flaky);
+/// `Err(alert)` = a binding/data_root problem worth surfacing.
+fn fetch_committed(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    h: u64,
+    win: WindowFacts,
+) -> Result<Option<(minuend_watch::DaUnit, Vec<u8>)>, String> {
+    let da = match fetch_da_unit(hub, &config.rollup_address, h) {
+        Ok(None) => return Ok(None),
+        Ok(Some(da)) => da,
+        Err(WatchError::HubUnavailable(_)) => return Ok(None), // backoff, never mis-challenge
+        Err(WatchError::BindingMismatch(msg)) => {
+            return Err(alert_and_maybe_challenge(
+                h,
+                win,
+                format!("h={h} BINDING MISMATCH: {msg}"),
+                None,
+            ));
+        }
+        Err(e) => return Err(format!("h={h} WATCH ERROR: {e}")),
+    };
+    // #16: the joint we fetched must hash to the value the AA recorded in
+    // da_unit_<h> before any downstream step trusts its payload.
+    if let Err(e) = verify_da_binding(&da) {
+        return Err(alert_and_maybe_challenge(
+            h,
+            win,
+            format!("h={h} BINDING MISMATCH: {e}"),
+            None,
+        ));
+    }
+    // B11: the exact bytes data_root commits to (inline blob or the
+    // concatenated packages, unmodified). 3 tries + backoff on transport
+    // errors, then give up — never mis-challenge on flaky package fetches.
+    for attempt in 0..3 {
+        match committed_frame_bytes(hub, &da.data) {
+            Ok(raw) => return Ok(Some((da, raw))),
+            Err(WatchError::HubUnavailable(_)) => {
+                std::thread::sleep(Duration::from_millis(500 * (attempt + 1) as u64));
+            }
+            Err(e) => {
+                return Err(alert_and_maybe_challenge(
+                    h,
+                    win,
+                    format!("h={h} BINDING MISMATCH: {e}"),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// L4 (#47): replay-free checks for a height above a stall: DA binding,
+/// `data_root` and strict frame decoding. Only heights still inside their
+/// dispute window are fetched, so a long stall does not refetch history.
+fn check_height_without_replay(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    h: u64,
+) -> anyhow::Result<Option<String>> {
+    let win = read_window(hub, config, h)?;
+    if !challenge_window_open(win.submitted_at, now_secs(), win.frozen) {
+        return Ok(None);
+    }
+    let (da, raw) = match fetch_committed(hub, config, h, win) {
+        Ok(Some(x)) => x,
+        Ok(None) => return Ok(None),
+        Err(alert) => return Ok(Some(alert)),
+    };
+    if let Err(e) = batch_from_committed(&da.data, &raw) {
+        return Ok(Some(alert_and_maybe_challenge(
+            h,
+            win,
+            format!("h={h} UNDECODABLE BATCH ({e}) above a replay stall"),
+            None,
+        )));
+    }
+    Ok(None)
 }
 
 /// Replay one height and advance the engine; surface only actionable alerts.
@@ -259,91 +479,36 @@ fn check_height(
     config: &WatchConfig,
     engine: &mut Engine,
     h: u64,
-    now: u64,
     advanced: &mut bool,
 ) -> anyhow::Result<Option<String>> {
-    let sa_key = format!("submitted_at_{h}");
-    let frozen_key = format!("frozen_{h}");
-    let sa = hub
-        .get_aa_state_var(&config.rollup_address, &sa_key)
-        .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
-    let frozen = hub
-        .get_aa_state_var(&config.rollup_address, &frozen_key)
-        .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
-    let sa_val = sa.and_then(|v| v.as_u64()).unwrap_or(0);
-    let frozen_val = frozen.and_then(|v| v.as_u64()).unwrap_or(0);
-    let in_window = challenge_window_open(sa_val, now, frozen_val);
-
-    let mut da = match fetch_da_unit(hub, &config.rollup_address, h) {
+    let win = read_window(hub, config, h)?;
+    let (da, raw) = match fetch_committed(hub, config, h, win) {
+        Ok(Some(x)) => x,
         Ok(None) => return Ok(None),
-        Ok(Some(da)) => da,
-        Err(WatchError::HubUnavailable(_)) => return Ok(None), // backoff, never mis-challenge
-        Err(WatchError::BindingMismatch(msg)) => {
-            let alert = format!("h={h} BINDING MISMATCH: {msg}");
-            if in_window {
-                maybe_post_challenge(config, h, &alert, None);
-            }
-            return Ok(Some(alert));
-        }
-        Err(e) => return Ok(Some(format!("h={h} WATCH ERROR: {e}"))),
+        Err(alert) => return Ok(Some(alert)),
     };
-    // #16: the joint we fetched must hash to the value the AA recorded in
-    // da_unit_<h> before any downstream step trusts its payload. Same alert
-    // arm as above; never challenged outside the window.
-    if let Err(e) = verify_da_binding(&da) {
-        let alert = format!("h={h} BINDING MISMATCH: {e}");
-        if in_window {
-            maybe_post_challenge(config, h, &alert, None);
+    let batch = match batch_from_committed(&da.data, &raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(Some(alert_and_maybe_challenge(
+                h,
+                win,
+                format!("h={h} ROOT MISMATCH ({e}): committed frames do not decode"),
+                None,
+            )));
         }
-        return Ok(Some(alert));
-    }
-    // Multi-package headers splice the assembled blob as `frames_blob`
-    // before `batch_from_data`. 3 tries + backoff, then give up — never
-    // mis-challenge on flaky package fetches.
-    if da.data.get("frames_blob").is_none() && da.data.get("packages").is_some() {
-        let mut assembled: Option<String> = None;
-        let mut last_err: Option<WatchError> = None;
-        for attempt in 0..3 {
-            match minuend_watch::assemble_frames(hub, &da.data) {
-                Ok(b) => {
-                    assembled = Some(b);
-                    break;
-                }
-                Err(WatchError::HubUnavailable(e)) => {
-                    last_err = Some(WatchError::HubUnavailable(e));
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        500 * (attempt + 1) as u64,
-                    ));
-                }
-                Err(e) => {
-                    let alert = format!("h={h} BINDING MISMATCH: {e}");
-                    if in_window {
-                        maybe_post_challenge(config, h, &alert, None);
-                    }
-                    return Ok(Some(alert));
-                }
-            }
-        }
-        match assembled {
-            Some(b) => {
-                da.data["frames_blob"] = serde_json::Value::String(b);
-            }
-            None => return Ok(None),
-        }
-        let _ = last_err;
-    }
+    };
 
     let prev_root = engine.state.state_root();
-    // Build the fraud proof BEFORE replay_and_check advances the engine:
+    // Build the fraud proof BEFORE validate_against advances the engine:
     // build_proof replays unit-by-unit on a scratch engine fork.
-    let proof_hint: Option<prove::BuiltProof> = (|| {
-        let batch = batch_from_data(&da.data).ok()?;
+    let proof_hint: Option<prove::BuiltProof> = {
         let mut scratch = engine.clone();
         // Inbox pairs for P-omit: fetch inbox vars is out of scope for the
-        // poll loop — caller supplies forced ids via MINUEND_FORCE_IDS; the
-        // submit timestamp gates staleness.
-        let inbox: Vec<(String, u64)> = std::env::var("MINUEND_FORCE_IDS")
-            .ok()
+        // poll loop — caller supplies forced ids via MINUEND_FORCE_IDS
+        // (legacy OPERP_FORCE_IDS accepted); the submit timestamp gates
+        // staleness.
+        let inbox: Vec<(String, u64)> = env_var_compat("MINUEND_FORCE_IDS")
             .map(|s| {
                 s.split(',')
                     .filter(|x| x.len() == 64)
@@ -351,9 +516,9 @@ fn check_height(
                     .collect()
             })
             .unwrap_or_default();
-        prove::build_proof(&batch, &mut scratch, &inbox, sa_val)
-    })();
-    match replay_and_check(&da, prev_root, engine) {
+        prove::build_proof(&batch, &mut scratch, &inbox, win.submitted_at)
+    };
+    match batch.validate_against(prev_root, engine) {
         Ok(()) => {
             // #37-13: the engine now sits at this height — the poll loop
             // advances its in-memory cursor so the next round does not
@@ -362,57 +527,56 @@ fn check_height(
             *advanced = true;
             Ok(None)
         }
-        Err(e) => {
-            if in_window {
-                let alert = format!(
-                    "h={} ROOT MISMATCH ({}): watcher should challenge with {} bytes bond",
-                    h, e, config.challenge_bond_gross
-                );
-                maybe_post_challenge(config, h, &alert, proof_hint.as_ref());
-                Ok(Some(alert))
-            } else {
-                Ok(Some(format!(
-                    "h={h} ROOT MISMATCH ({e}): outside challenge window (informational)"
-                )))
-            }
-        }
+        Err(e) => Ok(Some(alert_and_maybe_challenge(
+            h,
+            win,
+            format!(
+                "h={} ROOT MISMATCH ({}): watcher should challenge with {} bytes bond",
+                h, e, config.challenge_bond_gross
+            ),
+            proof_hint.as_ref(),
+        ))),
     }
 }
 
-/// If `MINUEND_WATCH_MNEMONIC` is set, spawn `obyte-local/post_challenge.js`.
-/// Unset mnemonic → print-only (caller already prints the alert).
-/// A built proof is written to a temp `proof.json` and passed as
-/// `--pred/--proof` (plus `--fill` for the fill AA); without a proof the
-/// spawn is skipped — never post without `--pred` and `--proof`.
-fn maybe_post_challenge(
-    config: &WatchConfig,
-    h: u64,
-    alert: &str,
-    proof: Option<&prove::BuiltProof>,
-) {
-    if env::var_os("MINUEND_WATCH_MNEMONIC").is_none() {
+/// Act on a challengeable alert according to [`ChallengeMode`] (L5, #47).
+/// A built proof is always written to a temp `proof.json` so an operator can
+/// post it by hand. Only the explicit devnet drill spawns
+/// `obyte-local/post_challenge.js` (`--pred/--proof`, plus `--fill` for the
+/// fill AA, never `--hub`); without a proof nothing is spawned.
+fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) {
+    let mode = current_challenge_mode();
+    if mode == ChallengeMode::PrintOnly {
         eprintln!("WATCH ALERT (print-only, no MINUEND_WATCH_MNEMONIC): {alert}");
         return;
     }
     let Some(p) = proof else {
-        eprintln!("WATCH ALERT (print-only, no expressible proof): {alert}");
+        eprintln!("WATCH ALERT (NOT CHALLENGED: no expressible proof): {alert}");
         return;
     };
-    let script =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/post_challenge.js");
-    let hub = config
-        .hub_url
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1:6611".into());
-    let h_s = h.to_string();
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("minuend-proof-{}-{}.json", h, p.pred));
+    let path = std::env::temp_dir().join(format!("minuend-proof-{}-{}.json", h, p.pred));
     if std::fs::write(&path, serde_json::to_string(&p.data).unwrap_or_default()).is_err() {
-        eprintln!("WATCH ALERT (print-only, proof write failed): {alert}");
+        eprintln!("WATCH CRITICAL (NOT CHALLENGED: proof write failed): {alert}");
         return;
     }
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/post_challenge.js");
+    if mode == ChallengeMode::LiveUnsupported {
+        eprintln!(
+            "WATCH CRITICAL: challenge for h={h} was NOT posted — automatic live-hub challenge \
+             posting is not implemented (post_challenge.js only drives a local aa-testkit devnet). \
+             Post it manually before the window closes: pred={} proof={} fill_aa={}. Alert: {alert}",
+            p.pred,
+            path.display(),
+            p.fill_aa,
+        );
+        return;
+    }
+    // DevnetDrill: local aa-testkit only, so no --hub and no mnemonic in the
+    // child's environment (post_challenge.js refuses both by design).
+    let h_s = h.to_string();
     eprintln!(
-        "spawning: node {} --height {} --pred {} --proof {} {}",
+        "spawning (devnet drill): node {} --height {} --pred {} --proof {} {}",
         script.display(),
         h,
         p.pred,
@@ -427,18 +591,23 @@ fn maybe_post_challenge(
         std::ffi::OsStr::new(&p.pred).to_owned(),
         std::ffi::OsStr::new("--proof").to_owned(),
         path.as_os_str().to_owned(),
-        std::ffi::OsStr::new("--hub").to_owned(),
-        std::ffi::OsStr::new(&hub).to_owned(),
     ];
     if p.fill_aa {
         args.push(std::ffi::OsStr::new("--fill").to_owned());
     }
-    // Hub flag is accepted for log parity; the poster resolves addresses
-    // from deployment.json / env like the other operator scripts.
-    match Command::new("node").args(args).status() {
+    match Command::new("node")
+        .args(args)
+        .env_remove("MINUEND_WATCH_MNEMONIC")
+        .env_remove("OPERP_WATCH_MNEMONIC")
+        .status()
+    {
         Ok(st) if st.success() => {}
-        Ok(st) => eprintln!("post_challenge.js exited {st}"),
-        Err(e) => eprintln!("post_challenge.js spawn failed: {e}"),
+        Ok(st) => eprintln!(
+            "WATCH CRITICAL: devnet challenge for h={h} was NOT posted (post_challenge.js exited {st}). Alert: {alert}"
+        ),
+        Err(e) => eprintln!(
+            "WATCH CRITICAL: devnet challenge for h={h} was NOT posted (spawn failed: {e}). Alert: {alert}"
+        ),
     }
 }
 
@@ -466,22 +635,37 @@ fn main() -> anyhow::Result<()> {
         config.rollup_address, args.hub, config.poll_interval_secs
     );
 
+    // L5 (#47): say up front what will happen to a challengeable alert.
+    match current_challenge_mode() {
+        ChallengeMode::PrintOnly => eprintln!(
+            "minuend-watch: no MINUEND_WATCH_MNEMONIC — alerts are print-only"
+        ),
+        ChallengeMode::LiveUnsupported => eprintln!(
+            "WATCH CRITICAL: MINUEND_WATCH_MNEMONIC is set but automatic live-hub challenge \
+             posting is NOT implemented; every challengeable alert will be reported as NOT \
+             posted together with a proof file to post manually"
+        ),
+        ChallengeMode::DevnetDrill => eprintln!(
+            "minuend-watch: MINUEND_WATCH_DEVNET_CHALLENGE=1 — challenges are local aa-testkit drills only"
+        ),
+    }
+
     // #37-13: cross-round replay cursor. Only a height whose replay ADVANCED
     // the engine moves it, so a gap or a mismatch is retried next round
     // instead of being silently skipped or re-checked against stale state.
     let mut cursor = ReplayCursor::new(args.from_height);
 
     loop {
-        let now = now_secs();
         let ll = hub
             .get_aa_state_var(&config.rollup_address, "last_submitted")
             .map_err(|e| anyhow::anyhow!("hub last_submitted: {e}"))?
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
+        let mut stalled: Option<u64> = None;
         for h in cursor.next_start()..=ll {
             let mut advanced = false;
-            match check_height(&hub, &config, &mut engine, h, now, &mut advanced) {
+            match check_height(&hub, &config, &mut engine, h, &mut advanced) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
                 Err(e) => println!("WATCH ERROR at h={h}: {e}"),
@@ -489,9 +673,27 @@ fn main() -> anyhow::Result<()> {
             if advanced {
                 cursor.record(h);
             } else {
-                // No DA yet, or a mismatch this round: retry from here next
-                // round (never advance past an unreplayed height).
+                // No DA yet, or a mismatch this round: the replay retries
+                // from here next round (never advance past an unreplayed
+                // height).
+                cursor.note_stall(h);
+                stalled = Some(h);
                 break;
+            }
+        }
+        // L4 (#47): never go silent above a stuck height. Report the stall
+        // and keep running the replay-free checks on later heights that are
+        // still challengeable.
+        if let Some(h) = stalled {
+            if let Some(msg) = cursor.stall_alert(ll) {
+                println!("WATCH ALERT: {msg}");
+                for later in h.saturating_add(1)..=ll {
+                    match check_height_without_replay(&hub, &config, later) {
+                        Ok(None) => {}
+                        Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
+                        Err(e) => println!("WATCH ERROR at h={later}: {e}"),
+                    }
+                }
             }
         }
 
@@ -501,7 +703,64 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{challenge_window_open, ReplayCursor};
+    use super::{
+        challenge_mode, challenge_postable, challenge_window_open, ChallengeMode, ReplayCursor,
+        CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS,
+    };
+
+    /// B10 (#47): posting stops CHALLENGE_SAFETY_MARGIN_SECS before the AA
+    /// deadline while the window itself is still reported open.
+    #[test]
+    fn challenge_posting_keeps_a_safety_margin() {
+        let sa = 1_760_000_000;
+        let deadline = sa + CHALLENGE_WINDOW_SECS;
+        assert!(challenge_postable(sa, sa + 1, 0));
+        assert!(challenge_postable(
+            sa,
+            deadline - CHALLENGE_SAFETY_MARGIN_SECS - 1,
+            0
+        ));
+        let late = deadline - CHALLENGE_SAFETY_MARGIN_SECS;
+        assert!(!challenge_postable(sa, late, 0));
+        assert!(
+            challenge_window_open(sa, late, 0),
+            "window itself still open"
+        );
+        assert!(!challenge_postable(sa, deadline, 0));
+        assert!(!challenge_postable(sa, sa + 1, 2), "frozen height");
+        assert!(!challenge_postable(0, 5, 0), "not submitted");
+        const { assert!(CHALLENGE_SAFETY_MARGIN_SECS < CHALLENGE_WINDOW_SECS) };
+    }
+
+    /// L5 (#47): a configured key no longer spawns a script that always
+    /// exits 1; it is reported as an unsupported live mode instead.
+    #[test]
+    fn challenge_mode_never_spawns_live_poster() {
+        assert_eq!(challenge_mode(false, false), ChallengeMode::PrintOnly);
+        assert_eq!(challenge_mode(true, false), ChallengeMode::LiveUnsupported);
+        assert_eq!(challenge_mode(true, true), ChallengeMode::LiveUnsupported);
+        assert_eq!(challenge_mode(false, true), ChallengeMode::DevnetDrill);
+    }
+
+    /// L4 (#47): a stuck height is tracked and reported (after the second
+    /// round), listing the later heights that are not replay-verified; a
+    /// successful replay clears it.
+    #[test]
+    fn replay_cursor_surfaces_persistent_stall() {
+        let mut c = ReplayCursor::new(1);
+        c.record(4);
+        assert_eq!(c.note_stall(5), 1);
+        assert!(c.stall_alert(9).is_none(), "one missing round is normal");
+        assert_eq!(c.note_stall(5), 2);
+        let msg = c.stall_alert(9).unwrap();
+        assert!(msg.contains("h=5"), "{msg}");
+        assert!(msg.contains("6..=9"), "{msg}");
+        // Stall moves to a new height → counter restarts.
+        assert_eq!(c.note_stall(6), 1);
+        c.record(6);
+        assert!(c.stall_alert(9).is_none());
+        assert_eq!(c.next_start(), 7);
+    }
 
     #[test]
     fn normal_seconds_timestamp_is_inside_challenge_window() {

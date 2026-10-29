@@ -5249,6 +5249,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// M2 (#47): the anchor ring must hold far more than the old 4096 ids,
+    /// so a post-snapshot child of a unit executed 5000 units before the
+    /// snapshot still links after restart.
+    #[test]
+    fn snapshot_anchor_ring_keeps_more_than_4096_units() {
+        let dir = std::env::temp_dir().join(format!("minuend-m2-ring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        let ids: Vec<UnitId> = (0u32..5_000)
+            .map(|i| {
+                let mut b = [0u8; 32];
+                b[..4].copy_from_slice(&i.to_le_bytes());
+                b[31] = 0xA5;
+                UnitId(b)
+            })
+            .collect();
+        for id in &ids {
+            eng.note_recent_unit(*id);
+        }
+        eng.flush_snapshot().unwrap();
+        let eng2 = Engine::load_or_genesis(&dir).unwrap();
+        assert_eq!(eng2.dag.ancestor_count(), 5_000);
+        assert!(
+            eng2.dag.is_known(ids[0]),
+            "oldest of 5000 pre-snapshot units fell out of the anchor ring"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H4 (#47): after a restart, re-delivering a unit that was executed
+    /// before the snapshot is refused as a DAG duplicate instead of being
+    /// executed a second time.
+    #[test]
+    fn restart_rejects_resent_pre_snapshot_unit() {
+        let dir = std::env::temp_dir().join(format!("minuend-h4-resend-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let a = gov_dep(vec![g], &sk(1), 10_000, 7);
+        let evs = eng.ingest(a.clone()).unwrap();
+        assert!(evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })));
+        eng.flush_snapshot().unwrap();
+
+        let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
+        allow_all(&mut eng2);
+        let before = eng2.state.clone();
+        assert!(matches!(
+            eng2.ingest(a),
+            Err(ExecError::Dag(DagError::Duplicate))
+        ));
+        assert_eq!(
+            eng2.state.state_root(),
+            before.state_root(),
+            "re-sent pre-snapshot unit must not change state"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #37-14b + #47 H3: a restored snapshot+WAL may hold GovWithdraw nonces
     /// from batches NEWER than the snapshot. Replaying those batches
     /// (validating mode) must accept them — but a nonce the SNAPSHOT itself
@@ -5366,6 +5425,7 @@ mod tests {
             },
             &alice,
         );
+        let wd_copy = wd.clone();
         eng.ingest(wd).unwrap();
         let gd = sign_unit(
             vec![g],
@@ -5388,9 +5448,16 @@ mod tests {
         allow_all(&mut eng2);
         assert!(eng2.state.withdrawals.contains_key(&(account, 7)));
 
-        // Same withdraw nonce after restart → DuplicateNonce.
+        // H4 (#47): the byte-identical pre-snapshot unit is refused by the
+        // DAG as a duplicate (it was executed before the restart).
+        assert!(matches!(
+            eng2.ingest(wd_copy.clone()),
+            Err(ExecError::Dag(DagError::Duplicate))
+        ));
+        // Same withdraw nonce in a NEW unit after restart → DuplicateNonce
+        // (op-level dedup survives the restart too).
         let dup = sign_unit(
-            vec![g],
+            vec![unit_id(&wd_copy)],
             Op::Withdraw {
                 account,
                 amount: 100 * USD_SCALE as i128,
