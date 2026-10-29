@@ -859,14 +859,20 @@ impl Engine {
                 return Err(RejectReason::Risk);
             }
             let params = self.state.market_params(market);
-            // R2-E-8: opening exposure on a spot_only market must be
-            // ISOLATED. A cross spot reserve is only subtracted from pooled
-            // equity, so the same account's perp losses, keeper rewards and
-            // funding payments (all paid from cross collateral) could eat
-            // it and break the band-solvency guarantee. An isolated bucket
-            // escrows the band worst case out of collateral instead. Pure
-            // reduces of a pre-existing cross spot position stay allowed.
+            // R2-E-8: a CROSS spot_only reserve is only subtracted from
+            // pooled equity, so any other exposure in the same account —
+            // perp losses, funding, keeper rewards and isolated-liquidation
+            // rewards (all paid from cross collateral) — could eat it and
+            // break the band-solvency guarantee. Cross spot exposure may
+            // therefore not coexist with ANY non-spot exposure (cross or
+            // isolated) in one account. Isolated spot is unaffected (its
+            // worst case is escrowed in its own bucket), and pure reduces
+            // of pre-existing mixed exposure stay allowed.
             if params.spot_only && !isolated {
+                if self.has_non_spot_exposure(account) {
+                    return Err(RejectReason::Risk);
+                }
+            } else if !params.spot_only && self.has_cross_spot_exposure(account) {
                 return Err(RejectReason::Risk);
             }
             // Funding-rate markets price money off the listing multiplier:
@@ -1052,9 +1058,15 @@ impl Engine {
                     None => notional_usd(f.qty, f.price),
                 };
                 let fee = bps(notional, params.taker_fee_bps);
+                if fee <= 0 {
+                    continue;
+                }
+                // Cross equity too: the fee must not dip into a cross spot
+                // reserve (R2-E-8) any more than into negative cash.
                 let pre = sim.collateral;
+                let pre_eq = sim.snapshot(&self.state.marks, &self.state.markets).equity;
                 sim.collateral = sim.collateral.saturating_sub(fee);
-                if fee > 0 && pre >= 0 && sim.collateral < 0 {
+                if (pre >= 0 && sim.collateral < 0) || (pre_eq >= 0 && pre_eq < fee) {
                     self.state.rollback(journal);
                     return Err(RejectReason::Risk);
                 }
@@ -1150,6 +1162,56 @@ impl Engine {
             .get(&market)
             .and_then(|b| b.live_orders().find(|o| o.account == account))
             .map(|o| o.isolated)
+    }
+
+    /// R2-E-8: does `account` hold a position or a live order on any market
+    /// that is not `spot_only` (either margin mode)?
+    fn has_non_spot_exposure(&self, account: AccountId) -> bool {
+        let is_spot = |m: &MarketId| {
+            self.state
+                .markets
+                .get(m)
+                .map(|p| p.spot_only)
+                .unwrap_or(false)
+        };
+        let pos = self
+            .state
+            .accounts
+            .get(&account)
+            .map(|a| {
+                a.positions
+                    .iter()
+                    .any(|(m, p)| p.qty != 0 && !is_spot(m))
+            })
+            .unwrap_or(false);
+        pos || self.state.books.iter().any(|(m, b)| {
+            !is_spot(m) && b.live_orders().any(|o| o.account == account)
+        })
+    }
+
+    /// R2-E-8: does `account` hold a CROSS position or a live cross order on
+    /// a `spot_only` market?
+    fn has_cross_spot_exposure(&self, account: AccountId) -> bool {
+        let is_spot = |m: &MarketId| {
+            self.state
+                .markets
+                .get(m)
+                .map(|p| p.spot_only)
+                .unwrap_or(false)
+        };
+        let pos = self
+            .state
+            .accounts
+            .get(&account)
+            .map(|a| {
+                a.positions
+                    .iter()
+                    .any(|(m, p)| p.qty != 0 && !p.isolated && is_spot(m))
+            })
+            .unwrap_or(false);
+        pos || self.state.books.iter().any(|(m, b)| {
+            is_spot(m) && b.live_orders().any(|o| o.account == account && !o.isolated)
+        })
     }
 
     fn collateral_of(&self, account: AccountId) -> Usd {
