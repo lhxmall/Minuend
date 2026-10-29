@@ -114,14 +114,19 @@
 					$ls = (var['last_submitted'] otherwise 0);
 					$lf = (var['last_finalized'] otherwise 0);
 					// #37-7/37-8: a fraud-failed height (frozen==2) may be
-					// RE-SUBMITTED in place — verdict now KEEPS
-					// last_submitted pinned at the failed top, so both the
-					// failed top itself (h == ls) and a lower stale height
-					// (h < ls, blocked by frozen_6 in the adjacent-fraud
-					// case) are re-opened through this branch.
+					// RE-SUBMITTED in place. #47 A1: only at the live tip —
+					// verdict sets last_submitted = min(ls, h), so the
+					// failed height IS ls and every height above it is
+					// dead (unfinalizable: h > ls) and gets overwritten by
+					// ordinary forward submits once the tip is fixed.
+					// Re-submitting any frozen height above ls+1 (the old
+					// rule) re-raised ls over stale heights whose prev no
+					// longer chains, freezing finalize forever.
+					// Invariant kept by these two rules: no frozen height
+					// in (last_finalized, ls); at most ls itself is frozen.
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
-						OR !$h OR ($h != $ls + 1 AND $frozen_h != 2)
+						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
 						OR trigger.data.assertion_version != 1
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
@@ -178,6 +183,11 @@
 					{
 						app: "state",
 						state: "{
+							// #47 A1: ls before this submit — a forward submit
+							// (h > ls) may overwrite a DEAD height left above
+							// an earlier verdict; its stale fee winner must not
+							// collect the race reward for the new assertion.
+							$ls_s = (var['last_submitted'] otherwise 0);
 							var['submitted_at_' || trigger.data.height] = timestamp;
 							var['state_root_' || trigger.data.height] = trigger.data.state_root;
 							// #37-4: same-height twin binding — the forest hash
@@ -199,7 +209,7 @@
 							var['active_bond_' || trigger.data.height] = trigger.address;
 							var['frozen_' || trigger.data.height] = 0;
 							var['last_submitted'] = trigger.data.height;
-							if (!var['fee_winner_' || trigger.data.height]){
+							if (!var['fee_winner_' || trigger.data.height] OR trigger.data.height > $ls_s){
 								var['fee_winner_' || trigger.data.height] = trigger.address;
 							}
 						}"
@@ -299,12 +309,22 @@
 							}
 							var['active_bond_' || trigger.data.height] = 0;
 							var['fee_winner_' || trigger.data.height] = 0;
-							// #37-7: last_submitted STAYS at the failed height
-							// (frozen_<h>=2 means "failed, awaiting resubmit").
-							// Rolling back to h-1 let the operator drain the
-							// pool backing the still-live higher heights via
-							// {claim:'pool'} the moment ls==lf again.
-							var['last_submitted'] = trigger.data.height;
+							// #37-7: last_submitted lands ON the failed height
+							// (frozen_<h>=2 means "failed, awaiting resubmit"),
+							// never h-1: rolling back to h-1 let the operator
+							// drain the pool via {claim:'pool'} the moment
+							// ls==lf again (the claim gate blocks while
+							// frozen_<ls>==2).
+							// #47 A1: but NEVER raise it — a verdict on a stale
+							// height above the tip (still inside its window)
+							// used to lift ls over dead heights whose prev no
+							// longer chains, so finalize bounced 'stale height'
+							// and nothing could be re-submitted: permanent
+							// halt. min(ls, h) keeps ls at the lowest failed
+							// height; everything above it is dead and is
+							// overwritten by forward submits.
+							$ls_v = (var['last_submitted'] otherwise 0);
+							var['last_submitted'] = ($ls_v < trigger.data.height) ? $ls_v : trigger.data.height;
 						}"
 					}
 				]
@@ -320,10 +340,11 @@
 					// #37-7: a failed height keeps last_submitted pinned at
 					// itself, so the busy gate alone again reads idle even
 					// while that height still owes a correct re-submit —
-					// block the drain while the highest submitted height is
-					// fraud-failed (frozen==2). Heights j < h were finalized
-					// before h (finalize is strictly sequential) and > h
-					// cannot exist beyond the pinned top.
+					// block the drain while the tip is fraud-failed
+					// (frozen==2). #47 A1: heights above the tip may still
+					// hold stale data but are dead (finalize needs
+					// h <= last_submitted) and are overwritten by forward
+					// submits, so they back nothing.
 					if ($k == 'pool' AND (var['frozen_' || (var['last_submitted'] otherwise 0)] otherwise 0) == 2)
 						bounce('pool busy');
 					$key = ($k == 'reward' ? 'reward_' : ($k == 'sbond' ? 'sbond_' : ($k == 'slash' ? 'slash_reward_' : 'pool_')));
