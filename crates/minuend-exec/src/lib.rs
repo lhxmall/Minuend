@@ -8872,4 +8872,167 @@ mod tests {
         let missing = leaves_before.difference(&leaves_now).count();
         assert!(missing <= 1, "{missing} leaves not restored");
     }
+
+    /// #47 A2: one Obyte address binds at most one account, so the AA
+    /// forest and the `adr:` witness leaves hold one leaf per address and
+    /// the forest dispute can never be pointed at an honest twin leaf.
+    #[test]
+    fn address_already_bound_to_another_account_is_refused() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        eng.ingest(deposit(vec![g], &sk(1), 1_000 * USD_SCALE as i128, 1))
+            .unwrap();
+        let other = sign_unit(
+            vec![g],
+            Op::Deposit {
+                account: acct_of(&sk(2)),
+                addr: test_addr(1),
+                amount: 100 * USD_SCALE as i128,
+                aa_unit: [2; 32],
+            },
+            &sk(2),
+        );
+        let evs = eng.ingest(other).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Rejected {
+                reason: RejectReason::BadAccount,
+                ..
+            }
+        )));
+        assert!(!eng.state.aa_addresses.contains_key(&acct_of(&sk(2))));
+        assert!(!eng.state.accounts.contains_key(&acct_of(&sk(2))));
+        assert_eq!(
+            eng.state.aa_address_owners.get(&test_addr(1)),
+            Some(&acct_of(&sk(1)))
+        );
+        // The same account may keep depositing with its own address.
+        let again = deposit(vec![g], &sk(1), 5 * USD_SCALE as i128, 1 + 26);
+        let evs = eng.ingest(again).unwrap();
+        assert!(applied(&evs), "{evs:?}");
+        let leaves = minuend_state::wit_leaves(&eng.state);
+        let adr: Vec<&String> = leaves
+            .iter()
+            .filter(|l| l.starts_with(&format!("adr:{}:", test_addr(1))))
+            .collect();
+        assert_eq!(
+            adr,
+            vec![&format!(
+                "adr:{}:{}",
+                test_addr(1),
+                hex::encode(acct_of(&sk(1)).0)
+            )]
+        );
+    }
+
+    /// #47 A2: a GovDeposit that fails AFTER the address check (supply
+    /// overflow) must not leave a binding behind.
+    #[test]
+    fn rejected_gov_deposit_leaves_no_binding() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        eng.state.perp_supply = u128::MAX;
+        let g = genesis_id();
+        let evs = eng.ingest(gov_dep(vec![g], &sk(4), 10, 7)).unwrap();
+        assert!(!applied(&evs), "{evs:?}");
+        assert!(eng.state.aa_addresses.is_empty());
+        assert!(eng.state.aa_address_owners.is_empty());
+    }
+
+    /// #47 (cross-PR): a withdraw from an account that does not exist is
+    /// rejected WITHOUT creating an empty account (the old path left an
+    /// `acct:{id}:0:0:0` witness leaf behind).
+    #[test]
+    fn withdraw_from_unknown_account_creates_nothing() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let evs = eng
+            .ingest(withdraw_unit(vec![g], &sk(9), 100, 1))
+            .unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Rejected {
+                reason: RejectReason::Insufficient,
+                ..
+            }
+        )));
+        assert!(!eng.state.accounts.contains_key(&acct_of(&sk(9))));
+    }
+
+    /// #47 (owner item): a book-path liquidation that closes NOTHING is a
+    /// no-op — its IOC must not cancel/refund the target's own escrowed
+    /// orders (a cash leg no fill string carries).
+    #[test]
+    fn fill_less_liquidation_is_a_no_op() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let alice = sk(1);
+        let keeper = sk(2);
+        let d1 = deposit(vec![g], &alice, 15_000 * USD_SCALE as i128, 1);
+        let id1 = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let a = acct_of(&alice);
+        // Lone long (synthetic, as in liquidate_remainder_stays_...).
+        eng.state
+            .account_mut(a)
+            .apply_fill(
+                Side::Bid,
+                true,
+                100_000 * PRICE_SCALE as i64,
+                QTY_SCALE,
+                BTC_USD,
+                None,
+                0,
+                false,
+            )
+            .unwrap();
+        eng.state.marks.insert(BTC_USD, PRICE_SCALE as i64);
+        // The target's own escrowed bid: the liquidation IOC (an ask) would
+        // STP-cancel it and refund its 500 USD margin_left.
+        let own = OrderId([7u8; 32]);
+        eng.state
+            .book_mut(BTC_USD)
+            .submit(
+                Order {
+                    id: own,
+                    account: a,
+                    market: BTC_USD,
+                    side: Side::Bid,
+                    typ: OrderType::Limit,
+                    tif: TimeInForce::Gtc,
+                    price: PRICE_SCALE as i64 / 2,
+                    qty: QTY_SCALE,
+                    remaining: QTY_SCALE,
+                    seq: 0,
+                    isolated: true,
+                    margin_left: 500 * USD_SCALE,
+                },
+                minuend_book::SelfTrade::Reject,
+            )
+            .unwrap();
+        let col_before = eng.state.accounts[&a].collateral;
+        let liq = sign_unit(
+            vec![id1],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: BTC_USD,
+            },
+            &keeper,
+        );
+        let evs = eng.ingest(liq).unwrap();
+        assert!(
+            evs.iter()
+                .all(|e| !matches!(e, ExecEvent::Applied { fills, .. } if !fills.is_empty())),
+            "{evs:?}"
+        );
+        assert_eq!(eng.state.accounts[&a].collateral, col_before, "no refund");
+        assert!(
+            eng.state.books[&BTC_USD].get(own).is_some(),
+            "own escrowed order survives a fill-less liquidation"
+        );
+    }
 }

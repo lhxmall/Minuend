@@ -400,12 +400,10 @@ struct TakerPlace<'a> {
     iso: &'a str,
 }
 
-/// Kind 2/3 leg on the Liquidate order-book path (#47 B1/B2): the other
-/// fill party (whose proven post collateral must be > 0, else the AA
-/// bounces: a claw may have touched this leg) and, for the taker
-/// (= liquidation target), the keeper reward seized after the fill.
-struct LiqLeg<'a> {
-    counterparty: &'a str,
+/// Kind 2/3 leg on the Liquidate order-book path (#47 B1/B2): for the
+/// taker (= liquidation target), the keeper reward seized after the fill.
+/// (The positive-counterparty gate lives on [`Leg::counterparty`].)
+struct LiqLeg {
     reward: Option<i128>,
 }
 
@@ -422,8 +420,16 @@ struct Leg<'a> {
     exp_bucket: Option<i128>,
     exp_fill: i128,
     taker_place: Option<TakerPlace<'a>>,
-    liq: Option<LiqLeg<'a>>,
+    liq: Option<LiqLeg>,
     allow_last: bool,
+    /// The other fill party (claw guard: its proven post collateral must be
+    /// > 0 before a collateral mismatch on THIS leg is fraud).
+    counterparty: &'a str,
+    /// #47 claw guard: may a collateral mismatch count at all? False for a
+    /// kind 0/1 maker leg whose taker Place is isolated (its escrow refund
+    /// lands on the taker after the claw, so "taker post > 0" proves
+    /// nothing) — the AA bounces such a mismatch.
+    claw_checkable: bool,
 }
 
 fn acct_col(tree: &[String], acct_hex: &str) -> Option<i128> {
@@ -469,12 +475,12 @@ fn aa_fill_verdict(
         }
         None => true,
     };
-    // #47 B1/B2: kind 2/3 needs a proven POSITIVE counterparty post leaf.
-    if let Some(liq) = &leg.liq {
-        match acct_col(tree, liq.counterparty) {
-            Some(c) if c > 0 => {}
-            _ => return false,
-        }
+    // #47 claw guard: a proven POSITIVE counterparty post leaf. Required
+    // outright for kind 2/3 (B1/B2); for kind 0/1 it only gates whether a
+    // collateral mismatch counts (see `col_ok` below).
+    let cp_pos = matches!(acct_col(tree, leg.counterparty), Some(c) if c > 0);
+    if leg.liq.is_some() && !cp_pos {
+        return false;
     }
     // Position leg.
     let pos_leaf = tree.iter().find(|l| {
@@ -519,7 +525,9 @@ fn aa_fill_verdict(
         }
     };
     // Collateral leg (+ the resting-order leg of a kind 0/1 taker).
-    let (expected, ord_ok, ord_bail) = if let Some(liq) = &leg.liq {
+    // `mid` = fill-stage collateral the engine's claw sees (before an
+    // isolated taker's unrested escrow refund).
+    let (expected, mid, ord_ok, ord_bail) = if let Some(liq) = &leg.liq {
         match liq.reward {
             // Liquidation target: fill-stage minus the keeper reward
             // seized from its own non-negative collateral.
@@ -529,9 +537,10 @@ fn aa_fill_verdict(
                 } else {
                     0
                 };
-                (leg.exp_fill - kpay, true, true)
+                let e = leg.exp_fill - kpay;
+                (e, e, true, true)
             }
-            None => (leg.exp_fill, true, true),
+            None => (leg.exp_fill, leg.exp_fill, true, true),
         }
     } else if let Some(tp) = &leg.taker_place {
         let still = if tp.rest { tp.tml } else { 0 };
@@ -561,16 +570,19 @@ fn aa_fill_verdict(
         };
         // exp_fill already carries release + pnl - fee; the escrow
         // identity adds -(taker_post + still) + post_back.
-        (leg.exp_fill - tp.tpost - still + tp.pback, ord_ok, ord_bail)
+        let e = leg.exp_fill - tp.tpost - still + tp.pback;
+        (e, e - tp.tml + still, ord_ok, ord_bail)
     } else {
-        (leg.exp_fill, true, true)
+        (leg.exp_fill, leg.exp_fill, true, true)
     };
-    // Negative expected post: the claw's remainder is unprovable from
+    // Negative fill-stage collateral: the claw's effect is unprovable from
     // these leaves — the AA bounces (no verdict) for that shape.
-    if expected < 0 {
+    if mid < 0 {
         return false;
     }
-    let col_ok = post_col == expected;
+    // #47 claw guard: a mismatch counts only when no claw can have moved
+    // this leg (positive counterparty; cross taker for a kind 0/1 maker).
+    let col_ok = post_col == expected || !(cp_pos && leg.claw_checkable);
     (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || (!ord_bail && !ord_ok)
 }
 
@@ -966,10 +978,11 @@ fn fill_proof(
             if who_taker && kind >= 2 && iso {
                 continue;
             }
-            // The AA requires the maker's PRE ord leaf whenever the maker
-            // position is isolated (pro-rata escrow), except for ADL
-            // (kind 2: no maker order, no escrow).
-            let maker_ord = if !who_taker && iso && kind != 2 {
+            // The AA requires the maker's PRE ord leaf on every order-book
+            // maker leg (#47: its margin mode decides the bucket check of a
+            // maker with no prior position), except for ADL (kind 2: no
+            // maker order, no escrow).
+            let maker_ord = if !who_taker && kind != 2 {
                 pre_leaves
                     .iter()
                     .find(|l| l.starts_with(&format!("ord:{}:", parts[6])))
@@ -977,9 +990,13 @@ fn fill_proof(
             } else {
                 None
             };
-            if !who_taker && iso && kind != 2 && maker_ord.is_none() {
+            if !who_taker && kind != 2 && maker_ord.is_none() {
                 continue;
             }
+            let mo_iso = maker_ord
+                .as_ref()
+                .map(|l| l.split(':').nth(8) == Some("1"))
+                .unwrap_or(false);
             let mpost_any: i128 = match maker_ord.as_ref().map(|l| l.split(':').collect::<Vec<_>>())
             {
                 Some(o) if o.len() == 10 => {
@@ -1096,7 +1113,7 @@ fn fill_proof(
             let chk_b = if who_taker {
                 kind <= 1 && op_parts.get(6) == Some(&"1")
             } else {
-                iso
+                iso || mo_iso
             };
             // #47 A3: kind 0/1 taker — bind the fill to its own Place op and
             // derive the resting escrow from typ/tif instead of F[5]'s leaf.
@@ -1140,11 +1157,6 @@ fn fill_proof(
             };
             let liq = if kind >= 2 {
                 Some(LiqLeg {
-                    counterparty: if who_taker {
-                        maker_hex.as_str()
-                    } else {
-                        taker_hex.as_str()
-                    },
                     reward: if who_taker { Some(reward) } else { None },
                 })
             } else {
@@ -1162,6 +1174,12 @@ fn fill_proof(
                 taker_place,
                 liq,
                 allow_last,
+                counterparty: if who_taker {
+                    maker_hex.as_str()
+                } else {
+                    taker_hex.as_str()
+                },
+                claw_checkable: who_taker || kind >= 2 || op_parts.get(6) == Some(&"0"),
             };
             // AA verdict mirror: silent unless the honest replay passes
             // every leg and the committed legs fail one of them. A fill
@@ -1229,18 +1247,20 @@ fn fill_proof(
             // (the trailing fill's neighbor is `n:{len}`).
             obj.insert("right".into(), right.clone().into());
             obj.insert("right_proof".into(), proof_json(&fills_tree, gidx + 1));
-            if who_taker || kind >= 2 {
-                // Op gate: prove the unit op (Place or Liquidate).
-                obj.insert("op".into(), op_str.clone().into());
-                obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
-            }
-            if kind >= 2 {
-                // #47 B1/B2: the counterparty's positive post collateral.
-                let cp = if who_taker { &maker_hex } else { &taker_hex };
-                let key = format!("acct:{cp}:");
-                let ci = posted_post.iter().position(|l| l.starts_with(&key))?;
-                obj.insert("cp_acct".into(), posted_post[ci].clone().into());
-                obj.insert("cp_acct_proof".into(), proof_json(&posted_post, ci));
+            // Op gate: every leg proves the unit op (Place or Liquidate).
+            obj.insert("op".into(), op_str.clone().into());
+            obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
+            // #47 claw guard: the counterparty's post collateral (required
+            // for kind 2/3, needed for a kind 0/1 collateral mismatch).
+            let cp = if who_taker { &maker_hex } else { &taker_hex };
+            let key = format!("acct:{cp}:");
+            match posted_post.iter().position(|l| l.starts_with(&key)) {
+                Some(ci) => {
+                    obj.insert("cp_acct".into(), posted_post[ci].clone().into());
+                    obj.insert("cp_acct_proof".into(), proof_json(&posted_post, ci));
+                }
+                None if kind >= 2 => return None,
+                None => {}
             }
             if let Some(tord) = &tord_hex {
                 // Resting-order leg: the taker order's own post ord leaf, or
@@ -1440,6 +1460,53 @@ mod tests {
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
         assert_eq!(proof.pred, "deposit");
         assert!(!proof.fill_aa);
+    }
+
+    /// #47 (cross-PR): rejected units are committed like applied ones. An
+    /// honestly REJECTED withdraw (insufficient balance — or, since #49,
+    /// the spot reserve / gov-nonce rules) leaves the leaf unchanged; that
+    /// must never become a withdraw proof (the AA bounces it too).
+    #[test]
+    fn rejected_withdraw_in_honest_batch_builds_no_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let g = genesis_id();
+        let aa = [9u8; 32];
+        let dep = sign_unit(
+            vec![g],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let d_id = unit_id(&dep);
+        let wd = sign_unit(
+            vec![d_id],
+            Op::Withdraw {
+                account: acct,
+                amount: 1_000,
+                nonce: 1,
+            },
+            &secret,
+        );
+        let w_id = unit_id(&wd);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(dep).unwrap();
+        let evs = eng.ingest(wd).unwrap();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Rejected { .. })));
+        let prev = minuend_state::ChainState::new();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[d_id, w_id]).expect("batch");
+        assert_eq!(batch.ops.len(), 2, "the rejected withdraw is committed");
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
     }
 
     #[test]
@@ -2266,11 +2333,58 @@ mod tests {
             exp_fill,
             taker_place: None,
             liq: Some(LiqLeg {
-                counterparty: cp,
                 reward: if taker { Some(30) } else { None },
             }),
             allow_last: false,
+            counterparty: cp,
+            claw_checkable: true,
         }
+    }
+
+    fn place_leg<'a>(acct: &'a str, cp: &'a str, exp_fill: i128, cross_taker: bool) -> Leg<'a> {
+        Leg {
+            acct_hex: acct,
+            market: "1",
+            exp_qty: 0,
+            exp_entry: 0,
+            exp_absent: true,
+            exp_bucket: None,
+            exp_fill,
+            taker_place: None,
+            liq: None,
+            allow_last: false,
+            counterparty: cp,
+            claw_checkable: cross_taker,
+        }
+    }
+
+    #[test]
+    fn kind0_winner_leg_clawed_by_negative_counterparty_is_not_fraud() {
+        // #47 (owner item "claw false-verdict in ordinary fills"): the
+        // maker ended the fill negative and was clawed back to 0 from the
+        // taker (fill-stage 1000 -> 600). The honest taker leaf 600 must
+        // not be judged; with a provably positive counterparty the same
+        // numbers ARE fraud (no claw can have happened).
+        let a = "aa".repeat(32);
+        let c = "cc".repeat(32);
+        let tree = |acol: i128, ccol: i128| -> Vec<String> {
+            let mut t = vec![
+                format!("acct:{a}:{acol}:0:0"),
+                format!("acct:{c}:{ccol}:0:0"),
+            ];
+            t.sort();
+            t
+        };
+        let leg = place_leg(&a, &c, 1_000, true);
+        assert!(!aa_fill_verdict(&tree(600, 0), &leg, false, None));
+        assert!(!aa_fill_verdict(&tree(600, -5), &leg, false, None));
+        assert!(aa_fill_verdict(&tree(600, 5), &leg, false, None));
+        assert!(!aa_fill_verdict(&tree(1_000, 5), &leg, false, None));
+        // Kind 0/1 maker leg against an ISOLATED taker Place: the taker's
+        // unrested escrow refund lands after the claw, so a positive taker
+        // leaf proves nothing — never a collateral verdict.
+        let iso = place_leg(&a, &c, 1_000, false);
+        assert!(!aa_fill_verdict(&tree(600, 5), &iso, false, None));
     }
 
     #[test]

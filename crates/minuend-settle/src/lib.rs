@@ -2605,4 +2605,45 @@ mod tests {
         let expected = hex::encode(sha256(b"abcd"));
         assert_eq!(got, expected);
     }
+
+    /// #47 B8: the rollup AA pins the same assertion version the batches
+    /// carry — bumping one without the other bounces every submit.
+    #[test]
+    fn rollup_aa_pins_the_rust_assertion_version() {
+        let src = include_str!("../../../obyte-local/agents/minuend_rollup.aa");
+        assert!(
+            src.contains(&format!(
+                "trigger.data.assertion_version != {}",
+                minuend_types::ASSERTION_VERSION
+            )),
+            "minuend_rollup.aa and ASSERTION_VERSION disagree"
+        );
+    }
+
+    /// #47 A2: deposit ops commit the bound address (the forest dispute AA
+    /// checks every new `adr:` witness leaf against it).
+    #[test]
+    fn deposit_ops_commit_the_address() {
+        let account = minuend_types::AccountId([3u8; 32]);
+        let op = minuend_dag::Op::Deposit {
+            account,
+            addr: "B".repeat(32),
+            amount: 7,
+            aa_unit: [0; 32],
+        };
+        assert_eq!(
+            ops_element("u", &op),
+            format!("d:{}:7:{}", hex::encode([3u8; 32]), "B".repeat(32))
+        );
+        let gop = minuend_dag::Op::GovDeposit {
+            account,
+            addr: "B".repeat(32),
+            amount: 9,
+            aa_unit: [0; 32],
+        };
+        assert_eq!(
+            ops_element("u", &gop),
+            format!("D:{}:9:{}", hex::encode([3u8; 32]), "B".repeat(32))
+        );
+    }
 }
