@@ -980,7 +980,7 @@ async function main() {
   // Isolated open payload: single-fill completeness rides the right
   // neighbor — for this sole fill the fills_root length sentinel `n:1` —
   // plus op + ord absence proofs over the post tree.
-  const isoFillPayload = (traceRoot, traceArr, postWit, postTree, col) => {
+  const isoFillPayload = (traceRoot, traceArr, postWit, postTree, col, cpLeaf = CP_LEAF) => {
     const acctLeaf = `acct:${DEP_ACCT}:${col}:0:0`;
     return {
       rollup: ROLLUP_ADDR,
@@ -1017,8 +1017,8 @@ async function main() {
       oleft_proof: merkle.getMerkleProof(postTree, postTree.indexOf(META1)),
       oright: isoPos,
       oright_proof: merkle.getMerkleProof(postTree, postTree.indexOf(isoPos)),
-      cp_acct: CP_LEAF,
-      cp_acct_proof: merkle.getMerkleProof(postTree, postTree.indexOf(CP_LEAF)),
+      cp_acct: cpLeaf,
+      cp_acct_proof: merkle.getMerkleProof(postTree, postTree.indexOf(cpLeaf)),
       who: "taker",
     };
   };
@@ -1894,10 +1894,7 @@ async function main() {
     const trace = pad2([wit], "claw-trace");
     const traceRoot = merkle.getMerkleRoot(trace);
     await submitAt(30, { opsRoot: ISO_OPS_ROOT, traceRoot, fillsRoot: ISO_FILLS_ROOT, unitsRoot: ISO_UNITS_ROOT, fillCount: 1 });
-    const payload = Object.assign(isoFillPayload(traceRoot, trace, wit, tree, 499400), {
-      cp_acct: CLAW_CP,
-      cp_acct_proof: merkle.getMerkleProof(tree, tree.indexOf(CLAW_CP)),
-    });
+    const payload = isoFillPayload(traceRoot, trace, wit, tree, 499400, CLAW_CP);
     await triggerBounce(challenger, fill, Object.assign({ pred: "fill_math", height: 30 }, payload), 20000, "no fraud");
     st = await vars(rollup);
     if (Number(st.frozen_30 || 0) !== 0) throw new Error("honest clawed winner leg froze h30!");
