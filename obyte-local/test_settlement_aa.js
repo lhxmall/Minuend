@@ -201,7 +201,7 @@ function submitData(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 1,
+    assertion_version: 2,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -238,7 +238,7 @@ function headerFromSubmit(sd, frameOp) {
     seq: sd.height,
     fill_count: sd.fill_count || 0,
     fills_hash: sha256Hex("fills"),
-    assertion_version: sd.assertion_version || 1,
+    assertion_version: sd.assertion_version || 2,
     wit_root: sd.wit_root,
     trace_root: sd.trace_root,
     units_root: sd.units_root,

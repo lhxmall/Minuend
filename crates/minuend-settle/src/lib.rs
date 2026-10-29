@@ -214,15 +214,25 @@ pub fn fills_bytes(fills: &[Fill]) -> Vec<u8> {
 pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
     use minuend_dag::Op::*;
     match op {
+        // #47 A2: deposits commit the Obyte address they bind (first
+        // deposit) or must match (later deposits), so the forest dispute AA
+        // can check that a new `adr:{addr}:{acct}` witness leaf appears only
+        // under a deposit op of that account WITH that address.
         Deposit {
-            account, amount, ..
+            account,
+            addr,
+            amount,
+            ..
         } => {
-            format!("d:{}:{}", hex::encode(account.0), amount)
+            format!("d:{}:{}:{}", hex::encode(account.0), amount, addr)
         }
         GovDeposit {
-            account, amount, ..
+            account,
+            addr,
+            amount,
+            ..
         } => {
-            format!("D:{}:{}", hex::encode(account.0), amount)
+            format!("D:{}:{}:{}", hex::encode(account.0), amount, addr)
         }
         Withdraw {
             account,

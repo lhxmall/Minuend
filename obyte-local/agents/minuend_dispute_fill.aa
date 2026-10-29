@@ -39,11 +39,14 @@
 	//   - (taker_post + still): escrow left collateral at place, the
 	//   fill's escrow share moved to the bucket (or back on a pure
 	//   reduce), and the post ord leaf holds the un-rested remainder.
-	// Post-fill, a negative expected collateral never gets a verdict:
-	// the engine claws a fill's hole back from the winner (zero-sum,
-	// insurance untouched) and any remainder stays negative — a shape
-	// these leaves cannot pin down. A non-negative expectation keeps
-	// the exact identity, empty range or not.
+	// Post-fill, a negative expected fill-stage collateral never gets a
+	// verdict: the engine claws a fill's hole back from the winner
+	// (zero-sum, insurance untouched) and any remainder stays negative —
+	// a shape these leaves cannot pin down. #47: the WINNER's leg is
+	// judged only when a proven positive counterparty post acct leaf
+	// (cp_acct) rules the claw out (all kinds), and a kind 0/1 maker leg
+	// additionally needs a cross Place taker (an isolated taker's escrow
+	// refund lands after the claw). Otherwise a mismatch bounces.
 	// kind 2 (ADL) / kind 3 (liquidation) legs are judged only on the
 	// order-book Liquidate path with every same-unit cash leg pinned
 	// (#47 B1/B2: op L: with taker == target, caller != maker, cross
@@ -298,16 +301,27 @@
 					// (No final-tree after-max arm here: the market-range
 					// fallback below covers it — ops budget.)
 					$empty = ($pe1 OR $pe2) ? '1' : '0';
-					// #47 A3/B1: every leg except a kind 0/1 maker leg binds
-					// the fill to the unit op at k (ops_root membership).
-					if ($who == 'taker' OR $kind >= 2) {
-						$op = trigger.data.op;
-						if (!trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
-							OR trigger.data.ops_proof.root != trigger.data.ops_root
-							OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
-							bounce('bad ops proof');
-						$OP = split($op, ':');
-					}
+					// #47 A3/B1: every leg binds the fill to the unit op at k
+					// (ops_root membership); a kind 0/1 maker leg reads only
+					// the Place's margin mode from it (claw guard below).
+					$op = trigger.data.op;
+					if (!trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
+						bounce('bad ops proof');
+					$OP = split($op, ':');
+					// #47 claw guard (all kinds): the engine claws a party's
+					// negative fill-stage collateral back from the OTHER fill
+					// party. A counterparty that ended the fill negative is
+					// left at <= 0 by the claw (and nothing later in the unit
+					// raises it, see below), so a proven POSITIVE counterparty
+					// post acct leaf excludes a claw on this leg.
+					$cp = trigger.data.cp_acct;
+					$cp_ok = typeof($cp) != 'boolean'
+						AND starts_with($cp, 'acct:' || (($who == 'taker') ? $F[4] : $F[3]) || ':')
+						AND is_valid_merkle_proof($cp, trigger.data.cp_acct_proof)
+						AND trigger.data.cp_acct_proof.root == $post_wit
+						AND split($cp, ':')[2] + 0 > 0;
 					// #47 B1/B2: kind 2 (ADL) and kind 3 (liquidation book
 					// fill) at idx 0 of a single-fill unit come only from a
 					// Liquidate unit `L:{caller}:{target}:{market}` on the
@@ -332,22 +346,16 @@
 						if (array_length($OP) != 4 OR $OP[0] != 'L' OR $OP[2] != $F[3]
 							OR $OP[3] != $market OR $OP[1] == $F[4])
 							bounce('no fraud');
-						if ($who == 'taker' AND $iso == '1') bounce('no fraud');
-						$cp = trigger.data.cp_acct;
-						if (typeof($cp) == 'boolean'
-							OR !is_valid_merkle_proof($cp, trigger.data.cp_acct_proof)
-							OR trigger.data.cp_acct_proof.root != $post_wit)
-							bounce('no fraud');
-						$CP = split($cp, ':');
-						if (array_length($CP) != 5 OR $CP[1] != (($who == 'taker') ? $F[4] : $F[3])
-							OR $CP[2] + 0 <= 0)
-							bounce('no fraud');
+						if (($who == 'taker' AND $iso == '1') OR !$cp_ok) bounce('no fraud');
 					}
 					// A maker-side isolated fill moves the maker order's
 					// pro-rata escrow — derivable from the maker's PRE ord
 					// leaf (fill qty vs remaining). ADL (kind 2) has no maker
-					// order and moves no escrow.
-					if ($who == 'maker' AND $iso == '1' AND $kind != 2) {
+					// order and moves no escrow. #47: the leaf is read for
+					// EVERY order-book maker leg, so a maker with no prior
+					// position whose order is isolated gets its new bucket
+					// checked too (its order mode is now proven).
+					if ($who == 'maker' AND $kind != 2) {
 						$mord = trigger.data.maker_ord;
 						if (typeof($mord) == 'boolean'
 							OR !starts_with($mord, 'ord:' || $F[6] || ':')
@@ -358,9 +366,11 @@
 						if (array_length($MO) != 10 OR $MO[7] != $acct_hex) bounce('bad maker ord');
 						$mrem = $MO[6] + 0;
 						$mml = $MO[9] + 0;
+						$mo_iso = $MO[8];
 					} else {
 						$mrem = 1;
 						$mml = 0;
+						$mo_iso = '0';
 					}
 					$mpost_any = ($qty >= $mrem) ? $mml : floor($mml * $qty / $mrem);
 					// The escrow share this fill moves for the challenged
@@ -442,7 +452,7 @@
 					// Place (kind 0/1) or an isolated pre position on the
 					// maker side. A pre-absent maker's bucket stays
 					// unchecked (its order mode is not proven here).
-					$chk_b = ($who == 'taker') ? ($kind <= 1 AND $OP[6] == '1') : ($iso == '1');
+					$chk_b = ($who == 'taker') ? ($kind <= 1 AND $OP[6] == '1') : ($iso == '1' OR $mo_iso == '1');
 					// Position leg: a surviving pos leaf where the engine
 					// removed the position is fabricated (verdict); otherwise
 					// proven absence (straddle over the POST tree, never a
@@ -509,6 +519,7 @@
 						$reward = floor(abs($t2) * $keeper_bps / 10000);
 						$kpay = ($exp_fill > 0) ? (($reward < $exp_fill) ? $reward : $exp_fill) : 0;
 						$exp_t = $exp_fill - $kpay;
+						$exp_m = $exp_t;
 						$op_ok = true;
 						$ord_ok = true;
 						$ord_bail = true;
@@ -575,8 +586,13 @@
 								$ord_bail = !($oh1 OR $oh2);
 							}
 							$exp_t = $old_col - $tpost - $still + $pback + $release + $pnl - $tfee;
+							// Fill-stage (pre-refund) collateral: the unrested
+							// escrow (tml - still) is refunded only AFTER the
+							// claw, so the claw sees exp_t minus that refund.
+							$exp_m = $exp_t - $tml + $still;
 						} else {
 							$exp_t = $exp_fill;
+							$exp_m = $exp_t;
 							$op_ok = true;
 							$ord_ok = true;
 							$ord_bail = true;
@@ -588,8 +604,13 @@
 					// cover stays as negative collateral — unverifiable
 					// from these leaves either way, so bounce instead of
 					// false-verdicting an honest height.
-					if ($exp_t < 0) bounce('no fraud');
-					$col_ok = ($post_col == $exp_t);
+					if ($exp_m < 0) bounce('no fraud');
+					// A collateral mismatch is fraud only when no claw can
+					// have moved this leg: positive counterparty, and for a
+					// kind 0/1 maker leg a CROSS Place taker (no escrow
+					// refund lands on the taker after the claw).
+					$col_ok = ($post_col == $exp_t)
+						OR !($cp_ok AND ($who == 'taker' OR $kind >= 2 OR $OP[6] == '0'));
 					// Verdict only when a leg is VERIFIED wrong; a bail
 					// (missing evidence) silences its own leg only. The
 					// #37-17 perp/W pin and the #47 op binding need no bail:

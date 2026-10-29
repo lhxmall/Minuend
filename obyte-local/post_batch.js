@@ -291,7 +291,12 @@ async function main() {
     // vault payments to the submitted corpus.
     aa_root: header.aa_root || require("crypto").createHash("sha256").update(aaForest, "utf8").digest("hex"),
     aa_forest: aaForest,
-    assertion_version: header.assertion_version || 1,
+    // #47 B8: the rollup pins assertion_version (now 2); never default a
+    // missing header field to a stale constant — the AA would bounce it.
+    assertion_version: (() => {
+      if (!Number.isInteger(header.assertion_version)) throw new Error("header.assertion_version missing");
+      return header.assertion_version;
+    })(),
     wit_root: header.wit_root,
     trace_root: header.trace_root,
     units_root: header.units_root,

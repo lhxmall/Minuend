@@ -233,12 +233,21 @@ fn deposit_proof(
     // account (a PERP-only holder has none either) — any posted leaf is
     // fraud, whatever its numbers. There is no PERP baseline to compare.
     let gov_fresh = is_gov && pre_hit.is_none();
-    if !gov_fresh
-        && liar_val == expected
-        && col_pinned
-            .map(|c| Some(c) == gov_col_must_match)
-            .unwrap_or(true)
-    {
+    // #47 (cross-PR, mirrors the AA): a REJECTED op leaves the moving
+    // column unchanged (fresh non-gov account: absent or col 0). Rejected
+    // units are committed like applied ones, so "unchanged" is an honest
+    // outcome the AA bounces — never build a proof for it.
+    let unchanged = match &pre_hit {
+        Some(_) => {
+            let pre_val = if is_gov { pre_perp as i128 } else { pre_col };
+            liar_val == pre_val
+        }
+        None => !is_gov && liar_col == 0,
+    };
+    let col_ok = col_pinned
+        .map(|c| Some(c) == gov_col_must_match)
+        .unwrap_or(true);
+    if !gov_fresh && (liar_val == expected || unchanged) && col_ok {
         return None; // honest leg — keep scanning
     }
     let mut roots = trace_roots(batch);

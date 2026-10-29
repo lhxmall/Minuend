@@ -195,7 +195,12 @@
 						// therefore fraud for D: and W: alike (the old
 						// `0 + amount == perp1` arm accepted a fabricated W:
 						// leaf with the opposite sign to the Rust mirror).
-						if (!$gov AND ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1)))
+						// #47 (cross-PR): a REJECTED op leaves the leg
+						// unchanged — rejected units are committed too (one
+						// trace entry per executed unit), and a withdraw on a
+						// fresh key leaves an empty acct leaf (col 0) behind.
+						// Unchanged is therefore an honest outcome: bounce.
+						if (!$gov AND ($col1 == '0' OR ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1))))
 							bounce('no fraud');
 					} else {
 						if (typeof($pre_leaf) == 'boolean'
@@ -208,7 +213,12 @@
 						$ptail0 = substring($tail0, length($col0) + 1, length($tail0));
 						$perp0 = substring($ptail0, 0, index_of($ptail0, ':'));
 						// Gov old account: PERP moves by amount, collateral pinned.
-						if ($gov ? (($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1)) AND $col0 == $col1) : ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1)))
+						// #47 (cross-PR): or the op was REJECTED (insufficient
+						// balance, nonce watermark, spot reserve, unbacked /
+						// duplicate deposit, address rule) and the moving
+						// column is unchanged — an honest outcome the leaves
+						// cannot tell apart from a silent drop, so bounce.
+						if ($gov ? (($perp0 == $perp1 OR ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1))))
 							bounce('no fraud');
 					}
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');

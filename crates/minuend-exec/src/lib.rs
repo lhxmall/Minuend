@@ -1236,18 +1236,25 @@ impl Engine {
             return Err(RejectReason::BadAccount);
         }
         // First deposit binds the address; rebinding to a different one would
-        // orphan or duplicate the account's AA leaf.
-        match self.state.aa_addresses.get(&account) {
-            Some(bound) if bound != addr => return Err(RejectReason::BadAccount),
-            Some(_) => {}
-            None => {
-                self.state.aa_addresses.insert(account, addr.to_string());
-            }
+        // orphan or duplicate the account's AA leaf. #47 A2: an address
+        // already bound to ANOTHER account is refused too (one forest leaf
+        // per address), and the binding is written only after the credit
+        // succeeded, so a rejected deposit leaves no binding behind.
+        let first_bind = self
+            .state
+            .check_aa_binding(account, addr)
+            .map_err(|_| RejectReason::BadAccount)?;
+        let mut acct = self
+            .state
+            .accounts
+            .get(&account)
+            .cloned()
+            .unwrap_or_else(|| minuend_state::Account::new(account));
+        acct.credit(amount).map_err(map_acct)?;
+        self.state.accounts.insert(account, acct);
+        if first_bind {
+            self.state.bind_aa_address(account, addr);
         }
-        self.state
-            .account_mut(account)
-            .credit(amount)
-            .map_err(map_acct)?;
         self.state.seen_aa_units.insert(aa_unit, self.state.height);
         self.state.consumed_deposits.insert(aa_unit);
         Ok(Vec::new())
@@ -1265,11 +1272,13 @@ impl Engine {
         if self.state.withdrawals.len() >= WITHDRAWALS_CAP {
             return Err(RejectReason::Risk);
         }
-        let marks = self.state.marks.clone();
-        let params = self.state.markets.clone();
-        self.state
-            .account_mut(account)
-            .debit(amount, &marks, &params)
+        // #47 (cross-PR): an unknown account has nothing to withdraw. The
+        // old `account_mut(..).debit(..)` created an empty account first and
+        // left it behind on the Insufficient reject.
+        let Some(acct) = self.state.accounts.get_mut(&account) else {
+            return Err(RejectReason::Insufficient);
+        };
+        acct.debit(amount, &self.state.marks, &self.state.markets)
             .map_err(map_acct)?;
         // Cumulative signed-withdrawal ledger committed as `W` in the AA
         // leaf: the vault AA enforces "this claim + prior claims <= W".
@@ -1382,8 +1391,17 @@ impl Engine {
         let mut journal = minuend_state::StateJournal::default();
         let out =
             self.liquidate_book_path(&mut journal, unit, seq, caller, target, market, pos_qty);
-        if out.is_err() {
-            self.state.rollback(journal);
+        // #47 (owner item "escrow refunds of fill-less forced liquidation"):
+        // a book-path liquidation that closed NOTHING is a no-op. Without
+        // this, its IOC could still cancel the target's own escrowed orders
+        // (CancelMaker) and refund their margin — a cash leg no fill string
+        // carries. In a force-sell after a single-fill Place that refund
+        // landed on a fill party's leaf, so the fill dispute AA's exact
+        // collateral identity judged the HONEST unit as fraud.
+        match &out {
+            Err(_) => self.state.rollback(journal),
+            Ok(fills) if fills.is_empty() => self.state.rollback(journal),
+            Ok(_) => {}
         }
         out
     }
@@ -1935,13 +1953,12 @@ impl Engine {
         if !valid_obyte_addr(addr) {
             return Err(RejectReason::BadAccount);
         }
-        match self.state.aa_addresses.get(&account) {
-            Some(bound) if bound != addr => return Err(RejectReason::BadAccount),
-            Some(_) => {}
-            None => {
-                self.state.aa_addresses.insert(account, addr.to_string());
-            }
-        }
+        // #47 A2: same one-address-one-account rule; bind only after the
+        // balance arithmetic below cannot fail any more.
+        let first_bind = self
+            .state
+            .check_aa_binding(account, addr)
+            .map_err(|_| RejectReason::BadAccount)?;
         let new_bal = self
             .state
             .perp_balances
@@ -1957,6 +1974,9 @@ impl Engine {
             .ok_or(RejectReason::Risk)?;
         self.state.perp_balances.insert(account, new_bal);
         self.state.perp_supply = new_supply;
+        if first_bind {
+            self.state.bind_aa_address(account, addr);
+        }
         self.state.seen_aa_units.insert(aa_unit, self.state.height);
         self.state.consumed_deposits.insert(aa_unit);
         Ok(Vec::new())

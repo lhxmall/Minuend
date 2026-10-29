@@ -79,6 +79,14 @@ pub struct ChainState {
     /// The AA-facing tree keys leaves by this address; unbound accounts are
     /// not representable on the AA side and are excluded from it.
     pub aa_addresses: BTreeMap<AccountId, String>,
+    /// #47 A2: reverse index of `aa_addresses` (address -> its ONE bound
+    /// account). An Obyte address may be bound to at most one account, so
+    /// the AA forest and the `adr:` witness leaves hold at most one leaf
+    /// per address and the forest↔witness dispute predicate can never be
+    /// pointed at an honest twin leaf. Always updated together with
+    /// `aa_addresses` via [`ChainState::bind_aa_address`].
+    #[serde(default)]
+    pub aa_address_owners: BTreeMap<String, AccountId>,
     /// Cumulative sidechain-signed withdrawal amount per account (i128 to
     /// match Usd). Committed inside the binary account leaf as `W` so the
     /// vault AA can enforce "this claim + prior claims <= W".
@@ -242,6 +250,7 @@ impl ChainState {
             deposits_allowed: HashSet::new(),
             seen_gov_nonces: HashMap::new(),
             aa_addresses: BTreeMap::new(),
+            aa_address_owners: BTreeMap::new(),
             withdrawn_total: BTreeMap::new(),
             last_finalized_root: sha256(b"minuend-mvp-1-genesis"),
             last_finalized_height: 0,
@@ -1008,6 +1017,29 @@ impl ChainState {
                 None => self.last_funding_height.remove(&m),
             };
         }
+    }
+
+    /// #47 A2: may `account` use `addr` as its AA withdrawal address?
+    /// `Ok(true)` = first binding needed, `Ok(false)` = already bound to
+    /// exactly this address, `Err(())` = the account is bound elsewhere or
+    /// the address already belongs to another account. Pure check — call
+    /// [`Self::bind_aa_address`] only after every other fallible step of
+    /// the op succeeded, so a rejected op never leaves a binding behind.
+    pub fn check_aa_binding(&self, account: AccountId, addr: &str) -> Result<bool, ()> {
+        match self.aa_addresses.get(&account) {
+            Some(bound) if bound != addr => Err(()),
+            Some(_) => Ok(false),
+            None => match self.aa_address_owners.get(addr) {
+                Some(owner) if *owner != account => Err(()),
+                _ => Ok(true),
+            },
+        }
+    }
+
+    /// Record a first binding approved by [`Self::check_aa_binding`].
+    pub fn bind_aa_address(&mut self, account: AccountId, addr: &str) {
+        self.aa_addresses.insert(account, addr.to_string());
+        self.aa_address_owners.insert(addr.to_string(), account);
     }
 
     pub fn book_mut(&mut self, market: MarketId) -> &mut OrderBook {
@@ -1843,6 +1875,13 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
                 o.margin_left
             ));
         }
+    }
+    // #47 A2: address -> account binding, keyed by the Obyte address so a
+    // dispute can prove an address is NOT bound (sorted-neighbour
+    // non-membership). The forest dispute AA ties every aa_forest leaf to
+    // the `adr:` + `acct:` leaves of this (final) witness tree.
+    for (addr, id) in &state.aa_address_owners {
+        leaves.push(format!("adr:{}:{}", addr, hex::encode(id.0)));
     }
     for (market, params) in &state.markets {
         let mark = state.marks.get(market).copied().unwrap_or(0);

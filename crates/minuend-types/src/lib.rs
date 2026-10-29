@@ -17,12 +17,18 @@ pub const QTY_SCALE: u64 = 100_000_000;
 pub const USD_SCALE: u64 = 1_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
-/// Pinned to 1 by the rollup AA (`assertion_version != 1` bounces), so it
-/// can only change together with an AA redeploy. Execution-semantics changes
-/// that did NOT bump it (#39 Place rollback, #42 no taker fee on ADL, #44
-/// genesis/CHAIN_ID rename) are recorded as one rules epoch / chain reset in
-/// docs/ROLLUP-UPGRADE.md §7 (#47 B8).
-pub const ASSERTION_VERSION: u32 = 1;
+/// Pinned by the rollup AA (`assertion_version != 2` bounces), so it can
+/// only change together with an AA redeploy.
+///
+/// History (docs/ROLLUP-UPGRADE.md §7):
+/// - 1: original rules.
+/// - 2 (#47, one coordinated chain reset with the rollup/dispute/vault AA
+///   redeploy): #39 Place rollback, #42 no taker fee on ADL, #44
+///   genesis/CHAIN_ID rename, #47 execution changes (spot worst-case
+///   reserve, ADL band clamp, gov-nonce watermark, fill-less liquidation
+///   no-op, unique address binding), the `p:` op `typ` field and the
+///   `d:`/`D:` op address field, and the `adr:` witness leaves.
+pub const ASSERTION_VERSION: u32 = 2;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

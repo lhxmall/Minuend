@@ -7,7 +7,7 @@
 	// path: {challenge:1} is not a case here and never freezes anything.
 // Constants mirror Rust (crates/minuend-types/src/lib.rs):
 //   'minuend-v2'      -> CHAIN_ID
-//   1               -> ASSERTION_VERSION
+//   2               -> ASSERTION_VERSION (#47 B8: bumped with this redeploy)
 //   3600            -> CHALLENGE_SECS (finalize clean window from submit)
 //   604800          -> ESCAPE_STALL_SECS (escape hatch)
 //   1000000000000   -> SUBMIT_BOND_NET (standing pool floor, not per-height lock)
@@ -127,7 +127,7 @@
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
 						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
-						OR trigger.data.assertion_version != 1
+						OR trigger.data.assertion_version != 2
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
 						// #37-4: the 1024-hex forest is bound to one 64-hex

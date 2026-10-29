@@ -89,7 +89,7 @@ function submitData(height, stateRoot, prev, forest) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 1,
+    assertion_version: 2,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,

@@ -720,7 +720,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.1 submit(h) — rollup
 
-前置：`chain_id=='minuend-v2'` ∧ `assertion_version==1`
+前置：`chain_id=='minuend-v2'` ∧ `assertion_version==2`（#47 B8：随本次 AA 重新部署从 1 升到 2）
 ∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 且 h == last_submitted 原位重提——#47 A1）
 ∧ 全新提交时 prev == `state_root_{h-1}`（前序高度 fraud-failed 时拒绝，
   不再豁免——失败高度之上的新链必须走重提分支）；重提时 prev 必须等于
