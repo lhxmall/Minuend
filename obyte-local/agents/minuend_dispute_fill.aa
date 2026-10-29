@@ -295,11 +295,9 @@
 						AND trigger.data.eleft_proof.root == $post_wit
 						AND trigger.data.eleft_proof.index == 0
 						AND $ephi <= trigger.data.eleft;
-					$pe3 = ($k + 1 == $n) AND trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
-						AND trigger.data.eleft_proof.root == $post_wit
-						AND trigger.data.eleft_proof.index == (var[$rollup]['wit_count_' || $h] otherwise 1) - 1
-						AND trigger.data.eleft < $eplo;
-					$empty = ($pe1 OR $pe2 OR $pe3) ? '1' : '0';
+					// (No final-tree after-max arm here: the market-range
+					// fallback below covers it — ops budget.)
+					$empty = ($pe1 OR $pe2) ? '1' : '0';
 					// #47 A3/B1: every leg except a kind 0/1 maker leg binds
 					// the fill to the unit op at k (ops_root membership).
 					if ($who == 'taker' OR $kind >= 2) {

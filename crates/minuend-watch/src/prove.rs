@@ -477,7 +477,9 @@ fn aa_fill_verdict(
     let (pos_ok, pos_bail) = if leg.exp_absent {
         if pos_leaf.is_some() {
             (false, false) // surviving leaf where the engine removed it
-        } else if acct_pos_range(tree, leg.acct_hex, leg.allow_last).is_some() {
+        } else if acct_pos_range(tree, leg.acct_hex, false).is_some() {
+            // The AA's acct-wide arm has no final-tree after-max branch;
+            // that shape falls through to the market-range check below.
             (true, false)
         } else {
             match mkt_pos_range(tree, leg.acct_hex, leg.market, leg.allow_last) {
@@ -1326,7 +1328,7 @@ fn fill_proof(
             // Regime proofs: the acct-wide pos range empty on the posted
             // tree, or the market-range straddle, back a claimed-absent
             // post pos.
-            if let Some((li, rj)) = acct_pos_range(&posted_post, acct_hex, allow_last) {
+            if let Some((li, rj)) = acct_pos_range(&posted_post, acct_hex, false) {
                 obj.insert("eleft".into(), posted_post[li].clone().into());
                 obj.insert("eleft_proof".into(), {
                     let p = obyte_merkle::proof(&posted_post, li);
