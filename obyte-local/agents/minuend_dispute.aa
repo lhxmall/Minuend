@@ -596,6 +596,7 @@
 					// units are NOT excluded any more: their first fill's
 					// priority is checkable (the old right-neighbor gate
 					// made every multi-maker sweep unchallengeable).
+					if ($F[2] != '0') bounce('no fraud');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
