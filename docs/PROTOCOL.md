@@ -204,6 +204,8 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
+`assertion_version` 当前为 **2**（#47 B8，见 ROLLUP-UPGRADE §7），rollup AA
+只接受等于 2 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
 
@@ -236,6 +238,12 @@ meta_leaf    = sha256("meta" ‖ 全部规范化共识元数据)
 `prev_state_hash` 链条真正具备防重组性质：改历史高度必然断链。
 
 ### 3.2 aa_root（字符串域分片森林，专为 AA 设计）
+
+> **#47 A2 起，金库不再按这棵森林付款。** 森林的叶子从不公开（DA 里只有
+> 16 个 shard 根），任何争议谓词都无法指向一片伪造的森林叶，所以它不是一个
+> “可挑战”的承诺。金库改为对**最终 witness 根**（`wit_root_<h>`，§3.4）
+> 证明 `adr:` 与 `acct:` 两片叶子；森林保留为与 `aa_root` 哈希绑定的信息性
+> 承诺。下面的描述仅作格式记录。
 
 Oscript 的 `sha256()` 对参数的 UTF-8 文本做哈希（默认输出 base64！）。
 字节级树无法在 AA 内复算，因此另建一棵**同构但键为字符串**的树，并打成
@@ -276,12 +284,63 @@ assert last_unit 一致 ∧ replay.state_root == root   # RootMismatch
 
 TooManyUnits 上限（200000）在 from_applied 就挡住超大批次。
 
+### 3.4 witness 叶（`wit_leaves`，Obyte merkle，争议 AA 与金库共用）
+
+排序后的字符串叶，`obyte_merkle::root`（与 Oscript `is_valid_merkle_proof`
+同一算法）；每个已执行单元（含被拒单元）后的根依次进入 `trace`：
+
+```
+acct:{acct_hex64}:{collateral}:{perp}:{W}
+pos:{acct_hex64}:{market}:{qty}:{entry}:{isolated 0|1}:{bucket}
+ord:{order_hex}:{market}:{side}:{price}:{seq}:{remaining}:{acct_hex}:{isolated}:{margin_left}
+adr:{obyte_address}:{acct_hex64}          # #47 A2：地址 → 账户绑定
+meta:{market}:{tick}:{im}:{mm}:{taker_fee}:{keeper}:{delisted}:{mark}:{usd_per_unit}:{funding_cap}
+```
+
+- `adr:` 叶按地址排序，所以“某地址没有绑定”可以用相邻两叶做非成员证明。
+- 引擎保证**一个地址最多绑定一个账户**（`deposit` / `gov_deposit` 在地址已属于
+  别的账户时 `BadAccount`），且绑定只在操作**成功**后写入。
+- 金库提款：`adr:{trigger.address}:{acct}` 与 `acct:{acct}:{col}:{perp}:{W}`
+  都必须证明在 `wit_root_<last_finalized>` 中，再按 `amount + wd_ ≤ W` 付款。
+- `minuend_dispute_bind.aa` 对**每个单元**钉住金库读取的两列：
+  - P-wpin：`W` 只能在该账户自己的 `w:` op 下变为 `W + amount`，否则不变；
+  - P-adr：新出现的 `adr:{A}:{X}` 必须对应 `d:`/`D:` op 且 op 的账户为 X、
+    地址为 A；已有绑定不得改指向。
+  被拒单元两列都不变，所以“未变化”永远不会被判 fraud。
+
+### 3.5 op 描述串（`ops_element`，`ops_root` 承诺）
+
+```
+d:{acct}:{amount}:{addr}     D:{acct}:{amount}:{addr}     # #47 A2：带地址
+w:{acct}:{amount}:{nonce}    W:{acct}:{amount}:{nonce}
+c:{acct}:{order_hex}
+p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}   # #47 A3：typ 0=Limit 1=Market
+L:{caller}:{target}:{market}
+x:{unit_hex}                                               # 其他 op
+```
+
+**被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
+因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
+“不变”也不是“正确变化”的值才判 fraud（#47 跨 PR 一致性修复）。
+
+### 3.6 DA 分帧（#47 B11）
+
+`frames_blob`（内联）或 `packages`（多包）二者**恰好一个**；`data_root` 承诺
+**原始拼接字节**（多包按顺序直接拼接，不做任何归一化），解析的就是这串字节：
+
+- 合法 UTF-8，不允许 `\r`；
+- 帧之间恰好一个 `\n`；不允许空帧（开头、结尾、连续 `\n` 都拒绝）；
+- 后续包以 `\n` 开头即可衔接，一帧可以跨包切开（只看拼接结果）。
+
+#39 之前“包边界无分隔”和“末尾带 `\n`”的写法不再被接受（主网未上线，现有
+Rust / JS 生产者都不产生这两种形状）。
+
 ## 4. 结算层：三个 AA、两类谓词（CHAIN_ID=minuend-v2）
 
 状态变量（rollup AA；`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa
 submitted_at_h, state_root_h, aa_forest_h (1024 hex), prev_h,
   wit_root_h, trace_root_h, units_root_h, units_set_root_h,
   ops_root_h, fills_root_h, unit_count_h, wit_count_h, fill_count_h
@@ -294,7 +353,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>   # sbond 仅遗留路径
 
 侧链 ChainState（PERP 治理，§7）不变：markets、perp_balances/supply/burned、
 proposals、oracle 账本。金库 vault AA 只有 `deposit` / `deposit_perp` /
-`withdraw`，提款读 `var[ROLLUP]['aa_forest_'||last_finalized]`。
+`withdraw`，提款读 `var[ROLLUP]['wit_root_'||last_finalized]`（#47 A2，§3.4）。
 
 ### 生命周期（高度 h）
 

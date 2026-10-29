@@ -233,24 +233,49 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 ## 7. 执行规则断代记录（#47 B8）
 
 确定性状态转移一旦改变，新版 watcher 重放旧引擎产出的高度就会得到不同的
-`state_root`，误报 ROOT MISMATCH。以下变更**没有**升 `ASSERTION_VERSION`、也没有激活高度：
+`state_root`，误报 ROOT MISMATCH；op / 叶格式一旦改变，旧 AA 与新 watcher 也会
+互判 fraud。因此 **#47 把以下全部变更合并成一次协调的链重置，并把
+`ASSERTION_VERSION` 从 1 升到 2**（Rust `minuend_types::ASSERTION_VERSION` 与
+`minuend_rollup.aa` 的 `assertion_version != 2` 门同时修改；
+`rollup_aa_pins_the_rust_assertion_version` 测试锁住两者一致）：
 
-| 引入 PR | 变更 | 位置 |
-|---|---|---|
-| #39 | `Place` 失败整体回滚（旧行为会残留已移除的 maker / 半边状态） | `minuend-exec` `place` 的 candidate 克隆 |
-| #42 | kind-2（ADL）成交不收 taker fee | `minuend-state` `apply_fill_pair` |
-| #44 | genesis 种子、`ORDERING_SALT_DOMAIN`、`CHAIN_ID`、gossip topic 改名 | 见 #47 B5 |
+| 来源 | 变更 |
+|---|---|
+| #39 | `Place` 失败整体回滚 |
+| #42 | kind-2（ADL）成交不收 taker fee |
+| #44 | genesis 种子、`ORDERING_SALT_DOMAIN`、`CHAIN_ID`、gossip topic 改名（见 §8） |
+| #47 执行层 | spot_only 最坏情况预留、ADL 成交价钳进价格区间、gov-nonce 水位只在成功时推进、Place/清算撤销日志、无成交的清算不留任何状态、一个地址只能绑定一个账户、对不存在账户的提款不再创建空账户 |
+| #47 承诺格式 | `p:` op 增加 `typ`；`d:`/`D:` op 增加地址；witness 树增加 `adr:` 叶；快照格式 v5 |
+| #47 AA | rollup / dispute / dispute_fill 定义变化，新增 dispute_bind，vault 改为按 `wit_root` 付款 |
 
-为什么目前不升 `ASSERTION_VERSION`：rollup AA 在 submit 时硬性要求
-`assertion_version == 1`（`minuend_rollup.aa`），Rust 端 `validate_against` 也要求
-header 等于常量。单独把常量改成 2 会让**所有新批次被 AA bounce**、同时让所有旧批次
-在新 watcher 上 RootMismatch；必须与 AA 重新部署一起做。按高度激活则需要把上表里
-已知有问题的旧执行路径保留在代码里，风险大于收益。
+规则：**以后再改确定性执行语义或承诺格式，必须二选一**——要么与 rollup AA
+重新部署一起把 `ASSERTION_VERSION` 再升一级（并在本表追加一行），要么在
+`minuend-types` 增加按高度激活的规则开关并在此登记。
 
-**现行约定**：主网未上线，#44 的 genesis/`CHAIN_ID` 改名本身已经是一次链重置。
-上表三项一起视为同一个执行规则断代：
+## 8. #44 改名与 #47 重新部署：迁移说明（#47 B5）
 
-- 由 #39 之前的引擎产出的任何高度、快照或 WAL，都不能被当前 watcher / validator 重放，
-  运营方必须从新 genesis 重新开始（快照格式也已升到 v5，旧快照会被自动跳过）。
-- 今后再改确定性执行语义时，必须二选一：要么与 rollup AA 重新部署一起升
-  `ASSERTION_VERSION`，要么在 `minuend-types` 增加按高度激活的规则开关并在本节登记。
+#44 的“改名”并不是纯显示名变化：genesis unit id、初始 `last_finalized_root`、
+加盐排序域、`CHAIN_ID` 和 gossip topic 都变了，这些都进入共识或哈希。#47
+**有意把它当作一条新链**，不回退常量：
+
+1. **旧数据不可继续使用。** 任何按 `operp-*` 常量产生的 DAG、WAL、快照都无法被
+   当前代码同步（父引用指向旧 genesis → `MissingParent`；快照版本也已是 v5，旧
+   快照会被自动跳过）。节点必须清空数据目录、从新 genesis 启动。
+2. **旧部署作废。** `obyte-local/deployment.json` 里的旧测试网 vault
+   `JZMGB3RWMUFIXQ4DBPDGFRLNLJNQAREH` 是按 `operp-mvp-1` 定义部署的（#44 把该
+   记录的 `chain_id` 直接改成了 `minuend-mvp-1`，与链上事实不符）。现在它被移到
+   `legacy_deployments` 并标为 `stale`，顶层地址全部为 `null`，`status` 为
+   `not-deployed`；`deploy_testnet.js` / `deploy_mainnet.js` 部署后会重写该文件
+   （`deploy_testnet.js` 以前构造了记录却从不写盘，已修）。
+3. **新部署顺序**（两个脚本已实现）：先部署 `minuend_dispute.aa`、
+   `minuend_dispute_fill.aa`、`minuend_dispute_bind.aa`（它们的定义不含 rollup
+   地址）→ 把三者地址写进 `minuend_rollup.aa`（`DISPUTE_AA_HERE` /
+   `DISPUTE_FILL_AA_HERE` / `DISPUTE_BIND_AA_HERE`）后部署 rollup → 把 rollup
+   地址写进 `minuend_vault.aa` 后部署 vault → 依次发送 `{bind:1}`、
+   `{bind_fill:1}`、`{bind_bind:1}`（各 20000 字节，`rollup` 地址放在 trigger
+   数据里）→ 校验 rollup 的 `dispute_aa` / `dispute_fill_aa` / `dispute_bind_aa`。
+4. **旧金库里的资金**（若有）只能用旧版本工具按旧 forest 证明取出；新金库不认
+   旧根。运营方与 watcher 的环境变量统一使用 `MINUEND_*`（旧 `OPERP_*` 仍可读取
+   并打印弃用警告，见 B9）。
+5. watcher / poster / 节点必须**同时**升级：新 `assertion_version`、新 op 格式与
+   新 `adr:` 叶，任何一方使用旧版本都会被另一方判定不一致。

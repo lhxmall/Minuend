@@ -85,5 +85,9 @@ fn main() {
     let out =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/withdraw_claim.json");
     std::fs::write(&out, serde_json::to_string_pretty(&claim).unwrap()).expect("write");
-    println!("wrote {} (witness root {})", out.display(), claim["wit_root"]);
+    println!(
+        "wrote {} (witness root {})",
+        out.display(),
+        claim["wit_root"]
+    );
 }

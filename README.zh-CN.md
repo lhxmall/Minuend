@@ -59,7 +59,7 @@ rollup 与 vault，最后将两个 dispute AA 各绑定一次并核验绑定状�
 | `minuend-exec` | 引擎本体：ingest → apply → 事件流；place/cancel/deposit/withdraw/liquidate 全量入口校验 |
 | `minuend-settle` | 批次 checkpoint、`validate_against` 重放审计（含独立充值证据验证）、`temp_data` 载荷、提款证明生成 |
 | `minuend-gossip` | operator 之间 WantUnits/HaveUnits 按需孤儿同步（纯 P2P 层，传输无关，绝不进共识） |
-| `minuend-watch` | 独立 rollup watcher：重放 `da_unit_<h>` 并组谓词 proof.json；当前 `post_challenge.js` 仍是本地 aa-testkit CLI，未接生产 hub 提交路径，不声称生产环境自动揭发（#37 第 2 项仍开放） |
+| `minuend-watch` | 独立 rollup watcher：重放 `da_unit_<h>` 并组谓词 proof.json；设置 `MINUEND_WATCH_MNEMONIC` 后经 `post_challenge_live.js` 在正式网络自动提交挑战（#47 L5）；`post_challenge.js` 仍是本地 aa-testkit 演练 |
 
 ## 协议设计原理
 
@@ -202,7 +202,8 @@ obyte-local/
   test_settlement_aa.js          三门 AA E2E（Linux/CI；win32 skip）
   deploy_mainnet.js / issue_perp.js  主网发 AA / 发 PERP
   post_batch.js                  本地 aa-testkit temp_data+submit → finalize → claim；未接生产
-  post_challenge.js              本地 aa-testkit 谓词 CLI（`--pred --proof`）；未接生产提交
+  post_challenge.js              本地 aa-testkit 谓词 CLI（`--pred --proof [--fill|--bind]`）
+  post_challenge_live.js         正式网络挑战提交（轻钱包，发送前再检查 600 秒余量）
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -409,7 +410,7 @@ WantUnits gossip、资金费外部锚接线。
 ## 验证状态
 
 - **Rust / js-checks / e2e**：CI 跑 workspace 测试、四份 AA 复杂度门（每 formula ≤100 且 Σops ≤2000）、golden vector、`test_settlement_aa.js`（win32 skip）。
-- **Watcher：** `minuend-watch` 逐高度重放并组 `proof.json`（需 `--vault/--rollup`）。**尚未实现**对正式 hub 的自动挑战：设了 `MINUEND_WATCH_MNEMONIC` 时，每个可挑战告警都会以 `WATCH CRITICAL ... NOT posted` 报出并保留 proof 文件供人工提交；未设助记词仅报警；`MINUEND_WATCH_DEVNET_CHALLENGE=1` 只在本地 aa-testkit 演练 `post_challenge.js`。距 3600 秒窗口截止 600 秒内不再发挑战；重放卡在某高度时持续告警，并对后续高度做 DA/`data_root` 检查。旧的 `OPERP_*` 环境变量仍可读取（会打印弃用警告）。须与 poster 分钥。
+- **Watcher：** `minuend-watch` 逐高度重放并组 `proof.json`（需 `--vault/--rollup`）。设了 `MINUEND_WATCH_MNEMONIC` 时，经 `obyte-local/post_challenge_live.js`（轻钱包；`MINUEND_WATCH_NETWORK=mainnet|testnet`，可选 `MINUEND_WATCH_HUB`）自动提交挑战：脚本在发送前重新读取链上 `submitted_at_<h>`/`frozen_<h>` 并用新的时钟再检查一次 600 秒余量；任何失败都以 `WATCH CRITICAL ... NOT posted` 报出并保留 proof 文件；未设助记词仅报警；`MINUEND_WATCH_DEVNET_CHALLENGE=1` 只在本地 aa-testkit 演练 `post_challenge.js`。距 3600 秒窗口截止 600 秒内不再发挑战；重放卡在某高度时持续告警，并对后续高度做 DA/`data_root` 检查。旧的 `OPERP_*` 环境变量仍可读取（会打印弃用警告）。须与 poster 分钥。
 
 ## 许可证
 

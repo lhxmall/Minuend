@@ -64,7 +64,7 @@ definition-hash cycle.
 | `minuend-exec` | The engine: ingest → apply → events; place/cancel/deposit/withdraw/liquidate with full intake validation |
 | `minuend-settle` | Batch checkpoints, `validate_against` replay verification, `temp_data` payloads, proof generation |
 | `minuend-gossip` | WantUnits/HaveUnits on-demand orphan sync between operators (pure P2P layer, transport-agnostic, never consensus) |
-| `minuend-watch` | Independent rollup watcher: replays `da_unit_<h>` and builds predicate `proof.json`; `post_challenge.js` is currently a local aa-testkit CLI, not a production hub submitter, so automatic production challenges are not claimed (#37 item 2 remains open) |
+| `minuend-watch` | Independent rollup watcher: replays `da_unit_<h>`, builds predicate `proof.json`, and (with `MINUEND_WATCH_MNEMONIC`) posts it live through `post_challenge_live.js` (#47 L5); `post_challenge.js` remains the local aa-testkit drill |
 
 ## Protocol principles
 
@@ -264,7 +264,8 @@ obyte-local/
   test_settlement_aa.js          three-AA E2E (Linux/CI; win32 skips)
   deploy_mainnet.js / issue_perp.js  mainnet AA deploy / PERP issuance
   post_batch.js                  local aa-testkit temp_data+submit → finalize → claim; not production-connected
-  post_challenge.js              local aa-testkit predicate CLI (`--pred --proof`); not production-connected
+  post_challenge.js              local aa-testkit predicate CLI (`--pred --proof [--fill|--bind]`)
+  post_challenge_live.js         live challenge poster (light headless wallet, 600 s margin re-check)
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -479,11 +480,15 @@ records) and [ROLLUP-UPGRADE.md](docs/ROLLUP-UPGRADE.md). Validation:
   ≤ 100 and Σops ≤ 2000), the golden vector, and `test_settlement_aa.js`
   (win32 skips).
 * **Watcher:** `minuend-watch` replays every height and builds `proof.json`
-  for a fraud predicate (`--vault`, `--rollup`). Automatic **live-hub**
-  challenge posting is not implemented yet: with `MINUEND_WATCH_MNEMONIC` set
-  it reports every challengeable alert as `WATCH CRITICAL ... NOT posted` and
-  keeps the proof file for a manual post; without a mnemonic it prints alerts
-  only; `MINUEND_WATCH_DEVNET_CHALLENGE=1` runs `post_challenge.js` as a local
+  for a fraud predicate (`--vault`, `--rollup`). With `MINUEND_WATCH_MNEMONIC`
+  set it posts the challenge on the live network via
+  `obyte-local/post_challenge_live.js` (light headless wallet;
+  `MINUEND_WATCH_NETWORK=mainnet|testnet`, optional `MINUEND_WATCH_HUB`); the
+  script re-reads `submitted_at_<h>`/`frozen_<h>` and re-checks the 600 s
+  margin with a fresh clock right before broadcasting, and the watcher keeps
+  the proof file and reports `WATCH CRITICAL ... NOT posted` if anything
+  fails. Without a mnemonic it prints alerts only;
+  `MINUEND_WATCH_DEVNET_CHALLENGE=1` runs `post_challenge.js` as a local
   aa-testkit drill. It stops posting 600 s before the 3600 s window closes,
   and keeps alerting (plus DA/`data_root` checks on later heights) when replay
   is stuck at one height. Legacy `OPERP_*` variables are still read, with a

@@ -169,10 +169,8 @@ fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
             Some(l) if l == post_leaf => None,
             Some(_) => Some(()),
             None => {
-                let ok = o.len() == 4
-                    && (o[0] == "d" || o[0] == "D")
-                    && o[1] == p[2]
-                    && o[3] == p[1];
+                let ok =
+                    o.len() == 4 && (o[0] == "d" || o[0] == "D") && o[1] == p[2] && o[3] == p[1];
                 if ok {
                     None
                 } else {
@@ -1706,7 +1704,10 @@ mod tests {
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
         assert_eq!(proof.pred, "wpin");
         assert_eq!(proof.target(), "bind");
-        assert!(proof.data.get("left").is_some(), "fresh account: pre absence");
+        assert!(
+            proof.data.get("left").is_some(),
+            "fresh account: pre absence"
+        );
     }
 
     /// #47 A2: an address binding re-pointed to another account → P-adr.

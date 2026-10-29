@@ -8993,7 +8993,7 @@ mod tests {
         let own = OrderId([7u8; 32]);
         eng.state
             .book_mut(BTC_USD)
-            .submit(
+            .submit_with(
                 Order {
                     id: own,
                     account: a,
