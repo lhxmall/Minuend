@@ -238,10 +238,16 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
         } => {
             format!("W:{}:{}:{}", hex::encode(account.0), amount, nonce)
         }
+        // #47 A3: `typ` (0 Limit / 1 Market) is committed so the fill
+        // dispute AA can tell whether an unfilled remainder rests in the
+        // book (Limit + Gtc) or is refunded in-unit — the escrow identity
+        // derives the taker's resting margin from the op instead of
+        // trusting an operator-chosen order id.
         Place {
             account,
             market,
             side,
+            typ,
             price,
             qty,
             isolated,
@@ -250,7 +256,7 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
             ..
         } => {
             format!(
-                "p:{}:{}:{}:{}:{}:{}:{}:{}",
+                "p:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 hex::encode(account.0),
                 market.0,
                 side.as_u8(),
@@ -258,7 +264,8 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
                 qty,
                 if *isolated { 1 } else { 0 },
                 margin,
-                tif.as_u8()
+                tif.as_u8(),
+                typ.as_u8()
             )
         }
         Cancel { account, order_id } => {
