@@ -5592,8 +5592,10 @@ mod tests {
         // Committed (snapshot) watermark 5; the WAL-only 6 stays apart.
         assert_eq!(replayer.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
         assert_eq!(replayer.wal_gov_nonces[&acct_of(&sk(1))], 6);
-        // Producing view: never reuse a committed nonce (WAL included).
-        assert_eq!(replayer.gov_nonce_watermark(&acct_of(&sk(1))), 6);
+        // R2-E-7: execution reads committed state only, in BOTH modes, so
+        // the producer and every validator agree; the WAL is only flagged.
+        assert_eq!(replayer.gov_nonce_watermark(&acct_of(&sk(1))), 5);
+        assert!(replayer.gov_wal_ahead(&acct_of(&sk(1))));
         replayer.validating = true;
         assert_eq!(replayer.gov_nonce_watermark(&acct_of(&sk(1))), 5);
         let dep_id = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
@@ -8405,9 +8407,12 @@ mod tests {
         let bob = sk(2);
         let a = acct_of(&alice);
 
-        // Alice's entire deposit is the $10 IM-floor margin; bob is the
+        // Alice's deposit is the $10 IM-floor margin plus exactly the
+        // $0.05 opening taker fee (5 bps of $100): R2-E-6 refuses an
+        // isolated taker whose fee would push its cross collateral below
+        // zero (the claw used to bill bob for it). Bob is the
         // counterparty. Genesis seeds BTC's mark at $100k.
-        let d1 = deposit(vec![g], &alice, usd(10), 1);
+        let d1 = deposit(vec![g], &alice, usd(10) + 50_000, 1);
         let mut tip = unit_id(&d1);
         eng.ingest(d1).unwrap();
         let d2 = deposit(vec![tip], &bob, usd(1_000), 2);
@@ -8827,14 +8832,19 @@ mod tests {
             free > 0 && free <= extra + 100 * USD_SCALE as i128,
             "free {free}"
         );
-        let evs = eng.ingest(withdraw_unit(vec![tip], &alice, 1, 2)).unwrap();
-        assert!(applied(&evs));
+        // (R2-E-5: withdrawals below MIN_WITHDRAW_AMOUNT are refused, so
+        // the probe takes exactly the minimum.)
         let evs = eng
-            .ingest(withdraw_unit(vec![tip], &alice, free, 3))
+            .ingest(withdraw_unit(vec![tip], &alice, MIN_WITHDRAW_AMOUNT, 2))
+            .unwrap();
+        assert!(applied(&evs));
+        let rest = free - MIN_WITHDRAW_AMOUNT;
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, rest + 1, 3))
             .unwrap();
         assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
         let evs = eng
-            .ingest(withdraw_unit(vec![tip], &alice, free - 1, 4))
+            .ingest(withdraw_unit(vec![tip], &alice, rest, 4))
             .unwrap();
         assert!(applied(&evs), "{evs:?}");
         // Same for the short side.
@@ -9269,5 +9279,591 @@ mod tests {
             eng.state.books[&BTC_USD].get(own).is_some(),
             "own escrowed order survives a fill-less liquidation"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Round-2 EXEC regressions (findings/round-2-exec.md, R2-R-3).
+    // ---------------------------------------------------------------
+
+    /// R2-E-1: a Reveal whose inner op names ANOTHER account (here a Place
+    /// "as" alice signed by mallory) is refused at ingest, and the executor
+    /// refuses it too when it reaches `reveal_op` by any other path —
+    /// without consuming the commit. Nested Commit/Reveal is refused.
+    #[test]
+    fn r2e1_reveal_inner_account_must_match_outer() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let mallory = sk(6);
+        let a = acct_of(&alice);
+        let m = acct_of(&mallory);
+        let d = deposit(vec![genesis_id()], &alice, 10_000 * USD_SCALE as i128, 1);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let foreign = Op::Withdraw {
+            account: a,
+            amount: 5_000 * USD_SCALE as i128,
+            nonce: 1,
+        };
+        let salt = [3u8; 32];
+        let h = minuend_dag::reveal_commit_hash(&foreign, &salt);
+        let c = commit_unit(
+            vec![tip],
+            &mallory,
+            h,
+            eng.state.height + minuend_types::COMMIT_TTL_HEIGHTS,
+        );
+        tip = unit_id(&c);
+        assert!(applied(&eng.ingest(c).unwrap()));
+        let r = sign_unit(
+            vec![tip],
+            Op::Reveal {
+                account: m,
+                commit_ref: h,
+                op: Box::new(foreign.clone()),
+                salt,
+            },
+            &mallory,
+        );
+        // Ingest: the signer does not own the inner op.
+        assert!(matches!(eng.ingest(r.clone()), Err(ExecError::BadSig)));
+        // Executor (DAG inserted directly, bypassing the ingest check).
+        let before = eng.state.state_root();
+        eng.dag.insert(r).unwrap();
+        let evs = eng.apply_ready();
+        assert!(rejected_with(&evs, RejectReason::BadAccount), "{evs:?}");
+        assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+        assert!(!eng.state.commits[&h].revealed, "commit not consumed");
+        assert_eq!(eng.state.accounts[&a].collateral, 10_000 * USD_SCALE as i128);
+        assert!(eng.state.withdrawn_total.get(&a).is_none());
+
+        // Nested Commit inside a Reveal is refused by the shared rule.
+        let outer = Op::Reveal {
+            account: m,
+            commit_ref: h,
+            op: Box::new(Op::Commit {
+                account: m,
+                commit: [0u8; 32],
+                ttl_height: 1,
+            }),
+            salt,
+        };
+        if let Op::Reveal { op, .. } = &outer {
+            assert!(!minuend_dag::reveal_inner_ok(&outer, op));
+        }
+        // Same-account inner op is still fine.
+        let own = Op::Withdraw {
+            account: m,
+            amount: 1,
+            nonce: 1,
+        };
+        assert!(minuend_dag::reveal_inner_ok(&outer, &own));
+    }
+
+    /// R2-E-3: collateral reserved by a resting cross opening order cannot
+    /// be withdrawn (the order could fill after the cash already left).
+    #[test]
+    fn r2e3_withdraw_cannot_release_resting_order_reserve() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let d = deposit(vec![genesis_id()], &alice, 10_000 * USD_SCALE as i128, 1);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        // Resting cross bid: 0.5 BTC @ 100k → IM 10% of $50k = $5k reserved.
+        let bid = place(
+            vec![tip],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            100_000 * PRICE_SCALE as i64,
+            QTY_SCALE / 2,
+            1,
+        );
+        let tip = unit_id(&bid);
+        assert!(applied(&eng.ingest(bid).unwrap()));
+        let resting = eng.resting_open_im(a);
+        assert!(resting > 0);
+        // Pulling the whole balance used to pass (no positions → equity 0).
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, 10_000 * USD_SCALE as i128, 1))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        let free = 10_000 * USD_SCALE as i128 - resting;
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, free + 1, 2))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        assert_eq!(eng.state.accounts[&a].collateral, 10_000 * USD_SCALE as i128);
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, free, 3))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+        assert_eq!(eng.state.accounts[&a].collateral, resting);
+    }
+
+    /// R2-E-4: a spot_only position is never liquidated (no ADL at the
+    /// frozen mark), even when its account is liquidatable through a perp.
+    #[test]
+    fn r2e4_spot_position_is_not_liquidatable() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let keeper = sk(3);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let p = {
+            let (e, _, m) = spot_engine(&[]);
+            e.state.markets[&m]
+        };
+        let need_bid =
+            minuend_account::spot_order_requirement(Side::Bid, px, QTY_SCALE, &p).unwrap();
+        let need_ask =
+            minuend_account::spot_order_requirement(Side::Ask, px, QTY_SCALE, &p).unwrap();
+        let (mut eng, mut tip, meme) = spot_engine(&[
+            (&alice, need_bid),
+            (&bob, need_ask),
+            (&keeper, 1_000 * USD_SCALE as i128),
+        ]);
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        assert!(applied(&eng.ingest(ask).unwrap()));
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&bid);
+        assert!(applied_with_fills(&eng.ingest(bid).unwrap()));
+        // Make alice liquidatable through a (pre-existing) perp long far
+        // underwater at the BTC mark.
+        let a = acct_of(&alice);
+        eng.state.account_mut(a).positions.insert(
+            BTC_USD,
+            minuend_account::Position {
+                market: BTC_USD,
+                qty: QTY_SCALE as i64,
+                entry_price: 200_000 * PRICE_SCALE as i64,
+                isolated: false,
+            },
+        );
+        assert!(
+            eng.state.accounts[&a]
+                .snapshot(&eng.state.marks, &eng.state.markets)
+                .liquidatable
+        );
+        let before = eng.state.state_root();
+        let liq = sign_unit(
+            vec![tip],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: meme,
+            },
+            &keeper,
+        );
+        let evs = eng.ingest(liq).unwrap();
+        assert!(rejected_with(&evs, RejectReason::NotLiquidatable), "{evs:?}");
+        assert_eq!(eng.state.state_root(), before);
+        assert_eq!(eng.state.accounts[&a].positions[&meme].qty, QTY_SCALE as i64);
+    }
+
+    /// R2-E-5: withdrawals are capped per account (one account can no longer
+    /// fill a global table and freeze everyone), and dust withdrawals below
+    /// MIN_WITHDRAW_AMOUNT are refused unless they sweep the whole balance.
+    #[test]
+    fn r2e5_withdrawal_cap_is_per_account_with_minimum_amount() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let bob = sk(2);
+        let carol = sk(3);
+        let g = genesis_id();
+        for (who, amt, aa) in [
+            (&alice, 1_000 * USD_SCALE as i128, 1u8),
+            (&bob, 1_000 * USD_SCALE as i128, 2),
+            (&carol, MIN_WITHDRAW_AMOUNT / 2, 3),
+        ] {
+            assert!(applied(&eng.ingest(deposit(vec![g], who, amt, aa)).unwrap()));
+        }
+        // Dust below the minimum: refused...
+        let evs = eng.ingest(withdraw_unit(vec![g], &alice, 1, 1)).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // ...unless it sweeps the entire balance.
+        let evs = eng
+            .ingest(withdraw_unit(vec![g], &carol, MIN_WITHDRAW_AMOUNT / 2, 1))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+        for n in 1..=MAX_PENDING_WITHDRAWALS_PER_ACCOUNT as u64 {
+            let evs = eng
+                .ingest(withdraw_unit(vec![g], &alice, MIN_WITHDRAW_AMOUNT, 100 + n))
+                .unwrap();
+            assert!(applied(&evs), "withdrawal {n}: {evs:?}");
+        }
+        let evs = eng
+            .ingest(withdraw_unit(vec![g], &alice, MIN_WITHDRAW_AMOUNT, 999))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // Another account is unaffected by alice's full ledger.
+        let evs = eng
+            .ingest(withdraw_unit(vec![g], &bob, MIN_WITHDRAW_AMOUNT, 1))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+    }
+
+    /// R2-E-6: an isolated taker whose entire collateral is escrowed can no
+    /// longer push its taker fee onto the maker through the claw.
+    #[test]
+    fn r2e6_isolated_taker_fee_is_not_clawed_from_maker() {
+        let usd = |v: i128| v * USD_SCALE as i128;
+        let px = 100_000 * PRICE_SCALE as i64;
+        let qty = QTY_SCALE / 1000; // $100 notional, $10 IM, $0.05 fee
+        for cushion in [0i128, 50_000] {
+            let mut eng = activated_engine();
+            let g = genesis_id();
+            let alice = sk(1);
+            let bob = sk(2);
+            let a = acct_of(&alice);
+            let b = acct_of(&bob);
+            eng.ingest(deposit(vec![g], &alice, usd(10) + cushion, 1))
+                .unwrap();
+            eng.ingest(deposit(vec![g], &bob, usd(1_000), 2)).unwrap();
+            let ask = place(
+                vec![g],
+                &bob,
+                Side::Ask,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                qty,
+                1,
+            );
+            assert!(applied(&eng.ingest(ask).unwrap()));
+            let bob_before = eng.state.accounts[&b].collateral;
+            let before = eng.state.state_root();
+            let iso = place_iso(
+                vec![g],
+                &alice,
+                BTC_USD,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                qty,
+                1,
+                10 * USD_SCALE,
+            );
+            let evs = eng.ingest(iso).unwrap();
+            if cushion == 0 {
+                assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+                assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+            } else {
+                assert!(applied_with_fills(&evs), "{evs:?}");
+                assert_eq!(eng.state.accounts[&a].collateral, 0, "fee paid by alice");
+                assert_eq!(
+                    eng.state.accounts[&b].collateral,
+                    bob_before,
+                    "maker pays nothing for the taker's fee"
+                );
+            }
+        }
+    }
+
+    /// R2-E-8: cross spot exposure cannot share an account with any
+    /// non-spot exposure (cross or isolated), in either order.
+    #[test]
+    fn r2e8_cross_spot_cannot_mix_with_non_spot_exposure() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let (mut eng, tip, meme) = spot_engine(&[
+            (&alice, 1_000_000 * USD_SCALE as i128),
+            (&bob, 1_000_000 * USD_SCALE as i128),
+        ]);
+        // Alice: resting cross perp bid first, then a cross spot open.
+        let perp = place(
+            vec![tip],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px / 2,
+            QTY_SCALE,
+            1,
+        );
+        assert!(applied(&eng.ingest(perp).unwrap()));
+        let spot = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px / 2,
+            QTY_SCALE,
+            2,
+        );
+        assert!(rejected_with(&eng.ingest(spot).unwrap(), RejectReason::Risk));
+        // Bob: resting cross spot bid first, then any perp open.
+        let spot = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px / 2,
+            QTY_SCALE,
+            1,
+        );
+        assert!(applied(&eng.ingest(spot).unwrap()));
+        let perp = place(
+            vec![tip],
+            &bob,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px / 2,
+            QTY_SCALE,
+            2,
+        );
+        assert!(rejected_with(&eng.ingest(perp).unwrap(), RejectReason::Risk));
+        let iso_perp = place_iso(
+            vec![tip],
+            &bob,
+            BTC_USD,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px / 2,
+            QTY_SCALE,
+            2,
+            10_000 * USD_SCALE,
+        );
+        assert!(rejected_with(&eng.ingest(iso_perp).unwrap(), RejectReason::Risk));
+    }
+
+    /// R2-E-9: summing resting quantities no longer overflows i64 (debug
+    /// panic / release wrap to a zero reserve).
+    #[test]
+    fn r2e9_resting_open_im_does_not_overflow() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let g = genesis_id();
+        // A fresh (unmarked) perp market so a 1-tick limit prices the order.
+        let d = gov_dep(vec![g], &sk(9), CREATE_MARKET_FEE_PERP, 99);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(9), false);
+        eng.ingest(cm).unwrap();
+        let mkt = MarketId(2);
+        assert!(eng.state.markets.contains_key(&mkt));
+        eng.ingest(deposit(vec![g], &alice, 1_000_000 * USD_SCALE as i128, 1))
+            .unwrap();
+        let q = 5_000_000_000_000_000_000u64; // two of these exceed i64::MAX
+        for n in 1..=3u64 {
+            let bid = place_on(
+                vec![g],
+                &alice,
+                mkt,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                1,
+                q,
+                n,
+            );
+            let _ = eng.ingest(bid).unwrap();
+        }
+        let live = eng.state.books[&mkt]
+            .live_orders()
+            .filter(|o| o.account == a)
+            .count();
+        assert!(live >= 2, "need two resting orders, got {live}");
+        let one = bps(notional_usd(q, 1), eng.state.market_params(mkt).im_bps);
+        assert!(
+            eng.resting_open_im(a) >= one * live as i128 - live as i128,
+            "reserve wrapped: {}",
+            eng.resting_open_im(a)
+        );
+    }
+
+    /// R2-E-11: a funding-rate off-book liquidation that fails mid-way
+    /// (here: the keeper credit overflows at the very end) leaves no
+    /// half-applied ADL fills behind; a failing inner Reveal op does not
+    /// consume its commit.
+    #[test]
+    fn r2e11_failed_funding_liquidation_and_reveal_leave_state_unchanged() {
+        use minuend_account::Position;
+        let mut eng = activated_engine();
+        let creator = acct_of(&sk(1));
+        eng.state
+            .perp_balances
+            .insert(creator, CREATE_MARKET_FEE_PERP);
+        let mut symbol = [0u8; 16];
+        symbol[..6].copy_from_slice(b"FUNDLX");
+        eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
+        let mkt = MarketId(2);
+        let alice = acct_of(&sk(2));
+        let bob = acct_of(&sk(3));
+        let keeper = acct_of(&sk(4));
+        let entry = minuend_types::encode_funding_price(40);
+        for (who, q) in [(alice, QTY_SCALE as i64), (bob, -(QTY_SCALE as i64))] {
+            eng.state.account_mut(who).positions.insert(
+                mkt,
+                Position {
+                    market: mkt,
+                    qty: q,
+                    entry_price: entry,
+                    isolated: false,
+                },
+            );
+        }
+        eng.state
+            .marks
+            .insert(mkt, minuend_types::encode_funding_price(30));
+        eng.state
+            .external_price_ring
+            .entry(mkt)
+            .or_default()
+            .push_back(minuend_types::ExternalSample {
+                seq: 0,
+                height: eng.state.height,
+                price: minuend_types::encode_funding_price(50),
+                source_id: 0,
+            });
+        eng.state.account_mut(INSURANCE_ACCOUNT).collateral = 10_000 * USD_SCALE as i128;
+        // Keeper at the top of the range: crediting any reward overflows.
+        eng.state.account_mut(keeper).collateral = i128::MAX;
+        let before = eng.state.state_root();
+        let out = eng.liquidate(UnitId([9u8; 32]), eng.state.seq, keeper, alice, mkt);
+        assert!(out.is_err(), "keeper credit must overflow: {out:?}");
+        assert_eq!(eng.state.state_root(), before, "no half-applied ADL");
+        assert_eq!(eng.state.accounts[&alice].positions[&mkt].qty, QTY_SCALE as i64);
+        assert_eq!(eng.state.accounts[&bob].positions[&mkt].qty, -(QTY_SCALE as i64));
+
+        // Reveal: inner Withdraw over the balance → Rejected, commit kept.
+        let mut eng = activated_engine();
+        let carol = sk(5);
+        let c_acct = acct_of(&carol);
+        let d = deposit(vec![genesis_id()], &carol, 10 * USD_SCALE as i128, 1);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let inner = Op::Withdraw {
+            account: c_acct,
+            amount: 20 * USD_SCALE as i128,
+            nonce: 1,
+        };
+        let salt = [4u8; 32];
+        let h = minuend_dag::reveal_commit_hash(&inner, &salt);
+        let c = commit_unit(
+            vec![tip],
+            &carol,
+            h,
+            eng.state.height + minuend_types::COMMIT_TTL_HEIGHTS,
+        );
+        tip = unit_id(&c);
+        eng.ingest(c).unwrap();
+        let before = eng.state.state_root();
+        let r = sign_unit(
+            vec![tip],
+            Op::Reveal {
+                account: c_acct,
+                commit_ref: h,
+                op: Box::new(inner),
+                salt,
+            },
+            &carol,
+        );
+        let evs = eng.ingest(r).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        assert!(!eng.state.commits[&h].revealed);
+        assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+    }
+
+    /// R2-R-3: an amount the batch frame encoder cannot represent is refused
+    /// at ingest — the unit never reaches the DAG, so no batch can contain
+    /// it (and `Batch::frames` can never fail on it).
+    #[test]
+    fn r2r3_out_of_range_amounts_refused_at_ingest() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let g = genesis_id();
+        let bad = [
+            Op::Withdraw {
+                account: a,
+                amount: 1i128 << 100,
+                nonce: 1,
+            },
+            Op::Withdraw {
+                account: a,
+                amount: i128::MIN,
+                nonce: 2,
+            },
+            Op::Deposit {
+                account: a,
+                addr: test_addr(1),
+                amount: i128::from(u64::MAX) + 1,
+                aa_unit: [1u8; 32],
+            },
+            Op::GovWithdraw {
+                account: a,
+                amount: u128::MAX,
+                nonce: 1,
+            },
+            Op::GovDeposit {
+                account: a,
+                addr: test_addr(1),
+                amount: u128::from(u64::MAX) + 1,
+                aa_unit: [2u8; 32],
+            },
+            Op::Reveal {
+                account: a,
+                commit_ref: [0u8; 32],
+                op: Box::new(Op::GovWithdraw {
+                    account: a,
+                    amount: u128::MAX,
+                    nonce: 3,
+                }),
+                salt: [0u8; 32],
+            },
+        ];
+        for op in bad {
+            assert!(!op_amounts_encodable(&op));
+            let u = sign_unit(vec![g], op, &alice);
+            let id = unit_id(&u);
+            assert!(matches!(eng.ingest(u), Err(ExecError::AmountOutOfRange)));
+            assert!(!eng.dag.is_known(id));
+        }
+        // Boundary values still encode and go through normal execution.
+        let edge = sign_unit(
+            vec![g],
+            Op::Withdraw {
+                account: a,
+                amount: i128::from(u64::MAX),
+                nonce: 9,
+            },
+            &alice,
+        );
+        assert!(eng.ingest(edge).is_ok());
     }
 }

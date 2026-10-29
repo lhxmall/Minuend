@@ -2669,4 +2669,41 @@ mod tests {
             format!("D:{}:9:{}", hex::encode([3u8; 32]), "B".repeat(32))
         );
     }
+
+    /// R2-E-12: a successful `validate_against` must hand the caller's
+    /// engine back in the caller's own mode, not stuck in validating mode.
+    #[test]
+    fn validate_against_restores_caller_mode() {
+        let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
+        batch.deposit_evidences = evidences;
+        assert!(!pre.validating);
+        batch.validate_against(prev_root, &mut pre).unwrap();
+        assert!(!pre.validating, "caller left in validating mode");
+        assert_eq!(pre.state.state_root(), eng.state.state_root());
+    }
+
+    /// R2-R-3: a unit whose op cannot be JSON-encoded makes `frames()`
+    /// return an error instead of panicking (engine-built batches can never
+    /// contain one: ingest refuses it).
+    #[test]
+    fn frames_out_of_range_amount_errors_instead_of_panicking() {
+        let (mut eng, pre, applied, _prev_root, evidences) = seed_trade();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
+        batch.deposit_evidences = evidences;
+        assert!(batch.frames().is_ok());
+        let mut bad = batch.units[0].clone();
+        bad.op = minuend_dag::Op::GovWithdraw {
+            account: minuend_types::AccountId([1u8; 32]),
+            amount: u128::MAX,
+            nonce: 1,
+        };
+        assert!(!minuend_exec::op_amounts_encodable(&bad.op));
+        batch.units.push(bad);
+        assert!(matches!(batch.frames(), Err(SettleError::FrameEncode)));
+        assert!(matches!(
+            batch.temp_data_packages(),
+            Err(SettleError::FrameEncode)
+        ));
+    }
 }

@@ -950,4 +950,25 @@ mod tests {
         assert_eq!(s.equity, 0);
         assert!(!s.reduce_only);
     }
+
+    /// R2-E-10: a short of `-1` growing by `i64::MAX` would land exactly on
+    /// `i64::MIN` (no checked_add error) and every later abs()/negation
+    /// would overflow. The fill is refused and the account is unchanged.
+    #[test]
+    fn position_qty_cannot_reach_i64_min() {
+        let mut a = Account::new(AccountId([1; 32]));
+        a.credit(10_000 * USD_SCALE as i128).unwrap();
+        a.apply_fill(Side::Ask, true, 1, 1, BTC_USD, None, 0, false)
+            .unwrap();
+        assert_eq!(a.positions[&BTC_USD].qty, -1);
+        let before = a.clone();
+        let r = a.apply_fill(Side::Ask, true, 1, i64::MAX as u64, BTC_USD, None, 0, false);
+        assert_eq!(r, Err(AccountError::Overflow));
+        assert_eq!(a.positions[&BTC_USD].qty, before.positions[&BTC_USD].qty);
+        assert_eq!(a.collateral, before.collateral);
+        // One less is fine: |qty| == i64::MAX.
+        a.apply_fill(Side::Ask, true, 1, (i64::MAX - 1) as u64, BTC_USD, None, 0, false)
+            .unwrap();
+        assert_eq!(a.positions[&BTC_USD].qty, -i64::MAX);
+    }
 }
