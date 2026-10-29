@@ -967,8 +967,17 @@ mod tests {
         assert_eq!(a.positions[&BTC_USD].qty, before.positions[&BTC_USD].qty);
         assert_eq!(a.collateral, before.collateral);
         // One less is fine: |qty| == i64::MAX.
-        a.apply_fill(Side::Ask, true, 1, (i64::MAX - 1) as u64, BTC_USD, None, 0, false)
-            .unwrap();
+        a.apply_fill(
+            Side::Ask,
+            true,
+            1,
+            (i64::MAX - 1) as u64,
+            BTC_USD,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
         assert_eq!(a.positions[&BTC_USD].qty, -i64::MAX);
     }
 }

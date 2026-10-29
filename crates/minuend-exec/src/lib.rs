@@ -1178,15 +1178,13 @@ impl Engine {
             .state
             .accounts
             .get(&account)
-            .map(|a| {
-                a.positions
-                    .iter()
-                    .any(|(m, p)| p.qty != 0 && !is_spot(m))
-            })
+            .map(|a| a.positions.iter().any(|(m, p)| p.qty != 0 && !is_spot(m)))
             .unwrap_or(false);
-        pos || self.state.books.iter().any(|(m, b)| {
-            !is_spot(m) && b.live_orders().any(|o| o.account == account)
-        })
+        pos || self
+            .state
+            .books
+            .iter()
+            .any(|(m, b)| !is_spot(m) && b.live_orders().any(|o| o.account == account))
     }
 
     /// R2-E-8: does `account` hold a CROSS position or a live cross order on
@@ -1254,7 +1252,11 @@ impl Engine {
                 }
             }
             // R2-E-10: no i64 negation (overflows at i64::MIN).
-            let short = if pos_qty < 0 { pos_qty.unsigned_abs() as u128 } else { 0 };
+            let short = if pos_qty < 0 {
+                pos_qty.unsigned_abs() as u128
+            } else {
+                0
+            };
             let long = pos_qty.max(0) as u128;
             oi += bid_qty.saturating_sub(short);
             oi += ask_qty.saturating_sub(long);
@@ -9341,7 +9343,10 @@ mod tests {
         assert!(rejected_with(&evs, RejectReason::BadAccount), "{evs:?}");
         assert_eq!(r2_root(&eng), before, "rejected = unchanged");
         assert!(!eng.state.commits[&h].revealed, "commit not consumed");
-        assert_eq!(eng.state.accounts[&a].collateral, 10_000 * USD_SCALE as i128);
+        assert_eq!(
+            eng.state.accounts[&a].collateral,
+            10_000 * USD_SCALE as i128
+        );
         assert!(!eng.state.withdrawn_total.contains_key(&a));
 
         // Nested Commit inside a Reveal is refused by the shared rule.
@@ -9394,7 +9399,12 @@ mod tests {
         assert!(resting > 0);
         // Pulling the whole balance used to pass (no positions → equity 0).
         let evs = eng
-            .ingest(withdraw_unit(vec![tip], &alice, 10_000 * USD_SCALE as i128, 1))
+            .ingest(withdraw_unit(
+                vec![tip],
+                &alice,
+                10_000 * USD_SCALE as i128,
+                1,
+            ))
             .unwrap();
         assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
         let free = 10_000 * USD_SCALE as i128 - resting;
@@ -9402,7 +9412,10 @@ mod tests {
             .ingest(withdraw_unit(vec![tip], &alice, free + 1, 2))
             .unwrap();
         assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
-        assert_eq!(eng.state.accounts[&a].collateral, 10_000 * USD_SCALE as i128);
+        assert_eq!(
+            eng.state.accounts[&a].collateral,
+            10_000 * USD_SCALE as i128
+        );
         let evs = eng
             .ingest(withdraw_unit(vec![tip], &alice, free, 3))
             .unwrap();
@@ -9485,9 +9498,15 @@ mod tests {
             &keeper,
         );
         let evs = eng.ingest(liq).unwrap();
-        assert!(rejected_with(&evs, RejectReason::NotLiquidatable), "{evs:?}");
+        assert!(
+            rejected_with(&evs, RejectReason::NotLiquidatable),
+            "{evs:?}"
+        );
         assert_eq!(r2_root(&eng), before);
-        assert_eq!(eng.state.accounts[&a].positions[&meme].qty, QTY_SCALE as i64);
+        assert_eq!(
+            eng.state.accounts[&a].positions[&meme].qty,
+            QTY_SCALE as i64
+        );
     }
 
     /// R2-E-5: withdrawals are capped per account (one account can no longer
@@ -9505,7 +9524,9 @@ mod tests {
             (&bob, 1_000 * USD_SCALE as i128, 2),
             (&carol, MIN_WITHDRAW_AMOUNT / 2, 3),
         ] {
-            assert!(applied(&eng.ingest(deposit(vec![g], who, amt, aa)).unwrap()));
+            assert!(applied(
+                &eng.ingest(deposit(vec![g], who, amt, aa)).unwrap()
+            ));
         }
         // Dust below the minimum: refused...
         let evs = eng.ingest(withdraw_unit(vec![g], &alice, 1, 1)).unwrap();
@@ -9582,8 +9603,7 @@ mod tests {
                 assert!(applied_with_fills(&evs), "{evs:?}");
                 assert_eq!(eng.state.accounts[&a].collateral, 0, "fee paid by alice");
                 assert_eq!(
-                    eng.state.accounts[&b].collateral,
-                    bob_before,
+                    eng.state.accounts[&b].collateral, bob_before,
                     "maker pays nothing for the taker's fee"
                 );
             }
@@ -9624,7 +9644,10 @@ mod tests {
             QTY_SCALE,
             2,
         );
-        assert!(rejected_with(&eng.ingest(spot).unwrap(), RejectReason::Risk));
+        assert!(rejected_with(
+            &eng.ingest(spot).unwrap(),
+            RejectReason::Risk
+        ));
         // Bob: resting cross spot bid first, then any perp open.
         let spot = place_on(
             vec![tip],
@@ -9648,7 +9671,10 @@ mod tests {
             QTY_SCALE,
             2,
         );
-        assert!(rejected_with(&eng.ingest(perp).unwrap(), RejectReason::Risk));
+        assert!(rejected_with(
+            &eng.ingest(perp).unwrap(),
+            RejectReason::Risk
+        ));
         let iso_perp = place_iso(
             vec![tip],
             &bob,
@@ -9661,7 +9687,10 @@ mod tests {
             2,
             10_000 * USD_SCALE,
         );
-        assert!(rejected_with(&eng.ingest(iso_perp).unwrap(), RejectReason::Risk));
+        assert!(rejected_with(
+            &eng.ingest(iso_perp).unwrap(),
+            RejectReason::Risk
+        ));
     }
 
     /// R2-E-9: summing resting quantities no longer overflows i64 (debug
@@ -9765,8 +9794,14 @@ mod tests {
         let out = eng.liquidate(UnitId([9u8; 32]), eng.state.seq, keeper, alice, mkt);
         assert!(out.is_err(), "keeper credit must overflow: {out:?}");
         assert_eq!(r2_root(&eng), before, "no half-applied ADL");
-        assert_eq!(eng.state.accounts[&alice].positions[&mkt].qty, QTY_SCALE as i64);
-        assert_eq!(eng.state.accounts[&bob].positions[&mkt].qty, -(QTY_SCALE as i64));
+        assert_eq!(
+            eng.state.accounts[&alice].positions[&mkt].qty,
+            QTY_SCALE as i64
+        );
+        assert_eq!(
+            eng.state.accounts[&bob].positions[&mkt].qty,
+            -(QTY_SCALE as i64)
+        );
 
         // Reveal: inner Withdraw over the balance → Rejected, commit kept.
         let mut eng = activated_engine();
