@@ -227,3 +227,30 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 6. **以后真要任意合约时：** 新 VM crate、新裁判、新 `CHAIN_ID`、用户迁资金。不要在 1–5 里预埋虚拟机。
 
 `CHAIN_ID` 在结算层切到新协议时换新值。旧金库资金走现有 finalized 提款迁出。
+
+---
+
+## 7. 执行规则断代记录（#47 B8）
+
+确定性状态转移一旦改变，新版 watcher 重放旧引擎产出的高度就会得到不同的
+`state_root`，误报 ROOT MISMATCH。以下变更**没有**升 `ASSERTION_VERSION`、也没有激活高度：
+
+| 引入 PR | 变更 | 位置 |
+|---|---|---|
+| #39 | `Place` 失败整体回滚（旧行为会残留已移除的 maker / 半边状态） | `minuend-exec` `place` 的 candidate 克隆 |
+| #42 | kind-2（ADL）成交不收 taker fee | `minuend-state` `apply_fill_pair` |
+| #44 | genesis 种子、`ORDERING_SALT_DOMAIN`、`CHAIN_ID`、gossip topic 改名 | 见 #47 B5 |
+
+为什么目前不升 `ASSERTION_VERSION`：rollup AA 在 submit 时硬性要求
+`assertion_version == 1`（`minuend_rollup.aa`），Rust 端 `validate_against` 也要求
+header 等于常量。单独把常量改成 2 会让**所有新批次被 AA bounce**、同时让所有旧批次
+在新 watcher 上 RootMismatch；必须与 AA 重新部署一起做。按高度激活则需要把上表里
+已知有问题的旧执行路径保留在代码里，风险大于收益。
+
+**现行约定**：主网未上线，#44 的 genesis/`CHAIN_ID` 改名本身已经是一次链重置。
+上表三项一起视为同一个执行规则断代：
+
+- 由 #39 之前的引擎产出的任何高度、快照或 WAL，都不能被当前 watcher / validator 重放，
+  运营方必须从新 genesis 重新开始（快照格式也已升到 v5，旧快照会被自动跳过）。
+- 今后再改确定性执行语义时，必须二选一：要么与 rollup AA 重新部署一起升
+  `ASSERTION_VERSION`，要么在 `minuend-types` 增加按高度激活的规则开关并在本节登记。

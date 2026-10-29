@@ -1,4 +1,5 @@
 mod amount;
+pub mod env_compat;
 mod ids;
 mod order;
 
@@ -15,6 +16,12 @@ pub const PRICE_SCALE: u64 = 100_000_000;
 pub const QTY_SCALE: u64 = 100_000_000;
 pub const USD_SCALE: u64 = 1_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
+/// Dispute-predicate / execution-rules version committed in every batch.
+/// Pinned to 1 by the rollup AA (`assertion_version != 1` bounces), so it
+/// can only change together with an AA redeploy. Execution-semantics changes
+/// that did NOT bump it (#39 Place rollback, #42 no taker fee on ADL, #44
+/// genesis/CHAIN_ID rename) are recorded as one rules epoch / chain reset in
+/// docs/ROLLUP-UPGRADE.md §7 (#47 B8).
 pub const ASSERTION_VERSION: u32 = 1;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";

@@ -644,7 +644,11 @@ impl Dag {
         if sorted != unit.parents {
             return Err(DagError::BadParents);
         }
-        if self.units.contains_key(&id) {
+        // H4 (#47): a pre-snapshot ancestor id was already executed before
+        // the restart. Treating it only as "known" (a linkable parent) let a
+        // re-sent copy of that old unit be linked and executed a second
+        // time; it must be refused exactly like a unit already in the DAG.
+        if self.units.contains_key(&id) || self.ancestors.contains(&id) {
             return Err(DagError::Duplicate);
         }
         let missing: Vec<UnitId> = unit
@@ -793,7 +797,8 @@ impl Dag {
     }
 
     pub fn is_executed(&self, id: UnitId) -> bool {
-        self.executed.contains(&id)
+        // H4 (#47): pre-snapshot ancestors were executed before the restart.
+        self.executed.contains(&id) || self.ancestors.contains(&id)
     }
 
     /// Deterministic execution order over all known-but-unexecuted units:
@@ -969,6 +974,28 @@ mod tests {
             &sk(1),
         );
         assert_eq!(dag.insert(u2), Err(DagError::EmptyParents));
+    }
+
+    /// H4 (#47): an id seeded as a pre-snapshot ancestor was already
+    /// executed before the restart. Re-sending that old unit must be refused
+    /// as Duplicate (not linked + re-executed), while new children of it
+    /// still link normally.
+    #[test]
+    fn pre_snapshot_ancestor_resend_is_duplicate() {
+        let g = genesis_id();
+        let old = deposit(vec![g], &sk(1), 1);
+        let old_id = unit_id(&old);
+        let mut dag = Dag::new();
+        dag.mark_ancestor_known(old_id);
+        assert!(dag.is_executed(old_id), "ancestor must count as executed");
+        assert_eq!(dag.insert(old), Err(DagError::Duplicate));
+        assert!(
+            dag.ready_linearized().is_empty(),
+            "re-sent pre-snapshot unit must not become ready again"
+        );
+        let child = deposit(vec![old_id], &sk(1), 2);
+        let cid = dag.insert(child).unwrap();
+        assert_eq!(dag.ready_linearized(), vec![cid]);
     }
 
     #[test]
