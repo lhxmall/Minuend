@@ -1020,18 +1020,19 @@ impl ChainState {
     }
 
     /// #47 A2: may `account` use `addr` as its AA withdrawal address?
-    /// `Ok(true)` = first binding needed, `Ok(false)` = already bound to
-    /// exactly this address, `Err(())` = the account is bound elsewhere or
-    /// the address already belongs to another account. Pure check — call
-    /// [`Self::bind_aa_address`] only after every other fallible step of
-    /// the op succeeded, so a rejected op never leaves a binding behind.
-    pub fn check_aa_binding(&self, account: AccountId, addr: &str) -> Result<bool, ()> {
+    /// `Some(true)` = first binding needed, `Some(false)` = already bound to
+    /// exactly this address, `None` = refused (the account is bound
+    /// elsewhere, or the address already belongs to another account). Pure
+    /// check — call [`Self::bind_aa_address`] only after every other
+    /// fallible step of the op succeeded, so a rejected op never leaves a
+    /// binding behind.
+    pub fn check_aa_binding(&self, account: AccountId, addr: &str) -> Option<bool> {
         match self.aa_addresses.get(&account) {
-            Some(bound) if bound != addr => Err(()),
-            Some(_) => Ok(false),
+            Some(bound) if bound != addr => None,
+            Some(_) => Some(false),
             None => match self.aa_address_owners.get(addr) {
-                Some(owner) if *owner != account => Err(()),
-                _ => Ok(true),
+                Some(owner) if *owner != account => None,
+                _ => Some(true),
             },
         }
     }

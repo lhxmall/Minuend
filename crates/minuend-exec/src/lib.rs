@@ -1243,7 +1243,7 @@ impl Engine {
         let first_bind = self
             .state
             .check_aa_binding(account, addr)
-            .map_err(|_| RejectReason::BadAccount)?;
+            .ok_or(RejectReason::BadAccount)?;
         let mut acct = self
             .state
             .accounts
@@ -1958,7 +1958,7 @@ impl Engine {
         let first_bind = self
             .state
             .check_aa_binding(account, addr)
-            .map_err(|_| RejectReason::BadAccount)?;
+            .ok_or(RejectReason::BadAccount)?;
         let new_bal = self
             .state
             .perp_balances

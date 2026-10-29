@@ -1426,12 +1426,13 @@ mod tests {
         let prev = minuend_state::ChainState::new();
         let mut eng2 = eng.clone();
         let mut batch = Batch::from_applied(&prev, &mut eng2, &[id]).expect("batch");
-        // Tamper the posted post leaf: col stays 0 despite +100 deposit.
+        // Tamper the posted post leaf: col 50 despite a +100 deposit (col 0
+        // would be the "rejected deposit" shape, which is honest — #47).
         if let Some(leaves) = batch.leaf_trace.get_mut(0) {
             for l in leaves.iter_mut() {
                 if l.starts_with(&format!("acct:{}:", hex::encode(acct.0))) {
                     let parts: Vec<&str> = l.split(':').collect();
-                    *l = format!("acct:{}:0:{}:{}", parts[1], parts[3], parts[4]);
+                    *l = format!("acct:{}:50:{}:{}", parts[1], parts[3], parts[4]);
                 }
             }
         }

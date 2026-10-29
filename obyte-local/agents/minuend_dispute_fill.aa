@@ -321,7 +321,9 @@
 						AND starts_with($cp, 'acct:' || (($who == 'taker') ? $F[4] : $F[3]) || ':')
 						AND is_valid_merkle_proof($cp, trigger.data.cp_acct_proof)
 						AND trigger.data.cp_acct_proof.root == $post_wit
-						AND split($cp, ':')[2] + 0 > 0;
+						// collateral column (offset 70) strictly positive
+						AND !starts_with(substring($cp, 70), '-')
+						AND !starts_with(substring($cp, 70), '0:');
 					// #47 B1/B2: kind 2 (ADL) and kind 3 (liquidation book
 					// fill) at idx 0 of a single-fill unit come only from a
 					// Liquidate unit `L:{caller}:{target}:{market}` on the
