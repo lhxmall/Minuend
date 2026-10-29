@@ -9285,6 +9285,14 @@ mod tests {
     // Round-2 EXEC regressions (findings/round-2-exec.md, R2-R-3).
     // ---------------------------------------------------------------
 
+    /// State root minus `last_unit`, which every unit (applied or rejected)
+    /// advances: "rejected = unchanged" is about everything else.
+    fn r2_root(eng: &Engine) -> [u8; 32] {
+        let mut s = eng.state.clone();
+        s.last_unit = UnitId([0u8; 32]);
+        s.state_root()
+    }
+
     /// R2-E-1: a Reveal whose inner op names ANOTHER account (here a Place
     /// "as" alice signed by mallory) is refused at ingest, and the executor
     /// refuses it too when it reaches `reveal_op` by any other path —
@@ -9327,14 +9335,14 @@ mod tests {
         // Ingest: the signer does not own the inner op.
         assert!(matches!(eng.ingest(r.clone()), Err(ExecError::BadSig)));
         // Executor (DAG inserted directly, bypassing the ingest check).
-        let before = eng.state.state_root();
+        let before = r2_root(&eng);
         eng.dag.insert(r).unwrap();
         let evs = eng.apply_ready();
         assert!(rejected_with(&evs, RejectReason::BadAccount), "{evs:?}");
-        assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+        assert_eq!(r2_root(&eng), before, "rejected = unchanged");
         assert!(!eng.state.commits[&h].revealed, "commit not consumed");
         assert_eq!(eng.state.accounts[&a].collateral, 10_000 * USD_SCALE as i128);
-        assert!(eng.state.withdrawn_total.get(&a).is_none());
+        assert!(!eng.state.withdrawn_total.contains_key(&a));
 
         // Nested Commit inside a Reveal is refused by the shared rule.
         let outer = Op::Reveal {
@@ -9466,7 +9474,7 @@ mod tests {
                 .snapshot(&eng.state.marks, &eng.state.markets)
                 .liquidatable
         );
-        let before = eng.state.state_root();
+        let before = r2_root(&eng);
         let liq = sign_unit(
             vec![tip],
             Op::Liquidate {
@@ -9478,7 +9486,7 @@ mod tests {
         );
         let evs = eng.ingest(liq).unwrap();
         assert!(rejected_with(&evs, RejectReason::NotLiquidatable), "{evs:?}");
-        assert_eq!(eng.state.state_root(), before);
+        assert_eq!(r2_root(&eng), before);
         assert_eq!(eng.state.accounts[&a].positions[&meme].qty, QTY_SCALE as i64);
     }
 
@@ -9553,7 +9561,7 @@ mod tests {
             );
             assert!(applied(&eng.ingest(ask).unwrap()));
             let bob_before = eng.state.accounts[&b].collateral;
-            let before = eng.state.state_root();
+            let before = r2_root(&eng);
             let iso = place_iso(
                 vec![g],
                 &alice,
@@ -9569,7 +9577,7 @@ mod tests {
             let evs = eng.ingest(iso).unwrap();
             if cushion == 0 {
                 assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
-                assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+                assert_eq!(r2_root(&eng), before, "rejected = unchanged");
             } else {
                 assert!(applied_with_fills(&evs), "{evs:?}");
                 assert_eq!(eng.state.accounts[&a].collateral, 0, "fee paid by alice");
@@ -9753,10 +9761,10 @@ mod tests {
         eng.state.account_mut(INSURANCE_ACCOUNT).collateral = 10_000 * USD_SCALE as i128;
         // Keeper at the top of the range: crediting any reward overflows.
         eng.state.account_mut(keeper).collateral = i128::MAX;
-        let before = eng.state.state_root();
+        let before = r2_root(&eng);
         let out = eng.liquidate(UnitId([9u8; 32]), eng.state.seq, keeper, alice, mkt);
         assert!(out.is_err(), "keeper credit must overflow: {out:?}");
-        assert_eq!(eng.state.state_root(), before, "no half-applied ADL");
+        assert_eq!(r2_root(&eng), before, "no half-applied ADL");
         assert_eq!(eng.state.accounts[&alice].positions[&mkt].qty, QTY_SCALE as i64);
         assert_eq!(eng.state.accounts[&bob].positions[&mkt].qty, -(QTY_SCALE as i64));
 
@@ -9782,7 +9790,7 @@ mod tests {
         );
         tip = unit_id(&c);
         eng.ingest(c).unwrap();
-        let before = eng.state.state_root();
+        let before = r2_root(&eng);
         let r = sign_unit(
             vec![tip],
             Op::Reveal {
@@ -9796,7 +9804,7 @@ mod tests {
         let evs = eng.ingest(r).unwrap();
         assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
         assert!(!eng.state.commits[&h].revealed);
-        assert_eq!(eng.state.state_root(), before, "rejected = unchanged");
+        assert_eq!(r2_root(&eng), before, "rejected = unchanged");
     }
 
     /// R2-R-3: an amount the batch frame encoder cannot represent is refused

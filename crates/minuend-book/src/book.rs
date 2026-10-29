@@ -133,17 +133,23 @@ impl OrderBook {
     }
 
     fn level_add(&mut self, side: Side, price: Price, delta: i64) {
+        // R2-E-9: two resting orders of qty ≤ i64::MAX at one price used to
+        // overflow `*e as i64 + delta` (debug panic on every node ingesting
+        // the unit). Modular u64 arithmetic is bit-identical to the old
+        // release-build behaviour (so no replica diverges) and exact while
+        // the level's true total stays below 2^64; this cache only feeds
+        // `best_bid`/`best_ask`, never matching.
         match side {
             Side::Bid => {
                 let e = self.bid_qty.entry(Reverse(price)).or_insert(0);
-                *e = (*e as i64 + delta) as Qty;
+                *e = e.wrapping_add_signed(delta);
                 if *e == 0 {
                     self.bid_qty.remove(&Reverse(price));
                 }
             }
             Side::Ask => {
                 let e = self.ask_qty.entry(price).or_insert(0);
-                *e = (*e as i64 + delta) as Qty;
+                *e = e.wrapping_add_signed(delta);
                 if *e == 0 {
                     self.ask_qty.remove(&price);
                 }
