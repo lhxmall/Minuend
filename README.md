@@ -493,6 +493,29 @@ records) and [ROLLUP-UPGRADE.md](docs/ROLLUP-UPGRADE.md). Validation:
   and keeps alerting (plus DA/`data_root` checks on later heights) when replay
   is stuck at one height. Legacy `OPERP_*` variables are still read, with a
   deprecation warning. Use a key separate from the poster.
+  Round 2 of #47: before replaying, the watcher requires the DA header to
+  equal the submit unit's `data` message and the roots the rollup AA stored
+  (`state_root_<h>`, `wit_root_<h>`, … and, on the binding AA, `da_bind_<h>`,
+  `data_root_<h>`, `counts_root_<h>`, `da_hash_<h>`); any difference is an
+  `ASSERTION/DA MISMATCH` alert and the height stays unverified (no dispute
+  predicate can prove it — the forged trees were never published).
+  `--state-dir DIR` checkpoints the replayed state after every verified
+  height so a restart resumes (temp_data is purged after ~24 h); to start
+  above height 1 put a trusted `chainstate.<h>.snap` there and pass
+  `--from-height h+1`. The live poster always receives `--rollup` (and
+  `--dispute-address` when configured) and posts to the dispute AA bound in
+  the rollup; posters run in the background and a `(height, predicate)` is
+  never posted twice. Limits: ≤ 64 MiB decompressed per package, ≤ 1 GiB per
+  height, single-member gzip only, `unit_count` ≤ 200 000 and equal to the
+  frame count. Replay cost stays O(units × state size) (the engine rebuilds
+  the witness tree per unit); size the watcher host for the largest state.
+* **Parent window (consensus, round 2 of #47):** a unit executes only if
+  every parent is among the last 400 000 executed units (genesis counts as
+  executed just before the first unit, so it stops being a valid parent
+  after 400 000 units). Older parents are refused by every node, which keeps
+  snapshot-restored nodes and long-running nodes in agreement and stops an
+  old unit from executing twice after a restart. Clients must build on
+  recent tips.
 
 ## License
 

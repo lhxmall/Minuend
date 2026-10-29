@@ -337,10 +337,13 @@ struct ChallengeCtx {
 
 impl ChallengeCtx {
     fn dispute_for(&self, target: &str) -> Option<&str> {
+        // Any other target (e.g. a future `book` dispute AA) gets no
+        // address: the live poster then uses the rollup's own binding.
         match target {
+            "main" => self.dispute_main.as_deref(),
             "fill" => self.dispute_fill.as_deref(),
             "bind" => self.dispute_bind.as_deref(),
-            _ => self.dispute_main.as_deref(),
+            _ => None,
         }
     }
 }

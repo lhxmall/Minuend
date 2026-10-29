@@ -432,12 +432,65 @@ pub const COMMITTED_ROOT_FIELDS: &[(&str, &str)] = &[
     ("fill_count", "fill_count_"),
 ];
 
+/// R2-R-1: per-height fields the DA-binding rollup AA (fix/47-r2-aa, see
+/// `work/r2-da-binding.md`) additionally stores. Compared whenever the AA
+/// has them; a rollup without them (pre-binding deployment) still gets the
+/// full field-by-field comparison above.
+pub const BINDING_ROOT_FIELDS: &[(&str, &str)] = &[
+    ("da_bind", "da_bind_"),
+    ("data_root", "data_root_"),
+    ("counts_root", "counts_root_"),
+];
+
+/// Domain tag of the DA binding hash.
+pub const DA_BIND_DOMAIN: &str = "minuend-da-v1";
+
+/// R2-R-1: `da_bind` = hex(sha256(join('|', [domain, chain_id, height,
+/// prev_state_hash, state_root, aa_root, wit_root, trace_root, units_root,
+/// units_set_root, ops_root, fills_root, counts_root, unit_count,
+/// wit_count, fill_count, assertion_version, data_root]))), integers in
+/// plain decimal, strings verbatim — recomputed here from the DA header.
+/// `None` when the header lacks a field.
+pub fn da_bind_from_header(header: &serde_json::Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    const KEYS: [&str; 17] = [
+        "chain_id",
+        "height",
+        "prev_state_hash",
+        "state_root",
+        "aa_root",
+        "wit_root",
+        "trace_root",
+        "units_root",
+        "units_set_root",
+        "ops_root",
+        "fills_root",
+        "counts_root",
+        "unit_count",
+        "wit_count",
+        "fill_count",
+        "assertion_version",
+        "data_root",
+    ];
+    let mut parts = vec![DA_BIND_DOMAIN.to_string()];
+    for k in KEYS {
+        parts.push(header.get(k).and_then(canon)?);
+    }
+    Some(hex::encode(Sha256::digest(parts.join("|").as_bytes())))
+}
+
 /// R2-R-1: fields the AA gates on (or that ride the submit for indexers)
 /// but does not store per height; compared against the submit `data`
 /// message only. `counts_root`/`validity_proof_hash`/`perp_burned` are
 /// compared when the submit carries them.
 const SUBMIT_ONLY_FIELDS: &[&str] = &["chain_id", "height", "assertion_version"];
-const SUBMIT_OPTIONAL_FIELDS: &[&str] = &["counts_root", "validity_proof_hash", "perp_burned"];
+const SUBMIT_OPTIONAL_FIELDS: &[&str] = &[
+    "counts_root",
+    "validity_proof_hash",
+    "perp_burned",
+    "da_bind",
+    "data_root",
+];
 
 /// Canonical text of a scalar JSON value for cross-source comparison
 /// (hub state vars may come back as numbers or strings).
@@ -571,7 +624,11 @@ pub fn read_committed_state<H: HubClient>(
     height: u64,
 ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, WatchError> {
     let mut out = std::collections::BTreeMap::new();
-    for (key, prefix) in COMMITTED_ROOT_FIELDS {
+    for (key, prefix) in COMMITTED_ROOT_FIELDS
+        .iter()
+        .chain(BINDING_ROOT_FIELDS)
+        .chain(&[("da_hash", "da_hash_")])
+    {
         let v = hub
             .get_aa_state_var(rollup, &format!("{prefix}{height}"))
             .map_err(WatchError::HubUnavailable)?;
@@ -597,6 +654,91 @@ pub fn check_header_against_state(
             state.get(*key).and_then(canon),
         );
     }
+    // Binding AA: every binding var it stores must match the header too.
+    for (key, prefix) in BINDING_ROOT_FIELDS {
+        if let Some(v) = state.get(*key) {
+            compare_field(
+                &mut out,
+                &format!("AA state {prefix}<h>:"),
+                key,
+                header_field(header, key),
+                canon(v),
+            );
+        }
+    }
+    let bound = state.contains_key("da_bind") || header.get("da_bind").is_some();
+    if bound {
+        for (key, prefix) in BINDING_ROOT_FIELDS {
+            if !state.contains_key(*key) {
+                out.push(format!("AA state {prefix}<h> missing (binding AA expected)"));
+            }
+        }
+        // The header's own da_bind must be the hash of its own fields.
+        match (da_bind_from_header(header), header_field(header, "da_bind")) {
+            (Some(re), Some(hd)) if re == hd => {}
+            (re, hd) => out.push(format!(
+                "DA header da_bind={} but recomputed from its fields={}",
+                hd.as_deref().unwrap_or("<absent>"),
+                re.as_deref().unwrap_or("<incomplete header>")
+            )),
+        }
+    }
+    out
+}
+
+/// R2-R-1: the DA joint must carry exactly one `temp_data` message, and its
+/// data hash must be the one the binding AA stored (`da_hash_<h>`, base64)
+/// and must hash the header we decoded.
+pub fn check_temp_data_hash(
+    joint: &serde_json::Value,
+    header: &serde_json::Value,
+    stored_da_hash: Option<&serde_json::Value>,
+) -> Vec<String> {
+    use base64::Engine as _;
+    let mut out = Vec::new();
+    let msgs: Vec<&serde_json::Value> = joint
+        .get("messages")
+        .or_else(|| joint.get("unit").and_then(|u| u.get("messages")))
+        .and_then(|m| m.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|m| m.get("app").and_then(|x| x.as_str()) == Some("temp_data"))
+                .collect()
+        })
+        .unwrap_or_default();
+    if msgs.len() != 1 {
+        out.push(format!(
+            "DA unit carries {} temp_data messages (exactly one required)",
+            msgs.len()
+        ));
+        return out;
+    }
+    let Some(stored) = stored_da_hash else {
+        return out; // pre-binding rollup: nothing stored to compare
+    };
+    let stored = canon(stored).unwrap_or_default();
+    let carried = msgs[0]
+        .pointer("/payload/data_hash")
+        .and_then(canon)
+        .unwrap_or_default();
+    if carried != stored {
+        out.push(format!(
+            "AA state da_hash_<h>={stored} but temp_data payload.data_hash={carried}"
+        ));
+    }
+    // ocore carries base64; accept the hex spelling too.
+    let recomputed = std::panic::catch_unwind(|| obyte_hash::get_data_hash(header)).ok();
+    let matches = recomputed.is_some_and(|h| {
+        base64::engine::general_purpose::STANDARD.encode(h) == stored || hex::encode(h) == stored
+    });
+    if !matches {
+        out.push(format!(
+            "AA state da_hash_<h>={stored} but the DA header hashes to {}",
+            recomputed
+                .map(|h| base64::engine::general_purpose::STANDARD.encode(h))
+                .unwrap_or_else(|| "<unhashable>".into())
+        ));
+    }
     out
 }
 
@@ -616,6 +758,11 @@ pub fn check_committed_roots<H: HubClient>(
     let mut problems = check_header_against_submit(&da.data, &submit, da.height);
     let state = read_committed_state(hub, rollup, da.height)?;
     problems.extend(check_header_against_state(&da.data, &state));
+    problems.extend(check_temp_data_hash(
+        &da.joint,
+        &da.data,
+        state.get("da_hash"),
+    ));
     if problems.is_empty() {
         Ok(())
     } else {
@@ -1406,5 +1553,85 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R2-R-1: golden vector shared with `daBindHash` in
+    /// obyte-local/script_helpers.js on fix/47-r2-aa (computed with node).
+    #[test]
+    fn da_bind_matches_js_golden_vector() {
+        let f = serde_json::json!({
+            "chain_id": "minuend-v2", "height": 7,
+            "prev_state_hash": "11".repeat(32), "state_root": "22".repeat(32),
+            "aa_root": "33".repeat(32), "wit_root": "W".repeat(44),
+            "trace_root": "T".repeat(44), "units_root": "U".repeat(44),
+            "units_set_root": "S".repeat(44), "ops_root": "O".repeat(44),
+            "fills_root": "F".repeat(44), "counts_root": "C".repeat(44),
+            "unit_count": 2, "wit_count": 5, "fill_count": 1,
+            "assertion_version": 2, "data_root": "44".repeat(32),
+        });
+        assert_eq!(
+            da_bind_from_header(&f).unwrap(),
+            "3e905c972e63147ccdf5a69d397fb87111364edef487a7c8428567743e540cf9"
+        );
+        let mut missing = f.clone();
+        missing.as_object_mut().unwrap().remove("counts_root");
+        assert!(da_bind_from_header(&missing).is_none());
+    }
+
+    /// R2-R-1 with the binding rollup AA: da_bind / data_root / counts_root
+    /// / da_hash stored on chain must all agree with the DA header.
+    #[test]
+    fn binding_aa_vars_are_checked_against_the_header() {
+        use base64::Engine as _;
+        let da = build_batch_da(false);
+        let h = da.height;
+        let mut header = da.data.clone();
+        header["da_bind"] = serde_json::json!(da_bind_from_header(&header).unwrap());
+        let mut submit = submit_from_header(&header);
+        submit["da_bind"] = header["da_bind"].clone();
+        submit["data_root"] = header["data_root"].clone();
+        let da_hash = base64::engine::general_purpose::STANDARD
+            .encode(obyte_hash::get_data_hash(&header));
+        let mut vars = state_from_submit(h, &submit);
+        vars.insert(format!("da_bind_{h}"), header["da_bind"].clone());
+        vars.insert(format!("data_root_{h}"), header["data_root"].clone());
+        vars.insert(format!("counts_root_{h}"), header["counts_root"].clone());
+        vars.insert(format!("da_hash_{h}"), serde_json::json!(da_hash));
+        let mut td = temp_data_msg(&header);
+        td["payload"]["data_hash"] = serde_json::json!(da_hash);
+        let joint = serde_json::json!({"messages": [td.clone(), {"app": "data", "payload": submit.clone()}]});
+        let du = |hd: &serde_json::Value, j: &serde_json::Value| DaUnit {
+            height: h,
+            unit_hash: String::new(),
+            data: hd.clone(),
+            joint: j.clone(),
+        };
+        let hub = |v: std::collections::HashMap<String, serde_json::Value>| MockHub {
+            vars: v,
+            joints: Default::default(),
+        };
+        check_committed_roots(&hub(vars.clone()), "R", &du(&header, &joint)).unwrap();
+
+        // On-chain da_bind differs from the header's.
+        let mut v = vars.clone();
+        v.insert(format!("da_bind_{h}"), serde_json::json!("00".repeat(32)));
+        assert!(check_committed_roots(&hub(v), "R", &du(&header, &joint)).is_err());
+        // Header da_bind is not the hash of its own fields.
+        let mut bad = header.clone();
+        bad["da_bind"] = serde_json::json!("00".repeat(32));
+        let p = check_header_against_state(&bad, &std::collections::BTreeMap::new());
+        assert!(p.iter().any(|m| m.contains("recomputed")), "{p:?}");
+        // Stored da_hash does not match the temp_data message.
+        let mut v = vars.clone();
+        v.insert(format!("da_hash_{h}"), serde_json::json!("AAAA"));
+        assert!(check_committed_roots(&hub(v), "R", &du(&header, &joint)).is_err());
+        // Two temp_data messages in the DA unit.
+        let two = serde_json::json!({"messages": [td.clone(), td, {"app": "data", "payload": submit}]});
+        let err = check_committed_roots(&hub(vars.clone()), "R", &du(&header, &two)).unwrap_err();
+        assert!(format!("{err}").contains("temp_data messages"), "{err}");
+        // A binding AA that lost a binding var is flagged.
+        let mut v = vars;
+        v.remove(&format!("counts_root_{h}"));
+        assert!(check_committed_roots(&hub(v), "R", &du(&header, &joint)).is_err());
     }
 }
