@@ -38,8 +38,14 @@ pub struct Engine {
     /// commits (`Batch::from_applied`); dropped (never persisted) if the
     /// batch is abandoned — no more burning nonces on uncommitted batches.
     pub pending_gov_wal: Vec<(AccountId, u64)>,
-    /// #37-14: replay-local GovWithdraw nonce watermark (see gov_withdraw).
-    pub replay_gov_nonces: std::collections::BTreeMap<AccountId, u64>,
+    /// #47 H3: GovWithdraw nonces recovered from the on-disk WAL at
+    /// restart that are NEWER than the loaded snapshot's committed
+    /// watermark (`state.seen_gov_nonces`). Kept apart from committed state
+    /// on purpose: the producing path treats them as an extra lower bound
+    /// (a nonce this node already committed must never be reused), while
+    /// validation replays judge only against committed state — the batches
+    /// being replayed are exactly the ones that consumed these nonces.
+    pub wal_gov_nonces: std::collections::BTreeMap<AccountId, u64>,
     /// Per-unit witness roots in log order (one `wit_root` per `apply_one`,
     /// applied or rejected). `Batch::from_applied` takes the last
     /// `applied.len()` entries as the batch trace.
@@ -117,6 +123,33 @@ impl Default for Engine {
 /// take `hole * delta / total` floored, the last takes the remainder — both
 /// capped at that counterparty's own positive delta so no debit ever exceeds
 /// what it gained. Free of state so the unit test pins the arithmetic.
+/// #47 H1: `notional × open_qty / side_qty`, multiplied first so the
+/// per-unit rate is not truncated away. `0 < open_qty <= side_qty`. On the
+/// (absurd) overflow of the product it saturates high: over-reserving
+/// rejects an order, under-reserving would hand out free leverage.
+fn open_share(notional: Usd, open_qty: i64, side_qty: i64) -> Usd {
+    if side_qty <= 0 {
+        return 0;
+    }
+    match notional.checked_mul(open_qty as Usd) {
+        Some(v) => v / side_qty as Usd,
+        None => Usd::MAX / 4,
+    }
+}
+
+/// #47 L3: clamp an off-book print into the market's listed band. `0` on
+/// either side means unbounded (see `create_market`).
+fn clamp_to_band(price: minuend_types::Price, p: &MarketParams) -> minuend_types::Price {
+    let mut px = price;
+    if p.min_price != 0 && px < p.min_price {
+        px = p.min_price;
+    }
+    if p.max_price != 0 && px > p.max_price {
+        px = p.max_price;
+    }
+    px
+}
+
 fn adl_haircut_share(hole: i128, delta: i128, total: i128, is_last: bool) -> i128 {
     let raw = if is_last { hole } else { hole * delta / total };
     raw.min(delta)
@@ -132,7 +165,7 @@ impl Engine {
             store_dir: None,
             validating: false,
             pending_gov_wal: Vec::new(),
-            replay_gov_nonces: std::collections::BTreeMap::new(),
+            wal_gov_nonces: std::collections::BTreeMap::new(),
             recent_units: std::collections::VecDeque::new(),
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
@@ -148,15 +181,20 @@ impl Engine {
     /// `Batch::validate_against` by the caller, exactly as the design's
     /// recovery sequence prescribes.
     pub fn load_or_genesis(dir: &Path) -> std::io::Result<Self> {
-        let (mut state, anchors) = match persist::load_latest_with_anchors(dir)? {
+        let (state, anchors) = match persist::load_latest_with_anchors(dir)? {
             Some((_, s, anchors)) => (s, anchors),
             None => (ChainState::new(), Vec::new()),
         };
+        // #47 H3: WAL nonces newer than the snapshot stay OUT of committed
+        // state (`seen_gov_nonces`) and go to `wal_gov_nonces`; see
+        // `gov_nonce_watermark` for how each mode reads them.
         let journal = GovNonceJournal::open(dir)?;
+        let mut wal_gov_nonces = std::collections::BTreeMap::new();
         for GovNonceRecord { account, nonce, .. } in journal.read_all()? {
-            let cur = state.seen_gov_nonces.get(&account).copied().unwrap_or(0);
-            if nonce > cur {
-                state.seen_gov_nonces.insert(account, nonce);
+            let committed = state.seen_gov_nonces.get(&account).copied().unwrap_or(0);
+            let cur = wal_gov_nonces.get(&account).copied().unwrap_or(0);
+            if nonce > committed && nonce > cur {
+                wal_gov_nonces.insert(account, nonce);
             }
         }
         // #37-14: the snapshot carries state, not the DAG. Seed every
@@ -178,13 +216,37 @@ impl Engine {
             store_dir: Some(dir.to_path_buf()),
             validating: false,
             pending_gov_wal: Vec::new(),
-            replay_gov_nonces: std::collections::BTreeMap::new(),
+            wal_gov_nonces,
             recent_units,
             wit_trace: Vec::new(),
             wit_count_trace: Vec::new(),
             wit_leaf_trace: Vec::new(),
             liquidating: false,
         })
+    }
+
+    /// Effective GovWithdraw nonce watermark for `account`: a nonce at or
+    /// below it is a replay.
+    ///
+    /// * Producing (`!validating`): committed state OR the WAL, whichever
+    ///   is higher — never reuse a nonce this node has already committed.
+    /// * Validating: committed state only (#47 H3). This is the snapshot's
+    ///   committed watermark advanced by every GovWithdraw the replay has
+    ///   applied so far, i.e. exactly what the producer saw. The old code
+    ///   used a replay-local map that started EMPTY, so a restored
+    ///   validator accepted nonces the snapshot had already consumed.
+    pub fn gov_nonce_watermark(&self, account: &AccountId) -> u64 {
+        let committed = self
+            .state
+            .seen_gov_nonces
+            .get(account)
+            .copied()
+            .unwrap_or(0);
+        if self.validating {
+            committed
+        } else {
+            committed.max(self.wal_gov_nonces.get(account).copied().unwrap_or(0))
+        }
     }
 
     /// #37-14: bounded recent-unit ring feeding snapshot DAG anchors.
@@ -251,7 +313,17 @@ impl Engine {
         };
         let j = GovNonceJournal::open(&dir)?;
         if j.should_compact() {
-            j.compact(&self.state.seen_gov_nonces)?;
+            // Compaction rewrites the WAL as one record per account: keep the
+            // WAL-only (newer-than-snapshot) nonces too, or a restart after
+            // compaction would forget them.
+            let mut merged = self.state.seen_gov_nonces.clone();
+            for (a, n) in &self.wal_gov_nonces {
+                let e = merged.entry(*a).or_insert(0);
+                if *n > *e {
+                    *e = *n;
+                }
+            }
+            j.compact(&merged)?;
         }
         Ok(())
     }
@@ -575,7 +647,10 @@ impl Engine {
         // both sides. Previously Ask used max but Bid used mark alone, under-
         // estimating margin for Market Bids. Also gate unknown market.
         match self.state.markets.get(&market) {
-            Some(p) if !p.delisted => {}
+            // #47 C2: a legacy spot listing (leveraged, band-less, or with a
+            // floor ≤ 0) has no finite worst case; it cannot fill anyway
+            // (`apply_fill_pair` refuses it), so do not let orders rest.
+            Some(p) if !p.delisted && minuend_types::spot_market_tradeable(p) => {}
             _ => return Err(RejectReason::Risk),
         }
         // Live-order count cap across every book: applies even to an IOC
@@ -619,12 +694,16 @@ impl Engine {
         }
         // Tradeable price range (#37 follow-up): a market may declare a
         // [min_price, max_price] band at listing (0 = unbounded on that
-        // side). It is an ADMISSION gate, not a clamp — out-of-band limits
-        // are rejected, and market orders (price 0) are gated below against
-        // the band instead of being silently allowed to print outside it.
-        // Bounding the band is what keeps a `spot_only` long's worst-case
-        // loss finite: its mark is frozen, so the range is the only cap on
-        // how far the real price can run against the position.
+        // side). It is an ADMISSION gate for limit prices: out-of-band
+        // limits are rejected. Market orders (price 0) need no gate of their
+        // own — they only ever fill against resting limits, which were all
+        // admitted inside the band (the band is fixed at listing). #47 L3:
+        // the off-book prints (ADL at the mark) are clamped into the band in
+        // `liquidate_inner`, and funding-rate markets may not list a band,
+        // so no fill on any market prints outside it.
+        // Bounding the band is what keeps a `spot_only` position's
+        // worst-case loss finite: its mark is frozen, so the range is the
+        // only cap on how far the real price can run against it.
         {
             let p = self.state.market_params(market);
             if (p.min_price != 0 || p.max_price != 0)
@@ -759,6 +838,17 @@ impl Engine {
             } else {
                 extra_im
             };
+            // #47 C2: a spot_only order reserves its worst case inside the
+            // listed band instead (both closing directions, plus taker
+            // fees), never anything priced off the frozen mark.
+            let limit_px = if typ == OrderType::Limit { price } else { 0 };
+            let extra_im = minuend_account::spot_order_requirement(
+                side,
+                limit_px,
+                open_qty.unsigned_abs(),
+                &params,
+            )
+            .unwrap_or(extra_im);
             let resting = self.resting_open_im(account);
             if isolated {
                 // Isolated floor: the bucket must cover this order's own IM
@@ -820,11 +910,15 @@ impl Engine {
         // false-verdict the honest batch.
         let escrow = if isolated { i128::from(margin) } else { 0 };
         // Matching may mutate earlier makers before a later fill fails.
-        // Stage book, escrow, account fills and refunds together so an Err
-        // discards the entire candidate state.
-        let mut candidate = self.state.clone();
+        // #47 B4: book, escrow, account fills and refunds are recorded in an
+        // undo journal (only the touched book levels/orders, fill-party
+        // accounts, insurance and this market's scalars) and rolled back on
+        // any Err — same all-or-nothing result as the old whole-ChainState
+        // clone, without copying the entire chain per order.
+        let mut journal = minuend_state::StateJournal::default();
         if escrow != 0 {
-            candidate.account_mut(account).collateral -= escrow;
+            self.state.journal_account(&mut journal, account);
+            self.state.account_mut(account).collateral -= escrow;
         }
         let oid = order_id(account, market, client_seq);
         let order = Order {
@@ -841,33 +935,41 @@ impl Engine {
             isolated,
             margin_left: if isolated { margin } else { 0 },
         };
-        let mut result = match candidate
-            .book_mut(market)
-            .submit_with(order, minuend_book::SelfTrade::Reject)
-        {
-            Ok(r) => r,
-            Err(e) => return Err(RejectReason::Book(e)),
-        };
+        let mut result =
+            match self
+                .state
+                .submit_journaled(&mut journal, order, minuend_book::SelfTrade::Reject)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    self.state.rollback(journal);
+                    return Err(RejectReason::Book(e));
+                }
+            };
         // Funding-rate markets realize rate-cash, not price-diff PnL; tag
         // the fills so the dispute AA picks the funding identity (book
         // submit defaults to kind 0).
-        if candidate.market_params(market).funding_rate {
+        if self.state.market_params(market).funding_rate {
             for f in &mut result.fills {
                 f.kind = 1;
             }
         }
         for fill in &result.fills {
-            candidate.apply_fill_pair(fill).map_err(map_acct)?;
+            if let Err(e) = self.state.apply_fill_pair_journaled(&mut journal, fill) {
+                self.state.rollback(journal);
+                return Err(map_acct(e));
+            }
         }
         // Refunds: STP-canceled makers' escrow and the taker's unfilled
-        // remainder (when it did not rest) return to collateral.
+        // remainder (when it did not rest) return to collateral. Nothing
+        // below can fail, so these need no journal entries.
         for (acct, amt) in &result.refunds {
             if *amt > 0 {
-                candidate.account_mut(*acct).collateral += i128::from(*amt);
+                self.state.account_mut(*acct).collateral += i128::from(*amt);
             }
         }
         if !result.taker_resting && result.taker_margin_left > 0 {
-            candidate.account_mut(account).collateral += i128::from(result.taker_margin_left);
+            self.state.account_mut(account).collateral += i128::from(result.taker_margin_left);
         }
         // Force-sell: any fill party still liquidatable after this fill is
         // closed in the same unit (book IOC, then ADL inside `liquidate`).
@@ -876,8 +978,7 @@ impl Engine {
         // unit's fill list; fill_math bounces a multi-fill unit, so they
         // must not become a second op.
         let mut fills = result.fills;
-        candidate.seen_client_seq.insert(account, client_seq);
-        self.state = candidate;
+        self.state.seen_client_seq.insert(account, client_seq);
         let extra = self.force_sell_fill_parties(&fills, unit, seq);
         fills.extend(extra);
         Ok(fills)
@@ -1025,6 +1126,13 @@ impl Engine {
                 // at place time — counting it here would double-reserve.
                 let n = match self.state.markets.get(market) {
                     Some(p) if p.funding_rate => funding_notional_usd(o.remaining, p.usd_per_unit),
+                    // #47 C2: a resting spot_only order reserves the same
+                    // band worst case `place` charged for it (im_bps is
+                    // 10 000 there, so the bps() below is the identity).
+                    Some(p) if p.spot_only => {
+                        minuend_account::spot_order_requirement(o.side, o.price, o.remaining, p)
+                            .unwrap_or(Usd::MAX / 4)
+                    }
                     _ => {
                         let px = if o.price != 0 {
                             o.price
@@ -1037,11 +1145,11 @@ impl Engine {
                 match o.side {
                     Side::Bid => {
                         bid_qty += o.remaining as i64;
-                        bid_notional += n;
+                        bid_notional = bid_notional.saturating_add(n);
                     }
                     Side::Ask => {
                         ask_qty += o.remaining as i64;
-                        ask_notional += n;
+                        ask_notional = ask_notional.saturating_add(n);
                     }
                 }
             }
@@ -1065,23 +1173,20 @@ impl Engine {
             // prices the whole side; one that only reduces prices zero.
             let bid_open_qty = bid_qty - short;
             let ask_open_qty = ask_qty - long;
+            // #47 H1: multiply BEFORE dividing. `notional / qty` alone is the
+            // per-qty-UNIT notional (1.0 qty = 1e8 units), which truncates
+            // to 0 below $100 and badly rounds down above it.
             let bid_im = if bid_qty > 0 && bid_open_qty > 0 {
-                bps(
-                    bid_notional / (bid_qty as Usd) * (bid_open_qty as Usd),
-                    im_bps,
-                )
+                bps(open_share(bid_notional, bid_open_qty, bid_qty), im_bps)
             } else {
                 0
             };
             let ask_im = if ask_qty > 0 && ask_open_qty > 0 {
-                bps(
-                    ask_notional / (ask_qty as Usd) * (ask_open_qty as Usd),
-                    im_bps,
-                )
+                bps(open_share(ask_notional, ask_open_qty, ask_qty), im_bps)
             } else {
                 0
             };
-            total += bid_im.max(ask_im);
+            total = total.saturating_add(bid_im.max(ask_im));
         }
         total
     }
@@ -1250,7 +1355,6 @@ impl Engine {
             return Err(RejectReason::NotLiquidatable);
         }
         let pos_qty = pos.as_ref().map(|p| p.qty).unwrap_or(0);
-        let target_isolated_pos = pos.as_ref().map(|p| p.isolated).unwrap_or(false);
         if pos_qty == 0 {
             return Err(RejectReason::NotLiquidatable);
         }
@@ -1266,6 +1370,42 @@ impl Engine {
         {
             return self.liquidate_funding_off_book(unit, seq, caller, target, market, pos_qty);
         }
+        // #47 L1: a legacy spot listing (see `spot_market_tradeable`) can
+        // never fill — `apply_fill_pair` returns `Risk` for it. Refuse
+        // BEFORE the book is touched instead of matching makers first.
+        if !minuend_types::spot_market_tradeable(&self.state.market_params(market)) {
+            return Err(RejectReason::Risk);
+        }
+        // #47 L1/B4: everything below (book IOC, fills, refunds, ADL, keeper
+        // payout) is journaled and rolled back on any Err, so a failing
+        // liquidation leaves no half-applied book or account state.
+        let mut journal = minuend_state::StateJournal::default();
+        let out =
+            self.liquidate_book_path(&mut journal, unit, seq, caller, target, market, pos_qty);
+        if out.is_err() {
+            self.state.rollback(journal);
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn liquidate_book_path(
+        &mut self,
+        journal: &mut minuend_state::StateJournal,
+        unit: UnitId,
+        seq: Seq,
+        caller: AccountId,
+        target: AccountId,
+        market: minuend_types::MarketId,
+        pos_qty: i64,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        let target_isolated_pos = self
+            .state
+            .accounts
+            .get(&target)
+            .and_then(|a| a.positions.get(&market))
+            .map(|p| p.isolated)
+            .unwrap_or(false);
         let side = if pos_qty > 0 { Side::Ask } else { Side::Bid };
         let qty = pos_qty.unsigned_abs();
         let oid = liq_order_id(unit);
@@ -1285,8 +1425,7 @@ impl Engine {
         };
         let result = self
             .state
-            .book_mut(market)
-            .submit(order)
+            .submit_journaled(journal, order, minuend_book::SelfTrade::CancelMaker)
             .map_err(RejectReason::Book)?;
         // Default self-trade policy: cancel-maker-continue (the target's
         // book must clear for the close to execute; kind 3's identity is
@@ -1298,23 +1437,22 @@ impl Engine {
             f.kind = 3;
         }
         for fill in &fills {
-            // Invariant: AccountError from apply_fill_pair is unreachable here
-            // by construction — the liquidation order's qty comes from the
-            // target's i64 position at a u64 price, so qty·price fits i128 and
-            // positions fit i64; its checked arithmetic cannot overflow.
-            // Should it ever fire anyway, this unit would surface as Rejected
-            // with partially-applied state; that is a documented known
-            // limitation, not a handled case.
-            self.state.apply_fill_pair(fill).map_err(map_acct)?;
+            // An AccountError here (should one ever fire) no longer leaves
+            // partially-applied state: the caller rolls the journal back.
+            self.state
+                .apply_fill_pair_journaled(journal, fill)
+                .map_err(map_acct)?;
         }
         // Escrow returns (#10): STP refunds and the liquidation IOC's
         // unfilled remainder are the target's own money — mirror place().
         for (acct, amt) in &result.refunds {
             if *amt > 0 {
+                self.state.journal_account(journal, *acct);
                 self.state.account_mut(*acct).collateral += i128::from(*amt);
             }
         }
         if !result.taker_resting && result.taker_margin_left > 0 {
+            self.state.journal_account(journal, target);
             self.state.account_mut(target).collateral += i128::from(result.taker_margin_left);
         }
         let still = if target_isolated_pos {
@@ -1354,6 +1492,10 @@ impl Engine {
             // negative collateral remains, the target is not credited,
             // nothing is printed.
             let mark = *self.state.marks.get(&market).unwrap_or(&0);
+            // #47 L3: the ADL print is clamped into the market's listed
+            // band (each side only when set). The oracle mark itself is not
+            // bounded by the band, but no fill may print outside it.
+            let mark = clamp_to_band(mark, &self.state.market_params(market));
             let close_side = if remaining_pos > 0 {
                 Side::Ask
             } else {
@@ -1408,7 +1550,9 @@ impl Engine {
                     maker_isolated: false,
                     kind: 2,
                 };
-                self.state.apply_fill_pair(&fill).map_err(map_acct)?;
+                self.state
+                    .apply_fill_pair_journaled(journal, &fill)
+                    .map_err(map_acct)?;
                 fills.push(fill);
                 remaining -= take;
             }
@@ -1432,6 +1576,8 @@ impl Engine {
                 .unwrap_or(0);
             let pay = keeper_paid.min(bal.max(0));
             if pay > 0 {
+                self.state.journal_account(journal, target);
+                self.state.journal_account(journal, caller);
                 if let Some(a) = self.state.accounts.get_mut(&target) {
                     a.collateral -= pay;
                 }
@@ -1824,25 +1970,12 @@ impl Engine {
     ) -> Result<Vec<Fill>, RejectReason> {
         // Strictly increasing nonce watermark per account: any nonce at or
         // below the highest consumed one is a replay, and gaps are allowed.
-        let watermark = if self.validating {
-            // #37-14: a restored snapshot+WAL can hold nonces from batches
-            // NEWER than the snapshot. Comparing against that watermark
-            // rejects the very batches being replayed, so validation keeps
-            // its own strictly-increasing watermark instead (a genuine
-            // duplicate inside the replayed stream still fails).
-            self.replay_gov_nonces.get(&account).copied().unwrap_or(0)
-        } else {
-            self.state
-                .seen_gov_nonces
-                .get(&account)
-                .copied()
-                .unwrap_or(0)
-        };
-        if nonce <= watermark {
+        // #47 H2: the watermark only moves on SUCCESS (the insert at the end
+        // of this fn), in both modes. Validation used to advance it before
+        // the balance check, so a rejected high nonce made a later honest
+        // low nonce fail on validators but apply on the producer.
+        if nonce <= self.gov_nonce_watermark(&account) {
             return Err(RejectReason::DuplicateNonce);
-        }
-        if self.validating {
-            self.replay_gov_nonces.insert(account, nonce);
         }
         let bal = self.state.perp_balances.get(&account).copied().unwrap_or(0);
         if bal < amount {
@@ -1887,29 +2020,10 @@ impl Engine {
         if spot_only && funding_rate {
             return Err(RejectReason::Risk);
         }
-        // Tradeable price range (#37 follow-up): when set, `min < max` and
-        // both must sit on the tick grid (limits align by `price % tick`).
-        // A bound of 0 means "unbounded on that side", so a min of exactly 0
-        // with a non-zero max is the bottom-unbounded case, not a zero-width
-        // band; `min >= max` only fails when both are non-zero (or when the
-        // max is set to a value the min already covers).
-        if (min_price != 0 || max_price != 0)
-            && (min_price >= max_price || min_price % tick_size != 0 || max_price % tick_size != 0)
-        {
-            return Err(RejectReason::Risk);
-        }
-        // A spot_only market has no oracle: its mark freezes at the first
-        // qualifying fill, so a long's loss can run past the notional when
-        // the real price moves below entry. Declaring a [min_price,
-        // max_price] band bounds that loss to `qty × (max - min)`, which is
-        // what makes full collateral sufficient. Listing one WITHOUT a range
-        // would leave the solvency hole open, so it is required — and since
-        // 0 doubles as "unbounded", a market whose floor really is zero must
-        // state it as `min_price = tick_size` (the smallest positive grid
-        // point), never 0.
-        if spot_only && (min_price == 0 || max_price == 0) {
-            return Err(RejectReason::Risk);
-        }
+        // #47 C1: the tick check MUST come first. Every `% tick_size` below
+        // would panic on a zero tick (division by zero) — and on `-1` with
+        // `i64::MIN` (overflow) — taking down every node that ingests the
+        // unit. With `tick_size > 0` established, `%` cannot panic.
         // Signed price grid: tick stays strictly positive; a zero or
         // negative grid would break limit alignment (`price % tick_size`).
         if tick_size <= 0
@@ -1923,6 +2037,37 @@ impl Engine {
                 spot_only,
             )
         {
+            return Err(RejectReason::Risk);
+        }
+        // Tradeable price range (#37 follow-up; #47 L2 semantics): each side
+        // is independent and `0` means "unbounded on that side". A set
+        // bound must sit on the tick grid; only when BOTH are set must
+        // `min < max`. So `[min, 0]` is a floor-only band and `[0, max]` a
+        // ceiling-only band. Because 0 is the sentinel, a real bound AT
+        // zero is written as the nearest grid point (`tick_size` for a
+        // floor, `-tick_size` for a ceiling).
+        if (min_price != 0 && min_price % tick_size != 0)
+            || (max_price != 0 && max_price % tick_size != 0)
+            || (min_price != 0 && max_price != 0 && min_price >= max_price)
+        {
+            return Err(RejectReason::Risk);
+        }
+        // #47 L3: funding-rate books trade encoded RATES and close
+        // liquidations off-book at the external index; a dollar band has no
+        // meaning there (they already have their own ±100% rate band), so
+        // they may not declare one.
+        if funding_rate && (min_price != 0 || max_price != 0) {
+            return Err(RejectReason::Risk);
+        }
+        // #47 C2: a spot_only market has no oracle, so its mark freezes at
+        // the first qualifying fill and cannot be used for margin. Every
+        // position there instead reserves its worst-case loss inside the
+        // band (`minuend_account::spot_requirement`): longs down to
+        // `min_price`, shorts up to `max_price`. That is only finite with a
+        // two-sided band, and a long's worst case only stays within its
+        // full-collateral notional with a strictly POSITIVE floor — so a
+        // spot listing needs `0 < min_price < max_price`.
+        if spot_only && (min_price <= 0 || max_price <= 0) {
             return Err(RejectReason::Risk);
         }
         // Money scale is listing-time and only meaningful on funding-rate
@@ -3399,18 +3544,18 @@ mod tests {
                 funding_rate: false,
                 usd_per_unit: 0,
                 funding_cap_bps: 0,
-                // A spot_only listing must declare a range (its frozen mark
-                // needs a bounded worst case); a regular market stays
-                // unbounded. The band is wide enough for the tests' price
-                // grid — they trade at ±100k * PRICE_SCALE, i.e. a signed
-                // range — while still being a real bound.
+                // A spot_only listing must declare a strictly positive,
+                // two-sided range (#47 C2: every position reserves its
+                // worst case inside it); a regular market stays unbounded.
+                // The tests trade at 100k * PRICE_SCALE, so [1, 200k] keeps
+                // a short's worst case (max − entry) at one notional.
                 min_price: if spot_only {
-                    -10_000_000 * minuend_types::PRICE_SCALE as i64
+                    minuend_types::PRICE_SCALE as i64
                 } else {
                     0
                 },
                 max_price: if spot_only {
-                    10_000_000 * minuend_types::PRICE_SCALE as i64
+                    200_000 * minuend_types::PRICE_SCALE as i64
                 } else {
                     0
                 },
@@ -4217,11 +4362,12 @@ mod tests {
         assert!(eng.state.accounts[&acct_of(&alice)].collateral < 990_000 * USD_SCALE as i128);
     }
 
+    /// #47 C2 (replaces the old negative-fill spot test): a spot_only band
+    /// must have a strictly positive floor, so a negative print can no
+    /// longer happen on a spot market — a negative limit sits below the
+    /// floor and is refused at admission, leaving the book and mark empty.
     #[test]
-    fn spot_only_negative_fill_sets_mark_without_funding() {
-        // Joint regression: spot_only gate × signed prices. A negative fill
-        // on a spot market writes a negative mark and still accrues no
-        // funding index.
+    fn spot_only_negative_limit_is_rejected_below_positive_floor() {
         let mut eng = activated_engine();
         let g = genesis_id();
         let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
@@ -4231,15 +4377,11 @@ mod tests {
         tip = unit_id(&cm);
         eng.ingest(cm).unwrap();
         let meme = MarketId(2);
-        let alice = sk(1);
+        assert!(eng.state.markets[&meme].min_price > 0);
         let bob = sk(2);
-        let d1 = deposit(vec![tip], &alice, 1_000_000 * USD_SCALE as i128, 1);
-        tip = unit_id(&d1);
-        eng.ingest(d1).unwrap();
         let d2 = deposit(vec![tip], &bob, 1_000_000 * USD_SCALE as i128, 2);
         tip = unit_id(&d2);
         eng.ingest(d2).unwrap();
-        let px = -100_000 * PRICE_SCALE as i64;
         let ask = place_on(
             vec![tip],
             &bob,
@@ -4247,31 +4389,22 @@ mod tests {
             Side::Ask,
             OrderType::Limit,
             TimeInForce::Gtc,
-            px,
+            -100_000 * PRICE_SCALE as i64,
             QTY_SCALE,
             1,
         );
-        tip = unit_id(&ask);
-        eng.ingest(ask).unwrap();
-        let bid = place_on(
-            vec![tip],
-            &alice,
-            meme,
-            Side::Bid,
-            OrderType::Limit,
-            TimeInForce::Gtc,
-            px,
-            QTY_SCALE,
-            1,
-        );
-        let evs = eng.ingest(bid).unwrap();
+        let evs = eng.ingest(ask).unwrap();
         assert!(evs.iter().any(|e| matches!(
             e,
-            ExecEvent::Applied { fills, .. } if !fills.is_empty()
+            ExecEvent::Rejected {
+                reason: RejectReason::Risk,
+                ..
+            }
         )));
-        assert_eq!(eng.state.marks.get(&meme).copied(), Some(px));
-        assert!(!eng.state.last_index.contains_key(&meme));
+        assert!(!eng.state.marks.contains_key(&meme));
+        assert!(!eng.state.funding_index_twap.contains_key(&meme));
     }
+
     /// #37 follow-up (price range): a spot_only listing MUST declare a
     /// [min_price, max_price] band. Its mark is frozen (no oracle), so a
     /// long worst case is qty x (entry - min); without a declared floor
@@ -4289,6 +4422,9 @@ mod tests {
             (0i64, 1000i64, "missing floor"),
             (1i64, 0i64, "missing ceiling"),
             (0i64, 0i64, "no range at all"),
+            // #47 C2: the floor must be strictly positive.
+            (-1000i64, 1000i64, "negative floor"),
+            (-1000i64, -1i64, "all-negative band"),
         ] {
             let cm = sign_unit(
                 vec![tip],
@@ -4731,14 +4867,20 @@ mod tests {
         assert_eq!(eng.state.markets[&meme].im_bps, 10_000);
         let alice = sk(1);
         let bob = sk(2);
-        // Exactly one notional of collateral each: any further loss must come
-        // out of PnL, not leverage, and PnL is bounded by the notional.
+        // Exactly the engine's worst-case requirement each (#47 C2: full
+        // notional plus band worst case plus fees): any further loss must
+        // come out of PnL, not leverage, and PnL is bounded by the band.
         let px = 100_000 * PRICE_SCALE as i64;
-        let notional = notional_usd(QTY_SCALE, px).unsigned_abs();
-        let d1 = deposit(vec![tip], &alice, notional as Usd, 1);
+        let p = eng.state.markets[&meme];
+        let need_bid =
+            minuend_account::spot_order_requirement(Side::Bid, px, QTY_SCALE, &p).unwrap();
+        let need_ask =
+            minuend_account::spot_order_requirement(Side::Ask, px, QTY_SCALE, &p).unwrap();
+        assert!(need_bid >= notional_usd(QTY_SCALE, px));
+        let d1 = deposit(vec![tip], &alice, need_bid, 1);
         tip = unit_id(&d1);
         eng.ingest(d1).unwrap();
-        let d2 = deposit(vec![tip], &bob, notional as Usd, 2);
+        let d2 = deposit(vec![tip], &bob, need_ask, 2);
         tip = unit_id(&d2);
         eng.ingest(d2).unwrap();
         let ask = place_on(
@@ -5040,7 +5182,7 @@ mod tests {
         eng.flush_snapshot().unwrap();
         let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
         allow_all(&mut eng2);
-        assert_eq!(eng2.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
+        assert_eq!(eng2.gov_nonce_watermark(&acct_of(&sk(1))), 5);
         // Lower nonce still rejected; higher nonce applies and re-journals.
         let evs = eng2.ingest(gov_with(vec![g], &sk(1), 50, 4)).unwrap();
         assert!(evs.iter().any(|e| matches!(
@@ -5107,12 +5249,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// #37-14b: a restored snapshot+WAL may hold GovWithdraw nonces from
-    /// batches NEWER than the snapshot. Replaying those batches (validating
-    /// mode) must not spuriously DuplicateNonce against the persisted
-    /// watermark, while a true replay duplicate still bounces.
+    /// #37-14b + #47 H3: a restored snapshot+WAL may hold GovWithdraw nonces
+    /// from batches NEWER than the snapshot. Replaying those batches
+    /// (validating mode) must accept them — but a nonce the SNAPSHOT itself
+    /// already committed is a real duplicate and must bounce. (The old test
+    /// asserted that a fresh unit reusing the snapshot's nonce 5 applied,
+    /// i.e. it pinned the H3 bug as correct behaviour.)
     #[test]
-    fn validating_replay_ignores_wal_nonces_newer_than_snapshot() {
+    fn validating_replay_honours_snapshot_nonces_but_not_newer_wal_nonces() {
         let dir = std::env::temp_dir().join(format!("minuend-g14-wal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut eng = Engine::load_or_genesis(&dir).unwrap();
@@ -5120,37 +5264,82 @@ mod tests {
         let g = genesis_id();
         eng.ingest(gov_dep(vec![g], &sk(1), 10_000, 7)).unwrap();
         eng.ingest(gov_with(vec![g], &sk(1), 1_000, 5)).unwrap();
+        eng.flush_gov_wal().unwrap();
         eng.flush_snapshot().unwrap();
         assert_eq!(eng.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
-        // The persisted watermark is 5. A FRESH unit (different parent so it
-        // is not the same DAG unit) carrying nonce 5 must still be accepted
-        // in validating mode: the restored watermark is from a batch newer
-        // than the snapshot, and replay is catching up to it.
+        // A batch NEWER than the snapshot consumes nonce 6 (WAL only).
+        eng.ingest(gov_with(vec![g], &sk(1), 1_000, 6)).unwrap();
+        eng.flush_gov_wal().unwrap();
+
         let mut replayer = Engine::load_or_genesis(&dir).unwrap();
         allow_all(&mut replayer);
+        // Committed (snapshot) watermark 5; the WAL-only 6 stays apart.
+        assert_eq!(replayer.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
+        assert_eq!(replayer.wal_gov_nonces[&acct_of(&sk(1))], 6);
+        // Producing view: never reuse a committed nonce (WAL included).
+        assert_eq!(replayer.gov_nonce_watermark(&acct_of(&sk(1))), 6);
         replayer.validating = true;
-        // Use a parent that is ancestor-known (the gov_dep unit) so the
-        // fresh child links, but the unit itself is new.
+        assert_eq!(replayer.gov_nonce_watermark(&acct_of(&sk(1))), 5);
         let dep_id = unit_id(&gov_dep(vec![g], &sk(1), 10_000, 7));
+        let rejected_dup = |evs: &[ExecEvent]| {
+            evs.iter().any(|e| {
+                matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::DuplicateNonce,
+                        ..
+                    }
+                )
+            })
+        };
+        // H3: a fresh unit reusing the snapshot's nonce 5 is a duplicate.
         let evs = replayer
             .ingest(gov_with(vec![dep_id], &sk(1), 1_000, 5))
             .unwrap();
+        assert!(rejected_dup(&evs), "snapshot nonce 5 accepted: {evs:?}");
+        // The replayed newer batch (nonce 6) must apply...
+        let evs = replayer
+            .ingest(gov_with(vec![g], &sk(1), 1_000, 6))
+            .unwrap();
         assert!(
             evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
-            "replayed gov-withdraw was wrongly rejected as DuplicateNonce"
+            "replayed gov-withdraw was wrongly rejected: {evs:?}"
         );
-        // A SECOND replay of the same nonce within the same stream is a real
-        // duplicate and must still bounce: same nonce, a different unit shape
-        // (amount differs) so the DAG does not short-circuit on duplicate id.
-        let evs2 = replayer.ingest(gov_with(vec![g], &sk(1), 999, 5)).unwrap();
-        assert!(evs2.iter().any(|e| matches!(
-            e,
-            ExecEvent::Rejected {
-                reason: RejectReason::DuplicateNonce,
-                ..
-            }
-        )));
+        // ...and a second use of 6 inside the replayed stream bounces.
+        let evs = replayer.ingest(gov_with(vec![g], &sk(1), 999, 6)).unwrap();
+        assert!(rejected_dup(&evs));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #47 H2: a GovWithdraw that fails its balance check must NOT advance
+    /// the nonce watermark — in either mode. Producer and validator must
+    /// agree on "insufficient high nonce, then honest lower nonce".
+    #[test]
+    fn failed_gov_withdraw_does_not_advance_nonce_in_either_mode() {
+        for validating in [false, true] {
+            let mut eng = Engine::new();
+            allow_all(&mut eng);
+            eng.validating = validating;
+            let g = genesis_id();
+            eng.ingest(gov_dep(vec![g], &sk(1), 100, 7)).unwrap();
+            let evs = eng
+                .ingest(gov_with(vec![g], &sk(1), 1_000_000, 10))
+                .unwrap();
+            assert!(evs.iter().any(|e| matches!(
+                e,
+                ExecEvent::Rejected {
+                    reason: RejectReason::Insufficient,
+                    ..
+                }
+            )));
+            assert_eq!(eng.gov_nonce_watermark(&acct_of(&sk(1))), 0);
+            let evs = eng.ingest(gov_with(vec![g], &sk(1), 50, 5)).unwrap();
+            assert!(
+                evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
+                "validating={validating}: honest nonce 5 rejected: {evs:?}"
+            );
+            assert_eq!(eng.state.seen_gov_nonces[&acct_of(&sk(1))], 5);
+        }
     }
 
     /// Gap 11 acceptance: collateral withdrawals and PERP deposits deduped by
@@ -8003,5 +8192,597 @@ mod tests {
             "bob paid the whole hole"
         );
         let _ = tip;
+    }
+
+    // -------------------------------------------------------------------
+    // #47 regression tests
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn list_custom(
+        parents: Vec<UnitId>,
+        secret: &[u8; 32],
+        tick_size: minuend_types::Price,
+        min_price: minuend_types::Price,
+        max_price: minuend_types::Price,
+        spot_only: bool,
+        funding_rate: bool,
+    ) -> Unit {
+        let mut symbol = [0u8; 16];
+        symbol[..4].copy_from_slice(b"T47X");
+        sign_unit(
+            parents,
+            Op::CreateMarket {
+                creator: acct_of(secret),
+                symbol,
+                tick_size,
+                im_bps: if spot_only { 10_000 } else { 1000 },
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                spot_only,
+                funding_rate,
+                usd_per_unit: if funding_rate { 1 } else { 0 },
+                funding_cap_bps: if funding_rate { 50 } else { 0 },
+                min_price,
+                max_price,
+            },
+            secret,
+        )
+    }
+
+    fn rejected_with(evs: &[ExecEvent], want: RejectReason) -> bool {
+        evs.iter()
+            .any(|e| matches!(e, ExecEvent::Rejected { reason, .. } if *reason == want))
+    }
+
+    fn applied_with_fills(evs: &[ExecEvent]) -> bool {
+        evs.iter()
+            .any(|e| matches!(e, ExecEvent::Applied { fills, .. } if !fills.is_empty()))
+    }
+
+    fn applied(evs: &[ExecEvent]) -> bool {
+        evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. }))
+    }
+
+    fn withdraw_unit(parents: Vec<UnitId>, secret: &[u8; 32], amount: Usd, nonce: u64) -> Unit {
+        sign_unit(
+            parents,
+            Op::Withdraw {
+                account: acct_of(secret),
+                amount,
+                nonce,
+            },
+            secret,
+        )
+    }
+
+    /// #47 C1: a zero (or negative) tick with a non-zero range used to hit
+    /// `min_price % tick_size` before the tick check and PANIC every node
+    /// (division by zero / `i64::MIN % -1`). It must be a plain Risk reject.
+    #[test]
+    fn create_market_bad_tick_with_range_rejects_instead_of_panicking() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        for (tick, lo, hi) in [(0i64, 1i64, 2i64), (0, 0, 5), (-1, i64::MIN, 0), (-1, 1, 2)] {
+            for spot in [false, true] {
+                let evs = eng
+                    .ingest(list_custom(vec![tip], &sk(3), tick, lo, hi, spot, false))
+                    .unwrap();
+                assert!(
+                    rejected_with(&evs, RejectReason::Risk),
+                    "tick {tick} range ({lo},{hi}) spot={spot}: {evs:?}"
+                );
+            }
+        }
+        // Nothing was listed and no PERP was burned.
+        assert_eq!(eng.state.next_market_id, 2);
+        assert_eq!(
+            eng.state.perp_balances[&acct_of(&sk(3))],
+            CREATE_MARKET_FEE_PERP
+        );
+    }
+
+    /// #47 L2: `0` means "unbounded on that side", independently per side.
+    /// A floor-only band (`[min, 0]`) and a ceiling-only band (`[0, max]`)
+    /// are valid listings, and the floor-only band still gates limits.
+    #[test]
+    fn floor_only_and_ceiling_only_bands_are_accepted() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), 3 * CREATE_MARKET_FEE_PERP, 7);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let floor = 1_000 * PRICE_SCALE as i64;
+        for (lo, hi) in [
+            (floor, 0i64),
+            (0, 500_000 * PRICE_SCALE as i64),
+            (-floor, 0),
+        ] {
+            let u = list_custom(vec![tip], &sk(3), 1, lo, hi, false, false);
+            tip = unit_id(&u);
+            let evs = eng.ingest(u).unwrap();
+            assert!(
+                !evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })),
+                "band ({lo},{hi}) rejected: {evs:?}"
+            );
+        }
+        let floor_mkt = MarketId(2);
+        assert_eq!(eng.state.markets[&floor_mkt].min_price, floor);
+        assert_eq!(eng.state.markets[&floor_mkt].max_price, 0);
+        let alice = sk(1);
+        let d1 = deposit(vec![tip], &alice, 1_000_000 * USD_SCALE as i128, 1);
+        tip = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let below = place_on(
+            vec![tip],
+            &alice,
+            floor_mkt,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            floor - 1,
+            QTY_SCALE,
+            1,
+        );
+        assert!(rejected_with(
+            &eng.ingest(below).unwrap(),
+            RejectReason::Risk
+        ));
+        let high = place_on(
+            vec![tip],
+            &alice,
+            floor_mkt,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            100 * floor,
+            QTY_SCALE,
+            1, // the rejected order above did not consume client_seq 1
+        );
+        let evs = eng.ingest(high).unwrap();
+        assert!(applied(&evs), "{evs:?}");
+    }
+
+    /// #47 L3: funding-rate books trade encoded rates; a dollar band there
+    /// is meaningless (and their off-book liquidation prints at the index),
+    /// so such a listing is refused.
+    #[test]
+    fn funding_rate_market_cannot_declare_band() {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(3), 2 * CREATE_MARKET_FEE_PERP, 7);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let evs = eng
+            .ingest(list_custom(vec![tip], &sk(3), 1, 1, 0, false, true))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // Same listing without a band is fine.
+        let evs = eng
+            .ingest(list_custom(vec![tip], &sk(3), 1, 0, 0, false, true))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+    }
+
+    /// #47 L3: off-book ADL prints are clamped into the listed band.
+    #[test]
+    fn clamp_to_band_respects_each_side_independently() {
+        let mut p = minuend_types::genesis_params();
+        assert_eq!(clamp_to_band(-5, &p), -5);
+        p.min_price = 10;
+        p.max_price = 20;
+        assert_eq!(clamp_to_band(5, &p), 10);
+        assert_eq!(clamp_to_band(25, &p), 20);
+        assert_eq!(clamp_to_band(15, &p), 15);
+        p.max_price = 0; // floor-only
+        assert_eq!(clamp_to_band(1_000, &p), 1_000);
+        assert_eq!(clamp_to_band(-1, &p), 10);
+    }
+
+    /// #47 H1: resting IM used to divide before multiplying, so the
+    /// per-qty-unit notional truncated to 0 below $100 and rounded badly
+    /// above. Every price must now reserve exactly `notional × IM`.
+    #[test]
+    fn resting_open_im_is_not_truncated_at_low_prices() {
+        for dollars in [1i64, 50, 99, 150, 1_234] {
+            let mut eng = Engine::new();
+            allow_all(&mut eng);
+            let g = genesis_id();
+            let alice = sk(1);
+            let d = deposit(vec![g], &alice, 1_000_000 * USD_SCALE as i128, 1);
+            let tip = unit_id(&d);
+            eng.ingest(d).unwrap();
+            let px = dollars * PRICE_SCALE as i64;
+            let evs = eng
+                .ingest(place(
+                    vec![tip],
+                    &alice,
+                    Side::Bid,
+                    OrderType::Limit,
+                    TimeInForce::Gtc,
+                    px,
+                    QTY_SCALE,
+                    1,
+                ))
+                .unwrap();
+            assert!(applied(&evs), "{evs:?}");
+            let want = bps(
+                notional_usd(QTY_SCALE, px),
+                minuend_types::genesis_params().im_bps,
+            );
+            assert!(want > 0);
+            assert_eq!(
+                eng.resting_open_im(acct_of(&alice)),
+                want,
+                "price ${dollars}"
+            );
+        }
+    }
+
+    /// Lists the standard spot test market (id 2, band [1, 200k]) and
+    /// funds `who` with the given collateral amounts.
+    fn spot_engine(funds: &[(&[u8; 32], Usd)]) -> (Engine, UnitId, MarketId) {
+        let mut eng = activated_engine();
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(9), CREATE_MARKET_FEE_PERP, 99);
+        let mut tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(9), true);
+        tip = unit_id(&cm);
+        eng.ingest(cm).unwrap();
+        for (i, (who, amt)) in funds.iter().enumerate() {
+            let u = deposit(vec![tip], who, *amt, 10 + i as u8);
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+        }
+        (eng, tip, MarketId(2))
+    }
+
+    /// #47 C2 path 1: opening a spot position and then withdrawing the
+    /// collateral that backs it used to pass (withdraw only checked 1.2×MM
+    /// against the frozen mark). Now only the free surplus is withdrawable.
+    #[test]
+    fn spot_withdraw_cannot_release_reserved_collateral() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let extra = 1_000 * USD_SCALE as i128;
+        let p = {
+            let (e, _, m) = spot_engine(&[]);
+            e.state.markets[&m]
+        };
+        let need_bid =
+            minuend_account::spot_order_requirement(Side::Bid, px, QTY_SCALE, &p).unwrap();
+        let need_ask =
+            minuend_account::spot_order_requirement(Side::Ask, px, QTY_SCALE, &p).unwrap();
+        let (mut eng, mut tip, meme) = spot_engine(&[(&alice, need_bid + extra), (&bob, need_ask)]);
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        assert!(applied(&eng.ingest(ask).unwrap()));
+        let bid = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&bid);
+        assert!(applied_with_fills(&eng.ingest(bid).unwrap()));
+        // The old attack: pull ~94% of the collateral back out.
+        let a = acct_of(&alice);
+        let col = eng.state.accounts[&a].collateral;
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, col * 94 / 100, 1))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        // Exactly the free surplus is withdrawable, not one unit more.
+        let free = eng.state.accounts[&a]
+            .snapshot(&eng.state.marks, &eng.state.markets)
+            .equity;
+        // Surplus = the extra deposit plus the unused part of the open-fee
+        // reserve (reserved at the band max, charged at the fill price).
+        assert!(
+            free > 0 && free <= extra + 100 * USD_SCALE as i128,
+            "free {free}"
+        );
+        let evs = eng.ingest(withdraw_unit(vec![tip], &alice, 1, 2)).unwrap();
+        assert!(applied(&evs));
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, free, 3))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, free - 1, 4))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+        // Same for the short side.
+        let b = acct_of(&bob);
+        let evs = eng
+            .ingest(withdraw_unit(
+                vec![tip],
+                &bob,
+                eng.state.accounts[&b].collateral / 2,
+                1,
+            ))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+    }
+
+    /// #47 C2 path 2: a short loses `qty × (max − entry)`, which exceeds
+    /// the entry notional once `max > 2 × entry`. A short funded with only
+    /// the notional must now be refused, and one funded with the engine's
+    /// requirement stays solvent even when it is closed at `max_price`
+    /// paying the taker fee.
+    #[test]
+    fn spot_short_stays_solvent_when_closed_at_band_max() {
+        let bob = sk(2);
+        let carol = sk(3);
+        let dave = sk(4);
+        let px = 50_000 * PRICE_SCALE as i64; // max (200k) is 4× entry
+        let (probe, _, m) = spot_engine(&[]);
+        let p = probe.state.markets[&m];
+        let max = p.max_price;
+        let notional = notional_usd(QTY_SCALE, px);
+        let need_ask =
+            minuend_account::spot_order_requirement(Side::Ask, px, QTY_SCALE, &p).unwrap();
+        assert!(need_ask > 3 * notional);
+        let need_carol_ask =
+            minuend_account::spot_order_requirement(Side::Ask, max, QTY_SCALE, &p).unwrap();
+        let need_bid =
+            minuend_account::spot_order_requirement(Side::Bid, px, QTY_SCALE, &p).unwrap();
+        let (mut eng, mut tip, meme) = spot_engine(&[
+            (&bob, need_ask),
+            (&carol, need_carol_ask),
+            (&dave, need_bid),
+            (&sk(5), notional),
+        ]);
+        // Notional-only short (the PR #45 assumption) is refused up front.
+        let thin = place_on(
+            vec![tip],
+            &sk(5),
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        assert!(rejected_with(
+            &eng.ingest(thin).unwrap(),
+            RejectReason::Risk
+        ));
+        // Bob shorts 1 @ px to Dave.
+        let ask = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask);
+        assert!(applied(&eng.ingest(ask).unwrap()));
+        let bid = place_on(
+            vec![tip],
+            &dave,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&bid);
+        assert!(applied_with_fills(&eng.ingest(bid).unwrap()));
+        // Carol offers at the band max; Bob buys back there as TAKER.
+        let ask2 = place_on(
+            vec![tip],
+            &carol,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            max,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&ask2);
+        assert!(applied(&eng.ingest(ask2).unwrap()));
+        let cover = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            max,
+            QTY_SCALE,
+            2,
+        );
+        assert!(applied_with_fills(&eng.ingest(cover).unwrap()));
+        let b = &eng.state.accounts[&acct_of(&bob)];
+        assert!(b.positions.is_empty());
+        assert!(b.collateral >= 0, "bob insolvent: {}", b.collateral);
+    }
+
+    /// #47 L1: liquidating a legacy (leveraged / band-less) spot listing
+    /// used to match book makers first and only then fail in
+    /// `apply_fill_pair`, leaving the book changed but positions untouched.
+    /// It must now be refused before the book is touched.
+    #[test]
+    fn legacy_spot_liquidation_leaves_book_untouched() {
+        let mut eng = activated_engine();
+        let meme = MarketId(2);
+        eng.state.markets.insert(
+            meme,
+            minuend_types::MarketParams {
+                symbol: [0u8; 16],
+                tick_size: 1,
+                im_bps: 1000,
+                mm_bps: 500,
+                taker_fee_bps: 5,
+                keeper_reward_bps: 100,
+                delisted: false,
+                spot_only: true,
+                funding_rate: false,
+                usd_per_unit: 0,
+                funding_cap_bps: 0,
+                min_price: 0,
+                max_price: 0,
+            },
+        );
+        let px = 100_000 * PRICE_SCALE as i64;
+        let alice = acct_of(&sk(1));
+        let carol = acct_of(&sk(3));
+        // Pre-fix state: Alice holds a leveraged long, the frozen mark is
+        // far below entry (liquidatable), Carol has a resting bid.
+        {
+            let a = eng.state.account_mut(alice);
+            a.collateral = 1_000 * USD_SCALE as i128;
+            a.positions.insert(
+                meme,
+                minuend_account::Position {
+                    market: meme,
+                    qty: QTY_SCALE as i64,
+                    entry_price: px,
+                    isolated: false,
+                },
+            );
+        }
+        eng.state.marks.insert(meme, px / 2);
+        eng.state.account_mut(carol).collateral = 1_000_000 * USD_SCALE as i128;
+        eng.state
+            .book_mut(meme)
+            .submit(minuend_book::Order {
+                id: order_id(carol, meme, 1),
+                account: carol,
+                market: meme,
+                side: Side::Bid,
+                typ: OrderType::Limit,
+                tif: TimeInForce::Gtc,
+                price: px / 2,
+                qty: QTY_SCALE,
+                remaining: QTY_SCALE,
+                seq: 0,
+                isolated: false,
+                margin_left: 0,
+            })
+            .unwrap();
+        let book_before = eng.state.books[&meme].clone();
+        let accounts_before = eng.state.accounts.clone();
+        let liq = sign_unit(
+            vec![genesis_id()],
+            Op::Liquidate {
+                caller: acct_of(&sk(2)),
+                target: alice,
+                market: meme,
+            },
+            &sk(2),
+        );
+        let evs = eng.ingest(liq).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        assert_eq!(eng.state.books[&meme], book_before, "book was mutated");
+        assert_eq!(eng.state.accounts, accounts_before);
+    }
+
+    /// #47 B4: `place` no longer deep-clones the whole ChainState; it
+    /// journals what it touches. A fill that fails AFTER an earlier fill in
+    /// the same match already landed must still leave the chain exactly as
+    /// before the op (book, accounts, insurance, mark, client seq, root).
+    #[test]
+    fn place_failure_after_partial_match_rolls_back_everything() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let (alice, bob, taker) = (sk(1), sk(2), sk(3));
+        let mut tip = g;
+        for (i, who) in [&alice, &bob, &taker].iter().enumerate() {
+            let u = deposit(vec![tip], who, 10_000 * USD_SCALE as i128, 1 + i as u8);
+            tip = unit_id(&u);
+            eng.ingest(u).unwrap();
+        }
+        let p100 = 100 * PRICE_SCALE as i64;
+        let p200 = 200 * PRICE_SCALE as i64;
+        for (who, px) in [(&alice, p100), (&bob, p200)] {
+            let u = place(
+                vec![tip],
+                who,
+                Side::Ask,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                QTY_SCALE,
+                1,
+            );
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+        }
+        // Rig Bob so his (second) fill overflows: closing a profitable long
+        // on top of a collateral already at i128::MAX - 5.
+        {
+            let b = eng.state.account_mut(acct_of(&bob));
+            b.collateral = i128::MAX - 5;
+            b.positions.insert(
+                BTC_USD,
+                minuend_account::Position {
+                    market: BTC_USD,
+                    qty: QTY_SCALE as i64,
+                    entry_price: PRICE_SCALE as i64,
+                    isolated: false,
+                },
+            );
+        }
+        let leaves_before: HashSet<[u8; 32]> = eng.state.leaves().into_iter().collect();
+        let accounts_before = eng.state.accounts.clone();
+        let book_before = eng.state.books[&BTC_USD].clone();
+        let marks_before = eng.state.marks.clone();
+        let seq_before = eng.state.seen_client_seq.clone();
+        let sweep = place(
+            vec![tip],
+            &taker,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            p200,
+            2 * QTY_SCALE,
+            1,
+        );
+        let evs = eng.ingest(sweep).unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })),
+            "{evs:?}"
+        );
+        assert_eq!(eng.state.accounts, accounts_before);
+        assert_eq!(eng.state.books[&BTC_USD], book_before);
+        assert_eq!(eng.state.marks, marks_before);
+        assert_eq!(eng.state.seen_client_seq, seq_before);
+        // Every account/book leaf is back; only the meta leaf (unit/seq
+        // bookkeeping of the rejected unit itself) may differ.
+        let leaves_now: HashSet<[u8; 32]> = eng.state.leaves().into_iter().collect();
+        let missing = leaves_before.difference(&leaves_now).count();
+        assert!(missing <= 1, "{missing} leaves not restored");
     }
 }
