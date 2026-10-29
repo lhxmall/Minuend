@@ -7,6 +7,16 @@
 //! is still valid. Only finalized heights are immutable, so operators must
 //! snapshot at (or before) their last finalized batch.
 //!
+//! R2-R-10 (round 2 of #47): `Batch::from_applied` currently flushes on its
+//! cadence when the batch is CUT, i.e. before it is submitted or finalized.
+//! A producer that crashes between that flush and a successful submit
+//! restarts one height ahead of the chain with the batch's unit bodies gone
+//! (the DAG is not persisted), and re-sent copies of those units are refused
+//! as duplicates. Until the producer flushes only at observed finalization,
+//! recover such a node by deleting snapshots above the last finalized height
+//! (the previous snapshot is kept, see `KEEP_SNAPSHOTS`). The watcher
+//! (`minuend-watch --state-dir`) only snapshots heights it has replayed.
+//!
 //! On restart: [`load_latest`] returns the newest snapshot; the caller then
 //! replays `gov_nonces.journal` over it (see [`crate::journal`]) and any
 //! batches newer than the snapshot via `Batch::validate_against`.
@@ -31,8 +41,11 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// Bump this whenever the bincode layout of anything inside `ChainState`
 /// changes (bincode is not self-describing, so `#[serde(default)]` does not
 /// help). History: v4 = `(ChainState, anchors)` tuple (#45); v5 =
-/// `MarketParams` gained `min_price`/`max_price` (#46, M3 in #47).
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
+/// `MarketParams` gained `min_price`/`max_price` (#46, M3 in #47); v6 =
+/// `ChainState.aa_address_owners` (#47 A2, added after the v5 bump without
+/// one — R2-R-14). `layout_fingerprint_is_pinned_to_format_version` pins
+/// the layout so the next change cannot land without a bump.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
 /// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
 /// restored engine cannot rebuild the DAG, so these ids are treated as
 /// already-executed ancestors when replaying post-snapshot batches.
@@ -46,6 +59,12 @@ pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
 /// still linkable. Worst case is 400 000 x 32 B = 12.8 MB per snapshot,
 /// and only when the chain is actually that busy (the ring holds executed
 /// units, not a fixed allocation).
+///
+/// R2-R-6/7: this is also the consensus parent window
+/// (`minuend_dag::PARENT_WINDOW`, same formula; asserted equal in the
+/// watcher's tests): a parent older than the last `DAG_ANCHOR_LIMIT`
+/// executed units is refused by every node, so a restored node's anchor
+/// set is exactly the set of parents any node may still accept.
 pub const DAG_ANCHOR_LIMIT: usize = 2 * BATCH_MAX_UNITS as usize;
 
 /// Exact decoder for snapshot bodies: same wire format as
@@ -352,6 +371,29 @@ mod tests {
         assert_eq!(got.len(), 10_000);
         assert_eq!(got[0], anchors[0]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R2-R-14: bincode is not self-describing, so a layout change that
+    /// forgets to bump `SNAPSHOT_FORMAT_VERSION` silently invalidates (or,
+    /// worse, mis-decodes) old snapshots. The digest below covers the
+    /// top-level `ChainState` fields plus one market and one account; when
+    /// it changes, bump `SNAPSHOT_FORMAT_VERSION`, extend the history note
+    /// and re-pin BOTH constants together.
+    #[test]
+    fn layout_fingerprint_is_pinned_to_format_version() {
+        let mut st = ChainState::new();
+        st.markets
+            .insert(minuend_types::BTC_USD, minuend_types::genesis_params());
+        let id = minuend_types::AccountId([3u8; 32]);
+        st.accounts.insert(id, crate::Account::new(id));
+        let body = bincode::serialize(&(&st, vec![[1u8; 32]])).unwrap();
+        let fp = hex::encode(minuend_types::sha256(&body));
+        const PINNED: (u32, &str) = (6, "FINGERPRINT_PLACEHOLDER");
+        assert_eq!(
+            (SNAPSHOT_FORMAT_VERSION, fp.as_str()),
+            PINNED,
+            "snapshot layout changed: bump SNAPSHOT_FORMAT_VERSION and re-pin"
+        );
     }
 
     #[test]

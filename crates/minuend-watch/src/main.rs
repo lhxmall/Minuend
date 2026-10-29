@@ -16,13 +16,17 @@
 use minuend_exec::Engine;
 use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
-    batch_from_committed, committed_frame_bytes, fetch_da_unit, prove, verify_da_binding,
-    HubClient, WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
+    batch_from_committed, check_committed_roots, committed_frame_bytes, fetch_da_unit,
+    load_checkpoint, prove, resolve_start_height, save_checkpoint, verify_da_binding,
+    write_private_proof, HubClient, WatchConfig, WatchError, CHALLENGE_BOND_GROSS,
+    DEFAULT_POLL_INTERVAL_SECS,
 };
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// HTTP-backed hub client over Obyte's JSON-RPC (`getAaStateVars`,
@@ -81,8 +85,16 @@ impl HttpHubClient {
             .write_all(request.as_bytes())
             .map_err(|e| e.to_string())?;
 
+        // I-3 / R2-R-2: a hub response is bounded too (a hostile or broken
+        // hub must not be able to exhaust the watcher's memory).
         let mut resp = Vec::new();
-        stream.read_to_end(&mut resp).map_err(|e| e.to_string())?;
+        (&mut stream)
+            .take(MAX_HUB_RESPONSE_BYTES + 1)
+            .read_to_end(&mut resp)
+            .map_err(|e| e.to_string())?;
+        if resp.len() as u64 > MAX_HUB_RESPONSE_BYTES {
+            return Err(format!("hub response exceeds {MAX_HUB_RESPONSE_BYTES} bytes"));
+        }
         let text = String::from_utf8_lossy(&resp).to_string();
 
         // Split headers from body; honor Content-Length when present.
@@ -134,12 +146,19 @@ impl HubClient for HttpHubClient {
     }
 }
 
+/// Largest JSON-RPC response accepted from the hub (a 4 MB package joint
+/// is base64 + JSON framing, so 64 MiB is generous).
+const MAX_HUB_RESPONSE_BYTES: u64 = 64 << 20;
+
 struct Args {
     rollup: String,
     vault: String,
     dispute: Option<String>,
+    dispute_fill: Option<String>,
+    dispute_bind: Option<String>,
     hub: String,
-    from_height: u64,
+    from_height: Option<u64>,
+    state_dir: Option<PathBuf>,
     poll_interval_secs: u64,
     bond: u64,
 }
@@ -147,8 +166,11 @@ fn parse_args() -> Result<Args, String> {
     let mut rollup = None;
     let mut vault = None;
     let mut dispute = None;
+    let mut dispute_fill = None;
+    let mut dispute_bind = None;
+    let mut state_dir = None;
     let mut hub = None;
-    let mut from_height = 1u64;
+    let mut from_height = None;
     let mut poll_interval_secs = DEFAULT_POLL_INTERVAL_SECS;
     let mut bond = CHALLENGE_BOND_GROSS;
 
@@ -158,13 +180,25 @@ fn parse_args() -> Result<Args, String> {
             "--rollup" => rollup = Some(it.next().ok_or("--rollup needs a value")?),
             "--vault" => vault = Some(it.next().ok_or("--vault needs a value")?),
             "--dispute" => dispute = Some(it.next().ok_or("--dispute needs a value")?),
+            "--dispute-fill" => {
+                dispute_fill = Some(it.next().ok_or("--dispute-fill needs a value")?)
+            }
+            "--dispute-bind" => {
+                dispute_bind = Some(it.next().ok_or("--dispute-bind needs a value")?)
+            }
+            "--state-dir" => {
+                state_dir = Some(PathBuf::from(
+                    it.next().ok_or("--state-dir needs a value")?,
+                ))
+            }
             "--hub" => hub = Some(it.next().ok_or("--hub needs a value")?),
             "--from-height" => {
-                from_height = it
-                    .next()
-                    .ok_or("--from-height needs a value")?
-                    .parse()
-                    .map_err(|_| "--from-height must be u64")?
+                from_height = Some(
+                    it.next()
+                        .ok_or("--from-height needs a value")?
+                        .parse()
+                        .map_err(|_| "--from-height must be u64")?,
+                )
             }
             "--poll-interval" => {
                 poll_interval_secs = it
@@ -192,8 +226,11 @@ fn parse_args() -> Result<Args, String> {
         rollup: rollup.ok_or("missing --rollup")?,
         vault: vault.ok_or("missing --vault")?,
         dispute,
+        dispute_fill,
+        dispute_bind,
         hub: hub.ok_or("missing --hub")?,
         from_height,
+        state_dir,
         poll_interval_secs,
         bond,
     })
@@ -202,11 +239,23 @@ fn parse_args() -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "minuend-watch --rollup <rollup-aa-addr> --vault <vault-aa-addr> --hub <hub-url> [--dispute <dispute-aa-addr>] \
- [--from-height <u64>] [--poll-interval <secs>] [--bond <gross-bytes>]\n\
+ [--dispute-fill <addr>] [--dispute-bind <addr>] [--state-dir <dir>] [--from-height <u64>] \
+ [--poll-interval <secs>] [--bond <gross-bytes>]\n\
  \n\
-Polls the rollup's da_unit_<h> assertions, replays each submitted height, and flags any\n\
-root mismatch inside the submitted_at+3600 dispute window for a watcher-owned\n\
-wallet to challenge via post_challenge.js (one-shot fraud predicates, no bond)."
+Polls the rollup's da_unit_<h> assertions, checks the DA header against the roots the\n\
+rollup AA stored, replays each submitted height, and flags any mismatch inside the\n\
+submitted_at+3600 dispute window for a watcher-owned wallet to challenge.\n\
+\n\
+--state-dir keeps a replay checkpoint (chainstate.<h>.snap) after every replayed height\n\
+so a restart resumes instead of replaying from genesis (temp_data is purged after\n\
+~24 h). To start above height 1, put a TRUSTED chainstate.<from-1>.snap there.\n\
+\n\
+Limits (R2-R-2/R2-R-5): <= {MAX_PKG} packages, <= {PKG_MB} MiB decompressed per package,\n\
+<= {TOT_MB} MiB per height, unit_count <= 200000. Replay cost is O(units x state size)\n\
+(full witness rebuild per unit); size the host for the largest expected state.",
+        MAX_PKG = minuend_watch::MAX_PACKAGES,
+        PKG_MB = minuend_watch::MAX_PACKAGE_RAW_BYTES >> 20,
+        TOT_MB = minuend_watch::MAX_COMMITTED_RAW_BYTES >> 20,
     );
 }
 
@@ -273,15 +322,44 @@ fn current_challenge_mode() -> ChallengeMode {
 /// window/margin/frozen gate refused to send (nothing was broadcast).
 const LIVE_EXIT_REFUSED: i32 = 3;
 
+/// Addresses the watcher hands to the challenge posters (R2-R-8): the
+/// rollup it is actually watching and any dispute AA given on the command
+/// line. The live poster reads the dispute AA from the rollup's own
+/// `dispute_*aa` state var when none is given.
+#[derive(Clone, Debug, Default)]
+struct ChallengeCtx {
+    rollup: String,
+    dispute_main: Option<String>,
+    dispute_fill: Option<String>,
+    dispute_bind: Option<String>,
+    proof_dir: PathBuf,
+}
+
+impl ChallengeCtx {
+    fn dispute_for(&self, target: &str) -> Option<&str> {
+        match target {
+            "fill" => self.dispute_fill.as_deref(),
+            "bind" => self.dispute_bind.as_deref(),
+            _ => self.dispute_main.as_deref(),
+        }
+    }
+}
+
+static CHALLENGE_CTX: OnceLock<ChallengeCtx> = OnceLock::new();
+
 /// L5 (#47): argv for `node post_challenge_live.js` (pure, unit-tested).
+/// R2-R-8: always names the watched rollup (`--rollup`) and, when known,
+/// the dispute AA (`--dispute-address`), so the script never falls back to
+/// whatever `deployment.json` in the checkout happens to say.
 fn live_challenge_args(
     script: &std::path::Path,
     h: u64,
     p: &prove::BuiltProof,
     proof_path: &std::path::Path,
     network: &str,
+    ctx: &ChallengeCtx,
 ) -> Vec<std::ffi::OsString> {
-    vec![
+    let mut args: Vec<std::ffi::OsString> = vec![
         script.as_os_str().to_owned(),
         "--height".into(),
         h.to_string().into(),
@@ -293,13 +371,108 @@ fn live_challenge_args(
         p.target().into(),
         "--network".into(),
         network.into(),
-    ]
+        "--rollup".into(),
+        ctx.rollup.clone().into(),
+    ];
+    if let Some(d) = ctx.dispute_for(p.target()) {
+        args.push("--dispute-address".into());
+        args.push(d.to_string().into());
+    }
+    args
+}
+
+/// R2-R-11: per `(height, predicate)` challenge bookkeeping, so a challenge
+/// that is being posted or was already broadcast is not paid for again on
+/// the next poll round, and the poster runs without blocking the loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AttemptState {
+    in_flight: bool,
+    broadcast: bool,
+    failures: u32,
+    refused: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PostDecision {
+    Post,
+    InFlight,
+    AlreadyBroadcast,
+    GaveUp,
+}
+
+/// Retries for a poster that exited with an error (nothing broadcast).
+const MAX_POST_FAILURES: u32 = 3;
+
+fn post_decision(prev: Option<&AttemptState>) -> PostDecision {
+    match prev {
+        None => PostDecision::Post,
+        Some(s) if s.in_flight => PostDecision::InFlight,
+        Some(s) if s.broadcast => PostDecision::AlreadyBroadcast,
+        Some(s) if s.refused || s.failures >= MAX_POST_FAILURES => PostDecision::GaveUp,
+        Some(_) => PostDecision::Post,
+    }
+}
+
+/// Fold a finished poster's exit code into its attempt state.
+fn record_exit(state: &mut AttemptState, code: Option<i32>) {
+    state.in_flight = false;
+    match code {
+        Some(0) => state.broadcast = true,
+        Some(LIVE_EXIT_REFUSED) => state.refused = true,
+        _ => state.failures += 1,
+    }
+}
+
+#[derive(Default)]
+struct ChallengeTracker {
+    states: BTreeMap<(u64, String), AttemptState>,
+    children: BTreeMap<(u64, String), (Child, String)>,
+}
+
+impl ChallengeTracker {
+    /// Reap finished posters; returns one report line per finished child.
+    fn poll(&mut self) -> Vec<String> {
+        let mut done = Vec::new();
+        for (key, (child, what)) in self.children.iter_mut() {
+            if let Ok(Some(st)) = child.try_wait() {
+                done.push((key.clone(), st, what.clone()));
+            }
+        }
+        let mut out = Vec::new();
+        for (key, st, what) in done {
+            self.children.remove(&key);
+            let state = self.states.entry(key.clone()).or_default();
+            record_exit(state, st.code());
+            let (h, pred) = key;
+            out.push(match st.code() {
+                Some(0) => format!("WATCH: challenge h={h} pred={pred} broadcast ({what})"),
+                Some(LIVE_EXIT_REFUSED) => format!(
+                    "WATCH CRITICAL: challenge h={h} pred={pred} was NOT posted — the \
+                     poster's fresh window/margin check refused it ({what})"
+                ),
+                _ => format!(
+                    "WATCH CRITICAL: challenge h={h} pred={pred} was NOT confirmed (poster \
+                     exited {st}; attempt {} of {MAX_POST_FAILURES}) ({what})",
+                    state.failures
+                ),
+            });
+        }
+        out
+    }
+}
+
+static TRACKER: Mutex<Option<ChallengeTracker>> = Mutex::new(None);
+
+fn with_tracker<R>(f: impl FnOnce(&mut ChallengeTracker) -> R) -> R {
+    let mut g = TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(ChallengeTracker::default))
 }
 
 /// #37-13: cross-round replay cursor. `processed_upto` is the last height
 /// whose replay advanced the engine; the next round starts right after it
-/// (never below the configured `from_height`). In-memory by design: a staler
-/// restart just replays from the configured start once.
+/// (never below the configured `from_height`). R2-R-9: with `--state-dir`
+/// the engine (and thus the cursor's start) is checkpointed after every
+/// replayed height, so a restart resumes where it stopped.
 ///
 /// L4 (#47): a height that does not replay still stops the *replay* (the
 /// engine cannot skip a height), but it is now recorded as a stall so the
@@ -447,6 +620,24 @@ fn fetch_committed(
             None,
         ));
     }
+    // R2-R-1: the header we are about to replay must carry exactly the
+    // roots the rollup AA stored from this unit's submit data (the vault
+    // pays from those). A replay alone only proves the HEADER honest.
+    match check_committed_roots(hub, &config.rollup_address, &da) {
+        Ok(()) => {}
+        Err(WatchError::HubUnavailable(_)) => return Ok(None),
+        Err(e) => {
+            return Err(alert_and_maybe_challenge(
+                h,
+                win,
+                format!(
+                    "h={h} CRITICAL {e} — the on-chain assertion is NOT the replayed DA; \
+                     treat height {h} as unverified"
+                ),
+                None,
+            ));
+        }
+    }
     // B11: the exact bytes data_root commits to (inline blob or the
     // concatenated packages, unmodified). 3 tries + backoff on transport
     // errors, then give up — never mis-challenge on flaky package fetches.
@@ -526,8 +717,26 @@ fn check_height(
     };
 
     let prev_root = engine.state.state_root();
-    // Build the fraud proof BEFORE validate_against advances the engine:
-    // build_proof replays unit-by-unit on a scratch engine fork.
+    // R2-R-5: validate first. `validate_against` replays on its own scratch
+    // clone and leaves `engine` untouched on failure, so the (expensive)
+    // proof-building replay now runs only for a height that actually fails
+    // instead of cloning and replaying every honest height twice.
+    let err = match batch.validate_against(prev_root, engine) {
+        Ok(()) => {
+            // R2-R-5: drop this height's per-unit traces (full witness leaf
+            // sets per unit) — they are only needed while the height is
+            // being judged; the watcher's memory no longer grows with
+            // history.
+            engine.prune_below(&batch.checkpoint.unit_ids);
+            // #37-13: the engine now sits at this height — the poll loop
+            // advances its cursor so the next round does not re-scan old
+            // heights against an advanced engine (PrevMismatch noise) and
+            // does not skip a gap.
+            *advanced = true;
+            return Ok(None);
+        }
+        Err(e) => e,
+    };
     let proof_hint: Option<prove::BuiltProof> = {
         let mut scratch = engine.clone();
         // Inbox pairs for P-omit: fetch inbox vars is out of scope for the
@@ -544,34 +753,26 @@ fn check_height(
             .unwrap_or_default();
         prove::build_proof(&batch, &mut scratch, &inbox, win.submitted_at)
     };
-    match batch.validate_against(prev_root, engine) {
-        Ok(()) => {
-            // #37-13: the engine now sits at this height — the poll loop
-            // advances its in-memory cursor so the next round does not
-            // re-scan old heights against an advanced engine (PrevMismatch
-            // noise) and does not skip a gap.
-            *advanced = true;
-            Ok(None)
-        }
-        Err(e) => Ok(Some(alert_and_maybe_challenge(
-            h,
-            win,
-            format!(
-                "h={} ROOT MISMATCH ({}): watcher should challenge with {} bytes bond",
-                h, e, config.challenge_bond_gross
-            ),
-            proof_hint.as_ref(),
-        ))),
-    }
+    Ok(Some(alert_and_maybe_challenge(
+        h,
+        win,
+        format!(
+            "h={} ROOT MISMATCH ({}): watcher should challenge with {} bytes bond",
+            h, err, config.challenge_bond_gross
+        ),
+        proof_hint.as_ref(),
+    )))
 }
 
 /// Act on a challengeable alert according to [`ChallengeMode`] (L5, #47).
-/// A built proof is always written to a temp `proof.json` first, so an
-/// operator can still post it by hand if the automatic post fails. `Live`
-/// spawns `obyte-local/post_challenge_live.js` (mnemonic inherited; the
-/// script refuses inside the 600 s margin itself); the devnet drill spawns
-/// `post_challenge.js` (never `--hub`, mnemonic stripped). Without a proof
-/// nothing is spawned.
+/// A built proof is always written first (R2-R-12: fresh 0600 file in a
+/// private directory), so an operator can still post it by hand if the
+/// automatic post fails. `Live` spawns `obyte-local/post_challenge_live.js`
+/// (mnemonic inherited; the script refuses inside the 600 s margin itself);
+/// the devnet drill spawns `post_challenge.js` (never `--hub`, mnemonic
+/// stripped). Without a proof nothing is spawned. R2-R-11: posters run in
+/// the background (reaped by the poll loop) and a `(height, predicate)`
+/// that is in flight or already broadcast is never posted again.
 fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) {
     let mode = current_challenge_mode();
     if mode == ChallengeMode::PrintOnly {
@@ -582,83 +783,94 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
         eprintln!("WATCH ALERT (NOT CHALLENGED: no expressible proof): {alert}");
         return;
     };
-    let path = std::env::temp_dir().join(format!("minuend-proof-{}-{}.json", h, p.pred));
-    if std::fs::write(&path, serde_json::to_string(&p.data).unwrap_or_default()).is_err() {
-        eprintln!("WATCH CRITICAL (NOT CHALLENGED: proof write failed): {alert}");
-        return;
+    let key = (h, p.pred.clone());
+    match with_tracker(|t| post_decision(t.states.get(&key))) {
+        PostDecision::Post => {}
+        PostDecision::InFlight => {
+            eprintln!("WATCH: challenge h={h} pred={} already in flight ({alert})", p.pred);
+            return;
+        }
+        PostDecision::AlreadyBroadcast => {
+            eprintln!(
+                "WATCH: challenge h={h} pred={} already broadcast; not paying again ({alert})",
+                p.pred
+            );
+            return;
+        }
+        PostDecision::GaveUp => {
+            eprintln!(
+                "WATCH CRITICAL: challenge h={h} pred={} not retried (refused or failed \
+                 {MAX_POST_FAILURES} times) — post it manually. Alert: {alert}",
+                p.pred
+            );
+            return;
+        }
     }
+    let ctx = CHALLENGE_CTX.get().cloned().unwrap_or_default();
+    let path = match write_private_proof(&ctx.proof_dir, h, &p.pred, &p.data) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("WATCH CRITICAL (NOT CHALLENGED: proof write failed: {e}): {alert}");
+            return;
+        }
+    };
     let obyte_local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local");
+    let mut cmd = Command::new("node");
     if mode == ChallengeMode::Live {
         let network =
             env_var_compat("MINUEND_WATCH_NETWORK").unwrap_or_else(|| "mainnet".to_string());
         let script = obyte_local.join("post_challenge_live.js");
-        let args = live_challenge_args(&script, h, p, &path, &network);
+        cmd.args(live_challenge_args(&script, h, p, &path, &network, &ctx));
         eprintln!(
-            "posting live challenge: pred={} target={} h={h} network={network} proof={}",
+            "posting live challenge: pred={} target={} h={h} network={network} rollup={} proof={}",
             p.pred,
             p.target(),
+            ctx.rollup,
             path.display()
         );
-        match Command::new("node").args(args).status() {
-            Ok(st) if st.success() => eprintln!("WATCH: challenge for h={h} broadcast ({alert})"),
-            Ok(st) if st.code() == Some(LIVE_EXIT_REFUSED) => eprintln!(
-                "WATCH CRITICAL: challenge for h={h} was NOT posted — the live poster's fresh \
-                 window/margin check refused it. proof={} Alert: {alert}",
-                path.display()
-            ),
-            Ok(st) => eprintln!(
-                "WATCH CRITICAL: challenge for h={h} was NOT confirmed (post_challenge_live.js \
-                 exited {st}). Post it manually before the window closes: pred={} target={} \
-                 proof={}. Alert: {alert}",
-                p.pred,
-                p.target(),
-                path.display()
-            ),
-            Err(e) => eprintln!(
+    } else {
+        // DevnetDrill: local aa-testkit only, so no --hub and no mnemonic in
+        // the child's environment (post_challenge.js refuses both by design).
+        let script = obyte_local.join("post_challenge.js");
+        let mut args: Vec<std::ffi::OsString> = vec![
+            script.as_os_str().to_owned(),
+            "--height".into(),
+            h.to_string().into(),
+            "--pred".into(),
+            p.pred.clone().into(),
+            "--proof".into(),
+            path.as_os_str().to_owned(),
+        ];
+        match p.target() {
+            "fill" => args.push("--fill".into()),
+            "bind" => args.push("--bind".into()),
+            _ => {}
+        }
+        cmd.args(args)
+            .env_remove("MINUEND_WATCH_MNEMONIC")
+            .env_remove("OPERP_WATCH_MNEMONIC");
+        eprintln!(
+            "spawning (devnet drill): node {} pred={} target={}",
+            script.display(),
+            p.pred,
+            p.target()
+        );
+    }
+    match cmd.spawn() {
+        Ok(child) => with_tracker(|t| {
+            let st = t.states.entry(key.clone()).or_default();
+            st.in_flight = true;
+            t.children
+                .insert(key, (child, format!("proof={} alert: {alert}", path.display())));
+        }),
+        Err(e) => {
+            with_tracker(|t| t.states.entry(key).or_default().failures += 1);
+            eprintln!(
                 "WATCH CRITICAL: challenge for h={h} was NOT posted (spawn failed: {e}). \
                  proof={} Alert: {alert}",
                 path.display()
-            ),
+            );
         }
-        return;
-    }
-    // DevnetDrill: local aa-testkit only, so no --hub and no mnemonic in the
-    // child's environment (post_challenge.js refuses both by design).
-    let script = obyte_local.join("post_challenge.js");
-    let h_s = h.to_string();
-    let mut args: Vec<std::ffi::OsString> = vec![
-        script.as_os_str().to_owned(),
-        "--height".into(),
-        h_s.into(),
-        "--pred".into(),
-        p.pred.clone().into(),
-        "--proof".into(),
-        path.as_os_str().to_owned(),
-    ];
-    match p.target() {
-        "fill" => args.push("--fill".into()),
-        "bind" => args.push("--bind".into()),
-        _ => {}
-    }
-    eprintln!(
-        "spawning (devnet drill): node {} pred={} target={}",
-        script.display(),
-        p.pred,
-        p.target()
-    );
-    match Command::new("node")
-        .args(args)
-        .env_remove("MINUEND_WATCH_MNEMONIC")
-        .env_remove("OPERP_WATCH_MNEMONIC")
-        .status()
-    {
-        Ok(st) if st.success() => {}
-        Ok(st) => eprintln!(
-            "WATCH CRITICAL: devnet challenge for h={h} was NOT posted (post_challenge.js exited {st}). Alert: {alert}"
-        ),
-        Err(e) => eprintln!(
-            "WATCH CRITICAL: devnet challenge for h={h} was NOT posted (spawn failed: {e}). Alert: {alert}"
-        ),
     }
 }
 
@@ -676,10 +888,49 @@ fn main() -> anyhow::Result<()> {
         poll_interval_secs: args.poll_interval_secs,
         challenge_bond_gross: args.bond,
     };
-    // Replay engine starts at genesis; heights above a replay gap fail with
-    // PrevMismatch until the earlier chain has been replayed — exactly the
-    // mismatch surfaced to the caller.
-    let mut engine = Engine::new();
+    // R2-R-9: resume from the replay checkpoint when --state-dir has one;
+    // otherwise the engine starts at genesis. A start height the engine
+    // cannot reach (no state for from_height-1) is refused up front.
+    let mut engine = match &args.state_dir {
+        Some(dir) => load_checkpoint(dir)?.unwrap_or_else(Engine::new),
+        None => Engine::new(),
+    };
+    let checkpoint_h = (engine.state.height > 0).then_some(engine.state.height);
+    let start = resolve_start_height(args.from_height, checkpoint_h).map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(ch) = checkpoint_h {
+        println!(
+            "minuend-watch: resumed from checkpoint h={ch} (state_root {})",
+            hex::encode(engine.state.state_root())
+        );
+        // Sanity: the checkpoint should match the chain's stored root.
+        if let Ok(Some(v)) =
+            hub.get_aa_state_var(&config.rollup_address, &format!("state_root_{ch}"))
+        {
+            let onchain = v.as_str().unwrap_or("").to_string();
+            let mine = hex::encode(engine.state.state_root());
+            if onchain != mine {
+                println!(
+                    "WATCH ALERT: checkpoint h={ch} state_root {mine} != on-chain state_root_{ch} \
+                     {onchain} (height re-submitted or checkpoint not trusted)"
+                );
+            }
+        }
+    }
+    let proof_dir = match &args.state_dir {
+        Some(d) => d.join("proofs"),
+        None => std::env::temp_dir().join(format!(
+            "minuend-watch-{}-{}",
+            std::process::id(),
+            now_secs()
+        )),
+    };
+    let _ = CHALLENGE_CTX.set(ChallengeCtx {
+        rollup: args.rollup.clone(),
+        dispute_main: args.dispute.clone(),
+        dispute_fill: args.dispute_fill.clone(),
+        dispute_bind: args.dispute_bind.clone(),
+        proof_dir,
+    });
 
     println!(
         "minuend-watch: watching {} via {} — every {}s, dispute window submitted_at+3600",
@@ -705,9 +956,13 @@ fn main() -> anyhow::Result<()> {
     // #37-13: cross-round replay cursor. Only a height whose replay ADVANCED
     // the engine moves it, so a gap or a mismatch is retried next round
     // instead of being silently skipped or re-checked against stale state.
-    let mut cursor = ReplayCursor::new(args.from_height);
+    let mut cursor = ReplayCursor::new(start);
 
     loop {
+        // R2-R-11: report background challenge posters that finished.
+        for line in with_tracker(|t| t.poll()) {
+            eprintln!("{line}");
+        }
         let ll = hub
             .get_aa_state_var(&config.rollup_address, "last_submitted")
             .map_err(|e| anyhow::anyhow!("hub last_submitted: {e}"))?
@@ -724,6 +979,12 @@ fn main() -> anyhow::Result<()> {
             }
             if advanced {
                 cursor.record(h);
+                // R2-R-9: checkpoint every replay-verified height.
+                if let Some(dir) = &args.state_dir {
+                    if let Err(e) = save_checkpoint(dir, &engine) {
+                        println!("WATCH ERROR: checkpoint at h={h} failed: {e}");
+                    }
+                }
             } else {
                 // No DA yet, or a mismatch this round: the replay retries
                 // from here next round (never advance past an unreplayed
@@ -757,7 +1018,9 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         challenge_mode, challenge_postable, challenge_window_open, live_challenge_args,
-        ChallengeMode, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS,
+        post_decision, record_exit, AttemptState, ChallengeCtx, ChallengeMode, PostDecision,
+        ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS, LIVE_EXIT_REFUSED,
+        MAX_POST_FAILURES,
     };
 
     /// B10 (#47): posting stops CHALLENGE_SAFETY_MARGIN_SECS before the AA
@@ -806,10 +1069,15 @@ mod tests {
         };
         let script = std::path::Path::new("/x/post_challenge_live.js");
         let proof = std::path::Path::new("/tmp/p.json");
-        let args: Vec<String> = live_challenge_args(script, 7, &mk(false, true), proof, "testnet")
-            .into_iter()
-            .map(|a| a.into_string().unwrap())
-            .collect();
+        let ctx = ChallengeCtx {
+            rollup: "R".repeat(32),
+            ..Default::default()
+        };
+        let args: Vec<String> =
+            live_challenge_args(script, 7, &mk(false, true), proof, "testnet", &ctx)
+                .into_iter()
+                .map(|a| a.into_string().unwrap())
+                .collect();
         assert_eq!(
             args,
             vec![
@@ -823,14 +1091,77 @@ mod tests {
                 "--target",
                 "bind",
                 "--network",
-                "testnet"
+                "testnet",
+                "--rollup",
+                &"R".repeat(32),
             ]
         );
-        let fill = live_challenge_args(script, 7, &mk(true, false), proof, "mainnet");
+        let fill = live_challenge_args(script, 7, &mk(true, false), proof, "mainnet", &ctx);
         assert!(fill.iter().any(|a| a == "fill"));
-        let main = live_challenge_args(script, 7, &mk(false, false), proof, "mainnet");
+        let main = live_challenge_args(script, 7, &mk(false, false), proof, "mainnet", &ctx);
         assert!(main.iter().any(|a| a == "main"));
         assert!(!main.iter().any(|a| a == "--hub"));
+    }
+
+    /// R2-R-8: the live poster always gets the WATCHED rollup and, when the
+    /// operator configured it, the matching dispute AA for the target.
+    #[test]
+    fn live_challenge_args_carry_watched_rollup_and_dispute() {
+        let mk = |fill_aa: bool, bind_aa: bool| minuend_watch::prove::BuiltProof {
+            pred: "deposit".into(),
+            fill_aa,
+            bind_aa,
+            data: serde_json::json!({}),
+        };
+        let ctx = ChallengeCtx {
+            rollup: "X".repeat(32),
+            dispute_main: Some("M".repeat(32)),
+            dispute_fill: None,
+            dispute_bind: Some("B".repeat(32)),
+            proof_dir: Default::default(),
+        };
+        let s = std::path::Path::new("/x/p.js");
+        let p = std::path::Path::new("/tmp/p.json");
+        let strs = |v: Vec<std::ffi::OsString>| -> Vec<String> {
+            v.into_iter().map(|a| a.into_string().unwrap()).collect()
+        };
+        let main = strs(live_challenge_args(s, 3, &mk(false, false), p, "mainnet", &ctx));
+        let i = main.iter().position(|a| a == "--rollup").unwrap();
+        assert_eq!(main[i + 1], "X".repeat(32));
+        let j = main.iter().position(|a| a == "--dispute-address").unwrap();
+        assert_eq!(main[j + 1], "M".repeat(32));
+        let bind = strs(live_challenge_args(s, 3, &mk(false, true), p, "mainnet", &ctx));
+        assert!(bind.contains(&"B".repeat(32)));
+        let fill = strs(live_challenge_args(s, 3, &mk(true, false), p, "mainnet", &ctx));
+        assert!(!fill.iter().any(|a| a == "--dispute-address"));
+        assert!(fill.contains(&"X".repeat(32)));
+    }
+
+    /// R2-R-11: a challenge in flight or already broadcast is never posted
+    /// (and paid for) again; errors retry a bounded number of times; a
+    /// window refusal is final.
+    #[test]
+    fn challenge_tracker_never_double_posts() {
+        assert_eq!(post_decision(None), PostDecision::Post);
+        let mut st = AttemptState {
+            in_flight: true,
+            ..Default::default()
+        };
+        assert_eq!(post_decision(Some(&st)), PostDecision::InFlight);
+        record_exit(&mut st, Some(0));
+        assert_eq!(post_decision(Some(&st)), PostDecision::AlreadyBroadcast);
+
+        let mut e = AttemptState::default();
+        for _ in 0..MAX_POST_FAILURES - 1 {
+            record_exit(&mut e, Some(1));
+            assert_eq!(post_decision(Some(&e)), PostDecision::Post);
+        }
+        record_exit(&mut e, None);
+        assert_eq!(post_decision(Some(&e)), PostDecision::GaveUp);
+
+        let mut r = AttemptState::default();
+        record_exit(&mut r, Some(LIVE_EXIT_REFUSED));
+        assert_eq!(post_decision(Some(&r)), PostDecision::GaveUp);
     }
 
     /// L4 (#47): a stuck height is tracked and reported (after the second
