@@ -93,7 +93,9 @@ impl HttpHubClient {
             .read_to_end(&mut resp)
             .map_err(|e| e.to_string())?;
         if resp.len() as u64 > MAX_HUB_RESPONSE_BYTES {
-            return Err(format!("hub response exceeds {MAX_HUB_RESPONSE_BYTES} bytes"));
+            return Err(format!(
+                "hub response exceeds {MAX_HUB_RESPONSE_BYTES} bytes"
+            ));
         }
         let text = String::from_utf8_lossy(&resp).to_string();
 
@@ -187,9 +189,7 @@ fn parse_args() -> Result<Args, String> {
                 dispute_bind = Some(it.next().ok_or("--dispute-bind needs a value")?)
             }
             "--state-dir" => {
-                state_dir = Some(PathBuf::from(
-                    it.next().ok_or("--state-dir needs a value")?,
-                ))
+                state_dir = Some(PathBuf::from(it.next().ok_or("--state-dir needs a value")?))
             }
             "--hub" => hub = Some(it.next().ok_or("--hub needs a value")?),
             "--from-height" => {
@@ -790,7 +790,10 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
     match with_tracker(|t| post_decision(t.states.get(&key))) {
         PostDecision::Post => {}
         PostDecision::InFlight => {
-            eprintln!("WATCH: challenge h={h} pred={} already in flight ({alert})", p.pred);
+            eprintln!(
+                "WATCH: challenge h={h} pred={} already in flight ({alert})",
+                p.pred
+            );
             return;
         }
         PostDecision::AlreadyBroadcast => {
@@ -863,8 +866,10 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
         Ok(child) => with_tracker(|t| {
             let st = t.states.entry(key.clone()).or_default();
             st.in_flight = true;
-            t.children
-                .insert(key, (child, format!("proof={} alert: {alert}", path.display())));
+            t.children.insert(
+                key,
+                (child, format!("proof={} alert: {alert}", path.display())),
+            );
         }),
         Err(e) => {
             with_tracker(|t| t.states.entry(key).or_default().failures += 1);
@@ -899,7 +904,8 @@ fn main() -> anyhow::Result<()> {
         None => Engine::new(),
     };
     let checkpoint_h = (engine.state.height > 0).then_some(engine.state.height);
-    let start = resolve_start_height(args.from_height, checkpoint_h).map_err(|e| anyhow::anyhow!(e))?;
+    let start =
+        resolve_start_height(args.from_height, checkpoint_h).map_err(|e| anyhow::anyhow!(e))?;
     if let Some(ch) = checkpoint_h {
         println!(
             "minuend-watch: resumed from checkpoint h={ch} (state_root {})",
@@ -1128,14 +1134,35 @@ mod tests {
         let strs = |v: Vec<std::ffi::OsString>| -> Vec<String> {
             v.into_iter().map(|a| a.into_string().unwrap()).collect()
         };
-        let main = strs(live_challenge_args(s, 3, &mk(false, false), p, "mainnet", &ctx));
+        let main = strs(live_challenge_args(
+            s,
+            3,
+            &mk(false, false),
+            p,
+            "mainnet",
+            &ctx,
+        ));
         let i = main.iter().position(|a| a == "--rollup").unwrap();
         assert_eq!(main[i + 1], "X".repeat(32));
         let j = main.iter().position(|a| a == "--dispute-address").unwrap();
         assert_eq!(main[j + 1], "M".repeat(32));
-        let bind = strs(live_challenge_args(s, 3, &mk(false, true), p, "mainnet", &ctx));
+        let bind = strs(live_challenge_args(
+            s,
+            3,
+            &mk(false, true),
+            p,
+            "mainnet",
+            &ctx,
+        ));
         assert!(bind.contains(&"B".repeat(32)));
-        let fill = strs(live_challenge_args(s, 3, &mk(true, false), p, "mainnet", &ctx));
+        let fill = strs(live_challenge_args(
+            s,
+            3,
+            &mk(true, false),
+            p,
+            "mainnet",
+            &ctx,
+        ));
         assert!(!fill.iter().any(|a| a == "--dispute-address"));
         assert!(fill.contains(&"X".repeat(32)));
     }

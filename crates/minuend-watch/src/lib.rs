@@ -670,7 +670,9 @@ pub fn check_header_against_state(
     if bound {
         for (key, prefix) in BINDING_ROOT_FIELDS {
             if !state.contains_key(*key) {
-                out.push(format!("AA state {prefix}<h> missing (binding AA expected)"));
+                out.push(format!(
+                    "AA state {prefix}<h> missing (binding AA expected)"
+                ));
             }
         }
         // The header's own da_bind must be the hash of its own fields.
@@ -806,7 +808,10 @@ pub fn save_checkpoint(
 /// loaded checkpoint height. The engine cannot skip heights, so a start
 /// above `checkpoint + 1` (or above 1 with no checkpoint) is refused up
 /// front instead of producing a `PrevMismatch` stall on every height.
-pub fn resolve_start_height(from_flag: Option<u64>, checkpoint: Option<u64>) -> Result<u64, String> {
+pub fn resolve_start_height(
+    from_flag: Option<u64>,
+    checkpoint: Option<u64>,
+) -> Result<u64, String> {
     let next = checkpoint.map(|h| h + 1).unwrap_or(1);
     match from_flag {
         None => Ok(next),
@@ -1324,7 +1329,7 @@ mod tests {
         let mut trail = gz(b"A");
         trail.extend_from_slice(b"junk");
         assert!(gunzip_bounded(&trail, 1024).is_err());
-        assert!(MAX_PACKAGE_RAW_BYTES <= MAX_COMMITTED_RAW_BYTES);
+        const { assert!(MAX_PACKAGE_RAW_BYTES <= MAX_COMMITTED_RAW_BYTES) };
     }
 
     /// R2-R-2: an inline `frames_blob` that decompresses beyond the cap is a
@@ -1436,7 +1441,10 @@ mod tests {
         for k in ["chain_id", "assertion_version", "height", "counts_root"] {
             let mut forged = submit.clone();
             forged[k] = serde_json::json!("x");
-            assert!(!check_header_against_submit(&header, &forged, h).is_empty(), "{k}");
+            assert!(
+                !check_header_against_submit(&header, &forged, h).is_empty(),
+                "{k}"
+            );
         }
         // Numbers vs numeric strings from the hub compare equal.
         let mut st = state.clone();
@@ -1499,7 +1507,10 @@ mod tests {
         assert_eq!(back.state.height, da.height);
         assert_eq!(back.recent_units, eng.recent_units);
         assert!(back.store_dir.is_none());
-        assert_eq!(resolve_start_height(None, Some(back.state.height)), Ok(da.height + 1));
+        assert_eq!(
+            resolve_start_height(None, Some(back.state.height)),
+            Ok(da.height + 1)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1590,8 +1601,8 @@ mod tests {
         let mut submit = submit_from_header(&header);
         submit["da_bind"] = header["da_bind"].clone();
         submit["data_root"] = header["data_root"].clone();
-        let da_hash = base64::engine::general_purpose::STANDARD
-            .encode(obyte_hash::get_data_hash(&header));
+        let da_hash =
+            base64::engine::general_purpose::STANDARD.encode(obyte_hash::get_data_hash(&header));
         let mut vars = state_from_submit(h, &submit);
         vars.insert(format!("da_bind_{h}"), header["da_bind"].clone());
         vars.insert(format!("data_root_{h}"), header["data_root"].clone());
@@ -1626,7 +1637,8 @@ mod tests {
         v.insert(format!("da_hash_{h}"), serde_json::json!("AAAA"));
         assert!(check_committed_roots(&hub(v), "R", &du(&header, &joint)).is_err());
         // Two temp_data messages in the DA unit.
-        let two = serde_json::json!({"messages": [td.clone(), td, {"app": "data", "payload": submit}]});
+        let two =
+            serde_json::json!({"messages": [td.clone(), td, {"app": "data", "payload": submit}]});
         let err = check_committed_roots(&hub(vars.clone()), "R", &du(&header, &two)).unwrap_err();
         assert!(format!("{err}").contains("temp_data messages"), "{err}");
         // A binding AA that lost a binding var is flagged.

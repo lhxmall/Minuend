@@ -388,7 +388,7 @@ mod tests {
         st.accounts.insert(id, crate::Account::new(id));
         let body = bincode::serialize(&(&st, vec![[1u8; 32]])).unwrap();
         let fp = hex::encode(minuend_types::sha256(&body));
-        const PINNED: (u32, &str) = (6, "FINGERPRINT_PLACEHOLDER");
+        const PINNED: (u32, &str) = (6, "e0ceb8bfffccee0f34446cc9787297ff61807499c6f73d36175a219393e87ba9");
         assert_eq!(
             (SNAPSHOT_FORMAT_VERSION, fp.as_str()),
             PINNED,

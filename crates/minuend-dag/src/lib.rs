@@ -687,7 +687,12 @@ impl Dag {
     /// Is `p` a valid parent for the unit executed at sequence `s`?
     /// `virtual_seq` carries sequence numbers assigned earlier in the same
     /// `ready_linearized` pass (units not executed yet).
-    fn parent_fresh_at(&self, p: UnitId, s: u64, virtual_seq: Option<&HashMap<UnitId, u64>>) -> bool {
+    fn parent_fresh_at(
+        &self,
+        p: UnitId,
+        s: u64,
+        virtual_seq: Option<&HashMap<UnitId, u64>>,
+    ) -> bool {
         let w = self.parent_window as u64;
         if p == genesis_id() {
             // Genesis = virtual seq -1: fresh while s - (-1) <= w.
