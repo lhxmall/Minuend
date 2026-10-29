@@ -472,10 +472,16 @@ records) and [ROLLUP-UPGRADE.md](docs/ROLLUP-UPGRADE.md). Validation:
 * **CI** runs workspace tests, the four-AA complexity gate (per-formula
   ≤ 100 and Σops ≤ 2000), the golden vector, and `test_settlement_aa.js`
   (win32 skips).
-* **Watcher:** `minuend-watch` builds `proof.json` and posts to the dispute AA
-  (`--pred --proof`; requires `MINUEND_WATCH_MNEMONIC`, `--vault` and
-  `--rollup`). Without a mnemonic it prints alerts only. Use a key separate
-  from the poster.
+* **Watcher:** `minuend-watch` replays every height and builds `proof.json`
+  for a fraud predicate (`--vault`, `--rollup`). Automatic **live-hub**
+  challenge posting is not implemented yet: with `MINUEND_WATCH_MNEMONIC` set
+  it reports every challengeable alert as `WATCH CRITICAL ... NOT posted` and
+  keeps the proof file for a manual post; without a mnemonic it prints alerts
+  only; `MINUEND_WATCH_DEVNET_CHALLENGE=1` runs `post_challenge.js` as a local
+  aa-testkit drill. It stops posting 600 s before the 3600 s window closes,
+  and keeps alerting (plus DA/`data_root` checks on later heights) when replay
+  is stuck at one height. Legacy `OPERP_*` variables are still read, with a
+  deprecation warning. Use a key separate from the poster.
 
 ## License
 

@@ -12,7 +12,8 @@
 //! batches newer than the snapshot via `Batch::validate_against`.
 
 use crate::ChainState;
-use minuend_types::Height;
+use bincode::Options;
+use minuend_types::{Height, BATCH_MAX_UNITS};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,11 +27,36 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// Version header prefixing every snapshot body. Old formats are not
 /// migrated (mainnet is not live); [`load_latest`] skips unknown versions
 /// and falls back to genesis rather than failing startup (#11).
-const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+///
+/// Bump this whenever the bincode layout of anything inside `ChainState`
+/// changes (bincode is not self-describing, so `#[serde(default)]` does not
+/// help). History: v4 = `(ChainState, anchors)` tuple (#45); v5 =
+/// `MarketParams` gained `min_price`/`max_price` (#46, M3 in #47).
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
 /// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
 /// restored engine cannot rebuild the DAG, so these ids are treated as
 /// already-executed ancestors when replaying post-snapshot batches.
-pub const DAG_ANCHOR_LIMIT: usize = 4096;
+///
+/// M2 (#47): the previous 4096 cap was far below `BATCH_MAX_UNITS`
+/// (200 000): one busy batch pushed most of its own units out of the ring,
+/// and any post-snapshot unit whose parent fell outside it stayed orphaned
+/// forever after restart. The ring now holds two full batches' worth of
+/// executed unit ids (the batch the snapshot closes plus the one before it),
+/// so every parent a client could reference from the last two batches is
+/// still linkable. Worst case is 400 000 x 32 B = 12.8 MB per snapshot,
+/// and only when the chain is actually that busy (the ring holds executed
+/// units, not a fixed allocation).
+pub const DAG_ANCHOR_LIMIT: usize = 2 * BATCH_MAX_UNITS as usize;
+
+/// Exact decoder for snapshot bodies: same wire format as
+/// `bincode::serialize` (fixed-width ints, little endian) but trailing bytes
+/// are an error, so a body written with a different layout is far more
+/// likely to be rejected than silently mis-decoded (M3, #47).
+fn snapshot_decoder() -> impl Options {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+}
 
 /// Durability of directory entries (rename) needs a directory fsync on unix;
 /// Windows has no equivalent API, so this is a no-op there.
@@ -107,7 +133,8 @@ pub fn load_latest_with_anchors(dir: &Path) -> io::Result<Option<LoadedSnapshot>
                     "unknown snapshot format version",
                 ));
             }
-            bincode::deserialize(&bytes[4..])
+            snapshot_decoder()
+                .deserialize(&bytes[4..])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })();
         if let Ok((state, anchors)) = parsed {
@@ -250,6 +277,80 @@ mod tests {
         body.extend_from_slice(&[0xFF; 64]);
         fs::write(dir.join(snapshot_name(7)), &body).unwrap();
         assert!(load_latest(&dir).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M3 (#47): a snapshot written by a build whose `MarketParams` layout
+    /// differs (header v4) must never be decoded as live state, even if its
+    /// bytes happen to parse. Loading skips it and falls back to the newest
+    /// current-version snapshot, or to genesis (`None`) when there is none.
+    #[test]
+    fn previous_format_version_is_skipped_not_misdecoded() {
+        let dir = std::env::temp_dir().join(format!("minuend-snap-v4-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A v4-headed file whose body is otherwise a perfectly decodable
+        // current-layout body: only the version header tells them apart.
+        let mut st = ChainState::new();
+        st.height = 128;
+        st.perp_supply = 999;
+        let body = bincode::serialize(&(&st, Vec::<[u8; 32]>::new())).unwrap();
+        let mut v4 = 4u32.to_le_bytes().to_vec();
+        v4.extend_from_slice(&body);
+        fs::write(dir.join(snapshot_name(128)), &v4).unwrap();
+        assert!(
+            load_latest(&dir).unwrap().is_none(),
+            "v4 snapshot must fall back to genesis, not decode"
+        );
+        // With an older current-version snapshot present, that one is used.
+        let mut older = ChainState::new();
+        older.height = 64;
+        older.perp_supply = 5;
+        save_snapshot(&dir, &older).unwrap();
+        // save_snapshot prunes to KEEP_SNAPSHOTS=2, so the v4 file survives.
+        assert!(dir.join(snapshot_name(128)).exists());
+        let (h, got) = load_latest(&dir).unwrap().unwrap();
+        assert_eq!(h, 64);
+        assert_eq!(got.perp_supply, 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M3 (#47): trailing bytes after a valid body (a sign of a layout
+    /// mismatch) are rejected instead of being ignored.
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("minuend-snap-trail-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let st = ChainState::new();
+        let body = bincode::serialize(&(&st, Vec::<[u8; 32]>::new())).unwrap();
+        let mut f = SNAPSHOT_FORMAT_VERSION.to_le_bytes().to_vec();
+        f.extend_from_slice(&body);
+        f.extend_from_slice(&[0u8; 8]);
+        fs::write(dir.join(snapshot_name(3)), &f).unwrap();
+        assert!(load_latest(&dir).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M2 (#47): far more than the old 4096 anchors survive a round trip.
+    #[test]
+    fn anchors_cover_more_than_old_4096_cap() {
+        const { assert!(DAG_ANCHOR_LIMIT >= BATCH_MAX_UNITS as usize) };
+        let dir =
+            std::env::temp_dir().join(format!("minuend-snap-anch-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let anchors: Vec<[u8; 32]> = (0u32..10_000)
+            .map(|i| {
+                let mut a = [0u8; 32];
+                a[..4].copy_from_slice(&i.to_le_bytes());
+                a
+            })
+            .collect();
+        save_snapshot_with_anchors(&dir, &ChainState::new(), &anchors).unwrap();
+        let (_, _, got) = load_latest_with_anchors(&dir).unwrap().unwrap();
+        assert_eq!(got.len(), 10_000);
+        assert_eq!(got[0], anchors[0]);
         let _ = fs::remove_dir_all(&dir);
     }
 

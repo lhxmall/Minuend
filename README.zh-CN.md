@@ -405,7 +405,7 @@ WantUnits gossip、资金费外部锚接线。
 ## 验证状态
 
 - **Rust / js-checks / e2e**：CI 跑 workspace 测试、四份 AA 复杂度门（每 formula ≤100 且 Σops ≤2000）、golden vector、`test_settlement_aa.js`（win32 skip）。
-- **Watcher：** `minuend-watch` 组 `proof.json` 打 dispute（`--pred --proof`，需 `MINUEND_WATCH_MNEMONIC` 与 `--vault/--rollup`）。未设助记词仅报警。须与 poster 分钥。
+- **Watcher：** `minuend-watch` 逐高度重放并组 `proof.json`（需 `--vault/--rollup`）。**尚未实现**对正式 hub 的自动挑战：设了 `MINUEND_WATCH_MNEMONIC` 时，每个可挑战告警都会以 `WATCH CRITICAL ... NOT posted` 报出并保留 proof 文件供人工提交；未设助记词仅报警；`MINUEND_WATCH_DEVNET_CHALLENGE=1` 只在本地 aa-testkit 演练 `post_challenge.js`。距 3600 秒窗口截止 600 秒内不再发挑战；重放卡在某高度时持续告警，并对后续高度做 DA/`data_root` 检查。旧的 `OPERP_*` 环境变量仍可读取（会打印弃用警告）。须与 poster 分钥。
 
 ## 许可证
 

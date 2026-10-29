@@ -12,6 +12,7 @@
 // requires it exactly once and caches the handle.
 
 const path = require("path");
+const { envCompat } = require("./script_helpers");
 
 const nm = path.join(__dirname, "..", "vendor", "aa-testkit", "node_modules");
 process.env.NODE_PATH = [nm, process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
@@ -46,7 +47,8 @@ function readFirstAddress(headlessWallet) {
 
 async function boot() {
   if (cached) return cached;
-  const MNEMONIC = process.env.MINUEND_DEPLOY_MNEMONIC;
+  // B9 (#47): legacy OPERP_DEPLOY_MNEMONIC accepted with a deprecation warning.
+  const MNEMONIC = envCompat("MINUEND_DEPLOY_MNEMONIC");
   if (!MNEMONIC || MNEMONIC.trim().split(/\s+/).length < 12)
     throw new Error("MINUEND_DEPLOY_MNEMONIC (12+ words) required");
   delete process.env.devnet;
