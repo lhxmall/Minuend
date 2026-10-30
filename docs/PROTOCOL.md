@@ -340,6 +340,10 @@ meta:{market}:{tick}:{im}:{mm}:{taker_fee}:{keeper}:{delisted}:{mark}:{usd_per_u
   - P-wpin：`W` 只能在该账户自己的 `w:` op 下变为 `W + amount`，否则不变；
   - P-adr：新出现的 `adr:{A}:{X}` 必须对应 `d:`/`D:` op 且 op 的账户为 X、
     地址为 A；已有绑定不得改指向；账户已有 `adrx:{X}:` 时不得再绑新地址（R2-A-8）；
+    第 4 轮（R4-A-4）：新绑定还要求金库 `dep_<anchor>`（`D:` 为 `depp_<anchor>`）记录
+    存在且 payer == A、account == X（bind AA 用 `VAULT_BASE` + rollup 推导金库地址）；
+  - P-frame（R4-A-3）：`c:`/`d:`/`w:`/`D:`/`W:` 单元中 `pos:` / `ord:` 叶不得出现、消失
+    或被改写，唯一例外是 `c:` 撤掉的属于该账户的订单；
   - P-tip（R2-A-1）：trace 末元素（下标 `unit_count-1`）必须等于 `wit_root_h`；
   - P-keep / P-mirror：见上。
   被拒单元两列都不变，所以“未变化”永远不会被判 fraud。
@@ -369,6 +373,17 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
 （R3-A-2）；P-keep 覆盖 `acct:` 叶（账户只会变、不会消失，按 `[acct:X:, acct:X;)`
 区间证明缺失，R3-A-6）；fill_math 的 collateral 恒等式容差 ±6，任何量级 ≥ 1e14
 或成交阶段 collateral < 6 时 bounce（Oscript 只有 15 位有效数字，R3-A-3）。
+
+第 4 轮 AA 规则：
+- **P-mbind**（R4-A-1，dispute_book）：成交的 maker 订单在 pre_wit 中存在但与成交不符
+  （owner、市场、方向、价格不同，或剩余量 < 成交量）即欺诈；订单不存在仍归 P-ghost。
+- **P-frame**（R4-A-3，dispute_bind）：见 §3.4。Place / Liquidate / `x:` 单元不覆盖。
+- **R4-A-5**（dispute_fill）：量级 / 近零门只跳过 collateral 腿，仓位、perp/W、op、挂单
+  余量腿始终判定；价格 / entry / qty ≥ 1e14 时跳过仓位数值比较，bucket / mml / tpost ≥ 1e14
+  跳过 bucket 比较，margin ≥ 1e14 跳过托管份额比较，op qty ≥ 1e14 跳过挂单余量比较。
+- **R4-A-6**：引擎 `PERP_SUPPLY_MAX = 99_999_999_999_999`（< 1e14，`gov_deposit` 超限以
+  `Risk` 拒绝，检查在绑定之前），所以 PERP 列 ≤ 14 位；dispute AA 的 gov 旧账户分支在
+  pre PERP > 14 位时 bounce，算术只在 post PERP 与 amount ≤ 14 位时进行。
 
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
@@ -449,6 +464,11 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
 
+第 4 轮部署变化：bind AA 带 `VAULT_BASE_HERE` 占位符（R4-A-4 读金库账本），必须在
+vault base 地址算出之后再部署（vault base 本来就最先部署）；PERP 供应上限
+`PERP_SUPPLY_MAX`（R4-A-6）。op 预算：vault 353、rollup 976、dispute 1383、dispute_fill
+1971、dispute_bind 1596、dispute_book 1117（上限 2000，dispute_fill 余量 29）。
+
 ### 生命周期（高度 h）
 
 ```
@@ -467,8 +487,9 @@ submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个
 
 fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              deposit | withdraw | escrow(Cancel only) | fill_math | ghost | skip
-             | wpin | adr | tip | keep | mirror
+             | wpin | adr | tip | keep | mirror | mbind | frame
              （第 2 轮：ghost/skip → dispute_book；wpin/adr/tip/keep/mirror → dispute_bind；
+             第 4 轮：mbind → dispute_book，frame → dispute_bind；
              fill_math → dispute_fill；其余 → dispute。verdict 后挑战者得 floor(罚没/5)）
              （#47：p: op 为 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}；
              fill_math 的 kind 0/1 taker 腿按 op 重算 taker_post 与挂单余额；kind 2/3 只在
@@ -551,7 +572,9 @@ Oscript 实现细节（踩过的坑）：
 仓位 entry 比较允许 ±1 最小单位容差；collateral 恒等式容差 ±6（第 3 轮 R3-A-3：
 每条成交腿最多 6 个最小单位错记不可挑战，换取在 Oscript 15 位精度下仍能判欺诈）；提供的充值 joint 也不证明 Obyte inclusion/
 stability。P-escrow 只验证 Cancel 退款的精确变化，不覆盖 Place escrow。`temp_data`
-正文保留 24h。默认执行序 UnitId 字典序
+正文保留 24h。第 4 轮：P-frame 只覆盖 `c:`/`d:`/`w:`/`D:`/`W:`；P-mbind 对同位数 > 15 位的
+剩余量不比较；R4-A-5 在 ≥ 1e14 量级跳过若干数值比较；watcher 在金库记录未知时不构造依赖
+它的 P-adr。默认执行序 UnitId 字典序
 （v2 commit-reveal 高度 0 生效）；报价质量受债券多数约束。
 主网部署前需正式 oscript 审计。「纯永续 → 图灵完备」升级路径见
 [ROLLUP-UPGRADE.md](ROLLUP-UPGRADE.md)。

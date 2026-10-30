@@ -743,6 +743,8 @@ acct:{account_hex_64}:{collateral}:{perp}:{W}   # W = 累计已借记提款
 部署时替换地址后的定义与源文件一致；第 2 轮数值）：vault 276、rollup 976、
 dispute 1255、dispute_bind 1094、dispute_book 804、dispute_fill 1919。
 dispute_fill 余量 81 ops，新增判定须先腾出预算。第 2 轮的完整变更见 §10.7。
+第 4 轮数值（§10.10）：vault 353、rollup 976、dispute 1383、dispute_fill 1971、
+dispute_bind 1596、dispute_book 1117；dispute_fill 只剩 29 ops 余量。
 
 rollup 状态变量（`<h>` 为高度后缀）：
 
@@ -795,7 +797,9 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | ghost | dispute_book（第 2 轮由 dispute_fill 迁入） | 成交的 maker 订单 id 前缀区间不在 pre_wit（kind 2 / 全零 maker 订单 id 一律 bounce，R2-A-6） |
 | skip | dispute_book（第 2 轮由 dispute 迁入） | pre_wit 中存在更优活单未成交（#47 B3：只判 unit 的第一笔 fill，多 fill unit 也可判；B7：taker 自己的 cross 挂单豁免，自己的逐仓托管挂单在 Place 成交（kind 0/1）上不豁免） |
 | wpin（P-wpin） | dispute_bind | #47 A2：某账户 `acct:` 叶的 W 列在 unit k 发生变化，但该 unit 的 op 不是**该账户自己的** `w:{acct}:{amount}:{nonce}`；合法结果只有 W1 == W0（含被拒）或 W1 == W0 + amount。新账户用 pre 非成员证明（左右邻叶）代替 pre 叶 |
-| adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈 |
+| adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈；第 4 轮（R4-A-4）：新绑定还要求金库 `dep_<anchor>`（`D:` 为 `depp_<anchor>`）记录存在且 payer == A、account == X，否则判欺诈 |
+| mbind（P-mbind） | dispute_book | 第 4 轮 R4-A-1：成交 F 的 maker 订单在 pre_wit 中的 `ord:` 叶与 F 不符——owner、市场、方向（maker 与 taker 方向相反）、价格不同，或剩余量 < 成交量 |
+| frame（P-frame） | dispute_bind | 第 4 轮 R4-A-3：在 `c:` / `d:` / `w:` / `D:` / `W:` 单元里，`pos:` / `ord:` 叶不得出现、消失或被改写；唯一例外是 `c:` 撤掉的、属于该 `c:` 账户的那张订单 |
 | tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
 | keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
 | deposit（第 2/3 轮加强） | dispute | R2-A-3：`d:` 入账必须由金库 `dep_<u>` 记录支撑（payer == op 地址、amount ≤ 记录值），pre 树不得已有 `dep:{u}`（重复入账），post 树必须出现 `dep:{u}`；第 3 轮：记录的 account == op 账户（R3-A-5）、post 树必须有 `adr:{addr}:{acct}`（R3-A-4）、`D:` 同样需 `depp_<u>` 支撑（R3-A-7）、被接受的提款后 collateral ≥ 0（R3-A-1） |
@@ -967,6 +971,53 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
 5. **生产者要求**：金库记录存在且 `deposit_verify::admit_deposit` 通过才 `allow_deposit`。
    这样无论生产者何时看到记录，重放结果都与它一致。已知限制：形状特殊（例如 > 256 KiB）
    的付款不会被登记，钱留在金库中，需要另行处理。
+
+### 10.10 第 4 轮（#47 R4）AA 变更
+
+1. **P-mbind（R4-A-1，dispute_book 新 case `pred: 'mbind'`）**：此前只有 P-ghost 证明
+   "maker 订单不存在"，运营者可以让一笔成交挂在**存在但不匹配**的订单上（别人的单、
+   别的价格、反方向、剩余量不够）。现在挑战者给出成交 F + 证明、该 unit 的
+   `units_proof`（下标 k）、pre_wit（k > 0 时带 pre_proof）以及 pre_wit 中前缀为
+   `ord:{F[6]}:` 的 maker 订单叶；owner（MO[7] == F[4]）、市场、方向（MO[3] 必须与
+   F[11] 相反）、价格（MO[4] == F[8]）任一不符，或剩余量 < 成交量即判欺诈。成交的
+   idx 不限（除 remaining / margin_left 外订单字段不变，remaining 在一个 unit 内只减不增）。
+   剩余量与成交量按规范整数比较：位数多者大；同位数时最多比较 15 位，超过 15 位且
+   同位数不判（不现实的量级）。kind 2 / 全零 maker id bounce；订单不在 pre 中仍归 P-ghost。
+2. **P-frame（R4-A-3，dispute_bind 新 case `pred: 'frame'`）**：`c:`（3 段）、
+   `d:`/`D:`（5 段）、`w:`/`W:`（4 段）单元不会移动仓位或订单。`ins=false`：某
+   `pos:`（7 段）/ `ord:`（10 段）叶在 pre 中、在 post 中精确不存在（相邻夹逼 / 小于最小叶）
+   → 欺诈，例外是 `c:` 撤的订单（Q[1] == O[2] 且 Q[7] == O[1]，即订单属于该 c: 的账户）；
+   `ins=true`：某叶在 post 中、在 pre 中精确不存在（或 pre 为空哨兵）→ 欺诈。被改写的叶
+   （entry / qty / price / owner 变化）同时满足两者。Place / Liquidate / 价格（`x:`）单元
+   不在覆盖范围（这些单元里仓位与订单会合法变化，仍属多成交 / 非交易排除项）。
+3. **P-adr 金库支撑（R4-A-4）**：新绑定 `adr:{A}:{X}` 额外要求
+   `var[vault][(D ? 'depp_' : 'dep_') || anchor] = 'payer:amount:account'` 且 payer == A、
+   account == X。金库地址与 P-deposit 相同的推导：
+   `chash160(['autonomous agent', {base_aa: VAULT_BASE, params: {rollup}}])`，因此
+   **bind AA 现在带 `VAULT_BASE_HERE` 占位符**，部署时必须先算出 vault base 地址再部署
+   bind AA（deploy_mainnet.js / deploy_testnet.js / test_settlement_aa.js 已按此替换）。
+   watcher 侧（`prove.rs`）只在**确知**金库记录时才用这一条构造 P-adr：记录来自 hub
+   读取（`read_vault_ledger`：变量不存在 = 已知缺失，读失败 = 未知）或批次里**验证通过**
+   的该锚点 evidence（一份 evidence 决定金库对该锚点的全部记录：金库只写 `dep_` 或
+   `depp_` 之一）。未知时（例如锚点已被金库记账但生产者没有执行、因此没有 evidence，
+   且 hub 未读到）不构造，避免发出会被 AA bounce 的付费挑战。
+4. **R4-A-5（dispute_fill）**：R3-A-3 的量级 / 近零门（`$exp_m < 6`）不再让整个谓词
+   bounce，只并入 `$col_ok`（只跳过 collateral 腿）；仓位、perp/W 钉、op、挂单余量腿
+   始终判定。为避免取消整体 bounce 后对诚实数据误判，新增精度保护：价格 / 旧 entry /
+   |旧 qty| / qty ≥ 1e14 时跳过仓位 qty/entry 数值比较；bucket / mml / tpost ≥ 1e14 时
+   跳过 bucket 比较；margin ≥ 1e14 时跳过 op 托管份额比较；op qty ≥ 1e14 时跳过挂单剩余量比较。
+   watcher `aa_fill_verdict` 同步镜像（`col_skip`、`Leg.pos_big`、`TakerPlace.remaining_big`）。
+5. **PERP 供应上限（R4-A-6）**：`minuend_types::PERP_SUPPLY_MAX = 99_999_999_999_999`（< 1e14）。
+   `Engine::gov_deposit` 在 `new_supply` 超过上限时以 `Risk` 拒绝，检查在绑定地址之前。
+   余额永远不超过供应（质押只移动余额），所以每个 PERP 列 ≤ 14 位，dispute AA 的 gov
+   （`D:`/`W:`）旧账户分支可以精确判定：pre PERP 列 > 14 位 → bounce `no fraud`（不判）；
+   算术（`perp0 ± amount == perp1` 与 `$cred` 入账测试）只在 post PERP 与 amount ≤ 14 位时
+   进行，否则只有"不变"算诚实。金库 AA 不变（它的 `length(perp) > 15` bounce 不会再被
+   诚实叶触发）。collateral 的 W 列保留原有 15 位门。
+
+部署 op 预算（第 4 轮）：vault 353、rollup 976、dispute 1383、dispute_fill 1971、
+dispute_bind 1596、dispute_book 1117（上限 2000）。dispute_fill 只剩 29 ops，后续任何
+fill 判定都必须先腾出预算。
 
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
@@ -1198,6 +1249,11 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
   `meta:` 叶，仅为检测缺口、不会误罚诚实批次）；watcher 重放成本为
   O(units × state)；settle 解码器对其他调用方无长度上限；`post_challenge_live.js`
   未在真实 hub 上联调
+- 第 4 轮取舍（§10.10）：P-frame 只覆盖 `c:`/`d:`/`w:`/`D:`/`W:` 单元；P-mbind 对同位数、
+  超过 15 位的剩余量 / 成交量不比较；R4-A-5 精度保护在 ≥ 1e14 量级跳过仓位 qty/entry、
+  bucket、托管份额与挂单余量比较；PERP 只在引擎上限以下精确判定（pre PERP 列 > 14 位
+  只可能来自更早已 finalize 的谎言，不再判定）；watcher 在金库记录未知时不构造依赖它的
+  P-adr；dispute_fill 余量 29 ops
 
 ---
 
