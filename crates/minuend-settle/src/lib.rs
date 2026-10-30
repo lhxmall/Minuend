@@ -218,13 +218,24 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
         // deposit) or must match (later deposits), so the forest dispute AA
         // can check that a new `adr:{addr}:{acct}` witness leaf appears only
         // under a deposit op of that account WITH that address.
+        // R2-A-3: a collateral deposit also commits its vault anchor (the
+        // Obyte unit hash, standard base64 — the vault AA's `dep_<unit>`
+        // key), so P-deposit can require the credit to be backed by a
+        // payment the vault actually recorded.
         Deposit {
             account,
             addr,
             amount,
-            ..
+            aa_unit,
         } => {
-            format!("d:{}:{}:{}", hex::encode(account.0), amount, addr)
+            use base64::Engine as _;
+            format!(
+                "d:{}:{}:{}:{}",
+                hex::encode(account.0),
+                amount,
+                addr,
+                base64::engine::general_purpose::STANDARD.encode(aa_unit)
+            )
         }
         GovDeposit {
             account,
@@ -293,8 +304,52 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
                 market.0
             )
         }
+        // R2-E-2: a Reveal executes its inner op (or nothing, when
+        // rejected), so for the ops whose witness columns the dispute AAs
+        // pin (collateral, PERP, W, adr:) the committed descriptor is the
+        // INNER op's — otherwise an honest Reveal{Withdraw} raises W under
+        // an `x:` tag and P-wpin verdicts it. Other inner ops keep `x:`
+        // (no predicate judges them through a Reveal).
+        Reveal { op: inner, .. }
+            if matches!(
+                inner.as_ref(),
+                Deposit { .. } | GovDeposit { .. } | Withdraw { .. } | GovWithdraw { .. }
+            ) =>
+        {
+            ops_element(unit_hex, inner)
+        }
         _ => format!("x:{unit_hex}"),
     }
+}
+
+/// R2-R-1: the binding hash the rollup AA recomputes from `trigger.data`
+/// at submit and stores as `da_bind_<h>`; the DA header carries the same
+/// value so watchers can bind the published header to the on-chain roots.
+/// Format: work/r2-da-binding.md (`minuend-da-v1`).
+pub fn da_bind_hash(c: &Checkpoint, chain_id: &str, data_root: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let s = [
+        "minuend-da-v1".to_string(),
+        chain_id.to_string(),
+        c.height.to_string(),
+        hex::encode(c.prev_state_hash),
+        hex::encode(c.state_root),
+        c.aa_root.clone(),
+        c.wit_root.clone(),
+        c.trace_root.clone(),
+        c.units_root.clone(),
+        c.units_set_root.clone(),
+        c.ops_root.clone(),
+        c.fills_root.clone(),
+        c.counts_root.clone(),
+        c.unit_count.to_string(),
+        c.wit_count.to_string(),
+        c.fill_count.to_string(),
+        c.assertion_version.to_string(),
+        data_root.to_string(),
+    ]
+    .join("|");
+    hex::encode(Sha256::digest(s.as_bytes()))
 }
 /// Fill-descriptor string committed by `fills_root`. `fill_index_in_unit`
 /// starts at 0 per unit. Field 13 is `taker_post` (USD_SCALE, 0 when the

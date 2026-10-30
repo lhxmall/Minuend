@@ -61,16 +61,18 @@ function challengeGate({ now, submittedAt, frozen, windowSecs = CHALLENGE_WINDOW
   return { ok: true, reason: `${deadline - t}s left`, deadline };
 }
 
-// Which dispute AA a proof goes to: main (deposit/withdraw/escrow/omit/
-// ghost/skip), fill (fill_math) or bind (#47 A2: wpin/adr).
+// Which dispute AA a proof goes to: main (deposit/withdraw/escrow/omit),
+// book (ghost/skip, split out in round 2), fill (fill_math) or bind
+// (#47 A2 + round 2: wpin/adr/tip/keep/mirror).
 const TARGETS = {
+  book: { deployKey: "dispute_book_aa_address", env: "MINUEND_DISPUTE_BOOK_AA", bind: { bind_book: 1 }, rollupVar: "dispute_book_aa" },
   main: { deployKey: "dispute_aa_address", env: "MINUEND_DISPUTE_AA", bind: { bind: 1 }, rollupVar: "dispute_aa" },
   fill: { deployKey: "dispute_fill_aa_address", env: "MINUEND_DISPUTE_FILL_AA", bind: { bind_fill: 1 }, rollupVar: "dispute_fill_aa" },
   bind: { deployKey: "dispute_bind_aa_address", env: "MINUEND_DISPUTE_BIND_AA", bind: { bind_bind: 1 }, rollupVar: "dispute_bind_aa" },
 };
 function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
   const t = TARGETS[target];
-  if (!t) throw new Error(`unknown dispute target '${target}' (main|fill|bind)`);
+  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind)`);
   const address = (deploy && deploy[t.deployKey]) || envCompat(t.env, env, warn);
   return Object.assign({ address: address || null }, t);
 }
@@ -88,6 +90,32 @@ function buildChallengeData({ height, pred, rollup, proof }) {
   return Object.assign({}, proof, { height, pred, rollup });
 }
 
+// R2-R-1: DA <-> submitted-roots binding hash (format: work/r2-da-binding.md,
+// Rust minuend_settle::da_bind_hash). The rollup AA recomputes it from the
+// submit trigger data; the temp_data header carries the same value.
+const DA_BIND_FIELDS = [
+  "chain_id", "height", "prev_state_hash", "state_root", "aa_root", "wit_root",
+  "trace_root", "units_root", "units_set_root", "ops_root", "fills_root",
+  "counts_root", "unit_count", "wit_count", "fill_count", "assertion_version", "data_root",
+];
+function daBindHash(f) {
+  const parts = ["minuend-da-v1"];
+  for (const k of DA_BIND_FIELDS) {
+    const v = f[k];
+    if (v === undefined || v === null || v === "") throw new Error(`daBindHash: missing ${k}`);
+    parts.push(String(v));
+  }
+  return require("crypto").createHash("sha256").update(parts.join("|"), "utf8").digest("hex");
+}
+
+// Proof-target routing by predicate name (round 2 split).
+function targetForPred(pred) {
+  if (pred === "fill_math") return "fill";
+  if (pred === "ghost" || pred === "skip") return "book";
+  if (["wpin", "adr", "tip", "keep", "mirror"].includes(pred)) return "bind";
+  return "main";
+}
+
 // Default light hubs per network (override with MINUEND_WATCH_HUB).
 function hubFor(network, override) {
   if (override) return override;
@@ -103,6 +131,9 @@ module.exports = {
   disputeTarget,
   buildChallengeData,
   hubFor,
+  daBindHash,
+  targetForPred,
+  DA_BIND_FIELDS,
   CHALLENGE_WINDOW_SECS,
   CHALLENGE_SAFETY_MARGIN_SECS,
   LEGACY_ENV_PREFIX,

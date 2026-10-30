@@ -16,7 +16,7 @@
 
 const path = require("path");
 const fs = require("fs");
-const { envCompat, disputeTarget } = require("./script_helpers");
+const { envCompat, disputeTarget, targetForPred } = require("./script_helpers");
 
 const aaRoot = path.join(__dirname, "..", "vendor", "aa-testkit");
 const nm = path.join(aaRoot, "node_modules");
@@ -41,7 +41,10 @@ let network;
 async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   // --fill → fill_math AA, --bind → #47 A2 binding AA (wpin/adr).
-  const target = flag("bind") ? "bind" : flag("fill") ? "fill" : "main";
+  // Round 2: ghost/skip live on the book dispute AA; with no explicit flag
+  // the predicate name picks the AA (the watcher's devnet drill passes no
+  // flag for book proofs).
+  const target = flag("bind") ? "bind" : flag("fill") ? "fill" : flag("book") ? "book" : targetForPred(arg("pred", "deposit"));
   const t = disputeTarget(target, deploy);
   const dispute = t.address;
   const rollup = deploy.rollup_aa_address || envCompat("MINUEND_ROLLUP_AA");
@@ -49,7 +52,7 @@ async function main() {
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");
   const proofFile = arg("proof");
-  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill|--bind]");
+  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill|--bind|--book]");
   // #37-2: the proof path used to be stored and never read — the script
   // then referenced an undefined `proof` and threw ReferenceError before
   // sending anything. Read and shape-check it here.

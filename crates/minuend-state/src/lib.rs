@@ -1883,6 +1883,23 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
     // the `adr:` + `acct:` leaves of this (final) witness tree.
     for (addr, id) in &state.aa_address_owners {
         leaves.push(format!("adr:{}:{}", addr, hex::encode(id.0)));
+        // R2-A-8: reverse binding leaf keyed by the ACCOUNT, so the binding
+        // dispute AA can prove "this account is already bound" (membership)
+        // and pin the mirror invariant adr <-> adrx on every unit.
+        leaves.push(format!("adrx:{}:{}", hex::encode(id.0), addr));
+    }
+    // R2-A-3: one permanent marker per consumed deposit anchor (collateral
+    // and PERP alike), keyed by the Obyte unit hash in standard base64 (the
+    // vault AA's `dep_<unit>` key). P-deposit proves a re-credited anchor by
+    // membership of its marker in the pre tree.
+    {
+        use base64::Engine as _;
+        for u in &state.consumed_deposits {
+            leaves.push(format!(
+                "dep:{}",
+                base64::engine::general_purpose::STANDARD.encode(u)
+            ));
+        }
     }
     for (market, params) in &state.markets {
         let mark = state.marks.get(market).copied().unwrap_or(0);
@@ -1900,12 +1917,16 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
             params.funding_cap_bps
         ));
     }
+    // R2-A-5/R2-A-10: a max sentinel that sorts after every real leaf
+    // ('~' > any lowercase tag), so every key absence is provable by an
+    // adjacent straddle or before-min — no "after max" arm and no reliance
+    // on the operator-reported wit_count.
+    leaves.push(WIT_MAX_SENTINEL.to_string());
     leaves.sort();
-    if leaves.is_empty() {
-        leaves.push(minuend_types::WIT_EMPTY_ELEMENT.to_string());
-    }
     leaves
 }
+/// Last leaf of every witness tree (R2-A-5/R2-A-10).
+pub const WIT_MAX_SENTINEL: &str = "~:end";
 /// Witness root after the current state (Obyte-merkle domain).
 pub fn wit_root(state: &ChainState) -> String {
     obyte_merkle::root(&wit_leaves(state))

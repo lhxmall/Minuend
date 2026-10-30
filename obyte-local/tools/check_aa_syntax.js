@@ -13,6 +13,7 @@ const { validate } = require(path.join(ocoreRoot, 'formula', 'validation.js'));
 const SUBSTITUTIONS = {
 	PERP_ASSET_ID_HERE: 'n9y3VghJdrwhU4nWem6P78yNc2NVFywqMdFcaXGBTeE=',
 	ROLLUP_AA_HERE: 'MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU',
+	VAULT_BASE_HERE: 'MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU',
 };
 
 function formulas(def, accPath, acc) {
