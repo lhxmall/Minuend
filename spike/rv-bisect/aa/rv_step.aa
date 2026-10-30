@@ -1,0 +1,135 @@
+["autonomous agent", {
+ bounce_fees: {base: 10000},
+ init: `{
+// rv32im one-step oracle (spike). Pure function memo: var['s_' || pre_root] = post_root.
+// trigger.data: pc, regs (array of 32 uint32 numbers), mem (memory root, base64), step,
+//               w (instruction word), wsib (siblings, D entries)  [fetch proof, index pc/4]
+//               mw, msib                                          [load/store word + proof] (only for loads/stores)
+//               nroot                                             [claimed memory root after a store]
+$D = 24;
+$P = [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304,8388608,16777216,33554432,67108864,134217728,268435456,536870912,1073741824,2147483648,4294967296];
+$T = trigger.data;
+$R = $T.regs;
+$pc = $T.pc;
+$sg = $z => $z >= 2147483648 ? $z - 4294967296 : $z;
+require(is_array($R) AND length($R) == 32 AND $R[0] == 0, 'regs');
+require(length(filter($R, 32, $v => !is_integer($v) OR $v < 0 OR $v > 4294967295)) == 0, 'reg range');
+require(is_integer($pc) AND $pc >= 0 AND $pc < 4294967296 AND is_integer($T.step) AND $T.step >= 0 AND typeof($T.mem) == 'string' AND length($T.mem) == 44 AND typeof($T.inp) == 'string' AND length($T.inp) == 44, 'state');
+$pre = sha256($pc || ':' || join($R, ',') || ':' || $T.mem || ':' || $T.inp || ':' || $T.step);
+$live = $pc % 4 == 0;  // TRAP(1) / HALT(2) sentinels: no-op step
+$infetch = $pc < $P[$D] * 4;  // fetch outside memory -> trap
+$res = {rd: 0, v: 0, pc: $pc, mem: $T.mem, ok: 0};
+if ($live AND !$infetch) $res.pc = 1;
+if ($live AND $infetch) {
+	$w = $T.w;
+	require(is_integer($w) AND $w >= 0 AND $w < 4294967296, 'w');
+	require(is_array($T.wsib) AND length($T.wsib) == $D, 'wsib');
+	require(is_valid_merkle_proof($w, {root: $T.mem, siblings: $T.wsib, index: $pc / 4}), 'fetch');
+	$op = $w % 128; $rd = floor($w / 128) % 32; $f3 = floor($w / 4096) % 8;
+	$i1 = floor($w / 32768) % 32; $i2 = floor($w / 1048576) % 32; $f7 = floor($w / 33554432);
+	$a = $R[$i1]; $b = $R[$i2];
+	$neg = $f7 >= 64;
+	$immI = floor($w / 1048576) - ($neg ? 4096 : 0);
+	$immS = ($f7 - ($neg ? 128 : 0)) * 32 + $rd;
+	$immB = ($neg ? -4096 : 0) + (floor($w / 128) % 2) * 2048 + ($f7 % 64) * 32 + (floor($w / 256) % 16) * 2;
+	$immJ = ($neg ? -1048576 : 0) + (floor($w / 4096) % 256) * 4096 + (floor($w / 1048576) % 2) * 2048 + (floor($w / 2097152) % 1024) * 2;
+	$U = $w - $w % 4096;
+	$npc4 = ($pc + 4) % 4294967296;
+	$res.pc = $npc4;
+	// ---- shared helpers, each evaluated at most once per path ----
+	$TA = [[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1],[0,0,2,2,0,0,2,2,0,0,2,2,0,0,2,2],[0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3],[0,0,0,0,4,4,4,4,0,0,0,0,4,4,4,4],[0,1,0,1,4,5,4,5,0,1,0,1,4,5,4,5],[0,0,2,2,4,4,6,6,0,0,2,2,4,4,6,6],[0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7],[0,0,0,0,0,0,0,0,8,8,8,8,8,8,8,8],[0,1,0,1,0,1,0,1,8,9,8,9,8,9,8,9],[0,0,2,2,0,0,2,2,8,8,10,10,8,8,10,10],[0,1,2,3,0,1,2,3,8,9,10,11,8,9,10,11],[0,0,0,0,4,4,4,4,8,8,8,8,12,12,12,12],[0,1,0,1,4,5,4,5,8,9,8,9,12,13,12,13],[0,0,2,2,4,4,6,6,8,8,10,10,12,12,14,14],[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]];  // 4-bit AND table
+	$and32 = ($ax, $ay) => reduce([0,4,8,12,16,20,24,28], 8, ($acc, $k) => $acc + $P[$k] * $TA[floor($ax / $P[$k]) % 16][floor($ay / $P[$k]) % 16], 0);
+	if ($op == 51 AND $f7 == 1) {  // M extension
+		if ($f3 < 4) {
+			$aL = $a % 65536; $aH = floor($a / 65536); $bL = $b % 65536; $bH = floor($b / 65536);
+			$p1 = $aH * $bL + $aL * $bH;
+			$lo0 = $aL * $bL + ($p1 % 65536) * 65536;
+			$lo = $lo0 % 4294967296;
+			$hu = ($aH * $bH + floor($p1 / 65536) + floor($lo0 / 4294967296)) % 4294967296;
+			$cor = (($f3 == 1 OR $f3 == 2) AND $a >= 2147483648 ? $b : 0) + ($f3 == 1 AND $b >= 2147483648 ? $a : 0);
+			$res.v = $f3 == 0 ? $lo : ($hu + 8589934592 - $cor) % 4294967296;
+		}
+		else {
+			$sgn = $f3 == 4 OR $f3 == 6;
+			$dx = $sgn ? $sg($a) : $a; $dy = $sgn ? $sg($b) : $b;
+			if ($dy == 0)
+				$res.v = $f3 == 4 OR $f3 == 5 ? 4294967295 : $a;
+			else if ($sgn AND $dx == -2147483648 AND $dy == -1)
+				$res.v = $f3 == 4 ? $a : 0;
+			else {
+				$q0 = $dx / $dy; $q1 = $q0 >= 0 ? floor($q0) : ceil($q0);   // truncating division
+				$r0 = $dx - $q1 * $dy;
+				$res.v = (($f3 < 6 ? $q1 : $r0) + 4294967296) % 4294967296;
+			}
+		}
+		$res.rd = $rd; $res.ok = 1;
+	}
+	else if ($op == 51 OR $op == 19) {  // ALU reg/imm
+		$im = $op == 19;
+		$y = $im ? ($immI + 4294967296) % 4294967296 : $b;
+		$sh = $y % 32;
+		$alt = $im ? ($f3 == 5 AND $f7 == 32) : $f7 == 32;
+		$ok = $im ? (($f3 != 1 AND $f3 != 5) OR $f7 == 0 OR ($f3 == 5 AND $f7 == 32)) : ($f7 == 0 OR ($f7 == 32 AND ($f3 == 0 OR $f3 == 5)));
+		if ($ok) {
+			$n = ($f3 >= 4 AND $f3 != 5) ? $and32($a, $y) : 0;
+			$res.v = $f3 == 0 ? (($alt ? $a - $y + 4294967296 : $a + $y) % 4294967296)
+				: $f3 == 1 ? ($a % $P[32 - $sh]) * $P[$sh]
+				: $f3 == 2 ? ($sg($a) < $sg($y) ? 1 : 0)
+				: $f3 == 3 ? ($a < $y ? 1 : 0)
+				: $f3 == 4 ? $a + $y - 2 * $n
+				: $f3 == 5 ? ($alt ? (floor($sg($a) / $P[$sh]) + 4294967296) % 4294967296 : floor($a / $P[$sh]))
+				: $f3 == 6 ? $a + $y - $n
+				: $n;
+			$res.rd = $rd; $res.ok = 1;
+		}
+	}
+	else if ($op == 55) { $res.rd = $rd; $res.v = $U; $res.ok = 1; }                         // LUI
+	else if ($op == 23) { $res.rd = $rd; $res.v = ($pc + $U) % 4294967296; $res.ok = 1; }    // AUIPC
+	else if ($op == 111 OR ($op == 103 AND $f3 == 0)) {                                    // JAL / JALR
+		$t = $op == 111 ? ($pc + $immJ + 4294967296) % 4294967296 : (($a + $immI + 4294967296) % 4294967296);
+		$t2 = $op == 103 ? $t - $t % 2 : $t;
+		if ($t2 % 4 == 0) { $res.rd = $rd; $res.v = $npc4; $res.pc = $t2; $res.ok = 1; }
+	}
+	else if ($op == 99 AND $f3 != 2 AND $f3 != 3) {                                         // branches
+		$c = $f3 == 0 ? $a == $b : $f3 == 1 ? $a != $b : $f3 == 4 ? $sg($a) < $sg($b) : $f3 == 5 ? $sg($a) >= $sg($b) : $f3 == 6 ? $a < $b : $a >= $b;
+		$tb = ($pc + $immB + 4294967296) % 4294967296;
+		if (!$c) $res.ok = 1;
+		else if ($tb % 4 == 0) { $res.pc = $tb; $res.ok = 1; }
+	}
+	else if (($op == 3 AND $f3 != 3 AND $f3 < 6) OR ($op == 35 AND $f3 < 3)) {            // loads / stores
+		$st = $op == 35;
+		$ea = ($a + ($st ? $immS : $immI) + 4294967296) % 4294967296;
+		$sz = $P[$f3 % 4];
+		if ($ea % $sz == 0 AND $ea < $P[$D] * 4) {
+			$mw = $T.mw;
+			require(is_integer($mw) AND $mw >= 0 AND $mw < 4294967296 AND is_array($T.msib) AND length($T.msib) == $D, 'mw');
+			require(!$st OR (typeof($T.nroot) == 'string' AND length($T.nroot) == 44), 'nroot');
+			require(is_valid_merkle_proof($mw, {root: $T.mem, siblings: $T.msib, index: floor($ea / 4)}), 'mproof');
+			$lane = $P[8 * ($ea % 4)]; $span = $P[8 * $sz];
+			if ($st) {
+				$nw = $mw - (floor($mw / $lane) % $span) * $lane + ($b % $span) * $lane;
+				require(is_valid_merkle_proof($nw, {root: $T.nroot, siblings: $T.msib, index: floor($ea / 4)}), 'nroot');
+				$res.mem = $T.nroot;
+			}
+			else {
+				$v = floor($mw / $lane) % $span;
+				$res.v = ($f3 < 2 AND $v >= $span / 2) ? $v + 4294967296 - $span : $v;
+				$res.rd = $rd;
+			}
+			$res.ok = 1;
+		}
+	}
+	else if ($w == 115 AND $R[17] == 93) { $res.pc = 2; $res.ok = 1; }                        // ecall exit -> HALT
+	else if ($w == 115 AND $R[17] == 63 AND $R[10] < $P[$D]) {                                // ecall read input word a0 -> a0
+		require(is_integer($T.iw) AND $T.iw >= 0 AND $T.iw < 4294967296 AND is_array($T.isib) AND length($T.isib) == $D, 'iw');
+		require(is_valid_merkle_proof($T.iw, {root: $T.inp, siblings: $T.isib, index: $R[10]}), 'iproof');
+		$res.rd = 10; $res.v = $T.iw; $res.ok = 1;
+	}
+	if (!$res.ok) $res.pc = 1;
+}
+$R2 = map($R, 32, ($ri, $rv) => ($ri == $res.rd AND $ri != 0) ? $res.v : $rv);
+$post = sha256($res.pc || ':' || join($R2, ',') || ':' || $res.mem || ':' || $T.inp || ':' || ($T.step + 1));
+
+}`,
+ messages: [{app: 'state', state: `{ var['s_' || $pre] = $post; response['post'] = $post;  }`}]
+}]

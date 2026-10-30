@@ -1,0 +1,90 @@
+["autonomous agent", {
+ bounce_fees: {base: 10000},
+ init: `{
+// K-ary bisection game over an rv32im execution trace (spike).
+// A claim says: from state root s0, after n steps, the state root is sN.
+// A challenger opens a game; the claimant posts K-1 intermediate roots; the challenger picks the first
+// segment it disagrees with; repeat until the segment is one step; then the one-step oracle AA
+// (rv_step, memo var['s_' || pre] = post) decides. Whoever misses a deadline loses.
+$STEP = 'MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU';   // rv_step AA address (params in a real deploy)
+$K = 16;            // branching factor
+$BOND = 100000;     // bytes, claim bond and challenge bond (each)
+$T = 3600;          // seconds per move
+$WIN = 86400;       // challenge window for a claim
+$d = trigger.data;
+$now = timestamp;
+$isR = $x => typeof($x) == 'string' AND length($x) == 44;
+// ---- claim
+if ($d.claim) {
+	require($isR($d.s0) AND $isR($d.sN) AND is_integer($d.n) AND $d.n >= 1 AND $d.n <= 1e15, 'bad claim');
+	require(trigger.output[[asset=base]] >= $BOND, 'bond');
+	$cid = trigger.unit;
+	$st = {k: 'c_' || $cid, v: $d.s0 || ':' || $d.sN || ':' || $d.n || ':' || trigger.address || ':' || ($now + $WIN) || ':open'};
+}
+// ---- finalize a claim: window over, no live games, no fraud
+else if ($d.finalize) {
+	$c = split(var['c_' || $d.finalize], ':');
+	require($c[5] == 'open' AND $now >= $c[4] AND !var['n_' || $d.finalize] AND !var['f_' || $d.finalize], 'cannot finalize');
+	$st = {k: 'c_' || $d.finalize, v: $c[0] || ':' || $c[1] || ':' || $c[2] || ':' || $c[3] || ':' || $c[4] || ':final', pay: $c[3]};
+}
+// ---- open a game against a claim
+else if ($d.open) {
+	$c = split(var['c_' || $d.open], ':');
+	require($c[5] == 'open' AND $now < $c[4], 'claim not open');
+	require(trigger.output[[asset=base]] >= $BOND, 'bond');
+	require(trigger.address != $c[3], 'self');
+	$gid = trigger.unit;
+	// game: cid:defender:challenger:lo:hi:rlo:rhi:turn:deadline
+	$st = {k: 'g_' || $gid, v: $d.open || ':' || $c[3] || ':' || trigger.address || ':0:' || $c[2] || ':' || $c[0] || ':' || $c[1] || ':' || ($c[2] == 1 ? 's' : 'd') || ':' || ($now + $T), cid: $d.open};
+}
+else {
+	$gid = $d.mids OTHERWISE $d.pick OTHERWISE $d.resolve;
+	$g = split(var['g_' || $gid] OTHERWISE '', ':');
+	require(length($g) == 9, 'no game');
+	$lo = +$g[3]; $hi = +$g[4]; $turn = $g[7]; $dl = +$g[8];
+	$cnt = min($K, $hi - $lo) - 1;   // number of interior points
+	$pt = $j => $j == 0 ? $lo : $j == $cnt + 1 ? $hi : $lo + floor($j * ($hi - $lo) / ($cnt + 1));
+	$pre = $g[0] || ':' || $g[1] || ':' || $g[2] || ':';
+	if ($d.mids) {
+		require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');
+		$r = $d.roots;
+		require(is_array($r) AND length($r) == $cnt, 'need ' || $cnt || ' roots');
+		require(length(filter($r, 15, $x => !$isR($x))) == 0, 'bad root');
+		$st = {k: 'g_' || $gid, v: $pre || $lo || ':' || $hi || ':' || $g[5] || ':' || $g[6] || ':c:' || ($now + $T), m: join($r, ',')};
+	}
+	else if ($d.pick) {
+		require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');
+		$j = $d.j;
+		require(is_integer($j) AND $j >= 0 AND $j <= $cnt, 'bad j');
+		$m = split(var['m_' || $gid], ',');
+		$rootAt = $i => $i == 0 ? $g[5] : $i == $cnt + 1 ? $g[6] : $m[$i - 1];
+		$nlo = $pt($j); $nhi = $pt($j + 1);
+		$st = {k: 'g_' || $gid, v: $pre || $nlo || ':' || $nhi || ':' || $rootAt($j) || ':' || $rootAt($j + 1) || ':' || ($nhi - $nlo == 1 ? 's' : 'd') || ':' || ($now + $T)};
+	}
+	else {
+		// resolve: decides the winner when possible
+		$memo = var[$STEP]['s_' || $g[5]];
+		$w = $turn == 's' AND $memo ? ($memo == $g[6] ? 'd' : 'c')
+			: $now >= $dl ? ($turn == 'd' ? 'c' : 'd')
+			: '';
+		require($w, 'undecided');
+		$st = {k: 'g_' || $gid, v: 'done:' || $w, pay: $w == 'd' ? $g[1] : $g[2], cid: $g[0], fraud: $w == 'c'};
+	}
+}
+
+}`,
+ messages: [
+  {if: `{$st.pay}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{$st.pay}`, amount: `{$d.finalize ? $BOND : 2 * $BOND - 2000}`}]}},
+  {app: 'state', state: `{
+	var[$st.k] = $st.v;
+	if ($st.m) var['m_' || $gid] = $st.m;
+	if ($d.open) var['n_' || $st.cid] += 1;
+	if ($d.resolve) {
+		var['m_' || $gid] = false;
+		if ($st.fraud) var['f_' || $st.cid] = 1;
+		else var['n_' || $st.cid] -= 1;
+	}
+	response['game'] = $st.v;
+}`}
+ ]
+}]
