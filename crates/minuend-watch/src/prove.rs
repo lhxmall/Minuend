@@ -5224,4 +5224,394 @@ mod tests {
         let liq = format!("L:{}:{t}:1", "dd".repeat(32));
         assert!(claw_eval(&fill(&t, &m, "3"), &liq, &pre, &pre).is_some());
     }
+
+    // ---- Round 6b: R6-C1 / R6-C2 / R6-H1 --------------------------------
+
+    fn set_op(batch: &mut Batch, k: usize, op: &str) {
+        batch.ops[k] = op.to_string();
+        batch.checkpoint.ops_root = obyte_merkle::root(&batch.ops);
+    }
+
+    /// r6_claw_maker_hole's honest single-fill kind-0 batch (bob's 9k hole
+    /// clawed from alice), with a bystander carol holding 7k.
+    fn r6b_place_fixture() -> (Batch, Engine, [AccountId; 3]) {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, carol) = (sk(1), sk(2), sk(4));
+        let (a, b, c) = (acct_of(&alice), acct_of(&bob), acct_of(&carol));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_col(&mut eng, c, 7_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, b, 1_000);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        (batch, replay, [a, b, c])
+    }
+
+    #[test]
+    fn r6b_c1_kind_relabel_and_x_op_are_fraud() {
+        let (batch, replay, [a, _, _]) = r6b_place_fixture();
+        let c = claw_check(&batch, &replay, "0");
+        let alice = hex::encode(a.0);
+        let p: Vec<&str> = batch.fills[0].split(':').collect();
+        assert_eq!(p[3], alice);
+        // (A) kind 0 -> 3 under the `p:` op + money print (alice is not
+        // debited the claw): the claw AA used to bounce on the op shape.
+        let mut lie = batch.clone();
+        set_fill_field(&mut lie, 0, 12, "3");
+        bump_col(&mut lie, 0, &alice, -c.x);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(proof.pred, "claw");
+        assert!(proof.data.get("right").is_none(), "shape verdict needs no state");
+        assert!(claw_shape_bad(&lie.fills[0], &lie.ops[0]) == Some(true));
+        // (C) the Place op relabelled `x:{unit}` (only Place / Liquidate
+        // emit fills).
+        let mut lie = batch.clone();
+        let u = hex::encode(lie.checkpoint.unit_ids[0].0);
+        set_op(&mut lie, 0, &format!("x:{u}"));
+        bump_col(&mut lie, 0, &alice, -c.x);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(proof.pred, "claw");
+        // A foreign `p:` (another account's Place) under the same fill.
+        let mut lie = batch.clone();
+        let other = batch.ops[0].replacen(&alice, &"ab".repeat(32), 1);
+        set_op(&mut lie, 0, &other);
+        assert_eq!(claw_shape_bad(&lie.fills[0], &lie.ops[0]), Some(true));
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(proof.pred, "claw");
+        // Honest Place + fill: the shape holds.
+        assert_eq!(claw_shape_bad(&batch.fills[0], &batch.ops[0]), Some(false));
+    }
+
+    #[test]
+    fn r6b_c1_kind3_to_kind0_on_a_liquidation_is_fraud() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "3");
+        assert_eq!(claw_shape_bad(&batch.fills[0], &batch.ops[0]), Some(false));
+        // (B) kind 3 -> 0 + bob not debited the claw.
+        let mut lie = batch.clone();
+        set_fill_field(&mut lie, 0, 12, "0");
+        bump_col(&mut lie, 0, &hex::encode(b.0), c.x);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(proof.pred, "claw");
+        assert!(proof.data.get("right").is_none());
+        // A Liquidate whose fill names neither fill party as the target.
+        let mut lie = batch.clone();
+        let caller = hex::encode(acct_of(&keeper).0);
+        set_op(&mut lie, 0, &format!("L:{caller}:{}:1", "ab".repeat(32)));
+        assert_eq!(claw_shape_bad(&lie.fills[0], &lie.ops[0]), Some(true));
+        // caller == target, caller == insurance: the engine refuses both.
+        let t = hex::encode(a.0);
+        assert_eq!(
+            claw_shape_bad(&batch.fills[0], &format!("L:{t}:{t}:1")),
+            Some(true)
+        );
+        assert_eq!(
+            claw_shape_bad(&batch.fills[0], &format!("L:{CLAW_ZERO}:{t}:1")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn r6b_c1_shape_rules_on_strings() {
+        let (t, m, c) = ("aa".repeat(32), "cc".repeat(32), "dd".repeat(32));
+        let u = "11".repeat(32);
+        let fill = |tk: &str, mk: &str, kind: &str, qty: &str| {
+            format!(
+                "f:{u}:0:{tk}:{mk}:{}:{}:1:100:{qty}:9:0:{kind}:0",
+                "77".repeat(32),
+                "33".repeat(32)
+            )
+        };
+        let p = format!("p:{t}:1:0:100:5:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &p), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "1", "5"), &p), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "2", "5"), &p), Some(true));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "6"), &p), Some(true));
+        // R6-H1: qty / order qty at the cap.
+        let big = format!("p:{t}:1:0:100:1000000000000000:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &big), Some(true));
+        let ok = format!("p:{t}:1:0:100:999999999999999:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &ok), Some(false));
+        assert_eq!(
+            claw_shape_bad(&fill(&t, &m, "0", "1000000000000000"), &ok),
+            Some(true)
+        );
+        // Funding-rate off-book ADL: the target is the MAKER (taker = the
+        // counterparty) — honest, not a shape lie.
+        let l = format!("L:{c}:{m}:1");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "2", "5"), &l), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &l), Some(true));
+        // ...but on a regular market the target must be the taker.
+        assert!(claw_regular_rule(&fill(&t, &m, "2", "5"), &l));
+        assert!(!claw_regular_rule(&fill(&m, &t, "2", "5"), &l));
+        assert!(claw_regular_rule(&fill(&t, &m, "1", "5"), &p));
+        // Any other op under a fill.
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &format!("x:{u}")), Some(true));
+        assert_eq!(
+            claw_shape_bad(&fill(&t, &m, "0", "5"), &format!("c:{t}:{}", "44".repeat(32))),
+            Some(true)
+        );
+        // P-fsane mirror: qty at the cap is never emitted.
+        let f = fill(&t, &m, "0", "1000000000000000");
+        assert!(fsane_shape_bad(&f.split(':').collect::<Vec<_>>()));
+        let f = fill(&t, &m, "0", "999999999999999");
+        assert!(!fsane_shape_bad(&f.split(':').collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn r6b_c2_third_party_credit_in_place_units_is_frame_fraud() {
+        let (batch, replay, [_, _, c]) = r6b_place_fixture();
+        let carol = hex::encode(c.0);
+        // Single-fill Place: carol is neither fill party.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &carol, 1_000_000_000_000);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
+        assert_eq!(proof.pred, "frame");
+        assert!(proof.bind_aa);
+        for key in ["unit", "pre_meta", "fright", "fill", "units_proof", "leaf"] {
+            assert!(proof.data.get(key).is_some(), "missing {key}");
+        }
+        assert!(proof.data["fill"].as_str().unwrap().contains(":0:"));
+        // Zero-fill Place (a resting bid nobody hits): only alice may move.
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, carol_sk) = (sk(1), sk(4));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, acct_of(&alice), 50_000);
+        claw_set_col(&mut eng, acct_of(&carol_sk), 7_000);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            90_000 * PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            Some(10_000 * minuend_types::USD_SCALE),
+        );
+        let (zb, zr) = claw_batch(&mut eng, bid);
+        assert!(zb.fills.is_empty());
+        assert!(build_proof(&zb, &mut zr.clone(), &[], 0).is_none());
+        let mut lie = zb.clone();
+        bump_col(&mut lie, 0, &carol, 5);
+        let proof = build_proof(&lie, &mut zr.clone(), &[], 0).expect("frame proof");
+        assert_eq!(proof.pred, "frame");
+        assert!(proof.data["fright"].as_str().unwrap().starts_with("n:"));
+        assert!(proof.data.get("fill").is_none());
+        // The op account's own escrow move is not P-frame's business.
+        let mut own = zb.clone();
+        bump_col(&mut own, 0, &hex::encode(acct_of(&alice).0), 5);
+        let p = build_proof(&own, &mut zr.clone(), &[], 0);
+        assert!(p.as_ref().is_none_or(|p| p.pred != "frame"), "{p:?}");
+    }
+
+    /// Book-path liquidation of alice (long 1 @ 100k, 15k) at mark 86k into
+    /// bob's bid @ 90k: no claw, keeper (a third party, no account yet) is
+    /// paid 1% of 90k from alice; insurance gets the 5 bps fee.
+    fn r6b_keeper_fixture() -> (Batch, Engine, [AccountId; 3]) {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b, kp) = (acct_of(&alice), acct_of(&bob), acct_of(&keeper));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            90_000 * PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 86_000 * PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: kp,
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        (batch, replay, [a, b, kp])
+    }
+
+    #[test]
+    fn r6b_c2_keeper_and_insurance_credit_are_pinned() {
+        let (batch, replay, [_, _, kp]) = r6b_keeper_fixture();
+        let c = claw_check(&batch, &replay, "3");
+        assert!(c.kpay > 0, "{c:?}");
+        let keeper = hex::encode(kp.0);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        assert!(!pre.iter().any(|l| l.starts_with(&format!("acct:{keeper}:"))));
+        // Keeper credited 10x its reward (the target still pays kpay once).
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &keeper, 9 * c.kpay);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        assert_eq!(proof.data["x_who"], "c");
+        assert!(proof.data.get("x_pleft").is_some() && proof.data.get("x_pre_acct").is_none());
+        // Insurance inflated (the fill's fee is 45 USD).
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, CLAW_ZERO, 1_000_000_000_000);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        assert_eq!(proof.data["x_who"], "i");
+        assert!(proof.data.get("x_pre_acct").is_some());
+        // A bystander credited in the liquidation unit: P-frame.
+        let mut lie = batch.clone();
+        let ghost = "5e".repeat(32);
+        lie.leaf_trace[0].push(format!("acct:{ghost}:1000000000000:0:0"));
+        retrace(&mut lie, 0);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
+        assert_eq!(proof.pred, "frame");
+        assert_eq!(proof.data["ins"], true);
+    }
+
+    #[test]
+    fn r6b_h1_honest_flip_near_the_cap_is_not_fraud() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 100_000_000);
+        claw_set_col(&mut eng, b, 100_000_000);
+        // bob long 4e14 lots @ the mark (isolated, 500k USD bucket).
+        let held: i64 = 400_000_000_000_000;
+        eng.state.account_mut(b).positions.insert(
+            minuend_types::BTC_USD,
+            minuend_account::Position {
+                market: minuend_types::BTC_USD,
+                qty: held,
+                entry_price: PRICE_SCALE as i64,
+                isolated: true,
+            },
+        );
+        eng.state
+            .account_mut(b)
+            .isolated_margin
+            .insert(minuend_types::BTC_USD, 500_000 * minuend_types::USD_SCALE as i128);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let px = PRICE_SCALE as i64;
+        let q = held as u64 + 1;
+        // The engine refuses an ask that would reach the cap...
+        let too_big = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            minuend_types::QTY_CAP - held as u64,
+            1,
+            Some(500_000 * minuend_types::USD_SCALE),
+        );
+        let ev = eng.ingest(too_big).unwrap();
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Rejected { .. })));
+        // ...and rests the flip 1 below it (4e14 + 1).
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+            Some(500_000 * minuend_types::USD_SCALE),
+        );
+        let i0 = unit_id(&ask);
+        let ev = eng.ingest(ask).unwrap();
+        assert!(!ev
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Rejected { .. })));
+        let bid = claw_place(vec![i0], &alice, Side::Bid, TimeInForce::Ioc, px, q, 1, None);
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        // bob closes 4e14 and opens 1 short: his escrow share goes to the
+        // new bucket, not back to collateral — exact below the cap.
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(c.x, 0);
+        let post = &batch.leaf_trace[0];
+        let bob_pos = post
+            .iter()
+            .find(|l| l.starts_with(&format!("pos:{}:", hex::encode(b.0))))
+            .expect("bob flipped");
+        assert_eq!(bob_pos.split(':').nth(3), Some("-1"));
+    }
 }
