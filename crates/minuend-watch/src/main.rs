@@ -16,10 +16,10 @@
 use minuend_exec::Engine;
 use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
-    batch_from_committed, check_committed_roots, committed_frame_bytes, fetch_da_unit,
-    load_checkpoint, prove, resolve_start_height, save_checkpoint, verify_da_binding,
-    write_private_proof, HubClient, WatchConfig, WatchError, CHALLENGE_BOND_GROSS,
-    DEFAULT_POLL_INTERVAL_SECS,
+    batch_from_committed, check_committed_roots, committed_frame_bytes, create_private_temp_dir,
+    fetch_da_unit, load_checkpoint, load_checkpoint_at, prove, resolve_start_height, rewind_target,
+    save_checkpoint_retaining, verify_da_binding, write_private_proof, ChainView, HubClient,
+    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -394,7 +394,8 @@ fn live_challenge_args(
     args
 }
 
-/// R2-R-11: per `(height, predicate)` challenge bookkeeping, so a challenge
+/// R2-R-11 / R3-R-3: per `(height, submission, predicate)` challenge
+/// bookkeeping, so a challenge
 /// that is being posted or was already broadcast is not paid for again on
 /// the next poll round, and the poster runs without blocking the loop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -436,10 +437,21 @@ fn record_exit(state: &mut AttemptState, code: Option<i32>) {
     }
 }
 
+/// R3-R-3: a challenge is identified by the height, the SUBMISSION it
+/// disputes (the `da_unit_<h>` the replay judged) and the predicate. A
+/// height that was frozen and re-submitted is a new submission: its fraud is
+/// challenged again even when the predicate repeats, and a refusal or
+/// give-up on the old submission does not carry over.
+type ChallengeKey = (u64, String, String);
+
+fn challenge_key(h: u64, submission: &str, pred: &str) -> ChallengeKey {
+    (h, submission.to_string(), pred.to_string())
+}
+
 #[derive(Default)]
 struct ChallengeTracker {
-    states: BTreeMap<(u64, String), AttemptState>,
-    children: BTreeMap<(u64, String), (Child, String)>,
+    states: BTreeMap<ChallengeKey, AttemptState>,
+    children: BTreeMap<ChallengeKey, (Child, String)>,
 }
 
 impl ChallengeTracker {
@@ -456,7 +468,7 @@ impl ChallengeTracker {
             self.children.remove(&key);
             let state = self.states.entry(key.clone()).or_default();
             record_exit(state, st.code());
-            let (h, pred) = key;
+            let (h, _, pred) = key;
             out.push(match st.code() {
                 Some(0) => format!("WATCH: challenge h={h} pred={pred} broadcast ({what})"),
                 Some(LIVE_EXIT_REFUSED) => format!(
@@ -524,6 +536,14 @@ impl ReplayCursor {
         }
     }
 
+    /// R3-R-2: the engine was rewound to the state after `height` (heights
+    /// above it are dead on-chain); replay resumes right after it.
+    fn rewind_to(&mut self, height: u64) {
+        self.processed_upto = height;
+        self.from_height = self.from_height.min(height.saturating_add(1));
+        self.stalled_at = None;
+    }
+
     /// Record that `height` did not advance the engine this round. Returns
     /// how many consecutive rounds the cursor has been stuck there.
     fn note_stall(&mut self, height: u64) -> u64 {
@@ -583,13 +603,14 @@ fn read_window(hub: &HttpHubClient, config: &WatchConfig, h: u64) -> anyhow::Res
 /// not once per poll round.
 fn alert_and_maybe_challenge(
     h: u64,
+    submission: &str,
     win: WindowFacts,
     alert: String,
     proof: Option<&prove::BuiltProof>,
 ) -> String {
     let now = now_secs();
     if challenge_postable(win.submitted_at, now, win.frozen) {
-        maybe_post_challenge(h, &alert, proof);
+        maybe_post_challenge(h, submission, &alert, proof);
         alert
     } else if challenge_window_open(win.submitted_at, now, win.frozen) {
         format!(
@@ -616,6 +637,7 @@ fn fetch_committed(
         Err(WatchError::BindingMismatch(msg)) => {
             return Err(alert_and_maybe_challenge(
                 h,
+                "",
                 win,
                 format!("h={h} BINDING MISMATCH: {msg}"),
                 None,
@@ -628,6 +650,7 @@ fn fetch_committed(
     if let Err(e) = verify_da_binding(&da) {
         return Err(alert_and_maybe_challenge(
             h,
+            &da.unit_hash,
             win,
             format!("h={h} BINDING MISMATCH: {e}"),
             None,
@@ -642,6 +665,7 @@ fn fetch_committed(
         Err(e) => {
             return Err(alert_and_maybe_challenge(
                 h,
+                &da.unit_hash,
                 win,
                 format!(
                     "h={h} CRITICAL {e} — the on-chain assertion is NOT the replayed DA; \
@@ -663,6 +687,7 @@ fn fetch_committed(
             Err(e) => {
                 return Err(alert_and_maybe_challenge(
                     h,
+                    &da.unit_hash,
                     win,
                     format!("h={h} BINDING MISMATCH: {e}"),
                     None,
@@ -693,6 +718,7 @@ fn check_height_without_replay(
     if let Err(e) = batch_from_committed(&da.data, &raw) {
         return Ok(Some(alert_and_maybe_challenge(
             h,
+            &da.unit_hash,
             win,
             format!("h={h} UNDECODABLE BATCH ({e}) above a replay stall"),
             None,
@@ -704,12 +730,14 @@ fn check_height_without_replay(
 /// Replay one height and advance the engine; surface only actionable alerts.
 /// Returns `Ok(None)` = nothing actionable (no da_unit, or replay clean),
 /// `Ok(Some(alert))` = a mismatch worth surfacing.
+/// `advanced` receives the replayed submission (`da_unit_<h>`) when the
+/// height advanced the engine.
 fn check_height(
     hub: &HttpHubClient,
     config: &WatchConfig,
     engine: &mut Engine,
     h: u64,
-    advanced: &mut bool,
+    advanced: &mut Option<String>,
 ) -> anyhow::Result<Option<String>> {
     let win = read_window(hub, config, h)?;
     let (da, raw) = match fetch_committed(hub, config, h, win) {
@@ -722,6 +750,7 @@ fn check_height(
         Err(e) => {
             return Ok(Some(alert_and_maybe_challenge(
                 h,
+                &da.unit_hash,
                 win,
                 format!("h={h} ROOT MISMATCH ({e}): committed frames do not decode"),
                 None,
@@ -745,7 +774,7 @@ fn check_height(
             // advances its cursor so the next round does not re-scan old
             // heights against an advanced engine (PrevMismatch noise) and
             // does not skip a gap.
-            *advanced = true;
+            *advanced = Some(da.unit_hash.clone());
             return Ok(None);
         }
         Err(e) => e,
@@ -768,6 +797,7 @@ fn check_height(
     };
     Ok(Some(alert_and_maybe_challenge(
         h,
+        &da.unit_hash,
         win,
         format!(
             "h={} ROOT MISMATCH ({}): watcher should challenge with {} bytes bond",
@@ -786,7 +816,7 @@ fn check_height(
 /// stripped). Without a proof nothing is spawned. R2-R-11: posters run in
 /// the background (reaped by the poll loop) and a `(height, predicate)`
 /// that is in flight or already broadcast is never posted again.
-fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) {
+fn maybe_post_challenge(h: u64, submission: &str, alert: &str, proof: Option<&prove::BuiltProof>) {
     let mode = current_challenge_mode();
     if mode == ChallengeMode::PrintOnly {
         eprintln!("WATCH ALERT (print-only, no MINUEND_WATCH_MNEMONIC): {alert}");
@@ -796,7 +826,7 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
         eprintln!("WATCH ALERT (NOT CHALLENGED: no expressible proof): {alert}");
         return;
     };
-    let key = (h, p.pred.clone());
+    let key = challenge_key(h, submission, &p.pred);
     match with_tracker(|t| post_decision(t.states.get(&key))) {
         PostDecision::Post => {}
         PostDecision::InFlight => {
@@ -893,6 +923,108 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
     }
 }
 
+/// Read one numeric rollup-AA state var (absent = 0).
+fn read_u64_var(hub: &HttpHubClient, config: &WatchConfig, key: &str) -> anyhow::Result<u64> {
+    Ok(hub
+        .get_aa_state_var(&config.rollup_address, key)
+        .map_err(|e| anyhow::anyhow!("hub {key}: {e}"))?
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0))
+}
+
+/// R3-R-2: the chain's current view of the accepted, not yet final heights.
+fn chain_view(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    last_submitted: u64,
+    last_finalized: u64,
+    processed_upto: u64,
+) -> anyhow::Result<ChainView> {
+    let mut view = ChainView {
+        last_submitted,
+        last_finalized,
+        frozen_at_last_submitted: read_u64_var(hub, config, &format!("frozen_{last_submitted}"))?,
+        ..Default::default()
+    };
+    for h in last_finalized.saturating_add(1)..=processed_upto.min(last_submitted) {
+        let v = hub
+            .get_aa_state_var(&config.rollup_address, &format!("da_unit_{h}"))
+            .map_err(|e| anyhow::anyhow!("hub da_unit_{h}: {e}"))?;
+        view.da_units
+            .insert(h, v.and_then(|v| v.as_str().map(str::to_string)));
+    }
+    Ok(view)
+}
+
+/// R3-R-2: load the checkpoint at `target` (or the newest one below it) and
+/// delete every checkpoint above it (the dead branch). Returns the engine
+/// and the height it sits at (0 = genesis).
+fn rewind_engine(dir: &std::path::Path, target: u64) -> anyhow::Result<(Engine, u64)> {
+    let mut heights = minuend_state::persist::snapshot_heights(dir)?;
+    heights.retain(|h| *h <= target);
+    for h in heights {
+        if let Ok(Some(e)) = load_checkpoint_at(dir, h) {
+            minuend_state::persist::remove_snapshots_above(dir, h)?;
+            return Ok((e, h));
+        }
+    }
+    minuend_state::persist::remove_snapshots_above(dir, 0)?;
+    Ok((Engine::new(), 0))
+}
+
+/// R3-R-2 / R3-R-7: pick the checkpoint to resume from. The newest
+/// checkpoint whose height is still live on-chain and whose state root
+/// equals the chain's `state_root_<h>` wins; checkpoints above it (a branch
+/// that was judged fraudulent and re-submitted while the watcher was down)
+/// are deleted. If checkpoints exist but none matches, or the chain cannot
+/// be read, startup fails hard instead of replaying from a dead branch.
+fn resume_engine(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    dir: &std::path::Path,
+) -> anyhow::Result<Option<Engine>> {
+    // R3-R-7: all-unreadable checkpoints are an error here (not genesis).
+    if load_checkpoint(dir)?.is_none() {
+        return Ok(None);
+    }
+    let ls = read_u64_var(hub, config, "last_submitted")?;
+    let live_top = if read_u64_var(hub, config, &format!("frozen_{ls}"))? == 2 {
+        ls.saturating_sub(1)
+    } else {
+        ls
+    };
+    for h in minuend_state::persist::snapshot_heights(dir)? {
+        if h > live_top {
+            println!("minuend-watch: checkpoint h={h} is above the live chain tip h={live_top}; skipping");
+            continue;
+        }
+        let Ok(Some(engine)) = load_checkpoint_at(dir, h) else {
+            println!("minuend-watch: checkpoint h={h} is unreadable; trying an older one");
+            continue;
+        };
+        let onchain = hub
+            .get_aa_state_var(&config.rollup_address, &format!("state_root_{h}"))
+            .map_err(|e| anyhow::anyhow!("hub state_root_{h}: {e} (cannot verify the checkpoint)"))?
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let mine = hex::encode(engine.state.state_root());
+        if onchain == mine {
+            minuend_state::persist::remove_snapshots_above(dir, h)?;
+            return Ok(Some(engine));
+        }
+        println!(
+            "minuend-watch: checkpoint h={h} state_root {mine} != on-chain state_root_{h} \
+             {onchain:?} (re-submitted or untrusted); trying an older one"
+        );
+    }
+    Err(anyhow::anyhow!(
+        "no checkpoint in {} matches the chain (live tip h={live_top}): refusing to resume \
+         from an unverified state. Import a trusted chainstate.<h>.snap or clear the state dir \
+         to replay from genesis on purpose",
+        dir.display()
+    ))
+}
+
 fn main() -> anyhow::Result<()> {
     let args = parse_args().map_err(|e| anyhow::anyhow!(e))?;
     // Vault is the evidence payee; rollup is the assertion AA. Replay reads
@@ -910,8 +1042,21 @@ fn main() -> anyhow::Result<()> {
     // R2-R-9: resume from the replay checkpoint when --state-dir has one;
     // otherwise the engine starts at genesis. A start height the engine
     // cannot reach (no state for from_height-1) is refused up front.
+    // R3-R-6: without --state-dir a FRESH private directory with an
+    // unpredictable name is created right now (never reused if it exists)
+    // for proofs and this run's checkpoints, so nobody can pre-plant it.
+    // R3-R-2: checkpoints are kept back to last_finalized either way, so
+    // the replay can rewind when an accepted height is judged / re-submitted.
+    let state_dir = match &args.state_dir {
+        Some(d) => d.clone(),
+        None => create_private_temp_dir("minuend-watch").map_err(|e| {
+            anyhow::anyhow!("cannot create a private temp dir for proofs/checkpoints: {e}")
+        })?,
+    };
     let mut engine = match &args.state_dir {
-        Some(dir) => load_checkpoint(dir)?.unwrap_or_else(Engine::new),
+        // R3-R-2 / R3-R-7: resume only from a checkpoint that matches the
+        // chain (fail hard otherwise; never a warning, never silent genesis).
+        Some(dir) => resume_engine(&hub, &config, dir)?.unwrap_or_else(Engine::new),
         None => Engine::new(),
     };
     let checkpoint_h = (engine.state.height > 0).then_some(engine.state.height);
@@ -919,31 +1064,11 @@ fn main() -> anyhow::Result<()> {
         resolve_start_height(args.from_height, checkpoint_h).map_err(|e| anyhow::anyhow!(e))?;
     if let Some(ch) = checkpoint_h {
         println!(
-            "minuend-watch: resumed from checkpoint h={ch} (state_root {})",
+            "minuend-watch: resumed from checkpoint h={ch} (state_root {}, matches the chain)",
             hex::encode(engine.state.state_root())
         );
-        // Sanity: the checkpoint should match the chain's stored root.
-        if let Ok(Some(v)) =
-            hub.get_aa_state_var(&config.rollup_address, &format!("state_root_{ch}"))
-        {
-            let onchain = v.as_str().unwrap_or("").to_string();
-            let mine = hex::encode(engine.state.state_root());
-            if onchain != mine {
-                println!(
-                    "WATCH ALERT: checkpoint h={ch} state_root {mine} != on-chain state_root_{ch} \
-                     {onchain} (height re-submitted or checkpoint not trusted)"
-                );
-            }
-        }
     }
-    let proof_dir = match &args.state_dir {
-        Some(d) => d.join("proofs"),
-        None => std::env::temp_dir().join(format!(
-            "minuend-watch-{}-{}",
-            std::process::id(),
-            now_secs()
-        )),
-    };
+    let proof_dir = state_dir.join("proofs");
     let _ = CHALLENGE_CTX.set(ChallengeCtx {
         rollup: args.rollup.clone(),
         dispute_main: args.dispute.clone(),
@@ -978,6 +1103,9 @@ fn main() -> anyhow::Result<()> {
     // the engine moves it, so a gap or a mismatch is retried next round
     // instead of being silently skipped or re-checked against stale state.
     let mut cursor = ReplayCursor::new(start);
+    // R3-R-2: the submission (`da_unit_<h>`) each accepted, not yet final
+    // height was replayed from.
+    let mut accepted: BTreeMap<u64, String> = BTreeMap::new();
 
     loop {
         // R2-R-11: report background challenge posters that finished.
@@ -989,22 +1117,77 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("hub last_submitted: {e}"))?
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let lf = match read_u64_var(&hub, &config, "last_finalized") {
+            Ok(v) => v,
+            Err(e) => {
+                println!("WATCH ERROR: {e}");
+                std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+                continue;
+            }
+        };
+
+        // R3-R-2: an accepted height may have been judged fraudulent (by
+        // another challenger) and re-submitted since we replayed it. Detect
+        // that on-chain and replay the new branch from the checkpoint below.
+        if cursor.processed_upto > lf {
+            match chain_view(&hub, &config, ll, lf, cursor.processed_upto) {
+                Ok(view) => {
+                    if let Some(t) = rewind_target(cursor.processed_upto, &accepted, &view) {
+                        println!(
+                            "WATCH ALERT: accepted heights {}..={} are no longer the chain's \
+                             (last_submitted={ll}, frozen_{ll}={}, or a re-submitted da_unit): \
+                             rewinding the replay to h={t} and re-checking them",
+                            t + 1,
+                            cursor.processed_upto,
+                            view.frozen_at_last_submitted
+                        );
+                        match rewind_engine(&state_dir, t) {
+                            Ok((eng, at)) => {
+                                engine = eng;
+                                cursor.rewind_to(at);
+                                accepted.retain(|h, _| *h <= at);
+                                if at < t {
+                                    println!(
+                                        "WATCH CRITICAL: no checkpoint at h={t}; rewound to h={at} \
+                                         instead (heights {}..={t} are replayed again)",
+                                        at + 1
+                                    );
+                                }
+                            }
+                            Err(e) => println!(
+                                "WATCH CRITICAL: cannot rewind to h={t}: {e} — heights above \
+                                 h={t} are NOT verified; restart with a trusted checkpoint"
+                            ),
+                        }
+                    }
+                    // First sight (e.g. after a restart, whose checkpoint was
+                    // verified against the chain): record what is there now.
+                    for (h, cur) in view.da_units {
+                        if let (true, Some(c)) = (h <= cursor.processed_upto, cur) {
+                            accepted.entry(h).or_insert(c);
+                        }
+                    }
+                }
+                Err(e) => println!("WATCH ERROR: re-submission check: {e}"),
+            }
+        }
+        accepted.retain(|h, _| *h > lf);
 
         let mut stalled: Option<u64> = None;
         for h in cursor.next_start()..=ll {
-            let mut advanced = false;
+            let mut advanced: Option<String> = None;
             match check_height(&hub, &config, &mut engine, h, &mut advanced) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
                 Err(e) => println!("WATCH ERROR at h={h}: {e}"),
             }
-            if advanced {
+            if let Some(submission) = advanced {
                 cursor.record(h);
-                // R2-R-9: checkpoint every replay-verified height.
-                if let Some(dir) = &args.state_dir {
-                    if let Err(e) = save_checkpoint(dir, &engine) {
-                        println!("WATCH ERROR: checkpoint at h={h} failed: {e}");
-                    }
+                accepted.insert(h, submission);
+                // R2-R-9 / R3-R-2: checkpoint every replay-verified height,
+                // keeping every checkpoint back to last_finalized.
+                if let Err(e) = save_checkpoint_retaining(&state_dir, &engine, lf) {
+                    println!("WATCH ERROR: checkpoint at h={h} failed: {e}");
                 }
             } else {
                 // No DA yet, or a mismatch this round: the replay retries
@@ -1038,11 +1221,68 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        challenge_mode, challenge_postable, challenge_window_open, live_challenge_args,
-        post_decision, record_exit, AttemptState, ChallengeCtx, ChallengeMode, PostDecision,
-        ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS, CHALLENGE_WINDOW_SECS, LIVE_EXIT_REFUSED,
-        MAX_POST_FAILURES,
+        challenge_key, challenge_mode, challenge_postable, challenge_window_open,
+        live_challenge_args, post_decision, record_exit, AttemptState, ChallengeCtx, ChallengeMode,
+        ChallengeTracker, PostDecision, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS,
+        CHALLENGE_WINDOW_SECS, LIVE_EXIT_REFUSED, MAX_POST_FAILURES,
     };
+
+    /// R3-R-3: the challenge key carries the submission (`da_unit_<h>`): a
+    /// frozen and re-submitted height that cheats again with the same
+    /// predicate is challenged again, and a refusal / give-up on the old
+    /// submission does not carry over. The same submission is still never
+    /// paid for twice.
+    #[test]
+    fn resubmitted_height_is_challenged_again() {
+        let mut t = ChallengeTracker::default();
+        let old = challenge_key(5, "UNIT_A", "wpin");
+        let mut st = AttemptState {
+            in_flight: true,
+            ..Default::default()
+        };
+        record_exit(&mut st, Some(0));
+        t.states.insert(old.clone(), st);
+        assert_eq!(
+            post_decision(t.states.get(&old)),
+            PostDecision::AlreadyBroadcast
+        );
+        let new = challenge_key(5, "UNIT_B", "wpin");
+        assert_ne!(old, new);
+        assert_eq!(post_decision(t.states.get(&new)), PostDecision::Post);
+        // A refusal (window/frozen) on the old submission is final for it
+        // only.
+        let mut r = AttemptState::default();
+        record_exit(&mut r, Some(LIVE_EXIT_REFUSED));
+        t.states.insert(old.clone(), r);
+        assert_eq!(post_decision(t.states.get(&old)), PostDecision::GaveUp);
+        assert_eq!(post_decision(t.states.get(&new)), PostDecision::Post);
+        // Same height, same predicate, different submission: distinct keys
+        // for every combination.
+        assert_ne!(
+            challenge_key(5, "UNIT_A", "wpin"),
+            challenge_key(5, "UNIT_A", "adr")
+        );
+        assert_ne!(
+            challenge_key(5, "UNIT_A", "wpin"),
+            challenge_key(6, "UNIT_A", "wpin")
+        );
+    }
+
+    /// R3-R-2: after a rewind the cursor resumes right above the rewound
+    /// height, even below the configured / resumed start height.
+    #[test]
+    fn replay_cursor_rewinds_below_its_start() {
+        let mut c = ReplayCursor::new(10);
+        c.record(14);
+        c.note_stall(15);
+        c.rewind_to(11);
+        assert_eq!(c.next_start(), 12);
+        assert!(c.stall_alert(20).is_none());
+        c.rewind_to(4);
+        assert_eq!(c.next_start(), 5, "rewind below the resumed start height");
+        c.record(5);
+        assert_eq!(c.next_start(), 6);
+    }
 
     /// B10 (#47): posting stops CHALLENGE_SAFETY_MARGIN_SECS before the AA
     /// deadline while the window itself is still reported open.

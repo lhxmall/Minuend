@@ -117,6 +117,23 @@ pub struct Checkpoint {
 /// unit ceiling; the 10k-node wall is closed by base64 frames, this cap is
 /// the remaining DA bound (plus the 24h temp_data purge).
 pub const PACK_SOURCE_CAP: usize = 4_000_000;
+/// R3-R-1: largest decompressed size of ONE package (or an inline
+/// `frames_blob`). Shared by the producer (packages are cut so their raw
+/// bytes never exceed it, `pack_frames_with_caps`, and
+/// `obyte-local/batch_frames.js` `MAX_PACKAGE_RAW_BYTES`) and the watcher
+/// (`minuend_watch::gunzip_bounded` refuses anything larger). Both sides use
+/// this one value, so an honest batch is never refused for size.
+pub const MAX_PACKAGE_RAW_BYTES: usize = 64 << 20;
+/// R3-R-1: largest decompressed size of all packages of one height. The
+/// producer refuses to export a batch above it ([`SettleError::DaTooLarge`];
+/// it must cut batches earlier, see [`Batch::da_raw_len`]) and the watcher
+/// refuses anything above it (memory bound).
+pub const MAX_COMMITTED_RAW_BYTES: usize = 1 << 30;
+/// R3-R-1: bytes `obyte-local/frame_stamp.js` may still add to an exported
+/// batch's frames (deposit evidence `,"e":{..}` per Deposit frame; all
+/// evidence together is capped at `DEPOSIT_EVIDENCE_MAX_BYTES`). The Rust
+/// exporter keeps this much headroom below both raw caps.
+pub const DA_EVIDENCE_HEADROOM_BYTES: usize = 4 * minuend_types::DEPOSIT_EVIDENCE_MAX_BYTES;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Batch {
     pub chain_id: String,
@@ -204,6 +221,13 @@ pub enum SettleError {
     DepositEvidenceTooLarge,
     #[error("gov wal flush failed")]
     WalFlush,
+    /// R3-R-1: the batch's committed frame bytes exceed the raw-size caps a
+    /// watcher accepts (`MAX_PACKAGE_RAW_BYTES` per frame/package,
+    /// `MAX_COMMITTED_RAW_BYTES` per height), or one frame cannot fit an
+    /// on-chain package. Posting it would stall every watcher, so the
+    /// producer must cut a smaller batch instead.
+    #[error("batch DA exceeds the watcher raw-size caps")]
+    DaTooLarge,
 }
 
 /// Canonical byte encoding of fills shared by batch construction and replay
@@ -638,6 +662,24 @@ impl Batch {
         }
         Ok(out)
     }
+    /// R3-R-1: committed raw bytes this batch's frames decompress to on a
+    /// watcher. A producer cutting batches must keep this (plus
+    /// [`DA_EVIDENCE_HEADROOM_BYTES`] when evidence is stamped later) at or
+    /// below [`MAX_COMMITTED_RAW_BYTES`]: every frame carries the full
+    /// post-unit witness leaf set, so the size grows with
+    /// `unit_count x leaf-set bytes`, not with the unit count alone.
+    pub fn da_raw_len(&self) -> Result<usize, SettleError> {
+        Ok(frames_raw_len(&self.frames()?))
+    }
+    /// R3-R-1: frames for an exporter whose output is later stamped with
+    /// deposit evidence and packed by `obyte-local/post_batch.js`. Refuses
+    /// ([`SettleError::DaTooLarge`]) a batch that, with the evidence
+    /// headroom, would exceed the raw caps every watcher enforces.
+    pub fn export_frames(&self) -> Result<Vec<String>, SettleError> {
+        let frames = self.frames()?;
+        check_da_budget(&frames, DA_EVIDENCE_HEADROOM_BYTES)?;
+        Ok(frames)
+    }
     /// Header scalars for the new wire: per-unit arrays are gone, only
     /// unchanged scalars plus blob/package pointers.
     pub fn header_json(&self) -> serde_json::Value {
@@ -682,30 +724,19 @@ impl Batch {
         if frames.is_empty() {
             return Err(SettleError::Empty);
         }
-        let mut blobs = pack_frames(&frames);
+        // R3-R-1: never emit DA a watcher would refuse. The full leaf set
+        // `l` stays in every frame (the watcher's proofs need the posted
+        // leaves; a stripped frame no longer matches the replayed leaf
+        // trace), so an over-size batch is refused here instead of being
+        // posted and stalling every watcher.
+        check_da_budget(&frames, 0)?;
+        let blobs = pack_frames(&frames);
         let over = blobs.iter().any(|b| {
             let obj = serde_json::json!({"package_blob": b});
             crate::obyte_hash::get_json_source(&obj).len() > PACK_SOURCE_CAP
         });
         if over {
-            let stripped: Vec<String> = frames
-                .iter()
-                .map(|f| {
-                    let mut v: serde_json::Value =
-                        serde_json::from_str(f).unwrap_or(serde_json::Value::Null);
-                    if let Some(m) = v.as_object_mut() {
-                        m.remove("l");
-                    }
-                    serde_json::to_string(&v).unwrap()
-                })
-                .collect();
-            blobs = pack_frames(&stripped);
-            // Still over cap with all leaves stripped: print-only. The
-            // oversize package cannot land on-chain (ocore rejects it), so
-            // the header's packages can never assemble — watchers back off
-            // on the missing joints instead of mis-challenging. Return the
-            // data as-is rather than erroring (same posture as the legacy
-            // 4MB leaf_trace cap).
+            return Err(SettleError::DaTooLarge);
         }
         let raw: Vec<Vec<u8>> = blobs
             .iter()
@@ -756,16 +787,30 @@ impl Batch {
         if replay.state.state_root() != prev_root {
             return Err(SettleError::PrevMismatch);
         }
-        if self.units.iter().any(|u| {
-            matches!(
-                u.op,
-                minuend_dag::Op::Deposit { .. } | minuend_dag::Op::GovDeposit { .. }
-            )
-        }) {
-            // H2: deposit anchors are no longer self-attested — every batch
-            // carrying Deposit/GovDeposit ops must present independently
-            // verifiable evidence (joint pays the vault the claimed amount
-            // in the claimed asset). Any failure maps to DepositEvidence.
+        // R3-R-4: deposit anchors are endorsed per unit. Only a Deposit/
+        // GovDeposit whose evidence verifies (the joint pays the vault the
+        // claimed amount in the claimed asset) is endorsed for the replay;
+        // one without valid evidence (e.g. a user-signed unit naming a bogus
+        // `aa_unit`, which the producer also rejected) is rejected by the
+        // replay like on the producer instead of failing the whole height.
+        // Every deposit the replay APPLIES must still carry verified
+        // evidence (checked right after the ingest loop), so an operator
+        // cannot credit an unpaid deposit.
+        let mut deposit_units: HashMap<UnitId, ([u8; 32], bool)> = HashMap::new();
+        for u in &self.units {
+            match &u.op {
+                minuend_dag::Op::Deposit { aa_unit, .. } => {
+                    deposit_units.insert(minuend_dag::unit_id(u), (*aa_unit, false));
+                }
+                minuend_dag::Op::GovDeposit { aa_unit, .. } => {
+                    deposit_units.insert(minuend_dag::unit_id(u), (*aa_unit, true));
+                }
+                _ => {}
+            }
+        }
+        let mut endorsed: HashMap<([u8; 32], bool), deposit_verify::VerifiedDeposit> =
+            HashMap::new();
+        if !deposit_units.is_empty() {
             // Pre-deploy (empty expected vault) evidence checks skip when
             // there are no evidences; evidences against an empty vault
             // string are rejected.
@@ -773,65 +818,40 @@ impl Batch {
             if vault.is_empty() && !self.deposit_evidences.is_empty() {
                 return Err(SettleError::DepositEvidence);
             }
-            let verified = deposit_verify::verify_all(
+            endorsed = deposit_verify::verify_each(
                 &self.units,
                 &self.deposit_evidences,
                 &vault,
                 &PERP_ASSET,
             )
             .map_err(|_| SettleError::DepositEvidence)?;
-            // R3-A-5: the payer-designated account of every anchor.
-            for (anchor, (_, account)) in verified {
-                replay.state.deposit_accounts.insert(anchor, account);
-            }
-        }
-        // R3-E-1: every admitted anchor carries the payment it was verified
-        // against (`verify_all` checked each top-level op's amount and
-        // payer == addr against its evidence), so the engine credits
-        // exactly that payment and nothing else can spend the anchor with a
-        // different amount. Only TOP-LEVEL deposit ops admit anchors; a
-        // Reveal may not carry a deposit at all.
-        for u in &self.units {
-            match &u.op {
-                minuend_dag::Op::Deposit {
-                    aa_unit,
-                    amount,
-                    addr,
-                    ..
-                } => match u128::try_from(*amount) {
-                    Ok(a)
-                        if !replay
-                            .state
-                            .deposit_backing
-                            .contains_key(&(*aa_unit, false)) =>
-                    {
-                        replay.state.allow_deposit(*aa_unit, false, a, addr);
-                    }
-                    // A second op on the same anchor keeps the first backing
-                    // (the engine rejects it as a duplicate anyway); a
-                    // negative amount admits the anchor with no matching
-                    // backing (u128 cannot hold it) — the engine rejects it.
-                    _ => {
-                        replay.state.deposits_allowed.insert((*aa_unit, false));
-                    }
-                },
-                // PERP deposits are backed by the same on-chain AA feed; the
-                // bool kind keeps a collateral endorsement from crediting
-                // PERP (and vice versa).
-                minuend_dag::Op::GovDeposit {
-                    aa_unit,
-                    amount,
-                    addr,
-                    ..
-                } if !replay.state.deposit_backing.contains_key(&(*aa_unit, true)) => {
-                    replay.state.allow_deposit(*aa_unit, true, *amount, addr);
-                }
-                _ => {}
+            // R3-E-1 / R3-A-5: each endorsed anchor is admitted together
+            // with the payment its evidence proves (amount, payer address,
+            // payer-designated account), so the engine credits exactly that
+            // payment to exactly that account; any other op on the anchor
+            // (front-run, wrong amount/address) is a rejected unit.
+            for ((anchor, is_perp), v) in &endorsed {
+                replay
+                    .state
+                    .allow_deposit(*anchor, *is_perp, v.amount, &v.payer, v.account);
             }
         }
         let pre_len = replay.log.len();
         for u in &self.units {
             replay.ingest(u.clone()).map_err(|_| SettleError::Replay)?;
+        }
+        // R3-R-4: an APPLIED deposit needs verified evidence (a rejected one
+        // needs none).
+        if !deposit_units.is_empty() {
+            for ev in replay.log.iter().skip(pre_len) {
+                if let minuend_exec::ExecEvent::Applied { unit, .. } = ev {
+                    if let Some(anchor) = deposit_units.get(unit) {
+                        if !endorsed.contains_key(anchor) {
+                            return Err(SettleError::DepositEvidence);
+                        }
+                    }
+                }
+            }
         }
         // Fill integrity: recompute hash/count/descriptors from replay events.
         let applied_set: HashSet<&UnitId> = self.checkpoint.unit_ids.iter().collect();
@@ -1013,6 +1033,44 @@ pub fn gunzip_bytes(gz: &[u8]) -> Result<Vec<u8>, SettleError> {
     Ok(out)
 }
 pub fn pack_frames_with_cap(frames: &[String], cap: usize) -> Vec<String> {
+    pack_frames_with_caps(frames, cap, MAX_PACKAGE_RAW_BYTES)
+}
+/// R3-R-1: committed raw length of `frames` (frames joined by one LF), i.e.
+/// what a watcher decompresses for the height.
+pub fn frames_raw_len(frames: &[String]) -> usize {
+    frames.iter().map(|f| f.len()).sum::<usize>() + frames.len().saturating_sub(1)
+}
+/// R3-R-1: the raw-size budget an exported batch must meet so that every
+/// watcher accepts it: each frame (plus its separator and `headroom`) must
+/// fit one package's raw cap, and all frames (plus `headroom`) the
+/// per-height raw cap. `headroom` reserves bytes a later stage still adds
+/// (deposit evidence stamped by `frame_stamp.js`).
+pub fn check_da_budget(frames: &[String], headroom: usize) -> Result<(), SettleError> {
+    check_da_budget_lens(frames.iter().map(String::len), headroom)
+}
+fn check_da_budget_lens(
+    frame_lens: impl Iterator<Item = usize>,
+    headroom: usize,
+) -> Result<(), SettleError> {
+    let mut total = 0usize;
+    let mut n = 0usize;
+    for len in frame_lens {
+        if len + 1 + headroom > MAX_PACKAGE_RAW_BYTES {
+            return Err(SettleError::DaTooLarge);
+        }
+        total += len;
+        n += 1;
+    }
+    if total + n.saturating_sub(1) + headroom > MAX_COMMITTED_RAW_BYTES {
+        return Err(SettleError::DaTooLarge);
+    }
+    Ok(())
+}
+/// Pack frames so each package's canonical source is at most `cap` bytes
+/// AND its decompressed bytes at most `raw_cap` (R3-R-1: the watcher's
+/// per-package raw cap). A single frame larger than either cap still forms
+/// its own (over-size) package; callers check with [`check_da_budget`].
+pub fn pack_frames_with_caps(frames: &[String], cap: usize, raw_cap: usize) -> Vec<String> {
     use base64::Engine as _;
     if frames.is_empty() {
         return Vec::new();
@@ -1050,7 +1108,12 @@ pub fn pack_frames_with_cap(frames: &[String], cap: usize) -> Vec<String> {
     for f in frames {
         let mut candidate = cur.clone();
         candidate.push(f);
-        if !cur.is_empty() && source_len(&candidate, out.len()) > cap {
+        // R3-R-1: cut on raw size first (cheap, no gzip), then on the
+        // compressed on-chain source size.
+        let raw_len = (if out.is_empty() { 0 } else { 1 })
+            + candidate.iter().map(|x| x.len()).sum::<usize>()
+            + candidate.len().saturating_sub(1);
+        if !cur.is_empty() && (raw_len > raw_cap || source_len(&candidate, out.len()) > cap) {
             flush(&mut cur, &mut out);
         }
         cur.push(f);
@@ -1632,9 +1695,14 @@ mod tests {
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert_eq!(pre.state.state_root(), eng.state.state_root());
         for (i, a) in anchors.iter().enumerate() {
+            let b = &pre.state.deposit_backing[&(*a, false)];
             assert_eq!(
-                pre.state.deposit_backing.get(&(*a, false)),
-                Some(&(10_000 * USD_SCALE as u128, test_addr(1 + i as u8)))
+                (b.amount, b.payer.clone(), b.account),
+                (
+                    10_000 * USD_SCALE as u128,
+                    test_addr(1 + i as u8),
+                    acct_of(&sk(1 + i as u8))
+                )
             );
         }
     }
@@ -2174,8 +2242,8 @@ mod tests {
         assert_eq!(ev.account, hex::encode(acct_of(&victim).0));
         let pre = eng.clone();
         // Producer side: the anchor and its designated account.
-        eng.state.deposits_allowed.insert((a, false));
-        eng.state.deposit_accounts.insert(a, acct_of(&victim));
+        eng.state
+            .allow_deposit(a, false, 5_000_000_000, &test_addr(4), acct_of(&victim));
         let steal = sign_unit(
             vec![genesis_id()],
             Op::Deposit {
@@ -2230,6 +2298,51 @@ mod tests {
             .unwrap();
         assert_eq!(rp.state.state_root(), eng.state.state_root());
         assert!(!rp.state.accounts.contains_key(&acct_of(&thief)));
+    }
+
+    /// R3-R-4: a user-signed Deposit naming a bogus `aa_unit` is rejected
+    /// by the producer (no such anchor in its feed) but still lands in the
+    /// batch. It needs no evidence: the replay rejects it the same way and
+    /// the height validates instead of stalling every watcher. A real
+    /// deposit in the same batch still needs (and gets) its evidence.
+    #[test]
+    fn rejected_bogus_deposit_needs_no_evidence() {
+        let (mut eng, pre, _, id, ev) = one_deposit_fixture();
+        let secret = sk(11);
+        let bogus = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&secret),
+                addr: test_addr(11),
+                amount: 7_000,
+                aa_unit: [0xAB; 32],
+            },
+            &secret,
+        );
+        let bogus_id = unit_id(&bogus);
+        let evs = eng.ingest(bogus).unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                minuend_exec::ExecEvent::Applied { unit, .. } if *unit == bogus_id
+            )),
+            "producer must reject the unbacked deposit"
+        );
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id, bogus_id]).unwrap();
+        batch.deposit_evidences = vec![ev.clone()];
+        let mut rp = pre.clone();
+        batch
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        // Bogus evidence for the rejected unit (wrong joint) is ignored too.
+        let j = payment_joint(12, 7_000, None, &test_addr(11), acct_of(&secret));
+        let mut wrong = evidence_from(&j, 7_000i128.to_string(), false);
+        wrong.aa_unit = hex::encode([0xAB; 32]);
+        batch.deposit_evidences = vec![ev, wrong];
+        batch
+            .validate_against(pre.state.state_root(), &mut pre.clone())
+            .unwrap();
     }
 
     #[test]
@@ -2321,15 +2434,24 @@ mod tests {
             &secret,
         );
         assert_eq!(
-            deposit_verify::verify_all(
-                &[u],
-                &[ev],
+            deposit_verify::verify_evidence(
+                &ev,
                 crate::TEST_VAULT_ADDRESS,
                 &minuend_types::PERP_ASSET
             ),
             Err(SettleError::DepositContentMismatch)
         );
-        // payer == authors[0] but != the sidechain op's addr: rejected too.
+        assert!(deposit_verify::verify_each(
+            std::slice::from_ref(&u),
+            &[ev],
+            crate::TEST_VAULT_ADDRESS,
+            &minuend_types::PERP_ASSET
+        )
+        .unwrap()
+        .is_empty());
+        // payer == authors[0] but != the sidechain op's addr: the anchor is
+        // endorsed with the REAL payer, and the engine rejects the op
+        // (per-unit `UnbackedDeposit`, not a batch-wide evidence failure).
         let ev2 = evidence_from(&j, 5_000i128.to_string(), false);
         let u2 = sign_unit(
             vec![genesis_id()],
@@ -2341,15 +2463,91 @@ mod tests {
             },
             &secret,
         );
-        assert_eq!(
-            deposit_verify::verify_all(
-                &[u2],
-                &[ev2],
-                crate::TEST_VAULT_ADDRESS,
-                &minuend_types::PERP_ASSET
-            ),
-            Err(SettleError::DepositContentMismatch)
+        let got = deposit_verify::verify_each(
+            std::slice::from_ref(&u2),
+            &[ev2],
+            crate::TEST_VAULT_ADDRESS,
+            &minuend_types::PERP_ASSET,
+        )
+        .unwrap();
+        let v = &got[&(a, false)];
+        assert_eq!((v.amount, v.payer.as_str()), (5_000, test_addr(6).as_str()));
+        let mut eng = Engine::new();
+        eng.state.allow_deposit(a, false, v.amount, &v.payer, v.account);
+        let evs = eng.ingest(u2).unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                minuend_exec::ExecEvent::Rejected {
+                    reason: minuend_exec::RejectReason::UnbackedDeposit,
+                    ..
+                }
+            )),
+            "{evs:?}"
         );
+    }
+
+    /// R3 integration: a front-running Deposit that cites the victim's
+    /// anchor with ANOTHER bound address (and account) is a rejected unit,
+    /// not an evidence failure — the height still validates and the
+    /// victim's own deposit credits the victim.
+    #[test]
+    fn front_run_with_other_address_is_per_unit_rejection() {
+        let mut eng = Engine::new();
+        eng.state
+            .markets
+            .insert(BTC_USD, minuend_types::genesis_params());
+        let victim = sk(4);
+        let thief = sk(9);
+        let j = payment_joint(13, 5_000_000_000, None, &test_addr(4), acct_of(&victim));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 5_000_000_000i128.to_string(), false);
+        let pre = eng.clone();
+        eng.state
+            .allow_deposit(a, false, 5_000_000_000, &test_addr(4), acct_of(&victim));
+        let steal = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&thief),
+                addr: test_addr(9),
+                amount: 5_000_000_000,
+                aa_unit: a,
+            },
+            &thief,
+        );
+        let sid = unit_id(&steal);
+        let evs = eng.ingest(steal).unwrap();
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                minuend_exec::ExecEvent::Applied { unit, .. } if *unit == sid
+            )),
+            "front-run must be rejected: {evs:?}"
+        );
+        let own = sign_unit(
+            vec![sid],
+            Op::Deposit {
+                account: acct_of(&victim),
+                addr: test_addr(4),
+                amount: 5_000_000_000,
+                aa_unit: a,
+            },
+            &victim,
+        );
+        let oid = unit_id(&own);
+        eng.ingest(own).unwrap();
+        assert_eq!(
+            eng.state.accounts[&acct_of(&victim)].collateral,
+            5_000_000_000
+        );
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[sid, oid]).unwrap();
+        batch.deposit_evidences = vec![ev];
+        let mut rp = pre.clone();
+        batch
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert!(!rp.state.accounts.contains_key(&acct_of(&thief)));
     }
 
     #[test]
@@ -2943,6 +3141,62 @@ mod tests {
             oversize[0].as_bytes()
         );
     }
+    /// R3-R-1: packages are also cut on RAW size, so highly compressible
+    /// frames (each repeating the previous frame's leaf set) never form a
+    /// package that decompresses beyond the watcher's per-package cap.
+    #[test]
+    fn pack_frames_cuts_on_raw_size() {
+        let leaves: Vec<String> = (0..40).map(|i| format!("acct:{i}:100")).collect();
+        let l = serde_json::to_string(&leaves).unwrap();
+        let frames: Vec<String> = (0..50)
+            .map(|i| format!("{{\"u\":{i},\"l\":{l}}}"))
+            .collect();
+        let raw_cap = 4096;
+        let one = pack_frames(&frames);
+        assert_eq!(one.len(), 1, "the source cap alone keeps them together");
+        assert!(decode_package_blob(&one[0]).unwrap().len() > raw_cap);
+        let packs = pack_frames_with_caps(&frames, PACK_SOURCE_CAP, raw_cap);
+        assert!(packs.len() > 1);
+        let mut joined = Vec::new();
+        for p in &packs {
+            let raw = decode_package_blob(p).unwrap();
+            assert!(raw.len() <= raw_cap, "{} > {raw_cap}", raw.len());
+            joined.extend_from_slice(&raw);
+        }
+        assert_eq!(joined, frames.join("\n").as_bytes());
+        assert_eq!(frames_raw_len(&frames), joined.len());
+        const { assert!(MAX_PACKAGE_RAW_BYTES <= MAX_COMMITTED_RAW_BYTES) };
+        const { assert!(DA_EVIDENCE_HEADROOM_BYTES < MAX_PACKAGE_RAW_BYTES) };
+    }
+
+    /// R3-R-1: a batch whose frames exceed the raw caps every watcher
+    /// enforces is refused at export (`DaTooLarge`) instead of being posted
+    /// and stalling every watcher; the leaf set is never silently stripped.
+    #[test]
+    fn oversize_da_is_refused_not_stripped() {
+        let (mut eng, pre, _, id, ev) = one_deposit_fixture();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
+        batch.deposit_evidences = vec![ev];
+        assert!(batch.temp_data_packages().is_ok());
+        let ok_len = batch.da_raw_len().unwrap();
+        assert!(ok_len + DA_EVIDENCE_HEADROOM_BYTES <= MAX_COMMITTED_RAW_BYTES);
+        assert!(batch.export_frames().is_ok());
+        batch.leaf_trace[0].push("x".repeat(MAX_PACKAGE_RAW_BYTES));
+        assert_eq!(
+            batch.temp_data_packages().unwrap_err(),
+            SettleError::DaTooLarge
+        );
+        assert_eq!(batch.export_frames().unwrap_err(), SettleError::DaTooLarge);
+        // Per-height cap: many frames that each fit but together do not.
+        let len = MAX_PACKAGE_RAW_BYTES / 2;
+        let n = MAX_COMMITTED_RAW_BYTES / len + 1;
+        assert_eq!(
+            check_da_budget_lens(std::iter::repeat_n(len, n), 0),
+            Err(SettleError::DaTooLarge)
+        );
+        assert_eq!(check_da_budget_lens(std::iter::repeat_n(len, 2), 0), Ok(()));
+    }
+
     #[test]
     fn data_root_golden() {
         let blobs = vec![b"ab".to_vec(), b"cd".to_vec()];

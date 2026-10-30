@@ -22,6 +22,7 @@ const zlib = require("zlib");
 const { envCompat, finalizeReached, daBindHash, DA_BIND_FIELDS } = require("./script_helpers");
 const {
   DEFAULT_PACKAGE_SOURCE_CAP,
+  assertPackageRawCaps,
   assertPackageSourceCap,
   packFrames,
 } = require("./batch_frames");
@@ -104,6 +105,43 @@ function tempDataMessage(data) {
 // unit_hash(joint) and compare against the sidechain deposit's aa_unit, so
 // a deposit endorsement is verifiable without trusting the operator.
 const { hub } = require(path.join(aaRoot, "node_modules", "ocore", "network.js"));
+// R3-R-4: fetch an anchor joint; `null` = not on Obyte. Hub errors are
+// retried a few times before the anchor is treated as absent.
+async function fetchAnchorJoint(aaUnit, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const j = await new Promise((resolve, reject) => {
+        hub.getJoint(Buffer.from(aaUnit, "hex").toString("base64"), (err, jt) => (err ? reject(err) : resolve(jt)));
+      });
+      if (j && j.unit) return j;
+    } catch (_) {
+      // fall through to retry
+    }
+    if (i + 1 < tries) await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+  }
+  return null;
+}
+
+// Amount (decimal string) the joint's FIRST matching payment output pays
+// `vault` in the asset class `isPerp` names (base: minus the 10000 bounce
+// fee), or null. Mirrors minuend-settle deposit_verify::find_payment_output_opt
+// (the Rust side additionally checks payload hashes and the PERP asset id).
+function paidToVault(msgs, vault, isPerp) {
+  for (const m of msgs) {
+    if (m.app !== "payment" || !m.payload || !Array.isArray(m.payload.outputs)) continue;
+    const isBase = !m.payload.asset || m.payload.asset === "base";
+    if (isPerp === isBase) continue;
+    for (const o of m.payload.outputs) {
+      if (vault && o.address !== vault) continue;
+      let amt;
+      try { amt = BigInt(o.amount); } catch (_) { return null; }
+      if (!isPerp) amt -= 10000n;
+      return amt >= 0n ? amt.toString() : null;
+    }
+  }
+  return null;
+}
+
 async function buildDepositEvidences(batchData, vaultAddress) {
   const evidences = [];
   const seen = new Set();
@@ -124,24 +162,16 @@ async function buildDepositEvidences(batchData, vaultAddress) {
     if (typeof aaUnit !== "string" || aaUnit.length !== 64) continue;
     if (seen.has(aaUnit)) continue;
     seen.add(aaUnit);
-    let joint;
-    try {
-      joint = await new Promise((resolve, reject) => {
-        hub.getJoint(Buffer.from(aaUnit, "hex").toString("base64"), (err, j) => (err ? reject(err) : resolve(j)));
-      });
-    } catch (e) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for missing joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("deposit anchor missing on Obyte: " + aaUnit.slice(0, 16));
-    }
+    // R3-R-4: a Deposit naming an anchor that is not on Obyte (anyone can
+    // sign one) was rejected by the producer and needs no evidence: the
+    // watcher replay endorses only anchors whose evidence verifies and
+    // rejects the unit the same way. Throwing here used to make the batch
+    // unpostable. A transient hub error is retried before giving up on the
+    // anchor (an APPLIED deposit without evidence fails watcher replay).
+    const joint = await fetchAnchorJoint(aaUnit);
     if (!joint || !joint.unit) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for empty joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("no joint for " + aaUnit.slice(0, 16));
+      console.log("deposit anchor not on Obyte (rejected unit, no evidence):", aaUnit.slice(0, 16));
+      continue;
     }
     // joint carries the FULL joint unit object: the watcher recomputes
     // unit_hash(joint.unit) via minuend_settle::obyte_hash::get_unit_hash and
@@ -150,26 +180,42 @@ async function buildDepositEvidences(batchData, vaultAddress) {
     const authors = Array.isArray(joint.unit.authors) ? joint.unit.authors : [];
     const payer = authors[0] && authors[0].address;
     if (typeof payer !== "string") {
-      throw new Error("deposit joint has no authors: " + aaUnit.slice(0, 16));
+      console.log("deposit joint has no authors (no evidence):", aaUnit.slice(0, 16));
+      continue;
     }
     if (dep.addr && dep.addr !== payer) {
-      throw new Error(
-        `deposit payer ${payer} != sidechain op addr ${dep.addr}: ` + aaUnit.slice(0, 16)
-      );
+      // Still attach it: the evidence proves the REAL payment (payer, amount,
+      // account), the watcher endorses the anchor with it, and the engine
+      // rejects this op per unit (UnbackedDeposit) like the producer did.
+      console.log(`deposit payer ${payer} != sidechain op addr ${dep.addr}:`, aaUnit.slice(0, 16));
     }
     // R3-A-5 / R3-E-3: the payer-designated sidechain account, read from
-    // the vault trigger's data message (the vault bounces a deposit without
-    // one). A sidechain op of ANOTHER account citing this anchor is still a
-    // valid batch member — the engine rejects it — so no throw here.
-    const dataMsgs = (joint.unit.messages || []).filter((m) => m.app === "data");
+    // the vault trigger's data message. The vault bounces a deposit without
+    // a valid one, so such a joint is no deposit: the producer rejected any
+    // op citing it and the watcher rejects it the same way without evidence
+    // (no throw — the batch must stay postable). A sidechain op of ANOTHER
+    // account citing a valid anchor is a rejected unit too; the evidence is
+    // still attached.
+    const msgs = Array.isArray(joint.unit.messages) ? joint.unit.messages : [];
+    const dataMsgs = msgs.filter((m) => m.app === "data");
     const account = dataMsgs.length === 1 && dataMsgs[0].payload && dataMsgs[0].payload.account;
     if (typeof account !== "string" || !/^[0-9a-f]{64}$/.test(account)) {
-      throw new Error("deposit joint has no payer-designated account: " + aaUnit.slice(0, 16));
+      console.log("deposit joint has no payer-designated account (no evidence):", aaUnit.slice(0, 16));
+      continue;
+    }
+    // R3 (unified pipeline): the evidence carries the amount the joint
+    // ACTUALLY paid the vault (base: output − 10000 bounce fee; PERP: the
+    // output), mirroring minuend-settle `verify_evidence`, not the op's
+    // claimed amount — the engine credits only an op that matches it.
+    const paid = paidToVault(msgs, vaultAddress, isPerp);
+    if (paid === null) {
+      console.log("deposit joint pays the vault nothing of this kind (no evidence):", aaUnit.slice(0, 16));
+      continue;
     }
     evidences.push({
       aa_unit: aaUnit,
       is_perp: isPerp,
-      amount: String(dep.amount),
+      amount: paid,
       vault_address: vaultAddress,
       payer,
       account,
@@ -243,6 +289,8 @@ async function main() {
   };
   const packages = packFrames(stamped, packageOptions);
   assertPackageSourceCap(packages, packageOptions);
+  // R3-R-1: never post DA a watcher refuses for size (it would stall).
+  assertPackageRawCaps(packages);
   const rawBlobs = packages.map((b) => zlib.gunzipSync(Buffer.from(b, "base64")));
   const dataRoot = crypto.createHash("sha256").update(Buffer.concat(rawBlobs)).digest("hex");
   const header = Object.assign({}, batchData);

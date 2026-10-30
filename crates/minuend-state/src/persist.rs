@@ -108,6 +108,20 @@ pub fn save_snapshot_with_anchors(
     state: &ChainState,
     anchors: &[[u8; 32]],
 ) -> io::Result<PathBuf> {
+    save_snapshot_retaining(dir, state, anchors, Height::MAX)
+}
+
+/// R3-R-2: like [`save_snapshot_with_anchors`], but every snapshot at or
+/// above `retain_from` is kept as well (on top of the newest
+/// `KEEP_SNAPSHOTS`). The watcher passes its `last_finalized` height so it
+/// can rewind to any not-yet-final height that is later judged fraudulent
+/// and re-submitted.
+pub fn save_snapshot_retaining(
+    dir: &Path,
+    state: &ChainState,
+    anchors: &[[u8; 32]],
+    retain_from: Height,
+) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let keep = anchors.len().min(DAG_ANCHOR_LIMIT);
     let body = (state, anchors[anchors.len() - keep..].to_vec());
@@ -124,7 +138,7 @@ pub fn save_snapshot_with_anchors(
     }
     fs::rename(&tmp, &path)?;
     fsync_dir(dir);
-    prune_snapshots(dir, KEEP_SNAPSHOTS)?;
+    prune_snapshots_from(dir, KEEP_SNAPSHOTS, retain_from)?;
     Ok(path)
 }
 
@@ -145,25 +159,65 @@ pub type LoadedSnapshot = (Height, ChainState, Vec<[u8; 32]>);
 /// #37-14: newest snapshot plus its DAG anchors (empty for older/absent data).
 pub fn load_latest_with_anchors(dir: &Path) -> io::Result<Option<LoadedSnapshot>> {
     for (_, path) in snapshot_candidates(dir)? {
-        let parsed = (|| -> io::Result<(ChainState, Vec<[u8; 32]>)> {
-            let bytes = fs::read(&path)?;
-            if bytes.len() < 4
-                || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != SNAPSHOT_FORMAT_VERSION
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unknown snapshot format version",
-                ));
-            }
-            snapshot_decoder()
-                .deserialize(&bytes[4..])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        })();
-        if let Ok((state, anchors)) = parsed {
+        if let Ok((state, anchors)) = read_snapshot(&path) {
             return Ok(Some((state.height, state, anchors)));
         }
     }
     Ok(None)
+}
+
+fn read_snapshot(path: &Path) -> io::Result<(ChainState, Vec<[u8; 32]>)> {
+    let bytes = fs::read(path)?;
+    if bytes.len() < 4
+        || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != SNAPSHOT_FORMAT_VERSION
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown snapshot format version",
+        ));
+    }
+    snapshot_decoder()
+        .deserialize(&bytes[4..])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// R3-R-2/R3-R-7: heights of every `chainstate.<h>.snap` file in `dir`
+/// (readable or not), newest first. Empty for a missing directory.
+pub fn snapshot_heights(dir: &Path) -> io::Result<Vec<Height>> {
+    Ok(snapshot_candidates(dir)?
+        .into_iter()
+        .map(|(h, _)| h)
+        .collect())
+}
+
+/// R3-R-2: load the snapshot of exactly `height`. `Ok(None)` when there is
+/// no such file; a file that does not decode (other format version,
+/// corruption, or a body whose height disagrees with its name) is an error.
+pub fn load_snapshot_at(dir: &Path, height: Height) -> io::Result<Option<LoadedSnapshot>> {
+    let path = dir.join(snapshot_name(height));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let (state, anchors) = read_snapshot(&path)?;
+    if state.height != height {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "snapshot height does not match its file name",
+        ));
+    }
+    Ok(Some((height, state, anchors)))
+}
+
+/// R3-R-2: delete every snapshot above `height` (a dead branch after a
+/// fraud verdict / re-submission), so a restart can never resume from it.
+pub fn remove_snapshots_above(dir: &Path, height: Height) -> io::Result<()> {
+    for (h, path) in snapshot_candidates(dir)? {
+        if h > height {
+            fs::remove_file(path)?;
+        }
+    }
+    fsync_dir(dir);
+    Ok(())
 }
 
 /// All snapshots in `dir` as (height, path), descending by height.
@@ -200,7 +254,9 @@ pub fn latest_snapshot(dir: &Path) -> io::Result<Option<PathBuf>> {
     Ok(snapshot_candidates(dir)?.into_iter().next().map(|(_, p)| p))
 }
 
-fn prune_snapshots(dir: &Path, keep: usize) -> io::Result<()> {
+/// Prune to the newest `keep` snapshots, never deleting one whose height is
+/// `>= retain_from` (R3-R-2).
+fn prune_snapshots_from(dir: &Path, keep: usize, retain_from: Height) -> io::Result<()> {
     // Orphan tmp files from a crash mid-save are never valid snapshots.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -216,6 +272,9 @@ fn prune_snapshots(dir: &Path, keep: usize) -> io::Result<()> {
     }
     let candidates = snapshot_candidates(dir)?;
     for (h, _) in candidates.iter().skip(keep) {
+        if *h >= retain_from {
+            continue;
+        }
         let _ = fs::remove_file(dir.join(snapshot_name(*h)));
     }
     fsync_dir(dir);
@@ -415,6 +474,37 @@ mod tests {
         std::fs::write(&orphan, b"junk").unwrap();
         save_snapshot(&dir, &ChainState::new()).unwrap();
         assert!(!orphan.exists(), "crash-orphan .snap.tmp must be pruned");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R3-R-2: snapshots at or above `retain_from` survive pruning, exact-
+    /// height loads work, and a dead branch above a height can be removed.
+    #[test]
+    fn retaining_save_keeps_unfinalized_heights_and_rewinds() {
+        let dir = std::env::temp_dir().join(format!("minuend-snap-retain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for h in 1..=8u64 {
+            let mut s = ChainState::new();
+            s.height = h;
+            s.perp_supply = h as u128 * 10;
+            save_snapshot_retaining(&dir, &s, &[[h as u8; 32]], 3).unwrap();
+        }
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![8, 7, 6, 5, 4, 3]);
+        let (h, st, anchors) = load_snapshot_at(&dir, 5).unwrap().unwrap();
+        assert_eq!((h, st.perp_supply), (5, 50));
+        assert_eq!(anchors, vec![[5u8; 32]]);
+        assert!(load_snapshot_at(&dir, 2).unwrap().is_none());
+        // A corrupt file at an exact height is an error, not "absent".
+        fs::write(dir.join(snapshot_name(4)), b"garbage").unwrap();
+        assert!(load_snapshot_at(&dir, 4).is_err());
+        remove_snapshots_above(&dir, 5).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![5, 4, 3]);
+        assert_eq!(load_latest(&dir).unwrap().unwrap().0, 5);
+        // The plain save keeps the old behaviour (newest KEEP_SNAPSHOTS).
+        let mut s = ChainState::new();
+        s.height = 6;
+        save_snapshot_with_anchors(&dir, &s, &[]).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap().len(), KEEP_SNAPSHOTS);
         let _ = fs::remove_dir_all(&dir);
     }
 }

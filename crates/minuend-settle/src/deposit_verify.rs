@@ -61,10 +61,6 @@ fn parse_hex32(s: &str) -> Result<[u8; 32], SettleError> {
     Ok(out)
 }
 
-fn amount_str_matches(ev_amount: &str, op_amount_str: &str) -> bool {
-    ev_amount == op_amount_str
-}
-
 /// True when an Obyte asset string (hex or base64 of the 32-byte id)
 /// identifies `want`.
 fn asset_matches(s: &str, want: &[u8; 32]) -> bool {
@@ -157,33 +153,37 @@ fn base_amount_matches(joint_amt: i128, ev_amt: i128) -> bool {
     joint_amt == ev_amt + 10_000 || joint_amt == ev_amt
 }
 
-fn verify_one(
-    op: &Op,
+/// R3 (unified deposit pipeline): what a verified evidence proves about
+/// its anchor — the on-chain payment, independent of any sidechain op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedDeposit {
+    /// Amount in the deposit's own unit (base: joint output − bounce fee;
+    /// PERP: joint output).
+    pub amount: u128,
+    /// The paying Obyte address (`joint.authors[0].address`).
+    pub payer: String,
+    /// The payer-designated sidechain account (`trigger.data.account`).
+    pub account: AccountId,
+}
+
+/// Verifies ONE evidence on its own: the joint hashes to `ev.aa_unit`, its
+/// first author is `ev.payer`, it pays `expected_vault` exactly `ev.amount`
+/// (+ bounce fee for base) in the asset class `ev.is_perp` names, both the
+/// payment and the data message are payload-hash bound, and the data
+/// message designates `ev.account`. The sidechain op is NOT consulted:
+/// whether an op may consume the anchor (same amount, payer address and
+/// account) is the engine's per-unit decision against the recorded backing
+/// (`ChainState::allow_deposit`), so an op that does not match — a
+/// front-run with another account or address, a wrong amount — is a
+/// REJECTED unit on producer and replay alike instead of an evidence
+/// failure that would stall the whole height.
+pub fn verify_evidence(
     ev: &DepositEvidence,
     expected_vault: &str,
     perp_asset: &[u8; 32],
-) -> Result<([u8; 32], bool, AccountId), SettleError> {
-    // op kind and aa_unit extraction
-    let (op_aa_unit, op_amount_str, op_is_perp, op_addr) = match op {
-        Op::Deposit {
-            aa_unit,
-            amount,
-            addr,
-            ..
-        } => (*aa_unit, amount.to_string(), false, addr.clone()),
-        Op::GovDeposit {
-            aa_unit,
-            amount,
-            addr,
-            ..
-        } => (*aa_unit, amount.to_string(), true, addr.clone()),
-        _ => return Err(SettleError::DepositContentMismatch), // not a deposit, caller filters
-    };
-
+) -> Result<([u8; 32], bool, VerifiedDeposit), SettleError> {
     // Payer binding (#8): the evidence's payer must be the joint's first
-    // author AND the sidechain op's bound withdrawal address — otherwise
-    // the first sidechain Deposit referencing someone else's payment
-    // claims the credit.
+    // author; the engine then requires the op's bound address to equal it.
     let joint_authors = if let Some(u) = ev.joint.get("unit") {
         u.get("authors")
     } else {
@@ -194,21 +194,16 @@ fn verify_one(
         .and_then(|a| a.get("address"))
         .and_then(|a| a.as_str());
     match first_author {
-        Some(a) if a == ev.payer && ev.payer == op_addr => {}
+        Some(a) if a == ev.payer => {}
         _ => return Err(SettleError::DepositContentMismatch),
     }
-
-    // aa_unit hex string must decode and equal op aa_unit
     let ev_bytes = parse_hex32(&ev.aa_unit)?;
-    if ev_bytes != op_aa_unit {
-        return Err(SettleError::DepositContentMismatch);
-    }
-    // kind
-    if ev.is_perp != op_is_perp {
-        return Err(SettleError::DepositKindMismatch);
-    }
-    // amount string must match op amount
-    if !amount_str_matches(&ev.amount, &op_amount_str) {
+    // The credited amount: a non-negative decimal in canonical form.
+    let amount: u128 = ev
+        .amount
+        .parse()
+        .map_err(|_| SettleError::DepositContentMismatch)?;
+    if amount.to_string() != ev.amount {
         return Err(SettleError::DepositContentMismatch);
     }
     // Payee check (H2): the declared vault must equal the caller's expected
@@ -221,7 +216,6 @@ fn verify_one(
     if computed != ev_bytes {
         return Err(SettleError::DepositContentMismatch);
     }
-    // content check: joint must actually pay the expected vault
     let unit_obj = if let Some(u) = ev.joint.get("unit") {
         u
     } else {
@@ -236,9 +230,7 @@ fn verify_one(
         Some(expected_vault)
     };
     // R3-A-5: the payer-designated account, declared in the evidence and
-    // read from the joint's payload-hash-verified data message. It is NOT
-    // compared with the op's account here: an op of another account is a
-    // valid (rejected) unit, judged by the engine.
+    // read from the joint's payload-hash-verified data message.
     let designated = designated_account(unit_obj).ok_or(SettleError::DepositContentMismatch)?;
     if ev.account != hex::encode(designated.0) {
         return Err(SettleError::DepositContentMismatch);
@@ -253,10 +245,8 @@ fn verify_one(
             } else {
                 // For base, joint amount is ev.amount + 10000 bounce fee;
                 // see `base_amount_matches` (fixtures post without the fee).
-                let ev_amt: i128 = ev
-                    .amount
-                    .parse()
-                    .map_err(|_| SettleError::DepositContentMismatch)?;
+                let ev_amt =
+                    i128::try_from(amount).map_err(|_| SettleError::DepositContentMismatch)?;
                 let joint_amt: i128 = joint_amount_str
                     .parse()
                     .map_err(|_| SettleError::DepositContentMismatch)?;
@@ -267,16 +257,38 @@ fn verify_one(
         }
         None => return Err(SettleError::DepositContentMismatch),
     }
-    Ok((ev_bytes, ev.is_perp, designated))
+    Ok((
+        ev_bytes,
+        ev.is_perp,
+        VerifiedDeposit {
+            amount,
+            payer: ev.payer.clone(),
+            account: designated,
+        },
+    ))
 }
 
-pub fn verify_all(
+/// R3-R-4 + R3-E-1 + R3-A-5: per-deposit verification for replay — the one
+/// deposit path of `Batch::validate_against`.
+///
+/// Structural problems of the evidence list itself (over the size cap,
+/// duplicate anchors, malformed anchor hex) are hard errors. Otherwise each
+/// Deposit/GovDeposit unit's anchor is endorsed iff an evidence for it
+/// exists, names the same asset kind as the op, and [`verify_evidence`]
+/// accepts it; the result maps each endorsed `(aa_unit, is_perp)` to the
+/// verified payment. Missing or failing evidence → simply not endorsed: the
+/// replay rejects that unit (`UnbackedDeposit`) exactly like the producer,
+/// whose vault feed never held it. The caller records each endorsed anchor
+/// with [`minuend_state::ChainState::allow_deposit`] (amount, payer,
+/// account), so the engine accepts only the exact payment for the
+/// designated account, and must still require that every deposit the
+/// replay APPLIED was endorsed.
+pub fn verify_each(
     units: &[minuend_dag::Unit],
     evidences: &[DepositEvidence],
     expected_vault: &str,
     perp_asset: &[u8; 32],
-) -> Result<HashMap<[u8; 32], (bool, AccountId)>, SettleError> {
-    // Size gate
+) -> Result<HashMap<([u8; 32], bool), VerifiedDeposit>, SettleError> {
     let total_bytes: usize = evidences
         .iter()
         .map(|e| serde_json::to_vec(e).map(|v| v.len()).unwrap_or(0))
@@ -284,41 +296,35 @@ pub fn verify_all(
     if total_bytes > DEPOSIT_EVIDENCE_MAX_BYTES {
         return Err(SettleError::DepositEvidenceTooLarge);
     }
-
-    // Dedup
-    let mut seen: HashSet<String> = HashSet::new();
-    for ev in evidences {
-        let key = ev.aa_unit.to_lowercase();
-        if !seen.insert(key) {
-            return Err(SettleError::DepositDuplicateAnchor);
-        }
-        // Validate hex format early
-        parse_hex32(&ev.aa_unit)?;
-    }
-
-    // Build map aa_unit hex -> evidence ref
     let mut map: HashMap<String, &DepositEvidence> = HashMap::new();
     for ev in evidences {
-        map.insert(ev.aa_unit.to_lowercase(), ev);
+        parse_hex32(&ev.aa_unit)?;
+        if map.insert(ev.aa_unit.to_lowercase(), ev).is_some() {
+            return Err(SettleError::DepositDuplicateAnchor);
+        }
     }
-
-    let mut verified: HashMap<[u8; 32], (bool, AccountId)> = HashMap::new();
-
+    let mut endorsed: HashMap<([u8; 32], bool), VerifiedDeposit> = HashMap::new();
+    let mut tried: HashSet<([u8; 32], bool)> = HashSet::new();
     for u in units {
-        let is_deposit = matches!(u.op, Op::Deposit { .. } | Op::GovDeposit { .. });
-        if !is_deposit {
+        let key = match &u.op {
+            Op::Deposit { aa_unit, .. } => (*aa_unit, false),
+            Op::GovDeposit { aa_unit, .. } => (*aa_unit, true),
+            _ => continue,
+        };
+        if !tried.insert(key) {
             continue;
         }
-        let op_aa_unit = match &u.op {
-            Op::Deposit { aa_unit, .. } => *aa_unit,
-            Op::GovDeposit { aa_unit, .. } => *aa_unit,
-            _ => unreachable!(),
+        let Some(ev) = map.get(&hex::encode(key.0)) else {
+            continue;
         };
-        let hex_id = hex::encode(op_aa_unit);
-        let ev = map.get(&hex_id).ok_or(SettleError::DepositAnchorMissing)?;
-        let (bytes, is_perp, account) = verify_one(&u.op, ev, expected_vault, perp_asset)?;
-        verified.insert(bytes, (is_perp, account));
+        if ev.is_perp != key.1 {
+            continue;
+        }
+        if let Ok((anchor, is_perp, v)) = verify_evidence(ev, expected_vault, perp_asset) {
+            if (anchor, is_perp) == key {
+                endorsed.insert(key, v);
+            }
+        }
     }
-
-    Ok(verified)
+    Ok(endorsed)
 }
