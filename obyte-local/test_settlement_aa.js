@@ -3468,7 +3468,7 @@ async function main() {
     const fsPayload = (h, u, f, i) => ({
       pred: "fsane", height: h, rollup: ROLLUP_ADDR, k: 0,
       trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot, units_root: ISO_UNITS_ROOT,
-      units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(u.tree, i), pre_wit: obxok.wit,
+      units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(u.tree, i), pre_wit: WIT_ROOT, // wit_root_85 (oneUnit commits no witRoot)
     });
     // The single-fill Place of 62 with a fabricated second fill (the
     // "make it multi-fill to escape P-claw / P-frame" route).
