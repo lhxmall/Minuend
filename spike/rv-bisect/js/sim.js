@@ -2,7 +2,7 @@
 const {run,val}=require('./oc.js'); const ref=require('./ref.js'); const fs=require('fs');
 const G=require('./mkgame.js'); const GAME=G.body+'\n'+G.state;
 const STEPF=fs.readFileSync(__dirname+'/../aa/rv_step.oscript','utf8')+"\nvar['s_' || $pre] = $post;";
-const STEP='MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU', GA='GAMEAAXXXXXXXXXXXXXXXXXXXXXXXXXX', OP='OPERATORXXXXXXXXXXXXXXXXXXXXXXXX', CH='CHALLENGERXXXXXXXXXXXXXXXXXXXXXX';
+const STEP=G.stepAddr, GA='GAMEAAXXXXXXXXXXXXXXXXXXXXXXXXXX', OP='OPERATORXXXXXXXXXXXXXXXXXXXXXXXX', CH='CHALLENGERXXXXXXXXXXXXXXXXXXXXXX';
 const I=(op,rd,f3,rs1,imm)=>(((imm&0xfff)<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
 const R=(op,rd,f3,rs1,rs2,f7)=>((f7<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
 const S=(f3,rs1,rs2,imm)=>((((imm>>5)&127)<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|((imm&31)<<7)|35)>>>0;

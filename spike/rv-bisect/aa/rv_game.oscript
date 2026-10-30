@@ -3,14 +3,16 @@
 // A challenger opens a game; the claimant posts K-1 intermediate roots; the challenger picks the first
 // segment it disagrees with; repeat until the segment is one step; then the one-step oracle AA
 // (rv_step, memo var['s_' || pre] = post) decides. Whoever misses a deadline loses.
-$STEP = 'MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU';   // rv_step AA address (params in a real deploy)
+$STEP = 'RV_STEP_AA_ADDRESS';   // replaced by mkgame.js with chash160(rv_step.aa) (adversarial pass 2, bug D)
 $K = 16;            // branching factor
 $BOND = 100000;     // bytes, claim bond and challenge bond (each)
 $T = 3600;          // seconds per move
 $WIN = 86400;       // challenge window for a claim
+$FEE = 2000;        // kept back from every payout for the AA's response-unit fees
 $d = trigger.data;
 $now = timestamp;
-$isR = $x => typeof($x) == 'string' AND length($x) == 44;
+// a root is 44 chars and must not contain the record separators ':' / ',' (adversarial pass 1, bug B)
+$isR = $x => typeof($x) == 'string' AND length($x) == 44 AND !contains($x, ':') AND !contains($x, ',');
 // ---- claim
 if ($d.claim) {
 	require($isR($d.s0) AND $isR($d.sN) AND is_integer($d.n) AND $d.n >= 1 AND $d.n <= 1e15, 'bad claim');
@@ -22,7 +24,7 @@ if ($d.claim) {
 else if ($d.finalize) {
 	$c = split(var['c_' || $d.finalize], ':');
 	require($c[5] == 'open' AND $now >= $c[4] AND !var['n_' || $d.finalize] AND !var['f_' || $d.finalize], 'cannot finalize');
-	$st = {k: 'c_' || $d.finalize, v: $c[0] || ':' || $c[1] || ':' || $c[2] || ':' || $c[3] || ':' || $c[4] || ':final', pay: $c[3]};
+	$st = {k: 'c_' || $d.finalize, v: $c[0] || ':' || $c[1] || ':' || $c[2] || ':' || $c[3] || ':' || $c[4] || ':final', pay: $c[3], amt: $BOND - $FEE};
 }
 // ---- open a game against a claim
 else if ($d.open) {
@@ -65,6 +67,11 @@ else {
 			: $now >= $dl ? ($turn == 'd' ? 'c' : 'd')
 			: '';
 		require($w, 'undecided');
-		$st = {k: 'g_' || $gid, v: 'done:' || $w, pay: $w == 'd' ? $g[1] : $g[2], cid: $g[0], fraud: $w == 'c'};
+		// payout (adversarial pass 1, bug A): the winner gets the loser's stake; the claim bond is paid out
+		// at most once (to the first successful challenger, or back to the claimant at finalize).
+		// Pass 2, bug C: only half of a fraudulent claim bond goes to the first challenger; the other half
+		// stays in the AA (burn), so a fraudster cannot win its bond back with a sock-puppet challenge.
+		$first = $w == 'c' AND !var['f_' || $g[0]];
+		$st = {k: 'g_' || $gid, v: 'done:' || $w, pay: $w == 'd' ? $g[1] : $g[2], cid: $g[0], fraud: $w == 'c', amt: ($first ? $BOND + $BOND / 2 : $BOND) - $FEE};
 	}
 }

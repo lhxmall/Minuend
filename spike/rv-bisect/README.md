@@ -6,7 +6,8 @@ Prototype only. Not wired into the rollup; not audited. Report (Chinese): `work/
 - `aa/rv_step.oscript` — rv32im one-step oracle (Oscript init body). `aa/rv_step.aa` = deployable wrapper
   (memo `var['s_' || pre_root] = post_root`). Real ocore validation: **complexity 10 / 100, ops 1850 / 2000**.
 - `aa/rv_game.oscript` + `js/mkgame.js` → `aa/rv_game.aa` — K-ary (K=16) bisection game: claim / open / mids / pick /
-  resolve / finalize, bonds, per-move timeout, final decision from the rv_step memo. **complexity 14, ops 715**.
+  resolve / finalize, bonds, per-move timeout, final decision from the rv_step memo. **complexity 15, ops 868**
+  (after the adversarial fixes). `mkgame.js` bakes in the real rv_step address (chash160 of `aa/rv_step.aa`).
 - `js/ref.js` — JS reference rv32im semantics + sparse word-Merkle memory (Obyte merkle hashing, depth D=24).
 - `js/oc.js` — real-ocore harness (validateAADefinition + formula evaluate with shared state vars).
 - `js/difftest.js` — random differential test Oscript vs reference (`SEED=.. N=..`).
@@ -31,3 +32,20 @@ precomputed. Input (batch data) = separate read-only word tree `inp_root`, read 
   honest operator vs griefing challenger → defender wins; operator times out → challenger wins.
 - instruction counts (riscv32im, opt-level 3): sha256(200 B) ≈ 16 k; ed25519 verify_strict ≈ 2.86 M;
   BTreeMap order insert ≈ 1 k each.
+
+## Adversarial testing (2026-10-30, run on the InstaBox VM)
+Loop: attack -> fix -> rerun the full suite, until one pass finds nothing new (3 passes).
+- `js/rvtests.js` + `rvtests/` (cpp + rustc `global_asm!`, no gcc cross toolchain): official riscv-tests rv32ui (42) + rv32um (8),
+  **every step** re-checked by the Oscript AA: 13 731 steps, 0 mismatches; 48/50 pass, `ma_data` / `fence_i` TRAP by design
+  (misaligned access and fence.i are unsupported).
+- `js/attack.js` (real ocore evaluator, 300 cases + random-adversary fuzz, `FUZZ=150 FUZZSEED=7`): lying operator /
+  lying challenger at first / middle / last step in reg / pc / mem / step / input root, both sides lying, forged Merkle proofs,
+  malformed inputs, instruction edge cases, protocol abuse, exact deadlines, concurrent challenges, bond accounting, ops.
+- `js/devnet.js` (aa-testkit devnet, real units / bounces / payment outputs): 27 cases.
+- Bugs found and fixed in `rv_game`: (A) payout `2*BOND` per game drained the AA (the claim bond was paid out once per game);
+  (B) roots containing `:` / `,` corrupted the `:`-joined records (stuck game, or a forged claim finalized without a window);
+  (C) a fraudster's sock-puppet challenger could win back the whole claim bond (now half is burned);
+  (D) the hard-coded rv_step address was not the real one (every one-step dispute would time out in the liar's favour).
+- Pass 3 (final): 300/300 evaluator, 2x150 fuzz games, devnet 27/27, riscv-tests unchanged.
+- Open: the claim's `s0` must be bound by the rollup (prev finalized root + batch input root); the challenger must post the
+  rv_step memo before the one-step deadline; no differential run against sail-riscv yet.
