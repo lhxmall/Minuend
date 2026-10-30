@@ -111,6 +111,25 @@ pub fn build_proof_with_vault(
     submit_ts: u64,
     vault: &VaultLedger,
 ) -> Option<BuiltProof> {
+    build_proof_with_prev(batch, replay, inbox, submit_ts, vault, None)
+}
+
+/// [`build_proof_with_vault`] with the previous height's committed final
+/// witness leaves (`prev_final`, the validated `leaf_trace` tail of h - 1).
+/// Every dispute AA anchors a k == 0 pre tree on `wit_root_{h-1}`, which is
+/// the tree BEFORE the commit-time prunes of h - 1 (oracle bond release,
+/// #37-15), while the replay engine starts this height AFTER them: at a
+/// bond-release boundary the replay pre tree is not the committed one and
+/// every k == 0 proof bounced 'bad pre wit'. With `prev_final` the k == 0
+/// pre leaves are the committed ones (R8 residue fix).
+pub fn build_proof_with_prev(
+    batch: &Batch,
+    replay: &mut Engine,
+    inbox: &[(String, u64)],
+    submit_ts: u64,
+    vault: &VaultLedger,
+    prev_final: Option<&[String]>,
+) -> Option<BuiltProof> {
     // Round 7b P-tsize: a committed tree whose size breaks the exact proof
     // depth every dispute AA now requires (provable before anything else).
     if let Some(p) = tsize_proof(batch) {
@@ -152,7 +171,10 @@ pub fn build_proof_with_vault(
     };
     // 2+. Walk units: ingest one at a time, compare wit root + ops string.
     for (k, unit_hex) in unit_hexes.iter().enumerate() {
-        let pre_leaves = minuend_state::wit_leaves(&replay.state);
+        let pre_leaves = match prev_final {
+            Some(p) if k == 0 && !p.is_empty() => p.to_vec(),
+            _ => minuend_state::wit_leaves(&replay.state),
+        };
         let pre_wit = obyte_merkle::root(&pre_leaves);
         let expected_op = ops_element(unit_hex, &batch.units[k].op);
         let op_ok = batch.ops.get(k).map(|o| o == &expected_op).unwrap_or(false);
@@ -2149,8 +2171,21 @@ fn deposit_proof(
     // the batch boundary (+ORACLE_BOND_PERP) may sit on top of a gov move.
     let bond = minuend_types::ORACLE_BOND_PERP as i128;
     let dperp = liar_perp - pre_perp as i128;
+    // R8-H2 residue (mirrors the AA's `$nob`): the allowance needs an
+    // EXPIRING bond of the op account in pre (`obond:X:{u}`, 0 < u <= h - 1);
+    // otherwise the proof carries that leaf or the prefix absence.
+    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
+    let okey = format!("obond:{acct_hex}:");
+    let ob = pre_leaves.iter().find(|l| l.starts_with(&okey));
+    let h = batch.checkpoint.height;
+    let bond_ok = !empty_pre
+        && ob.is_some_and(|l| {
+            let u = &l[okey.len()..];
+            u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
+        });
     let bk = if is_gov
         && k == 0
+        && bond_ok
         && pre_hit.is_some()
         && liar_perp.to_string().len() <= 14
         && parts[2].len() <= 14
@@ -2271,6 +2306,28 @@ fn deposit_proof(
     obj.insert("post_leaf".into(), liar_leaf.into());
     obj.insert("post_leaf_proof".into(), post_leaf_proof);
     obj.extend(dep_extra);
+    if is_gov && k == 0 && pre_hit.is_some() && !bond_ok && !empty_pre {
+        match ob {
+            Some(l) => {
+                obj.insert("obond".into(), l.clone().into());
+                obj.insert(
+                    "obond_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, l)?),
+                );
+            }
+            None => {
+                if let Some(abs) = prefix_absence(pre_leaves, &okey) {
+                    let o = abs.as_object()?;
+                    obj.insert("oleft".into(), o.get("left")?.clone());
+                    obj.insert("oleft_proof".into(), o.get("left_proof")?.clone());
+                    if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
+                        obj.insert("oright".into(), r.clone());
+                        obj.insert("oright_proof".into(), rp.clone());
+                    }
+                }
+            }
+        }
+    }
     if let Some(pre_leaf) = pre_hit {
         let pre_idx = index_of(pre_leaves, &pre_leaf)?;
         obj.insert("pre_leaf".into(), pre_leaf.into());

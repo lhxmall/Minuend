@@ -4033,6 +4033,34 @@ async function main() {
       await live(112, "honest D: creating a PERP-only holder's leaf");
     }
     console.log("80. R8-C3: credited D: on a fresh account (acct:X:0:amount:0) → 'no fraud'; credited past the deposit → frozen (P-deposit)");
+
+    // ---- 81. R8-H2 residue: P-deposit's k == 0 bond allowance ($bk) -----
+    // The D:/W: op account is P-deposit's (P-xframe exempts it), so the
+    // +50000 allowance there must also be disproved by "no expiring bond"
+    // evidence (obond leaf with unlock 0 / > h - 1, or the obond:X: gap).
+    {
+      const P12 = await clawSetup(113, "r8-p12", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBU, END]);
+      const w12 = (name, op, post) => Object.assign(oneUnit(name, op, post), { witRoot: P12.wit });
+      const wPay = (u, pre, post, extra) => Object.assign({ pred: "withdraw", height: 114 }, depositPayload(u, post),
+        { pre_wit: P12.wit, pre_leaf: pre, pre_leaf_proof: P12.proof(pre) }, extra || {});
+      const keep12 = [META1, BAND1, posM9, END];
+      // (a) M (no bond) "rejected" W: posting +50000 PERP.
+      const wM = `W:${M}:100:1`;
+      const mLie = w12("r8-bk-mlie", wM, [tA(1000000000, 110000), `acct:${M}:2000000000:50000:0`].concat(keep12));
+      await submitAt(114, mLie);
+      await triggerBounce(challenger, dispute, wPay(mLie, mA(2000000000), `acct:${M}:2000000000:50000:0`), 20000, "no fraud");
+      await triggerVerdict(challenger, dispute, wPay(mLie, mA(2000000000), `acct:${M}:2000000000:50000:0`,
+        gap(P12.pre, `obond:${M}:`, `obond:${M};`, "oleft", "oright")), 20000, "R8-H2 residue: +50000 at k == 0 on a W: account without a bond");
+      await frozen(114, "P-deposit bond allowance without a bond");
+      // (b) T (expiring bond obond:T:100) W: 100 with its bond returned → honest.
+      const wT = `W:${T}:100:2`;
+      const tOk = w12("r8-bk-tok", wT, [tA(1000000000, 109900), mA(2000000000)].concat(keep12));
+      await submitAt(114, tOk);
+      await triggerBounce(challenger, dispute, wPay(tOk, tA(1000000000, 60000), tA(1000000000, 109900),
+        { obond: OBU, obond_proof: P12.proof(OBU) }), 20000, "no fraud");
+      await live(114, "honest W: by an oracle with its bond returned at unit 0");
+    }
+    console.log("81. R8-H2 residue: P-deposit +50000 at k == 0 needs an expiring bond: W: account without one + gap evidence → frozen; oracle with its expiring bond → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

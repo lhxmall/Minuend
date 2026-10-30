@@ -240,7 +240,29 @@
 						// batch boundary) may sit on top of the gov move. A
 						// delta that also reads as a credited D: (== amount)
 						// stays credited (backing judged), never "bond".
-						$bk = ($k == 0 AND $pnum AND !($deposit AND $perp1 - $perp0 == $amount) AND ($perp1 - $perp0 == 50000 OR $perp1 - $perp0 == 50000 + ($deposit ? $amount : 0 - $amount))) ? 50000 : 0;
+						// R8-H2 residue: the allowance needs an EXPIRING bond —
+						// the challenger disproves it with the [obond:X:,
+						// obond:X;) straddle in pre (oleft/oright) or X's only
+						// obond leaf in pre (obond) with unlock 0 or > h - 1
+						// (same evidence as P-xframe).
+						$ob = trigger.data.obond;
+						$ou = (typeof($ob) == 'string') ? substring($ob, 71, length($ob)) : '';
+						$olo = 'obond:' || $acct || ':';
+						$ohi = 'obond:' || $acct || ';';
+						$ouq = json_parse($ou);
+						$nob = (typeof($ob) == 'string' AND starts_with($ob, $olo)
+								AND is_valid_merkle_proof($ob, trigger.data.obond_proof) AND trigger.data.obond_proof.root == $pre_wit
+								AND !(length($ou) <= 15 AND !starts_with($ou, '0') AND is_integer($ouq) AND $ouq <= $h - 1))
+							OR (trigger.data.oleft AND contains(trigger.data.oleft, ':') AND trigger.data.oleft_proof.root == $pre_wit
+								AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
+								AND ((trigger.data.oright AND contains(trigger.data.oright, ':')
+									AND is_integer(trigger.data.oleft_proof.index) AND trigger.data.oleft_proof.index >= 0
+									AND trigger.data.oleft_proof.index + 1 == trigger.data.oright_proof.index
+									AND trigger.data.oright_proof.root == $pre_wit
+									AND trigger.data.oleft < $olo AND $ohi <= trigger.data.oright
+									AND is_valid_merkle_proof(trigger.data.oright, trigger.data.oright_proof))
+								OR (trigger.data.oleft_proof.index == 0 AND $ohi <= trigger.data.oleft)));
+						$bk = ($k == 0 AND !$nob AND $pnum AND !($deposit AND $perp1 - $perp0 == $amount) AND ($perp1 - $perp0 == 50000 OR $perp1 - $perp0 == 50000 + ($deposit ? $amount : 0 - $amount))) ? 50000 : 0;
 						$match = $gov ? (($perp0 + $bk == $perp1 OR ($pnum AND ($deposit ? ($perp0 + $bk + $amount == $perp1) : ($perp0 + $bk - $amount == $perp1 AND !starts_with($perp1, '-'))))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
 						// R3-A-7: a credited PERP deposit (D:) is backed like d:.
 						$cred = $deposit AND ($gov ? ($pnum AND $perp0 + $bk != $perp1 AND $perp0 + $bk + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));

@@ -839,6 +839,7 @@ fn check_height(
     h: u64,
     advanced: &mut Option<String>,
     vault_cache: &mut VaultReadCache,
+    prev_final: &mut Option<(u64, Vec<String>)>,
 ) -> anyhow::Result<Option<String>> {
     let win = read_window(hub, config, h)?;
     let (da, raw) = match fetch_committed(hub, config, h, win) {
@@ -871,6 +872,10 @@ fn check_height(
             // being judged; the watcher's memory no longer grows with
             // history.
             engine.prune_below(&batch.checkpoint.unit_ids);
+            // R8 residue: keep this height's committed final witness leaves
+            // (validated leaf_trace tail, pre commit-prune) — the k == 0
+            // pre tree of h + 1 that every dispute AA anchors on.
+            *prev_final = batch.leaf_trace.last().cloned().map(|l| (h, l));
             // #37-13: the engine now sits at this height — the poll loop
             // advances its cursor so the next round does not re-scan old
             // heights against an advanced engine (PrevMismatch noise) and
@@ -905,12 +910,17 @@ fn check_height(
             win.submitted_at,
             vault_cache,
         );
-        prove::build_proof_with_vault(
+        let prev = prev_final
+            .as_ref()
+            .filter(|(ph, _)| *ph + 1 == h)
+            .map(|(_, l)| l.as_slice());
+        prove::build_proof_with_prev(
             &batch,
             &mut scratch,
             &inbox,
             win.submitted_at,
             &vault_ledger,
+            prev,
         )
     };
     Ok(Some(alert_and_maybe_challenge(
@@ -1477,6 +1487,7 @@ fn main() -> anyhow::Result<()> {
         }
         // R5-R-2: vault reads (failures included) are cached for one round.
         let mut vault_cache = VaultReadCache::new();
+        let mut prev_final: Option<(u64, Vec<String>)> = None;
         // R2-R-11: report background challenge posters that finished.
         for line in with_tracker(|t| t.poll()) {
             eprintln!("{line}");
@@ -1672,6 +1683,7 @@ fn main() -> anyhow::Result<()> {
                 h,
                 &mut advanced,
                 &mut vault_cache,
+                &mut prev_final,
             ) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),

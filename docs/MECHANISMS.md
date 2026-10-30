@@ -1444,16 +1444,21 @@ dispute_bind 1960、dispute_book 1801、dispute_claw 1827、dispute_xframe 1598�
    （挑战者可再证明 0e 被拒：X 已有 bond 叶、或 X 的 PERP 没有减少；0f 被拒：X 没有 bond 或
    bond 已在解押），只有 X 的 0f（unlock 0 的叶）、0x10 的 target、或 k == 0 且
    0 < unlock ≤ h − 1 能删除；`keep`：这样的过期叶仍出现在 unit 0 的 post 树里是欺诈。
-   剩余：`D:` / `W:` 的 op 账户 PERP 由 P-deposit 判，其 `$bk` 仍允许 k == 0 的 +50000
-   （不看 `obond:`）；被拒的 SlashOracle 删除别人的 bond 叶并拿 +25000 不可证明
+   R8b：`D:` / `W:` 的 op 账户 PERP 由 P-deposit 判，其 `$bk`（k == 0 的 +50000）现在同样
+   以挑战者证据推翻：pre 里 X 唯一的 `obond:` 叶 unlock 为 0 或 > h − 1（`obond` +
+   `obond_proof`），或 `[obond:X:, obond:X;)` 夹逼（`oleft`/`oright`）时不给 +50000；watcher
+   `deposit_proof` 同步（`bond_ok`，证明附带该叶或夹逼）。
+   剩余：被拒的 SlashOracle 删除别人的 bond 叶并拿 +25000 不可证明
    （资格依赖不在见证里的报价历史）。
 
-op 预算：vault 364、rollup 1037、dispute 1660、dispute_fill 1984、dispute_bind 1955、
+op 预算（R8b）：vault 364、rollup 1037、dispute 1791、dispute_fill 1984、dispute_bind 1955、
 dispute_book 1801、dispute_claw 1827、dispute_xframe 1930、dispute_mframe 1962。
 
-watcher 已知限制（未变）：k == 0 的证明用重放引擎的 pre 状态（批次提交时已执行
+watcher（R8b 修复）：k == 0 的证明原先用重放引擎的 pre 状态（批次提交时已执行
 `prune_oracle_unbonding`），与链上 `wit_root_{h−1}`（提交前计算）在有 bond 释放的边界上
-不一致，这种边界上的 k == 0 证明会 bounce `bad pre wit`（浪费手续费，不会误判）。
+不一致而 bounce `bad pre wit`。现在 watcher 保留上一高度已验证的 `leaf_trace` 末项
+（提交前的见证叶），h 的 k == 0 证明以它为 pre（`build_proof_with_prev`）；没有上一高度
+（watcher 从中途启动、或超大批次无 leaf_trace）时退回旧行为。
 
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
