@@ -19,7 +19,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const zlib = require("zlib");
-const { envCompat, finalizeReached } = require("./script_helpers");
+const { envCompat, finalizeReached, daBindHash, DA_BIND_FIELDS } = require("./script_helpers");
 const {
   DEFAULT_PACKAGE_SOURCE_CAP,
   assertPackageSourceCap,
@@ -197,8 +197,17 @@ async function main() {
   console.log("batch:", batchData.chain_id, "height", batchData.height,
     "units", (batchData.unit_ids || []).length);
 
+  // Round 2: the vault is a parameterized instance of the base AA.
+  const vaultBasePath = resolveVaultAa();
+  let vaultBaseDef = null;
+  require("ocore/formula/parse_ojson").parse(fs.readFileSync(vaultBasePath, "utf8"), (err, res) => {
+    if (err) throw err;
+    vaultBaseDef = res[1];
+  });
+  const vaultBaseAddr = require("ocore/object_hash.js").getChash160(["autonomous agent", vaultBaseDef]);
   network = await Network.create()
-    .with.agent({ vault: resolveVaultAa() })
+    .with.agent({ vaultBase: vaultBasePath })
+    .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ poster: 1e13 })
     .run();
   const poster = network.wallet.poster;
@@ -298,7 +307,16 @@ async function main() {
     unit_count: header.unit_count,
     wit_count: header.wit_count,
     fill_count: header.fill_count,
+    // R2-R-1: data_root + da_bind ride the submit; the rollup AA recomputes
+    // da_bind from these fields and the header below carries the same value.
+    data_root: dataRoot,
   };
+  submitData.da_bind = daBindHash(submitData);
+  header.chain_id = submitData.chain_id;
+  header.da_bind = submitData.da_bind;
+  for (const k of DA_BIND_FIELDS)
+    if (String(header[k]) !== String(submitData[k]))
+      throw new Error(`header/submit mismatch on ${k}`);
   // Optional audit anchors: the rollup AA does not gate on these, but they
   // ride the submit data for indexers/self-checks (header temp_data carries
   // the same values for watchers).

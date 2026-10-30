@@ -221,13 +221,24 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
         // deposit) or must match (later deposits), so the forest dispute AA
         // can check that a new `adr:{addr}:{acct}` witness leaf appears only
         // under a deposit op of that account WITH that address.
+        // R2-A-3: a collateral deposit also commits its vault anchor (the
+        // Obyte unit hash, standard base64 — the vault AA's `dep_<unit>`
+        // key), so P-deposit can require the credit to be backed by a
+        // payment the vault actually recorded.
         Deposit {
             account,
             addr,
             amount,
-            ..
+            aa_unit,
         } => {
-            format!("d:{}:{}:{}", hex::encode(account.0), amount, addr)
+            use base64::Engine as _;
+            format!(
+                "d:{}:{}:{}:{}",
+                hex::encode(account.0),
+                amount,
+                addr,
+                base64::engine::general_purpose::STANDARD.encode(aa_unit)
+            )
         }
         GovDeposit {
             account,
@@ -296,8 +307,52 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
                 market.0
             )
         }
+        // R2-E-2: a Reveal executes its inner op (or nothing, when
+        // rejected), so for the ops whose witness columns the dispute AAs
+        // pin (collateral, PERP, W, adr:) the committed descriptor is the
+        // INNER op's — otherwise an honest Reveal{Withdraw} raises W under
+        // an `x:` tag and P-wpin verdicts it. Other inner ops keep `x:`
+        // (no predicate judges them through a Reveal).
+        Reveal { op: inner, .. }
+            if matches!(
+                inner.as_ref(),
+                Deposit { .. } | GovDeposit { .. } | Withdraw { .. } | GovWithdraw { .. }
+            ) =>
+        {
+            ops_element(unit_hex, inner)
+        }
         _ => format!("x:{unit_hex}"),
     }
+}
+
+/// R2-R-1: the binding hash the rollup AA recomputes from `trigger.data`
+/// at submit and stores as `da_bind_<h>`; the DA header carries the same
+/// value so watchers can bind the published header to the on-chain roots.
+/// Format: work/r2-da-binding.md (`minuend-da-v1`).
+pub fn da_bind_hash(c: &Checkpoint, chain_id: &str, data_root: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let s = [
+        "minuend-da-v1".to_string(),
+        chain_id.to_string(),
+        c.height.to_string(),
+        hex::encode(c.prev_state_hash),
+        hex::encode(c.state_root),
+        c.aa_root.clone(),
+        c.wit_root.clone(),
+        c.trace_root.clone(),
+        c.units_root.clone(),
+        c.units_set_root.clone(),
+        c.ops_root.clone(),
+        c.fills_root.clone(),
+        c.counts_root.clone(),
+        c.unit_count.to_string(),
+        c.wit_count.to_string(),
+        c.fill_count.to_string(),
+        c.assertion_version.to_string(),
+        data_root.to_string(),
+    ]
+    .join("|");
+    hex::encode(Sha256::digest(s.as_bytes()))
 }
 /// Fill-descriptor string committed by `fills_root`. `fill_index_in_unit`
 /// starts at 0 per unit. Field 13 is `taker_post` (USD_SCALE, 0 when the
@@ -2643,6 +2698,87 @@ mod tests {
         );
     }
 
+    /// R2-E-2: a Reveal wrapping a Withdraw/Deposit commits the INNER op's
+    /// descriptor (the binding AA pins W/adr: by op tag); other inner ops
+    /// keep the opaque `x:` tag.
+    #[test]
+    fn reveal_commits_inner_financial_descriptor() {
+        let account = minuend_types::AccountId([4u8; 32]);
+        let inner = minuend_dag::Op::Withdraw {
+            account,
+            amount: 5,
+            nonce: 9,
+        };
+        let rev = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(inner.clone()),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev), ops_element("uu", &inner));
+        assert!(ops_element("uu", &rev).starts_with("w:"));
+        let cancel = minuend_dag::Op::Cancel {
+            account,
+            order_id: minuend_types::OrderId([7; 32]),
+        };
+        let rev2 = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(cancel),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev2), "x:uu");
+    }
+
+    /// R2-R-1: the DA binding hash format is pinned (JS daBindHash and the
+    /// rollup AA recompute exactly this string).
+    #[test]
+    fn da_bind_hash_format_is_pinned() {
+        let c = Checkpoint {
+            height: 7,
+            prev_state_hash: [1; 32],
+            state_root: [2; 32],
+            aa_root: "a".repeat(64),
+            wit_root: "W".repeat(44),
+            trace_root: "T".repeat(44),
+            units_root: "U".repeat(44),
+            units_set_root: "S".repeat(44),
+            ops_root: "O".repeat(44),
+            fills_root: "F".repeat(44),
+            counts_root: "C".repeat(44),
+            unit_count: 3,
+            wit_count: 11,
+            fill_count: 2,
+            assertion_version: 2,
+            aa_shard_roots: std::array::from_fn(|_| String::new()),
+            last_unit: UnitId([0; 32]),
+            seq: 0,
+            unit_ids: Vec::new(),
+            fills_hash: [0; 32],
+            validity_proof_hash: None,
+            perp_burned: None,
+        };
+        let s = format!(
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|2|{}",
+            hex::encode([1u8; 32]),
+            hex::encode([2u8; 32]),
+            "a".repeat(64),
+            "W".repeat(44),
+            "T".repeat(44),
+            "U".repeat(44),
+            "S".repeat(44),
+            "O".repeat(44),
+            "F".repeat(44),
+            "C".repeat(44),
+            "d".repeat(64)
+        );
+        use sha2::Digest as _;
+        assert_eq!(
+            da_bind_hash(&c, "minuend-v2", &"d".repeat(64)),
+            hex::encode(sha2::Sha256::digest(s.as_bytes()))
+        );
+    }
+
     /// #47 A2: deposit ops commit the bound address (the forest dispute AA
     /// checks every new `adr:` witness leaf against it).
     #[test]
@@ -2654,9 +2790,15 @@ mod tests {
             amount: 7,
             aa_unit: [0; 32],
         };
+        // R2-A-3: + the vault anchor (standard base64 of the unit hash).
         assert_eq!(
             ops_element("u", &op),
-            format!("d:{}:7:{}", hex::encode([3u8; 32]), "B".repeat(32))
+            format!(
+                "d:{}:7:{}:{}",
+                hex::encode([3u8; 32]),
+                "B".repeat(32),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            )
         );
         let gop = minuend_dag::Op::GovDeposit {
             account,

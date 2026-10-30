@@ -37,21 +37,28 @@ function resolveAa(agentFile, subs, outName) {
   fs.writeFileSync(out, src);
   return out;
 }
-function resolveRollupAa(disputeAddr, fillAddr, bindAddr) {
+function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr) {
   return resolveAa("minuend_rollup.aa", {
     DISPUTE_AA_HERE: disputeAddr,
     DISPUTE_FILL_AA_HERE: fillAddr,
     DISPUTE_BIND_AA_HERE: bindAddr,
+    DISPUTE_BOOK_AA_HERE: bookAddr,
   }, ".minuend_rollup.resolved.aa");
+}
+function resolveBookAa() {
+  return resolveAa("minuend_dispute_book.aa", {}, ".minuend_dispute_book.resolved.aa");
 }
 function resolveBindAa() {
   return resolveAa("minuend_dispute_bind.aa", {}, ".minuend_dispute_bind.resolved.aa");
 }
-function resolveDisputeAa() {
-  return resolveAa("minuend_dispute.aa", {}, ".minuend_dispute.resolved.aa");
+// Round 2 (R2-A-3): the vault is a parameterized instance of a BASE AA
+// that names no address; dispute.aa hardcodes the base and derives the
+// rollup's vault as chash160(['autonomous agent', {base_aa, params:{rollup}}]).
+function resolveDisputeAa(vaultBaseAddr) {
+  return resolveAa("minuend_dispute.aa", { VAULT_BASE_HERE: vaultBaseAddr }, ".minuend_dispute.resolved.aa");
 }
-function resolveVaultAa(rollupAddress, perpAssetId) {
-  return resolveAa("minuend_vault.aa", { ROLLUP_AA_HERE: rollupAddress, PERP_ASSET_ID_HERE: perpAssetId }, ".minuend_vault.resolved.aa");
+function resolveVaultBaseAa(perpAssetId) {
+  return resolveAa("minuend_vault.aa", { PERP_ASSET_ID_HERE: perpAssetId }, ".minuend_vault_base.resolved.aa");
 }
 function resolveFillAa() {
   return resolveAa("minuend_dispute_fill.aa", {}, ".minuend_dispute_fill.resolved.aa");
@@ -76,7 +83,6 @@ async function main() {
   console.log("deploying minuend_rollup.aa / minuend_dispute.aa / minuend_vault.aa to TESTNET ...");
   // #13 order: dispute AAs hash first (no rollup in their defs), then the
   // rollup hardcodes them, then vault + binds (rollup rides trigger data).
-  const disputePath = resolveDisputeAa();
   const fillPath = resolveFillAa();
   const chashOf = (file) => {
     let parsed = null;
@@ -86,13 +92,19 @@ async function main() {
     });
     return objectHash.getChash160(["autonomous agent", parsed]);
   };
+  const vaultBasePath = resolveVaultBaseAa(PERP_ASSET_ID);
+  const vaultBaseAddr = chashOf(vaultBasePath);
+  const disputePath = resolveDisputeAa(vaultBaseAddr);
   const disputeAddr = chashOf(disputePath);
+  const bookPath = resolveBookAa();
+  const bookAddr = chashOf(bookPath);
   const fillAddr = chashOf(fillPath);
   const bindPath = resolveBindAa();
   const bindAddr = chashOf(bindPath);
-  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr);
+  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr);
 
   const network = await Network.create()
+    .with.agent({ vaultBase: vaultBasePath })
     .with.agent({ rollup: rollupPath })
     .with.wallet({ operator: 1e14 })
     .run();
@@ -104,12 +116,14 @@ async function main() {
     .with.agent({ dispute: disputePath })
     .with.agent({ fill: fillPath })
     .with.agent({ bind: bindPath })
-    .with.agent({ vault: resolveVaultAa(rollup, PERP_ASSET_ID) })
+    .with.agent({ book: bookPath })
+    .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ operator: 1e14 })
     .run();
   const dispute = network2.agent.dispute;
   const fill = network2.agent.fill;
   const bindAa = network2.agent.bind;
+  const bookAa = network2.agent.book;
   const vault = network2.agent.vault;
   console.log("dispute AA address:", dispute);
   console.log("fill AA address   :", fill);
@@ -141,6 +155,14 @@ async function main() {
   if (bb.error || !bb.unit) throw new Error("binding-dispute bind failed: " + bb.error);
   await network2.witnessUntilStable(bb.unit);
   console.log("binding dispute bound; unit =", bb.unit);
+  const kb = await op2.triggerAaWithData({
+    toAddress: bookAa,
+    amount: 20000,
+    data: { bind_book: 1, rollup },
+  });
+  if (kb.error || !kb.unit) throw new Error("book-dispute bind failed: " + kb.error);
+  await network2.witnessUntilStable(kb.unit);
+  console.log("book dispute bound; unit =", kb.unit);
 
   const v = await operator.readAAStateVars(rollup);
   const vars_ = v.vars || v;
@@ -150,6 +172,8 @@ async function main() {
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(vars_.dispute_fill_aa));
   if (String(vars_.dispute_bind_aa) !== String(bindAa))
     throw new Error("dispute_bind_aa not bound: " + JSON.stringify(vars_.dispute_bind_aa));
+  if (String(vars_.dispute_book_aa) !== String(bookAa))
+    throw new Error("dispute_book_aa not bound: " + JSON.stringify(vars_.dispute_book_aa));
   if (Number(vars_.last_submitted || 0) !== 0)
     throw new Error("boot last_submitted wrong");
   if (Number(vars_.last_finalized || 0) !== 0)
@@ -162,7 +186,9 @@ async function main() {
     dispute_aa_address: dispute,
     dispute_fill_aa_address: fill,
     dispute_bind_aa_address: bindAa,
+    dispute_book_aa_address: bookAa,
     vault_aa_address: vault,
+    vault_base_aa_address: vaultBaseAddr,
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,

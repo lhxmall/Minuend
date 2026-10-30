@@ -28,12 +28,15 @@ pub struct BuiltProof {
 }
 
 impl BuiltProof {
-    /// Which dispute AA takes this proof: `main`, `fill` or `bind`.
+    /// Which dispute AA takes this proof: `main`, `book` (round 2: P-ghost
+    /// and P-skip moved to `minuend_dispute_book.aa`), `fill` or `bind`.
     pub fn target(&self) -> &'static str {
         if self.bind_aa {
             "bind"
         } else if self.fill_aa {
             "fill"
+        } else if self.pred == "ghost" || self.pred == "skip" {
+            "book"
         } else {
             "main"
         }
@@ -134,34 +137,56 @@ pub fn build_proof(
         if let Some(p) = binding_proof(batch, k, &op, &pre_leaves, &post_leaves) {
             return Some(p);
         }
+        // Round 2: permanent leaves kept, binding mirror intact.
+        if let Some(p) = keep_mirror_proof(batch, k, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
     }
-    None
+    // R2-A-1: every unit transition replayed clean — the committed
+    // wit_root must still be the trace's last element (P-tip).
+    tip_proof(batch)
 }
 
-/// #47 A2 mirror of `minuend_dispute_bind.aa` for one leaf: `None` = the AA
-/// accepts the transition (bounces 'no fraud').
+/// #47 A2 + round 2 mirror of `minuend_dispute_bind.aa` (P-wpin / P-adr)
+/// for one posted post leaf: `None` = the AA accepts the transition
+/// (bounces 'no fraud').
 fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
     let p: Vec<&str> = post_leaf.split(':').collect();
     let o: Vec<&str> = op.split(':').collect();
     if p.len() == 5 && p[0] == "acct" && p[1].len() == 64 {
         let key = format!("acct:{}:", p[1]);
-        let w0 = match pre.iter().find(|l| l.starts_with(&key)) {
-            Some(l) => l.split(':').nth(4)?.to_string(),
-            None => "0".to_string(),
+        let pre_leaf = pre.iter().find(|l| l.starts_with(&key));
+        let (w0, c0) = match pre_leaf {
+            Some(l) => {
+                let q: Vec<&str> = l.split(':').collect();
+                (q.get(4)?.to_string(), q.get(2)?.to_string())
+            }
+            None => ("0".to_string(), "0".to_string()),
         };
-        if p[4] == w0 {
-            return None;
-        }
         let own = o.len() == 4 && o[0] == "w" && o[1] == p[1];
-        let sum = w0
-            .parse::<i128>()
-            .ok()
-            .zip(o.get(2).and_then(|a| a.parse::<i128>().ok()))
-            .and_then(|(a, b)| a.checked_add(b));
-        if own && sum.is_some() && p[4].parse::<i128>().ok() == sum {
+        if !own {
+            return if p[4] == w0 { None } else { Some(()) };
+        }
+        // R2-A-2: rejected => both columns unchanged; accepted => W += amt
+        // AND collateral -= amt on an existing pre leaf (<= 15 digits).
+        if p[4] == w0 && p[2] == c0 {
             return None;
         }
-        return Some(());
+        let short = |s: &str| s.len() <= 15;
+        let accepted = pre_leaf.is_some()
+            && [o[2], p[2], p[4], c0.as_str(), w0.as_str()]
+                .iter()
+                .all(|v| short(v))
+            && (|| {
+                let amt: i128 = o[2].parse().ok()?;
+                let w0n: i128 = w0.parse().ok()?;
+                let c0n: i128 = c0.parse().ok()?;
+                let w1: i128 = p[4].parse().ok()?;
+                let c1: i128 = p[2].parse().ok()?;
+                Some(amt > 0 && w1 == w0n + amt && c1 == c0n - amt)
+            })()
+            .unwrap_or(false);
+        return if accepted { None } else { Some(()) };
     }
     if p.len() == 3 && p[0] == "adr" && p[2].len() == 64 {
         let key = format!("adr:{}:", p[1]);
@@ -169,8 +194,13 @@ fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
             Some(l) if l == post_leaf => None,
             Some(_) => Some(()),
             None => {
-                let ok =
-                    o.len() == 4 && (o[0] == "d" || o[0] == "D") && o[1] == p[2] && o[3] == p[1];
+                // R2-A-8: the account must not already be bound.
+                let bound = pre
+                    .iter()
+                    .any(|l| l.starts_with(&format!("adrx:{}:", p[2])));
+                let shape = (o.first() == Some(&"d") && o.len() == 5)
+                    || (o.first() == Some(&"D") && o.len() == 4);
+                let ok = !bound && shape && o[1] == p[2] && o[3] == p[1];
                 if ok {
                     None
                 } else {
@@ -182,9 +212,10 @@ fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
     None
 }
 
-/// Prefix non-membership of `key` in the sorted `leaves`, in the AA's three
-/// shapes (adjacent straddle, before-min, after-max at k == 0 only).
-fn prefix_absence(leaves: &[String], key: &str, after_max_ok: bool) -> Option<serde_json::Value> {
+/// Prefix non-membership of `key` in the sorted `leaves`, in the AA's two
+/// shapes (adjacent straddle, before-min). Round 2: no after-max arm —
+/// every witness tree ends with the `~:end` sentinel (R2-A-10).
+fn prefix_absence(leaves: &[String], key: &str) -> Option<serde_json::Value> {
     let pos = leaves
         .iter()
         .position(|l| l.as_str() >= key)
@@ -199,13 +230,145 @@ fn prefix_absence(leaves: &[String], key: &str, after_max_ok: bool) -> Option<se
         }))
     } else if pos == 0 && !leaves.is_empty() {
         Some(serde_json::json!({"left": leaves[0], "left_proof": proof_json(leaves, 0)}))
-    } else if pos == leaves.len() && pos > 0 && after_max_ok {
-        Some(serde_json::json!({
-            "left": leaves[pos - 1], "left_proof": proof_json(leaves, pos - 1),
-        }))
     } else {
         None
     }
+}
+
+/// Exact non-membership of `leaf` in the sorted `leaves` (P-keep /
+/// P-mirror / P-deposit marker shapes): adjacent straddle or before-min.
+fn exact_absence(leaves: &[String], leaf: &str, l: &str, r: &str) -> Option<serde_json::Value> {
+    if leaves.iter().any(|x| x == leaf) {
+        return None;
+    }
+    let pos = leaves
+        .iter()
+        .position(|x| x.as_str() > leaf)
+        .unwrap_or(leaves.len());
+    if pos > 0 && pos < leaves.len() {
+        let mut m = serde_json::Map::new();
+        m.insert(l.into(), leaves[pos - 1].clone().into());
+        m.insert(format!("{l}_proof"), proof_json(leaves, pos - 1));
+        m.insert(r.into(), leaves[pos].clone().into());
+        m.insert(format!("{r}_proof"), proof_json(leaves, pos));
+        Some(serde_json::Value::Object(m))
+    } else if pos == 0 && !leaves.is_empty() {
+        let mut m = serde_json::Map::new();
+        m.insert(l.into(), leaves[0].clone().into());
+        m.insert(format!("{l}_proof"), proof_json(leaves, 0));
+        Some(serde_json::Value::Object(m))
+    } else {
+        None
+    }
+}
+
+/// Mirror leaf of a binding leaf: adr:{A}:{X} <-> adrx:{X}:{A}.
+fn binding_mirror(leaf: &str) -> Option<String> {
+    let q: Vec<&str> = leaf.split(':').collect();
+    if q.len() != 3 {
+        return None;
+    }
+    match q[0] {
+        "adr" => Some(format!("adrx:{}:{}", q[2], q[1])),
+        "adrx" => Some(format!("adr:{}:{}", q[2], q[1])),
+        _ => None,
+    }
+}
+
+/// Round 2 P-keep / P-mirror for unit `k` (binding dispute AA): a
+/// permanent pre leaf (`adr:`/`adrx:`/`dep:`) missing from the POSTED post
+/// tree, or a posted binding leaf without its mirror. Emitted only when
+/// the honest replay's post tree does not break the same rule.
+fn keep_mirror_proof(
+    batch: &Batch,
+    k: usize,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    let permanent =
+        |l: &&String| l.starts_with("adr:") || l.starts_with("adrx:") || l.starts_with("dep:");
+    let base = || {
+        serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "k": k,
+            "post_wit": batch.trace.get(k).cloned().unwrap_or_default(),
+            "post_proof": proof_json(&batch.trace, k),
+        })
+    };
+    // P-keep
+    if let Some(lost) = pre_leaves
+        .iter()
+        .filter(permanent)
+        .find(|l| !posted.contains(l) && post_leaves.contains(l))
+    {
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("leaf".into(), lost.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, lost)?),
+        );
+        obj.extend(
+            exact_absence(posted, lost, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "keep".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    // P-mirror
+    for l in posted.iter() {
+        let Some(m) = binding_mirror(l) else { continue };
+        if posted.contains(&m) {
+            continue;
+        }
+        let honest_breaks = post_leaves
+            .iter()
+            .any(|h| binding_mirror(h).is_some_and(|hm| !post_leaves.contains(&hm)));
+        if honest_breaks {
+            return None;
+        }
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.insert("leaf".into(), l.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(posted, index_of(posted, l)?),
+        );
+        obj.extend(
+            exact_absence(posted, &m, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "mirror".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    None
+}
+
+/// R2-A-1 P-tip: the committed wit_root is not the trace's last element.
+fn tip_proof(batch: &Batch) -> Option<BuiltProof> {
+    let n = batch.checkpoint.unit_count as usize;
+    let tip = batch.trace.get(n.checked_sub(1)?)?;
+    if *tip == batch.checkpoint.wit_root {
+        return None;
+    }
+    Some(BuiltProof {
+        pred: "tip".into(),
+        fill_aa: false,
+        bind_aa: true,
+        data: serde_json::json!({"tip": tip, "tip_proof": proof_json(&batch.trace, n - 1)}),
+    })
 }
 
 /// #47 A2: P-wpin / P-adr proof for unit `k`, emitted only when the POSTED
@@ -255,9 +418,16 @@ fn binding_proof(
             obj.insert("pre_leaf_proof".into(), proof_json(pre_leaves, i));
         }
         None => {
-            let after_max_ok = k == 0 && batch.checkpoint.height > 1;
-            let absent = prefix_absence(pre_leaves, &key, after_max_ok)?;
+            let absent = prefix_absence(pre_leaves, &key)?;
             obj.extend(absent.as_object()?.clone());
+            // R2-A-8: a new binding of an already-bound account.
+            if !wpin {
+                let xkey = format!("adrx:{}:", liar.split(':').nth(2)?);
+                if let Some(i) = pre_leaves.iter().position(|l| l.starts_with(&xkey)) {
+                    obj.insert("xleaf".into(), pre_leaves[i].clone().into());
+                    obj.insert("xleaf_proof".into(), proof_json(pre_leaves, i));
+                }
+            }
         }
     }
     Some(BuiltProof {
@@ -295,7 +465,8 @@ fn deposit_proof(
     pre_leaves: &[String],
     is_deposit: bool,
 ) -> Option<BuiltProof> {
-    // Parse op: d:{acct}:{amount} (3 parts) or w:{acct}:{amount}:{nonce}.
+    // Parse op: d:{acct}:{amount}:{addr}:{aa_unit_b64} (round 2),
+    // D:{acct}:{amount}:{addr}, w:/W:{acct}:{amount}:{nonce}.
     let parts: Vec<&str> = op.split(':').collect();
     if parts.len() < 3 {
         return None;
@@ -398,7 +569,26 @@ fn deposit_proof(
     let col_ok = col_pinned
         .map(|c| Some(c) == gov_col_must_match)
         .unwrap_or(true);
-    if !gov_fresh && (liar_val == expected || unchanged) && col_ok {
+    // R2-A-3 (mirrors the AA's credit arm): a credited collateral deposit
+    // is also judged on its anchor marker `dep:{aa_unit}` — already in the
+    // pre tree (re-credit) or missing from the posted post tree. The
+    // vault-ledger backing (dep_<unit>) is on-chain state this offline
+    // builder cannot read; the AA checks it on every deposit challenge.
+    let credited = !is_gov && is_deposit && amount > 0 && liar_val == expected && !unchanged;
+    let mut dep_extra = serde_json::Map::new();
+    if credited {
+        if let Some(u) = parts.get(4) {
+            let mk = format!("dep:{u}");
+            if let Some(i) = index_of(pre_leaves, &mk) {
+                dep_extra.insert("dep_pre_proof".into(), proof_json(pre_leaves, i));
+            } else if let Some(a) = exact_absence(&posted_post, &mk, "dleft", "dright") {
+                dep_extra.extend(a.as_object()?.clone());
+            }
+        }
+        if dep_extra.is_empty() {
+            return None; // credited, marker fine — honest leg (as far as offline data shows)
+        }
+    } else if !gov_fresh && (liar_val == expected || unchanged) && col_ok {
         return None; // honest leg — keep scanning
     }
     let mut roots = trace_roots(batch);
@@ -426,6 +616,7 @@ fn deposit_proof(
     obj.insert("post_proof".into(), post_proof);
     obj.insert("post_leaf".into(), liar_leaf.into());
     obj.insert("post_leaf_proof".into(), post_leaf_proof);
+    obj.extend(dep_extra);
     if let Some(pre_leaf) = pre_hit {
         let pre_idx = index_of(pre_leaves, &pre_leaf)?;
         obj.insert("pre_leaf".into(), pre_leaf.into());
@@ -783,6 +974,11 @@ fn fill_proof(
         // Prefix-range ghost: fraud iff NO pre leaf carries this order id.
         // Any same-id leaf sits inside [$lo,$hi) and breaks every AA
         // straddle, so only emit then.
+        // R2-A-6: ADL fills (kind 2) have no maker order (zero id) — the
+        // AA bounces them; never build a ghost proof for one.
+        if parts[12] == "2" || maker_order_hex.bytes().all(|b| b == b'0') {
+            continue;
+        }
         let ord_prefix = format!("ord:{maker_order_hex}:");
         let ghost_hit = !pre_leaves.iter().any(|l| l.starts_with(&ord_prefix));
         if ghost_hit {
@@ -1051,7 +1247,9 @@ fn fill_proof(
             Ok(v) => v,
             Err(_) => continue,
         };
-        let usd: i128 = match mparts[9].parse() {
+        // usd_per_unit must parse (the AA reads the meta leaf shape) but
+        // is no longer used: kind-1 fee/PnL are not modelled (R2-A-7).
+        let _usd: i128 = match mparts[9].parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -1059,11 +1257,10 @@ fn fill_proof(
         // of kind 0/3, keeper base of kind 2/3. Funding markets (kind 1)
         // price the fee off the multiplier. Kind 2 (ADL) pays no fee.
         let t2 = i128::from(qty) * i128::from(price) / 100_000_000 * 1_000_000 / 100_000_000;
-        let fee: i128 = if kind == 2 {
+        // R2-A-7 (mirrors the AA): kind 1 may settle the funding peg inside
+        // the fill — its collateral leg is never judged, fee/PnL modelled 0.
+        let fee: i128 = if kind == 2 || kind == 1 {
             0
-        } else if kind == 1 {
-            let fnot = i128::from(qty) * usd * 1_000_000 / 100_000_000;
-            fnot * fee_bps / 10_000
         } else {
             t2.abs() * fee_bps / 10_000
         };
@@ -1074,8 +1271,8 @@ fn fill_proof(
             .get(k)
             .cloned()
             .unwrap_or_else(|| post_leaves.to_vec());
-        let allow_last =
-            k + 1 == batch.units.len() && posted_post.len() == batch.checkpoint.wit_count as usize;
+        // Round 2: the AA has no after-max arm any more (`~:end` sentinel).
+        let allow_last = false;
         let sides = [
             ("taker", taker_hex.as_str(), taker_side),
             ("maker", maker_hex.as_str(), maker_side),
@@ -1201,12 +1398,7 @@ fn fill_proof(
                 // engine apply_fill); kind 0/2/3 = price-diff realize. Both
                 // truncate toward zero at each division like Rust i128.
                 let pnl: i128 = if kind == 1 {
-                    let bpp = (price - 10_000_000_000_000) / 10_000;
-                    let bpe = (old_entry - 10_000_000_000_000) / 10_000;
-                    let sq: i128 = if old_qty > 0 { close } else { -close };
-                    let x = sq * i128::from(bpp - bpe) * usd * 1_000_000;
-                    let c1 = x / 100_000_000;
-                    c1 / 10_000
+                    0
                 } else {
                     let signed: i128 = if old_qty > 0 {
                         price as i128 - old_entry as i128
@@ -1334,7 +1526,9 @@ fn fill_proof(
                 } else {
                     taker_hex.as_str()
                 },
-                claw_checkable: who_taker || kind >= 2 || op_parts.get(6) == Some(&"0"),
+                // R2-A-7: never for kind 1 (funding peg may move collateral).
+                claw_checkable: kind != 1
+                    && (who_taker || kind >= 2 || op_parts.get(6) == Some(&"0")),
             };
             // AA verdict mirror: silent unless the honest replay passes
             // every leg and the committed legs fail one of them. A fill
@@ -1708,6 +1902,77 @@ mod tests {
             proof.data.get("left").is_some(),
             "fresh account: pre absence"
         );
+    }
+
+    /// R2-A-1: every transition clean but the committed wit_root is not
+    /// the trace tip → P-tip on the binding dispute AA.
+    #[test]
+    fn r2_forged_wit_root_builds_tip_proof() {
+        let (mut batch, _acct, aa) = honest_deposit_batch();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        batch.checkpoint.wit_root = obyte_merkle::hash("forged-tree");
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("tip proof");
+        assert_eq!(p.pred, "tip");
+        assert_eq!(p.target(), "bind");
+        assert_eq!(p.data["tip"], serde_json::json!(batch.trace[0]));
+        assert_eq!(p.data["tip_proof"]["index"], serde_json::json!(0));
+    }
+
+    /// R2-A-2 / R2-A-8 mirror of the binding AA: W and collateral are
+    /// judged jointly; a second binding of a bound account is refused.
+    #[test]
+    fn r2_binding_violation_is_joint() {
+        let a = "aa".repeat(32);
+        let pre = vec![format!("acct:{a}:1000:0:0")];
+        let op = format!("w:{a}:100:1");
+        let v = |leaf: String| binding_violation(&op, &pre, &leaf);
+        assert!(v(format!("acct:{a}:900:0:100")).is_none(), "accepted");
+        assert!(v(format!("acct:{a}:1000:0:0")).is_none(), "rejected");
+        assert!(
+            v(format!("acct:{a}:1000:0:100")).is_some(),
+            "W without debit"
+        );
+        assert!(v(format!("acct:{a}:900:0:0")).is_some(), "debit without W");
+        let f = "99".repeat(32);
+        assert!(
+            binding_violation(&format!("w:{f}:100:1"), &pre, &format!("acct:{f}:0:0:100"))
+                .is_some(),
+            "W minted on a rejected (fresh) withdraw"
+        );
+        let addr = "Q".repeat(32);
+        let d = format!("d:{a}:5:{addr}:{}", "A".repeat(44));
+        let bound = vec![format!("adrx:{a}:{}", "R".repeat(32))];
+        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}")).is_some());
+        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}")).is_none());
+        // round-2 d: carries the anchor: the old 4-part shape is refused
+        let d4 = format!("d:{a}:5:{addr}");
+        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}")).is_some());
+    }
+
+    /// R2-A-8: a posted binding without its adrx: mirror → P-mirror.
+    #[test]
+    fn r2_dropped_binding_mirror_builds_mirror_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let x = format!("adrx:{}:{}", hex::encode(acct.0), test_addr());
+        assert!(batch.leaf_trace[0].contains(&x), "engine writes adrx:");
+        assert!(
+            batch.leaf_trace[0].iter().any(|l| l.starts_with("dep:")),
+            "engine writes the consumed-deposit marker"
+        );
+        assert_eq!(
+            batch.leaf_trace[0].last().map(String::as_str),
+            Some("~:end")
+        );
+        batch.leaf_trace[0].retain(|l| *l != x);
+        retrace(&mut batch, 0);
+        batch.checkpoint.wit_root = batch.trace[0].clone();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("mirror proof");
+        assert_eq!(p.pred, "mirror");
+        assert!(p.data.get("left").is_some() && p.data.get("right").is_some());
     }
 
     /// #47 A2: an address binding re-pointed to another account → P-adr.

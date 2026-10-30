@@ -3,7 +3,15 @@
 	//
 	// Trust model: NO owner key. This AA holds the collateral (base) and the
 	// PERP governance asset and pays ONLY proof-gated withdrawals against
-	// the rollup AA (ROLLUP_AA_HERE) finalized assertion forest. It accepts
+	// the rollup AA (params.rollup) finalized witness root.
+	//
+	// Round 2 (R2-A-3): this is a BASE AA. The deployed vault is the
+	// parameterized instance ['autonomous agent', {base_aa: <this base>,
+	// params: {rollup: <rollup address>}}], so the dispute AAs can derive
+	// the ONE genuine vault of a rollup with chash160(...) (the rollup
+	// cannot hardcode the vault — the vault names the rollup: chash
+	// cycle) and read its deposit ledger dep_<unit> without trusting a
+	// caller-supplied address. It accepts
 	// no assertions, has no lock/challenge/finalize path, and cannot be
 	// upgraded — a later custody AA migrates funds through the same
 	// finalized-root withdrawal path.
@@ -18,7 +26,7 @@
 	// produced by ocore merkle.getMerkleProof / Rust obyte_merkle::proof).
 	// withdrawn = the leaf's cumulative withdrawal total W — the
 	// sidechain's own debit record and the ONLY payment authority
-	// (#37-11): the gate is amount + wd_<addr> <= withdrawn, so payouts are
+	// (#37-11): the gate is amount + wd_<account> <= withdrawn, so payouts are
 	// bounded by debited-withdrawn bytes, wd_ advances kill stale-leaf
 	// replays, and later roots raise W so sequential withdrawals never
 	// dead-end; amount non-negative; decimal strings capped at 15 chars;
@@ -28,23 +36,34 @@
 	// any dispute predicate (A2). The witness root is challengeable: W and
 	// the adr: binding are pinned per unit by minuend_dispute_bind.aa.
 	// The engine binds one address to at most one account, so a payee has
-	// exactly one adr: leaf. ROLLUP_AA_HERE is substituted at deploy/test
-	// time.
-	// State vars: wd_<addr> (cumulative base withdrawn), wp_<addr>
-	// (cumulative PERP withdrawn), pperp_<addr> (PERP deposits received).
+	// exactly one adr: leaf. The rollup address arrives as params.rollup
+	// (parameterized instance), never as a substituted literal.
+	// State vars: wd_<account_hex> (cumulative base withdrawn PER ACCOUNT —
+	// R2-A-8: a second address bound to the same account can never spend
+	// the same W twice), wp_<addr> (cumulative PERP withdrawn),
+	// pperp_<addr> (PERP deposits received), dep_<unit> =
+	// '{payer}:{amount}' (R2-A-3: every base deposit, keyed by the trigger
+	// unit hash in base64 — the anchor a `d:` op must cite).
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
 			{
 				if: "{trigger.data.deposit}",
 				init: "{
+					if (!params.rollup) bounce('base AA');
 					if (trigger.output[[asset=base]] - 10000 <= 0)
 						bounce('deposit too small');
 				}",
 				messages: [
 					{
+						// R2-A-3: on-chain deposit ledger. Credited amount =
+						// output - bounce fee (the sidechain evidence rule:
+						// joint pays amount + 10000). P-deposit requires a
+						// credited `d:` to cite this unit with this payer and
+						// an amount <= the recorded one.
 						app: "state",
 						state: "{
+							var['dep_' || trigger.unit] = trigger.address || ':' || (trigger.output[[asset=base]] - 10000);
 						}"
 					}
 				]
@@ -57,6 +76,7 @@
 				// payment; here it is accepted and ledgered instead.
 				if: "{trigger.data.deposit_perp}",
 				init: "{
+					if (!params.rollup) bounce('base AA');
 					if (!(trigger.output[[asset='PERP_ASSET_ID_HERE']] > 0))
 						bounce('bad deposit');
 				}",
@@ -74,9 +94,19 @@
 				// witness root (#47 A2). Balance authority = the proven W.
 				if: "{trigger.data.withdraw}",
 				init: "{
-					$lf = var['ROLLUP_AA_HERE']['last_finalized'];
+					$rollup = params.rollup;
+					if (!$rollup) bounce('base AA');
+					$lf = var[$rollup]['last_finalized'];
 					if (!$lf)
 						bounce('not finalizable');
+					// R2-A-12: a proof may target any of the last 32
+					// finalized heights (W only grows and wd_ is a cumulative
+					// watermark, so an older root can only pay less); a
+					// finalize landing between proof build and inclusion no
+					// longer bounces the claim. Default: last_finalized.
+					$ph = (typeof(trigger.data.height) == 'boolean') ? $lf : trigger.data.height;
+					if (!is_integer($ph) OR $ph < 1 OR $ph > $lf OR $ph + 32 <= $lf)
+						bounce('bad height');
 					// Presence gate: missing trigger fields evaluate to boolean
 					// false, so typeof()==='boolean' detects absence while legal
 					// falsy values ('0', 0) pass.
@@ -92,7 +122,7 @@
 					if (length(trigger.data.account) != 64)
 						bounce('bad claim');
 					// Root source: the finalized height's witness root.
-					$wr = var['ROLLUP_AA_HERE']['wit_root_' || $lf];
+					$wr = var[$rollup]['wit_root_' || $ph];
 					if (!$wr)
 						bounce('no root');
 					// perp length cap must run BEFORE the subtraction below: a
@@ -122,7 +152,7 @@
 					// balance and never gates a payment.
 					if (length(trigger.data.collateral) > 15 OR length(trigger.data.withdrawn) > 15
 						OR trigger.data.amount < 0
-						OR trigger.data.amount + (var['wd_' || trigger.address] otherwise 0) > trigger.data.withdrawn
+						OR trigger.data.amount + (var['wd_' || trigger.data.account] otherwise 0) > trigger.data.withdrawn
 						OR $perp_claimed < 0)
 						bounce('bad claim amount');
 					// #47 A2: payee binding + balance leaf, both proven against
@@ -168,7 +198,7 @@
 					{
 						app: "state",
 						state: "{
-							var['wd_' || trigger.address] += trigger.data.amount;
+							var['wd_' || trigger.data.account] += trigger.data.amount;
 							var['wp_' || trigger.address] += $perp_claimed;
 						}"
 					}

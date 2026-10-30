@@ -7,7 +7,7 @@
 // set. post_challenge.js stays the local aa-testkit drill.
 //
 // Usage: node obyte-local/post_challenge_live.js --height H --pred P \
-//          --proof proof.json --target main|fill|bind [--network mainnet|testnet] \
+//          --proof proof.json --target main|book|fill|bind [--network mainnet|testnet] \
 //          [--rollup ADDR] [--dispute-address ADDR]
 //
 // Environment:
@@ -19,7 +19,7 @@
 // Addresses (R2-R-8): the rollup is --rollup (minuend-watch always passes
 // the rollup it watches) > MINUEND_ROLLUP_AA > deployment.json, the last
 // only when its `network` matches. The dispute AA is the one the rollup has
-// bound in its dispute_aa / dispute_fill_aa / dispute_bind_aa state var;
+// bound in its dispute_aa / dispute_book_aa / dispute_fill_aa / dispute_bind_aa state var;
 // --dispute-address, when given, must equal it.
 //
 // Safety (B10, 600 s margin): the dispute AAs judge the challenge unit's own
@@ -52,14 +52,36 @@ function arg(name, def) {
 
 const EXIT_REFUSED = 3;
 
+// R2-A-13: `--claim` sends {claim:'slash'} from the wallet's main address
+// (the address every live challenge pays from).
+async function claimSlash() {
+  const network = arg("network", envCompat("MINUEND_WATCH_NETWORK") || "mainnet");
+  let deploy = {};
+  try {
+    deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
+  } catch (_) { /* --rollup / env still work without the file */ }
+  const rollup = resolveLiveRollup({ cli: arg("rollup"), deploy, network });
+  const { boot } = require("./mainnet_wallet.js");
+  const w = await boot({ mnemonicEnv: "MINUEND_WATCH_MNEMONIC", network, hub: hubFor(network, envCompat("MINUEND_WATCH_HUB")) });
+  const owed = (await w.network.requestFromLightVendor("light/get_aa_state_vars", { address: rollup, var_prefix: "slash_reward_" + w.address }))["slash_reward_" + w.address];
+  if (!Number(owed)) { console.log(`nothing to claim for ${w.address}`); process.exit(0); }
+  const messages = [{ app: "data", payload_location: "inline", payload_hash: w.objectHash.getBase64Hash({ claim: "slash" }), payload: { claim: "slash" } }];
+  const unit = await new Promise((resolve, reject) => w.wallet.sendMultiPayment(
+    { paying_addresses: [w.address], change_address: w.address, to_address: rollup, amount: 10000, messages },
+    (err, u) => (err ? reject(new Error("claim failed: " + err)) : resolve(u))));
+  console.log(`claim sent: ${unit} (owed ${owed} to ${w.address})`);
+  process.exit(0);
+}
+
 async function main() {
+  if (process.argv.includes("--claim")) return claimSlash();
   const height = Number(arg("height"));
   const pred = arg("pred");
   const proofFile = arg("proof");
   const target = arg("target", "main");
   const network = arg("network", envCompat("MINUEND_WATCH_NETWORK") || "mainnet");
   if (!Number.isInteger(height) || height < 1 || !pred || !proofFile)
-    throw new Error("usage: node post_challenge_live.js --height N --pred P --proof proof.json --target main|fill|bind [--network mainnet|testnet]");
+    throw new Error("usage: node post_challenge_live.js --height N --pred P --proof proof.json --target main|book|fill|bind [--network mainnet|testnet]");
   let deploy = {};
   try {
     deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
@@ -105,12 +127,20 @@ async function main() {
       payload_hash: w.objectHash.getBase64Hash(data),
       payload: data,
     }];
-    w.wallet.issueChangeAddressAndSendMultiPayment(
-      { to_address: disputeAddress, amount: 20000, messages },
+    // R2-A-13: pay FROM the wallet's main address (and keep change there):
+    // the rollup credits slash_reward_<trigger.address> and only that
+    // address can {claim:'slash'} it.
+    w.wallet.sendMultiPayment(
+      { paying_addresses: [w.address], change_address: w.address, to_address: disputeAddress, amount: 20000, messages },
       (err, u) => (err ? reject(new Error("send failed: " + err)) : resolve(u)),
     );
   });
-  console.log("challenge broadcast:", unit);
+  console.log("challenge broadcast:", unit, "challenger:", w.address);
+  // R2-A-13: durable record of who can claim the slash reward.
+  try {
+    fs.appendFileSync(path.join(__dirname, "challenges.jsonl"),
+      JSON.stringify({ height, pred, target, unit, challenger: w.address, rollup, ts: Math.floor(Date.now() / 1000) }) + "\n");
+  } catch (e) { console.error("warning: could not record challenge:", e.message); }
 
   // Observe the outcome for up to 10 minutes: a verdict sets frozen_<h>=2.
   const until = Date.now() + 600 * 1000;
@@ -118,7 +148,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 20000));
     const f = (await readVars(rollup, "frozen_" + height).catch(() => ({})))["frozen_" + height];
     if (Number(f) === 2) {
-      console.log(`VERDICT: h=${height} frozen=2 (fraud accepted). Claim with {claim:'slash'}.`);
+      console.log(`VERDICT: h=${height} frozen=2 (fraud accepted). Claim: node post_challenge_live.js --claim --network ${network} (from ${w.address}).`);
       process.exit(0);
     }
   }

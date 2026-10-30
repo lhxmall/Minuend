@@ -15,17 +15,24 @@
 //   50              -> POOL_MAX_INFLIGHT (last_submitted-last_finalized < 50)
 //   500000000000    -> SUBMIT_BOND_SLASH_HALF (fraud slash to challenger)
 //   20000           -> RACE_REWARD (first-submitter reward)
-	// DA convention (social, enforced by watchers off-chain): the submit
-	// trigger unit carries a temp_data message with the batch JSON
-	// (trace/ops/fills arrays); da_unit_<h> pins that unit. The AA does NOT
-	// inspect unit[trigger.unit].messages (fragile at eval time).
+	// DA convention: the submit trigger unit carries exactly ONE temp_data
+	// message (batch header + frames); da_unit_<h> pins that unit.
+	// R2-R-1: the AA reads unit[trigger.unit] at submit (ocore strips the
+	// temp_data payload.data but keeps data_hash), requires exactly one
+	// temp_data message and stores its data_hash as da_hash_<h>; it also
+	// recomputes da_bind (sha256 over the submitted roots + data_root,
+	// format work/r2-da-binding.md 'minuend-da-v1') and stores it as
+	// da_bind_<h>. The header carries the same da_bind; watchers bind the
+	// published header to these on-chain values (header==roots itself is
+	// not provable on chain: the AA cannot read temp_data content).
 	// State vars:
 	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa,
-	//   dispute_bind_aa (#47 A2)
+	//   dispute_bind_aa (#47 A2), dispute_book_aa (round 2: ghost/skip)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
 	//   unit_count_<h>, wit_count_<h>, fill_count_<h>, da_unit_<h>, active_bond_<h>,
+	//   counts_root_<h> (I-2), data_root_<h>, da_bind_<h>, da_hash_<h> (R2-R-1),
 	//   fee_winner_<h>, frozen_<h> (absent/0 live, 2 failed),
 	//   inbox_upto_<h> (submit timestamp: forces older than this belong here)
 	//   pool_<addr> (standing submit pool; submits need >= 1e12)
@@ -81,6 +88,22 @@
 						app: "state",
 						state: "{
 							var['dispute_bind_aa'] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
+				// Round 2: ghost/skip moved to a fourth dispute AA (ops budget).
+				if: "{trigger.data.set_dispute_book}",
+				init: "{
+					if (trigger.address != 'DISPUTE_BOOK_AA_HERE' OR var['dispute_book_aa'])
+						bounce('not authorized');
+				}",
+				messages: [
+					{
+						app: "state",
+						state: "{
+							var['dispute_book_aa'] = trigger.address;
 						}"
 					}
 				]
@@ -169,10 +192,27 @@
 						OR !trigger.data.units_set_root OR length(trigger.data.units_set_root) != 44
 						OR !trigger.data.ops_root OR length(trigger.data.ops_root) != 44
 						OR !trigger.data.fills_root OR length(trigger.data.fills_root) != 44
+						// I-2 / R2-R-1: counts_root and data_root are now
+						// committed (stored below and bound into da_bind).
+						OR !trigger.data.counts_root OR length(trigger.data.counts_root) != 44
+						OR !trigger.data.data_root OR length(trigger.data.data_root) != 64
 						OR !is_integer(trigger.data.unit_count) OR trigger.data.unit_count < 1 OR trigger.data.unit_count > 200000
 						OR !is_integer(trigger.data.wit_count) OR trigger.data.wit_count < 1
 						OR !is_integer(trigger.data.fill_count) OR trigger.data.fill_count < 0)
 					bounce('bad submit');
+					// R2-R-1: DA binding. One hash over every submitted root
+					// (+ data_root of the frames) that the header must repeat.
+					$da_bind = sha256('minuend-da-v1|' || trigger.data.chain_id || '|' || $h
+						|| '|' || trigger.data.prev_state_hash || '|' || trigger.data.state_root
+						|| '|' || trigger.data.aa_root || '|' || trigger.data.wit_root
+						|| '|' || trigger.data.trace_root || '|' || trigger.data.units_root
+						|| '|' || trigger.data.units_set_root || '|' || trigger.data.ops_root
+						|| '|' || trigger.data.fills_root || '|' || trigger.data.counts_root
+						|| '|' || trigger.data.unit_count || '|' || trigger.data.wit_count
+						|| '|' || trigger.data.fill_count || '|' || trigger.data.assertion_version
+						|| '|' || trigger.data.data_root, 'hex');
+					if (trigger.data.da_bind != $da_bind)
+						bounce('bad da_bind');
 					// #37-8: a resubmit MUST bind to the actual pre-root of
 					// its height (prev == state_root_<h-1>) — never to the
 					// old cleared top/root pair. If the predecessor is also
@@ -200,6 +240,12 @@
 						bounce('pool occupancy');
 					if (var['active_bond_' || $h] AND $h <= $ls AND $frozen_h != 2)
 						bounce('height taken');
+					// Exactly one temp_data message (the header) in this unit (read last: cheap gates bounce first);
+					// its data_hash survives the temp_data purge.
+					$tds = filter(unit[trigger.unit].messages, 16, $m => $m.app == 'temp_data');
+					if (array_length($tds) != 1)
+						bounce('need one temp_data');
+					$da_hash = $tds[0].payload.data_hash;
 				}",
 				messages: [
 					{
@@ -227,6 +273,10 @@
 							var['wit_count_' || trigger.data.height] = trigger.data.wit_count;
 							var['fill_count_' || trigger.data.height] = trigger.data.fill_count;
 							var['da_unit_' || trigger.data.height] = trigger.unit || '';
+							var['counts_root_' || trigger.data.height] = trigger.data.counts_root;
+							var['data_root_' || trigger.data.height] = trigger.data.data_root;
+							var['da_bind_' || trigger.data.height] = $da_bind;
+							var['da_hash_' || trigger.data.height] = $da_hash;
 							var['inbox_upto_' || trigger.data.height] = timestamp;
 							var['active_bond_' || trigger.data.height] = trigger.address;
 							var['frozen_' || trigger.data.height] = 0;
@@ -297,7 +347,8 @@
 					$da = (var['dispute_aa'] otherwise 0);
 					$df = (var['dispute_fill_aa'] otherwise 0);
 					$db = (var['dispute_bind_aa'] otherwise 0);
-					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db)
+					$dk = (var['dispute_book_aa'] otherwise 0);
+					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');
@@ -328,7 +379,10 @@
 								$p = (var['pool_' || $op] otherwise 0);
 								$slashed = $p > 500000000000 ? 500000000000 : $p;
 								var['pool_' || $op] = $p - $slashed;
-								var['slash_reward_' || trigger.data.challenger] = (var['slash_reward_' || trigger.data.challenger] otherwise 0) + $slashed;
+								// R2-A-9: the challenger gets 1/5; the rest stays
+								// locked in this AA (no var ever credits it).
+								var['slash_reward_' || trigger.data.challenger] = (var['slash_reward_' || trigger.data.challenger] otherwise 0) + floor($slashed / 5);
+								var['slash_burned'] = (var['slash_burned'] otherwise 0) + $slashed - floor($slashed / 5);
 							}
 							var['active_bond_' || trigger.data.height] = 0;
 							var['fee_winner_' || trigger.data.height] = 0;

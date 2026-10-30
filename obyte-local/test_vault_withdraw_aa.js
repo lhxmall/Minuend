@@ -72,7 +72,11 @@ const NO_DISPUTE = {
 };
 const ROLLUP_SRC = writeResolved("minuend_rollup.aa", NO_DISPUTE, ".e2e_vault_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
-const VAULT_SRC = writeResolved("minuend_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw.aa");
+// Round 2: the vault is a parameterized instance of the base AA.
+const VAULT_BASE_SRC = writeResolved("minuend_vault.aa", { PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw_base.aa");
+const VAULT_BASE_ADDR = chashOf(fs.readFileSync(VAULT_BASE_SRC, "utf8"));
+const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
+const { daBindHash } = require("./script_helpers");
 
 const SUBMIT_FEE = 10000;
 const STATE_ROOT = sha256Hex("state-1");
@@ -102,6 +106,28 @@ function submitData(height, stateRoot, prev, witRoot) {
     unit_count: 1,
     wit_count: 1,
     fill_count: 0,
+    data_root: sha256Hex("frames-" + height),
+  };
+}
+// R2-R-1: submits carry ONE temp_data header + da_bind over the roots.
+function bindSubmit(sd) {
+  sd.da_bind = daBindHash(sd);
+  const header = Object.assign({}, sd);
+  delete header.submit;
+  delete header.aa_forest;
+  return {
+    messages: [
+      {
+        app: "temp_data",
+        payload_location: "inline",
+        payload: {
+          data_length: require("ocore/object_length.js").getLength(header, true),
+          data_hash: require("ocore/object_hash.js").getBase64Hash(header, true),
+          data: header,
+        },
+      },
+      { app: "data", payload: sd },
+    ],
   };
 }
 
@@ -153,9 +179,10 @@ function bounceDetail(res) {
 // the vault runs). ---
 const ACCT = "ab".repeat(32);
 const DECOY_ACCT = "cd".repeat(32);
-function witTree(payee, col, w) {
+function witTree(payee, col, w, payee2) {
   const DECOY = "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK";
   const leaves = [
+    ...(payee2 ? [`adr:${payee2}:${ACCT}`] : []),
     `adr:${payee}:${ACCT}`,
     `acct:${ACCT}:${col}:0:${w}`,
     `adr:${DECOY}:${DECOY_ACCT}`,
@@ -172,16 +199,20 @@ function witTree(payee, col, w) {
     adrProof: proofOf(`adr:${payee}:${ACCT}`),
     acctProof: proofOf(`acct:${ACCT}:${col}:0:${w}`),
     decoyProof: proofOf(`acct:${DECOY_ACCT}:500:0:900000`),
+    adr2Proof: payee2 ? proofOf(`adr:${payee2}:${ACCT}`) : null,
   };
 }
 
 async function main() {
   network = await Network.create()
+    .with.agent({ vaultBase: VAULT_BASE_SRC })
     .with.agent({ rollup: ROLLUP_SRC })
-    .with.agent({ vault: VAULT_SRC })
+    .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
+    .with.wallet({ other: 1e9 })
     .run();
-  const { operator } = network.wallet;
+  const { operator, other } = network.wallet;
+  const otherAddr = await other.getAddress();
   const rollup = network.agent.rollup;
   const vault = network.agent.vault;
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
@@ -196,13 +227,21 @@ async function main() {
   });
   if (dep.error) throw new Error("vault deposit failed: " + dep.error);
   await network.witnessUntilStable(dep.unit);
-  console.log("  vault seeded");
+  {
+    const vs = await vars(vault);
+    if (vs["dep_" + dep.unit] !== wdAcct + ":1000000")
+      throw new Error("R2-A-3: vault dep_ ledger wrong: " + JSON.stringify(vs["dep_" + dep.unit]));
+  }
+  console.log("  vault seeded (dep_ ledger recorded)");
 
-  async function submitWit(hh, col, w) {
-    const t = witTree(wdAcct, col, w);
+  async function submitWit(hh, col, w, payee2) {
+    const t = witTree(wdAcct, col, w, payee2);
     console.log(`step: submit h${hh} wit_root (col=${col}, W=${w})`);
     const sd = submitData(hh, STATE_ROOT, hh === 1 ? PREV_ROOT : STATE_ROOT, t.root);
-    await trigger(operator, rollup, sd, SUBMIT_FEE);
+    const m = bindSubmit(sd);
+    const r = await operator.sendMulti({ messages: m.messages, base_outputs: [{ address: rollup, amount: SUBMIT_FEE }] });
+    if (r.error) throw new Error(`h${hh} submit failed: ` + r.error);
+    await network.witnessUntilStable(r.unit);
     const st = await vars(rollup);
     if (Number(st.last_submitted) !== hh) throw new Error(`h${hh} did not land`);
     if (st["wit_root_" + hh] !== t.root) throw new Error(`wit_root_${hh} not stored`);
@@ -219,10 +258,10 @@ async function main() {
     withdraw: 1, amount, withdrawn: String(withdrawn), account: ACCT,
     collateral: String(col), perp: "0", adr_proof: t.adrProof, acct_proof: t.acctProof,
   }, extra || {});
-  async function withdrawOk(t, amount, withdrawn, col, wantWd) {
-    console.log(`step: withdraw amount=${amount} withdrawn=${withdrawn} col=${col}`);
+  async function withdrawOk(t, amount, withdrawn, col, wantWd, extra) {
+    console.log(`step: withdraw amount=${amount} withdrawn=${withdrawn} col=${col} ${JSON.stringify(extra || {})}`);
     const r = await operator.triggerAaWithData({
-      toAddress: vault, amount: 20000, data: claim(t, amount, withdrawn, col),
+      toAddress: vault, amount: 20000, data: claim(t, amount, withdrawn, col, extra),
     });
     if (r.error) throw new Error("withdraw trigger failed: " + r.error);
     await network.witnessUntilStable(r.unit);
@@ -230,8 +269,9 @@ async function main() {
     if (JSON.stringify(res || {}).includes('"bounced":true'))
       throw new Error("withdraw bounced: " + bounceDetail(res));
     const st = await vars(vault);
-    if (Number(st["wd_" + wdAcct] || 0) !== wantWd)
-      throw new Error(`wd_ == ${st["wd_" + wdAcct]}, want ${wantWd}`);
+    // R2-A-8: the watermark is per ACCOUNT, not per payee address.
+    if (Number(st["wd_" + ACCT] || 0) !== wantWd)
+      throw new Error(`wd_ == ${st["wd_" + ACCT]}, want ${wantWd}`);
     console.log(`  paid, wd_ == ${wantWd}`);
   }
 
@@ -254,16 +294,38 @@ async function main() {
   // A proof against a non-finalized/other root bounces.
   await triggerBounce(operator, vault, claim(t1, 0, 0, 1000000), 20000, "bad binding proof");
   console.log("  h2: proof against a superseded root refused");
-  await withdrawOk(t2, 700000, 700000, 300000, 700000);
-  console.log("  h2: issue shape (col=300k, W=700k) pays — no brick");
-
-  // h3: (col=0, W=1000000) — residual 300k pays, no dead-end.
-  const t3 = await submitWit(3, 0, 1000000);
+  // h3: (col=0, W=1000000), and a SECOND address bound to the same account.
+  const t3 = await submitWit(3, 0, 1000000, otherAddr);
   await finalize(3);
+  // R2-A-12: a proof against a recent finalized root (h2) still pays —
+  // last_finalized moved on while the claim was in flight.
+  await withdrawOk(t2, 700000, 700000, 300000, 700000, { height: 2 });
+  console.log("  h3: h2-root claim pays after finalize moved (R2-A-12)");
+  await triggerBounce(operator, vault, claim(t2, 1, 700000, 300000, { height: 2 }), 20000, "bad claim amount");
+  console.log("  h3: older-root replay bounces on the per-account watermark");
+  await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0, { height: 4 }), 20000, "bad height");
+  await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0, { height: 1.5 }), 20000, "bad height");
   await withdrawOk(t3, 300000, 1000000, 0, 1000000);
   console.log("  h3: residual pays, deposit fully drained");
   await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0), 20000, "bad claim amount");
   console.log("  h3: post-drain replay bounces");
+  // R2-A-8: the second address bound to ACCT cannot spend the same W again.
+  {
+    const r = await other.triggerAaWithData({
+      toAddress: vault, amount: 20000,
+      data: { withdraw: 1, amount: 300000, withdrawn: "1000000", account: ACCT, collateral: "0", perp: "0", adr_proof: t3.adr2Proof, acct_proof: t3.acctProof },
+    });
+    if (r.error && !String(r.error).includes("bad claim amount")) throw new Error("second-address claim: " + r.error);
+    if (!r.error) {
+      await network.witnessUntilStable(r.unit);
+      const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+      if (!JSON.stringify(res || {}).includes("bad claim amount")) {
+        failures++;
+        console.error("FAIL: second bound address double-spent W: " + JSON.stringify(res || {}).slice(0, 300));
+      }
+    }
+    console.log("  R2-A-8: second bound address refused (per-account wd_)");
+  }
 
   await network.stop();
   process.exit(failures === 0 ? 0 : 1);

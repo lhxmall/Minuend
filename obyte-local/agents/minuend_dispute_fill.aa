@@ -149,7 +149,11 @@
 					$right_ok = trigger.data.right
 						AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
 						AND trigger.data.right_proof.root == trigger.data.fills_root
+						AND is_integer(trigger.data.fill_proof.index) AND trigger.data.fill_proof.index >= 0
 						AND trigger.data.right_proof.index == trigger.data.fill_proof.index + 1
+						// R2-A-5: the neighbour must be a real fills leaf (f:)
+						// or the length sentinel (n:) — never an internal node.
+						AND (starts_with(trigger.data.right, 'f:') OR starts_with(trigger.data.right, 'n:'))
 						AND !starts_with(trigger.data.right, 'f:' || $F[1] || ':');
 					if (!$right_ok) bounce('no fraud');
 					$who = trigger.data.who;
@@ -202,21 +206,21 @@
 						// WITH a pre position and freeze honest heights.
 						$plo = 'pos:' || $acct_hex || ':' || $market || ':';
 						$phi = 'pos:' || $acct_hex || ':' || $market || ';';
-						$phit1 = trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
-							AND trigger.data.pleft_proof.root == $pre_wit
-							AND trigger.data.pright AND is_valid_merkle_proof(trigger.data.pright, trigger.data.pright_proof)
-							AND trigger.data.pright_proof.root == $pre_wit
+						$phit1 = trigger.data.pleft AND trigger.data.pright
+							AND contains(trigger.data.pleft, ':') AND contains(trigger.data.pright, ':')
+							AND is_integer(trigger.data.pleft_proof.index) AND trigger.data.pleft_proof.index >= 0
 							AND trigger.data.pleft_proof.index + 1 == trigger.data.pright_proof.index
-							AND trigger.data.pleft < $plo AND $phi <= trigger.data.pright;
-						$phit2 = trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
 							AND trigger.data.pleft_proof.root == $pre_wit
+							AND trigger.data.pright_proof.root == $pre_wit
+							AND trigger.data.pleft < $plo AND $phi <= trigger.data.pright
+							AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
+							AND is_valid_merkle_proof(trigger.data.pright, trigger.data.pright_proof);
+						$phit2 = trigger.data.pleft AND contains(trigger.data.pleft, ':')
 							AND trigger.data.pleft_proof.index == 0
-							AND $phi <= trigger.data.pleft;
-						$phit3 = ($k == 0 AND $h > 1) AND trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
 							AND trigger.data.pleft_proof.root == $pre_wit
-							AND trigger.data.pleft_proof.index == (var[$rollup]['wit_count_' || ($h - 1)] otherwise 0) - 1
-							AND trigger.data.pleft < $plo;
-						if (!$phit1 AND !$phit2 AND !$phit3) bounce('no fraud');
+							AND $phi <= trigger.data.pleft
+							AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof);
+						if (!$phit1 AND !$phit2) bounce('no fraud');
 						$old_qty = 0;
 						$old_entry = 0;
 						$iso = '0';
@@ -247,8 +251,7 @@
 					if (array_length($M) != 11 OR $M[1] != $market) bounce('bad pre meta');
 					$fee_bps = $M[5] + 0;
 					$keeper_bps = $M[6] + 0;
-					$usd = $M[9] + 0;
-					// Price notional (engine notional_usd), truncating toward
+										// Price notional (engine notional_usd), truncating toward
 					// zero at each step like Rust i128 division: the fee base
 					// of kind 0/3 and the keeper-reward base of kind 2/3.
 					$kind = $F[12] + 0;
@@ -260,12 +263,13 @@
 						// must too, or honest ADL heights false-verdict.
 						$fee = 0;
 					} else {
-						if ($kind == 1) {
-							$fn = floor($qty * $usd * 1000000 / 100000000);
-							$fee = floor($fn * $fee_bps / 10000);
-						} else {
-							$fee = floor(abs($t2) * $fee_bps / 10000);
-						}
+						// R2-A-7: a kind-1 (funding-rate market) fill may run
+						// settle_funding_peg inside apply_fill_pair, moving
+						// rate-cash between ALL holders of the market — fill
+						// parties included. Unmodelable here: the kind-1
+						// collateral leg never verdicts (see $col_ok), so its
+						// fee/PnL are not computed (position legs still are).
+						$fee = ($kind == 1) ? 0 : floor(abs($t2) * $fee_bps / 10000);
 					}
 					$tfee = ($who == 'taker') ? $fee : 0;
 					$post_acct = trigger.data.post_acct;
@@ -288,18 +292,22 @@
 					// empty? (Used by the close-to-flat position leg.)
 					$eplo = 'pos:' || $acct_hex || ':';
 					$ephi = 'pos:' || $acct_hex || ';';
-					$pe1 = trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
-						AND trigger.data.eleft_proof.root == $post_wit
-						AND trigger.data.eright AND is_valid_merkle_proof(trigger.data.eright, trigger.data.eright_proof)
-						AND trigger.data.eright_proof.root == $post_wit
+					$pe1 = trigger.data.eleft AND trigger.data.eright
+						AND contains(trigger.data.eleft, ':') AND contains(trigger.data.eright, ':')
+						AND is_integer(trigger.data.eleft_proof.index) AND trigger.data.eleft_proof.index >= 0
 						AND trigger.data.eleft_proof.index + 1 == trigger.data.eright_proof.index
-						AND trigger.data.eleft < $eplo AND $ephi <= trigger.data.eright;
-					$pe2 = trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
 						AND trigger.data.eleft_proof.root == $post_wit
+						AND trigger.data.eright_proof.root == $post_wit
+						AND trigger.data.eleft < $eplo AND $ephi <= trigger.data.eright
+						AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
+						AND is_valid_merkle_proof(trigger.data.eright, trigger.data.eright_proof);
+					$pe2 = trigger.data.eleft AND contains(trigger.data.eleft, ':')
 						AND trigger.data.eleft_proof.index == 0
-						AND $ephi <= trigger.data.eleft;
-					// (No final-tree after-max arm here: the market-range
-					// fallback below covers it — ops budget.)
+						AND trigger.data.eleft_proof.root == $post_wit
+						AND $ephi <= trigger.data.eleft
+						AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof);
+					// (No after-max arm anywhere: every witness tree ends with
+					// the `~:end` sentinel — R2-A-10; R2-A-5 hardened indices.)
 					$empty = ($pe1 OR $pe2) ? '1' : '0';
 					// #47 A3/B1: every leg binds the fill to the unit op at k
 					// (ops_root membership); a kind 0/1 maker leg reads only
@@ -404,15 +412,9 @@
 						// Realized PnL by kind. kind 1 = funding rate cash,
 						// rate diff UNCLAMPED (engine apply_fill has no cap),
 						// trunc-toward-zero at both division steps.
+						// R2-A-7: kind-1 PnL is not modelled (collateral leg skipped).
 						if ($kind == 1) {
-							$bp0 = ($price - 10000000000000);
-							$bp1 = ($old_entry - 10000000000000);
-							$bpp = ($bp0 < 0) ? ceil($bp0 / 10000) : floor($bp0 / 10000);
-							$bpe = ($bp1 < 0) ? ceil($bp1 / 10000) : floor($bp1 / 10000);
-							$sq = ($old_qty > 0) ? $close : (0 - $close);
-							$cx = $sq * ($bpp - $bpe) * $usd * 1000000;
-							$c1 = ($cx < 0) ? ceil($cx / 100000000) : floor($cx / 100000000);
-							$pnl = ($c1 < 0) ? ceil($c1 / 10000) : floor($c1 / 10000);
+							$pnl = 0;
 						} else {
 							$signed = ($old_qty > 0) ? ($price - $old_entry) : ($old_entry - $price);
 							$pr = $signed * $close * 1000000;
@@ -474,21 +476,21 @@
 							} else {
 								$slo = 'pos:' || $acct_hex || ':' || $market || ':';
 								$shi = 'pos:' || $acct_hex || ':' || $market || ';';
-								$ps1 = trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
-									AND trigger.data.post_pleft_proof.root == $post_wit
-									AND trigger.data.post_pright AND is_valid_merkle_proof(trigger.data.post_pright, trigger.data.post_pright_proof)
-									AND trigger.data.post_pright_proof.root == $post_wit
+								$ps1 = trigger.data.post_pleft AND trigger.data.post_pright
+									AND contains(trigger.data.post_pleft, ':') AND contains(trigger.data.post_pright, ':')
+									AND is_integer(trigger.data.post_pleft_proof.index) AND trigger.data.post_pleft_proof.index >= 0
 									AND trigger.data.post_pleft_proof.index + 1 == trigger.data.post_pright_proof.index
-									AND trigger.data.post_pleft < $slo AND $shi <= trigger.data.post_pright;
-								$ps2 = trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
 									AND trigger.data.post_pleft_proof.root == $post_wit
+									AND trigger.data.post_pright_proof.root == $post_wit
+									AND trigger.data.post_pleft < $slo AND $shi <= trigger.data.post_pright
+									AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
+									AND is_valid_merkle_proof(trigger.data.post_pright, trigger.data.post_pright_proof);
+								$ps2 = trigger.data.post_pleft AND contains(trigger.data.post_pleft, ':')
 									AND trigger.data.post_pleft_proof.index == 0
-									AND $shi <= trigger.data.post_pleft;
-								$ps3 = ($k + 1 == $n) AND trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
 									AND trigger.data.post_pleft_proof.root == $post_wit
-									AND trigger.data.post_pleft_proof.index == (var[$rollup]['wit_count_' || $h] otherwise 1) - 1
-									AND trigger.data.post_pleft < $slo;
-								if ($ps1 OR $ps2 OR $ps3) {
+									AND $shi <= trigger.data.post_pleft
+									AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof);
+								if ($ps1 OR $ps2) {
 									$pos_ok = true;
 									$pos_bail = false;
 								} else {
@@ -574,16 +576,20 @@
 									AND $TO[7] == $F[3] AND $TO[8] == $OP[6] AND $TO[9] + 0 == $tml);
 								$ord_bail = false;
 							} else {
-								$oh1 = trigger.data.oleft AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
-									AND trigger.data.oleft_proof.root == $post_wit
-									AND trigger.data.oright AND is_valid_merkle_proof(trigger.data.oright, trigger.data.oright_proof)
-									AND trigger.data.oright_proof.root == $post_wit
+								$oh1 = trigger.data.oleft AND trigger.data.oright
+									AND contains(trigger.data.oleft, ':') AND contains(trigger.data.oright, ':')
+									AND is_integer(trigger.data.oleft_proof.index) AND trigger.data.oleft_proof.index >= 0
 									AND trigger.data.oleft_proof.index + 1 == trigger.data.oright_proof.index
-									AND trigger.data.oleft < $to AND $thi <= trigger.data.oright;
-								$oh2 = trigger.data.oleft AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
 									AND trigger.data.oleft_proof.root == $post_wit
+									AND trigger.data.oright_proof.root == $post_wit
+									AND trigger.data.oleft < $to AND $thi <= trigger.data.oright
+									AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
+									AND is_valid_merkle_proof(trigger.data.oright, trigger.data.oright_proof);
+								$oh2 = trigger.data.oleft AND contains(trigger.data.oleft, ':')
 									AND trigger.data.oleft_proof.index == 0
-									AND $thi <= trigger.data.oleft;
+									AND trigger.data.oleft_proof.root == $post_wit
+									AND $thi <= trigger.data.oleft
+									AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof);
 								$ord_ok = !$rest;
 								$ord_bail = !($oh1 OR $oh2);
 							}
@@ -611,7 +617,7 @@
 					// have moved this leg: positive counterparty, and for a
 					// kind 0/1 maker leg a CROSS Place taker (no escrow
 					// refund lands on the taker after the claw).
-					$col_ok = ($post_col == $exp_t)
+					$col_ok = ($post_col == $exp_t) OR $kind == 1
 						OR !($cp_ok AND ($who == 'taker' OR $kind >= 2 OR $OP[6] == '0'));
 					// Verdict only when a leg is VERIFIED wrong; a bail
 					// (missing evidence) silences its own leg only. The
