@@ -400,7 +400,7 @@
 						}
 						// absent party: [acct:X:, acct:X;) holds no leaf of pre
 						$who = trigger.data.who;
-						if ($who == 'taker' OR $who == 'maker') {
+						if (typeof($who) == 'string' AND ($who == 'taker' OR $who == 'maker')) {
 							$alo = 'acct:' || (($who == 'taker') ? $F[3] : $F[4]) || ':';
 							$ahi = 'acct:' || (($who == 'taker') ? $F[3] : $F[4]) || ';';
 							$ab1 = trigger.data.left AND trigger.data.right
