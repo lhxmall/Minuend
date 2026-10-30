@@ -21,8 +21,7 @@ use minuend_watch::{
     pick_root_verified_checkpoint, prove, resolve_start_height, rewind_target, root_diverged,
     sane_chain_readings, save_checkpoint_retaining, sweep_stale_temp_dirs,
     tip_awaiting_resubmission, verify_da_binding, write_private_proof, ChainView, HubClient,
-    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
-    TEMP_DIR_OWNER_FILE,
+    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, TEMP_DIR_OWNER_FILE,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -967,8 +966,14 @@ fn chain_view(
 /// deleted, and when no checkpoint at or below a non-zero `target` loads,
 /// nothing is touched and the rewind fails (the old code wiped every
 /// checkpoint and restarted from genesis, unrecoverable once the DA of the
-/// early heights expired). Genesis is only used for `target == 0`.
-fn rewind_engine(dir: &std::path::Path, target: u64) -> anyhow::Result<(Engine, u64)> {
+/// early heights expired). Genesis is only used for `target == 0`, or when
+/// `genesis_fallback` is set (a temp-dir run, which started from genesis
+/// anyway and keeps only a capped number of checkpoints, R4-R-7).
+fn rewind_engine(
+    dir: &std::path::Path,
+    target: u64,
+    genesis_fallback: bool,
+) -> anyhow::Result<(Engine, u64)> {
     let mut heights = minuend_state::persist::snapshot_heights(dir)?;
     heights.retain(|h| *h <= target);
     for h in heights {
@@ -977,7 +982,7 @@ fn rewind_engine(dir: &std::path::Path, target: u64) -> anyhow::Result<(Engine, 
             return Ok((e, h));
         }
     }
-    if target > 0 {
+    if target > 0 && !genesis_fallback {
         return Err(anyhow::anyhow!(
             "no readable checkpoint at or below h={target}; nothing was changed"
         ));
@@ -991,12 +996,15 @@ fn rewind_engine(dir: &std::path::Path, target: u64) -> anyhow::Result<(Engine, 
 /// and re-submitted, and possibly finalized, before we looked). Rewind to
 /// the newest checkpoint whose root the chain still has; checkpoints above
 /// it are retired to `dead/`. Errors (hub, no matching checkpoint) leave
-/// everything untouched.
+/// everything untouched, except that a temp-dir run (`genesis_fallback`,
+/// which started from genesis and keeps few checkpoints) replays from
+/// genesis when no checkpoint matches.
 fn rewind_to_chain_root(
     hub: &HttpHubClient,
     config: &WatchConfig,
     dir: &std::path::Path,
     below: u64,
+    genesis_fallback: bool,
 ) -> anyhow::Result<(Engine, u64)> {
     let heights = minuend_state::persist::snapshot_heights(dir)?;
     let mut loaded: BTreeMap<u64, Engine> = BTreeMap::new();
@@ -1015,6 +1023,10 @@ fn rewind_to_chain_root(
     )
     .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
     let Some(h) = pick else {
+        if genesis_fallback {
+            minuend_state::persist::retire_snapshots_above(dir, 0)?;
+            return Ok((Engine::new(), 0));
+        }
         return Err(anyhow::anyhow!(
             "no checkpoint below h={below} matches the chain's state_root; nothing was changed"
         ));
@@ -1251,7 +1263,7 @@ fn main() -> anyhow::Result<()> {
                             cursor.processed_upto,
                             view.frozen_at_last_submitted
                         );
-                        match rewind_engine(&state_dir, t) {
+                        match rewind_engine(&state_dir, t, temp_mode) {
                             Ok((eng, at)) => {
                                 engine = eng;
                                 cursor.rewind_to(at);
@@ -1301,7 +1313,7 @@ fn main() -> anyhow::Result<()> {
                              replayed h={h} (re-submitted, possibly already finalized): \
                              rewinding to the newest checkpoint the chain agrees with"
                         );
-                        match rewind_to_chain_root(&hub, &config, &state_dir, h) {
+                        match rewind_to_chain_root(&hub, &config, &state_dir, h, temp_mode) {
                             Ok((eng, at)) => {
                                 engine = eng;
                                 cursor.rewind_to(at);

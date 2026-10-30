@@ -1047,7 +1047,10 @@ pub fn sweep_stale_temp_dirs(prefix: &str, own: &std::path::Path) -> Vec<std::pa
         let Ok(own_meta) = std::fs::metadata(own) else {
             return cleared;
         };
-        let base = own.parent().map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
+        let base = own
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
         let Ok(entries) = std::fs::read_dir(&base) else {
             return cleared;
         };
@@ -1070,9 +1073,7 @@ pub fn sweep_stale_temp_dirs(prefix: &str, own: &std::path::Path) -> Vec<std::pa
             let Ok(pid) = pid.trim().parse::<u32>() else {
                 continue;
             };
-            if pid == std::process::id()
-                || std::path::Path::new(&format!("/proc/{pid}")).exists()
-            {
+            if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists() {
                 continue;
             }
             clear_temp_checkpoints(&path);
@@ -2098,8 +2099,14 @@ mod tests {
         assert!(sane_chain_readings(Some(0), Some(5), 5, 8).is_err());
         assert!(sane_chain_readings(Some(0), Some(0), 0, 3).is_err());
         assert!(sane_chain_readings(Some(9), None, 5, 8).is_err());
-        assert!(sane_chain_readings(Some(9), Some(4), 5, 8).is_err(), "lf went back");
-        assert!(sane_chain_readings(Some(4), Some(5), 5, 8).is_err(), "ls < lf");
+        assert!(
+            sane_chain_readings(Some(9), Some(4), 5, 8).is_err(),
+            "lf went back"
+        );
+        assert!(
+            sane_chain_readings(Some(4), Some(5), 5, 8).is_err(),
+            "ls < lf"
+        );
         // Legit readings pass, including a fresh chain with nothing yet.
         assert_eq!(sane_chain_readings(Some(9), Some(5), 5, 8), Ok((9, 5)));
         assert_eq!(sane_chain_readings(Some(5), Some(5), 4, 8), Ok((5, 5)));
@@ -2183,7 +2190,8 @@ mod tests {
             std::fs::write(d.join(format!("{SNAPSHOT_PREFIX}1.snap")), b"x").unwrap();
             std::fs::create_dir_all(d.join(DEAD_SNAPSHOT_DIR)).unwrap();
             std::fs::write(
-                d.join(DEAD_SNAPSHOT_DIR).join(format!("{SNAPSHOT_PREFIX}2.snap")),
+                d.join(DEAD_SNAPSHOT_DIR)
+                    .join(format!("{SNAPSHOT_PREFIX}2.snap")),
                 b"x",
             )
             .unwrap();
@@ -2192,7 +2200,11 @@ mod tests {
         std::fs::write(stale.join("proofs").join("p.json"), b"{}").unwrap();
         // pid 0x7fff_fff0 is above Linux's pid_max: never running.
         std::fs::write(stale.join(TEMP_DIR_OWNER_FILE), "2147483632").unwrap();
-        std::fs::write(live.join(TEMP_DIR_OWNER_FILE), std::process::id().to_string()).unwrap();
+        std::fs::write(
+            live.join(TEMP_DIR_OWNER_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
         let swept = sweep_stale_temp_dirs(&prefix, &own);
         #[cfg(target_os = "linux")]
         {
