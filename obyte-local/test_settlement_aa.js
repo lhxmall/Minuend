@@ -1369,6 +1369,10 @@ async function main() {
     const vs = await vars(vault);
     if (vs["depp_" + govUnit] !== govPayer + ":50000:" + govAcct)
       throw new Error("R3-A-7: vault depp_ ledger wrong: " + JSON.stringify(vs["depp_" + govUnit]));
+    // R5-A-5: the vault tracks every recorded PERP deposit against the
+    // sidechain's PERP_SUPPLY_MAX (deposits past it bounce and refund).
+    if (Number(vs.pperp_total) !== 50000)
+      throw new Error("R5-A-5: vault pperp_total wrong: " + JSON.stringify(vs.pperp_total));
   }
   const govOp = `D:${govAcct}:50000:${govPayer}:${govUnit}`;
   const GOV_OPS = pad2([govOp], "govops");
