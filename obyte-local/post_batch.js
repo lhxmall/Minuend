@@ -22,6 +22,7 @@ const zlib = require("zlib");
 const { envCompat, finalizeReached, daBindHash, DA_BIND_FIELDS } = require("./script_helpers");
 const {
   DEFAULT_PACKAGE_SOURCE_CAP,
+  assertPackageRawCaps,
   assertPackageSourceCap,
   packFrames,
 } = require("./batch_frames");
@@ -233,6 +234,8 @@ async function main() {
   };
   const packages = packFrames(stamped, packageOptions);
   assertPackageSourceCap(packages, packageOptions);
+  // R3-R-1: never post DA a watcher refuses for size (it would stall).
+  assertPackageRawCaps(packages);
   const rawBlobs = packages.map((b) => zlib.gunzipSync(Buffer.from(b, "base64")));
   const dataRoot = crypto.createHash("sha256").update(Buffer.concat(rawBlobs)).digest("hex");
   const header = Object.assign({}, batchData);

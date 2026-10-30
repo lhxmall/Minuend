@@ -268,3 +268,49 @@ pub fn verify_all(
 
     Ok(verified)
 }
+
+/// R3-R-4: per-deposit verification for replay. Structural problems of the
+/// evidence list itself (over the size cap, duplicate anchors, malformed
+/// anchor hex) are still hard errors, but a Deposit/GovDeposit unit with
+/// missing or non-verifying evidence is NOT: it is simply not endorsed. The
+/// returned set holds the `(aa_unit, is_perp)` anchors whose evidence
+/// verified; the replay endorses exactly those, so a unit signed against a
+/// bogus anchor is rejected by the replay exactly as by the producer (whose
+/// feed never contained it), instead of failing the whole height. The
+/// caller must still require evidence for every deposit the replay
+/// APPLIED (`Batch::validate_against` does).
+pub fn verify_each(
+    units: &[minuend_dag::Unit],
+    evidences: &[DepositEvidence],
+    expected_vault: &str,
+    perp_asset: &[u8; 32],
+) -> Result<HashSet<([u8; 32], bool)>, SettleError> {
+    let total_bytes: usize = evidences
+        .iter()
+        .map(|e| serde_json::to_vec(e).map(|v| v.len()).unwrap_or(0))
+        .sum();
+    if total_bytes > DEPOSIT_EVIDENCE_MAX_BYTES {
+        return Err(SettleError::DepositEvidenceTooLarge);
+    }
+    let mut map: HashMap<String, &DepositEvidence> = HashMap::new();
+    for ev in evidences {
+        parse_hex32(&ev.aa_unit)?;
+        if map.insert(ev.aa_unit.to_lowercase(), ev).is_some() {
+            return Err(SettleError::DepositDuplicateAnchor);
+        }
+    }
+    let mut endorsed: HashSet<([u8; 32], bool)> = HashSet::new();
+    for u in units {
+        let op_aa_unit = match &u.op {
+            Op::Deposit { aa_unit, .. } | Op::GovDeposit { aa_unit, .. } => *aa_unit,
+            _ => continue,
+        };
+        let Some(ev) = map.get(&hex::encode(op_aa_unit)) else {
+            continue;
+        };
+        if let Ok(k) = verify_one(&u.op, ev, expected_vault, perp_asset) {
+            endorsed.insert(k);
+        }
+    }
+    Ok(endorsed)
+}

@@ -331,15 +331,14 @@ pub fn replay_and_check(
     batch.validate_against(prev_root, engine)
 }
 
-/// R2-R-2: largest decompressed size accepted for ONE package (or an inline
-/// `frames_blob`). A package's gzip source is capped at `PACK_SOURCE_CAP`
-/// (4 MB) on-chain; 64 MiB leaves a 16x compression headroom for honest
-/// JSON frames while a gzip bomb (~1000:1) is cut off early.
-pub const MAX_PACKAGE_RAW_BYTES: usize = 64 << 20;
-/// R2-R-2: largest decompressed size accepted for all packages of one
-/// height together (the watcher holds these bytes, the split frames and
-/// the decoded batch in memory at once).
-pub const MAX_COMMITTED_RAW_BYTES: usize = 1 << 30;
+/// R2-R-2 / R3-R-1: largest decompressed size accepted for ONE package (or
+/// an inline `frames_blob`), and for all packages of one height together.
+/// These are the producer's own limits (`minuend_settle` cuts packages on
+/// raw size and refuses to export a batch above the per-height cap;
+/// `obyte-local/batch_frames.js` enforces the same values before posting),
+/// so an honest batch is never refused for size while a gzip bomb is still
+/// cut off early.
+pub use minuend_settle::{MAX_COMMITTED_RAW_BYTES, MAX_PACKAGE_RAW_BYTES};
 /// R2-R-2: a header can list at most one package per unit, and a batch
 /// carries at most `BATCH_MAX_UNITS` units.
 pub const MAX_PACKAGES: usize = minuend_types::BATCH_MAX_UNITS as usize;
