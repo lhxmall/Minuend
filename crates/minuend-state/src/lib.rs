@@ -1986,6 +1986,14 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
     }
     for (market, params) in &state.markets {
         let mark = state.marks.get(market).copied().unwrap_or(0);
+        // Round 7 (PR #51 未修复项 28): the listed price band (0 = that
+        // side unbounded), so P-claw can bind a kind-2 ADL print to
+        // `clamp(mark, band)`. A separate leaf keeps the 11-field `meta:`
+        // layout every dispute AA parses.
+        leaves.push(format!(
+            "band:{}:{}:{}",
+            market.0, params.min_price, params.max_price
+        ));
         leaves.push(format!(
             "meta:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             market.0,

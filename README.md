@@ -116,11 +116,13 @@ Each fill updates both legs (VWAP entry for opens); **realized PnL settles
 into collateral immediately at close time**, so winners can withdraw profits
 and the withdrawal-proof leaf (which commits `collateral`) reflects true
 solvency. Snapshots compute maintenance margin (5% of abs notional) and
-initial margin (10%). A user fill also rechecks both parties and may
-force-sell a still-liquidatable party in the same unit. Keeper liquidation
-first sends a market IOC; if the target remains liquidatable, remaining
-quantity is ADL'd at mark onto opposite-sign holders. If their positions are
-insufficient, the unsold position remains on the target. The market's
+initial margin (10%). Since round 7 of #47 a unit carries at most one fill
+(an IOC / market order stops after its first maker, a GTC limit order that
+would take a second maker is rejected, and a fill no longer force-sells a
+party in the same unit). Keeper liquidation first sends a market IOC (one
+fill); if the book filled nothing and the target remains liquidatable, the
+position is ADL'd at the band-clamped mark onto one opposite-sign holder.
+Whatever is left waits for the next `Liquidate`. The market's
 `keeper_reward_bps` is paid only from the target's positive collateral
 (genesis market: 100 bps); if there is not enough, the keeper receives only
 what is available. For a non-insurance fill that leaves a party with negative

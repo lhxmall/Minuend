@@ -53,7 +53,7 @@ notional_usd(qty, price) =
 |---|---|
 | `AccountId` | `sha256(ed25519 公钥)`，32 字节 |
 | `OrderId` | `sha256(account32 ‖ market_u32le ‖ client_seq_u64le)` |
-| `UnitId` | `sha256(canonical_bytes)`，canonical 前缀为 ASCII `"ODX1"` |
+| `UnitId` | 第 7 轮起（`ASSERTION_VERSION = 4`）：`sha256(utf8("mnu3\|" + hex(canonical_bytes) + "\|" + E))`，E 为该 unit 的 ops 描述串（无描述串的 op 为 `x`），见 §10.14；canonical 前缀仍为 ASCII `"ODX1"` / `"ODX2"` |
 | 清算单 id | `sha256(b"liq" ‖ unit_id_32)` |
 
 ### 1.3 入口溢出防护（DoS 防线）
@@ -108,7 +108,11 @@ Unit {
 区分）：StakeOracle(tag 14)、UnstakeOracle(15)、SlashOracle(16)、
 UpdateExternalPrice(17，外部喂价锚，§6.2 末)、Commit(18)/Reveal(19)
 （v2 commit-reveal 排序，§2.5）。
-canonical 尾部追加 pubkey。签名验证用 ed25519 **verify_strict**：
+canonical 尾部追加 pubkey。第 7 轮起 unit id 不再是 `sha256(canonical)`，而是
+`sha256("mnu3|" + hex(canonical) + "|" + E)`（`minuend_dag::unit_text`，E = ops 描述串
+`op_descriptor`，没有描述串的 op 为 `x`）：签名仍覆盖 unit id，因此也覆盖 ops 描述串；
+Oscript 能对这段 UTF-8 文本重算 id，P-opbind（§10.14）据此把 `ops_root` 叶绑定到 unit。
+签名验证用 ed25519 **verify_strict**：
 拒绝可延展签名（非规范 s 值、小阶分量）。
 
 ### 2.2 身份绑定
@@ -802,6 +806,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈；第 4 轮（R4-A-4）：新绑定还要求金库 `dep_<anchor>`（`D:` 为 `depp_<anchor>`）记录存在且 payer == A、account == X，否则判欺诈 |
 | mbind（P-mbind） | dispute_book | 第 4 轮 R4-A-1：成交 F 的 maker 订单在 pre_wit 中的 `ord:` 叶与 F 不符——owner、市场、方向（maker 与 taker 方向相反）、价格不同，或剩余量 < 成交量 |
 | claw（P-claw） | dispute_claw | 第 6 轮：单成交 unit 的**两条腿**——taker 与 maker 的 pre/post `acct:` 叶、两者的 pre 仓位、maker 订单、unit op——按引擎重算两方的成交阶段 collateral、claw（先 taker 后 maker，零和）、逐仓 taker 未留簿托管的退款（claw 之后）与 keeper 扣取（claw 之后，记给 caller）；任一方 post collateral 偏离超出舍入容差即欺诈（§10.12） |
+| opbind（P-opbind） | dispute | 第 7 轮（未修复项 10）：`ops_root` 第 k 叶 ≠ `units_root` 第 k 叶那个 unit 的 ops 描述串。挑战者提交 unit 文本在第二个 `\|` 处切开的两段 `u_pre` / `u_op`，AA 重算 `sha256(u_pre‖u_op)` = units 叶、比较 `u_op`（`x` → `x:{id}`）与 ops 叶（§10.14） |
 | frame（P-frame） | dispute_bind | 第 4 轮 R4-A-3：在 `c:` / `d:` / `w:` / `D:` / `W:` 单元里，`pos:` / `ord:` 叶不得出现、消失或被改写；唯一例外是 `c:` 撤掉的、属于该 `c:` 账户的那张订单。第 6b 轮 R6-C2：普通市场零成交 / 单成交的 `p:` / `L:` 单元里，op 账户（L: 的 caller 与 target）、maker、保险账户以外的 `acct:` / `pos:` / `ord:` 叶同样冻结（§10.13） |
 | tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
 | keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
@@ -1225,6 +1230,75 @@ kind 3→0、`x:` op、他人的 `p:`、target 不在成交里的 `L:`；单成�
 部署 op 预算（第 6b 轮）：vault 364、rollup 996、dispute 1383、dispute_fill 1966、
 dispute_bind 1956、dispute_book 1708、dispute_claw 1706（上限 2000）。
 
+### 10.14 第 7 轮（#47 R7）：ops 叶绑定 unit、每个 unit 至多一笔成交、ADL 价格
+
+第 7 轮处理第 6b 轮之后剩下的两条 Critical 级路线（PR 正文未修复项 10、19）和 ADL 价格（项 28）。
+
+1. **P-opbind（项 10，dispute AA，`pred: 'opbind'`）**。问题：`ops_root` 的叶是运营方写的字符串，
+   链上没有任何东西把它绑定到签名的 unit。运营方可以把一个零成交 Place / Liquidate 单元的
+   op 叶写成 `x:`（P-frame 不再冻结第三方），或者改写 `p:` 里的 isolated / margin / tif / typ，
+   让 P-claw 的模型要求对手 maker 付 claw（R6-M1）。Oscript 不能验 ed25519，也不能对二进制
+   求 sha256（`sha256` 只吃 UTF-8 字符串），所以旧的 `sha256(canonical_bytes)` 链上无法重算。
+   **修法（共识变更，`ASSERTION_VERSION = 4`）**：unit id 改为对一段 UTF-8 文本求 sha256：
+   ```
+   unit_text = "mnu3|" + hex(canonical_bytes) + "|" + E      // E = op_descriptor(op)，没有则 "x"
+   unit_id   = sha256(unit_text)
+   ```
+   canonical 字节保证 id 对整个 unit（parents、op、pubkey）单射；末尾的 E 就是该 unit 应当
+   提交的 ops 叶（`x:` 类 op 提交 `x:{id}`）。签名覆盖 id，所以也覆盖 E。挑战者从 DA 取出
+   unit，把文本在**第二个** `|` 处切开：`u_pre = "mnu3|" + hex + "|"`、`u_op = E`。AA：
+   `u_pre` 以 `mnu3|` 开头、以 `|` 结尾、恰好含两个 `|`（hex 里没有 `|`，所以这是唯一的切法；
+   E 自己可以含 `|`，例如被拒的怪地址充值，AA 因此从不切分整段文本）；`sha256(u_pre‖u_op)`
+   必须是 `units_root` 的第 k 叶；期望叶 = `u_op == 'x' ? 'x:'‖id : u_op`；与 `ops_root` 第 k
+   叶不同即欺诈。诚实批次的叶就是 E，sha256 原像唯一，所以不可能被误判。
+   **信任论证**：签名有效性仍只能由 watcher 链下检查（Oscript 无 ed25519）。运营方能做的是把
+   一个没有有效签名 unit 的 id 写进 `units_root`——这时 DA 里找不到这个 unit（或签名不对），
+   watcher 重放直接失败并报警，这是已有的 DA / 有效性残留（未修复项 1），不是 P-opbind 的
+   范围；只要 DA 里有 id 为 U 的 unit，它的 ops 叶就被 P-opbind 钉死。
+   watcher：`prove.rs::opbind_proof` 在逐 unit 比较发现 ops 叶不符、且 DA unit 的 id 等于
+   提交的 units 叶时出证明（拼接长度 > 4096 不出）。
+
+2. **每个 unit 至多一笔成交（项 19，执行规则 + P-fsane）**。问题：多成交 unit 里两条腿的 claw、
+   第三方账户都没有谓词；运营方既可以**编造**第二笔成交把单成交 unit 变成"多成交"，也可以
+   用自己的账户**真实地**构造多成交 unit（两张自己的挂单 + 一笔吃两张的 taker），然后在里面
+   给任意账户加钱。逐笔判多成交需要每笔成交之后的中间状态根，或者在一个 AA 里按笔循环
+   （Oscript 的 `map` / `foreach` 按次数乘 op 数），都放不进 2000 ops。
+   **修法（共识变更）**：引擎保证每个 unit 至多产生一笔成交——
+   - 簿（`OrderBook::submit_journaled`，引擎唯一的撮合入口）：Market / IOC 单吃到第一笔后停止，
+     剩余量不留簿（本来就不留）；Limit + Gtc 单若在第一笔之后还会吃到第二个 maker，整单拒绝
+     （`BookError::MultiFill`，撤销日志回滚），否则剩余量照常留簿（不再交叉）。
+   - `place` 不再在同一 unit 里 force-sell 仍可清算的成交方（以前会追加清算 / ADL 成交）；
+     这类账户由之后 unit 里的 keeper `Liquidate` 处理（有 keeper 奖励激励）。
+   - 簿内清算：IOC 只吃一笔；**簿内有成交时本 unit 不再 ADL**，剩余仓位等下一次 `Liquidate`；
+     簿内无成交时 ADL 只取一个对手方。资金费率市场的场外清算同样只取一个对手方。
+   于是任何成交的 idx 都是 0：P-fsane 新增一臂——成交串 F[1] 有 units 证明（64 位 hex）时，
+   `substring(fill, 66, 3) != ':0:'` 即欺诈。编造的第二笔成交只凭成交串就能判；单成交 unit
+   的 P-claw / fill_math / P-frame 覆盖因此不再能被绕开；运营方也无法再构造真实的多成交 unit。
+   P-claw / fill_math / P-frame 里"多成交 → bounce"的门保留（保守，现在这种 unit 本身就是欺诈）。
+   代价：大单需要拆成多个 unit；Gtc 限价单穿两个价位会被拒；大仓位的清算按每次一个 maker /
+   一个对手方分几次完成。
+
+3. **ADL 价格（项 28，P-claw）**。witness 树新增 `band:{market}:{min_price}:{max_price}` 叶
+   （0 = 该侧无界；单独成叶，`meta:` 仍是 11 段）。普通市场的 kind 2 成交价必须等于
+   `clamp(pre mark, band)`（`clamp_to_band`：先下界、后上界）：每个 unit 至多一笔成交意味着
+   ADL 只在簿内没有成交时发生，本 unit 没有改过 mark，所以 mark 就是 pre `meta:` 叶的第 8 段。
+   P-claw 在给出 `band` + `band_proof`（pre_wit）时判 `$badp`，与 `$fr0` 一样直接判欺诈。
+   不给 band 时不判价格（旧载荷照常工作）。
+
+4. **项 35 / 36 的变化**：多成交 unit 不再存在，项 35 中"多成交 unit 产生的超限仓位"随之关闭
+   （资金费率市场的部分仍在）；项 36 不变。
+
+**测试**：Rust `r7_unit_text_binds_the_ops_descriptor`（dag：id = sha256(text)、前缀两个 `|`、
+含 `|` 的地址、`x` op）、`r7_opbind_proves_a_rewritten_ops_leaf`（`x:` / margin 改写 / 他人的 `p:`
+→ opbind，AA 镜像判 verdict；同一载荷对诚实叶 → no fraud）、`r7_opbind_x_ops_and_split_rule`
+（`x` op、在地址的 `|` 处重切 → bounce）、`r7_fabricated_second_fill_is_fsane_fraud`、
+`r7_one_fill_per_unit`（exec：Gtc 穿两档被拒且簿不变、IOC 只吃一笔、Gtc 吃一笔后余量留簿）、
+`r7_adl_price_is_bound_to_mark_and_band`；`claw_check` 对所有诚实 ADL 断言价格 = clamp。
+devnet e2e 场景 65–67（高度 83–86）。
+
+部署 op 预算（第 7 轮）：vault 364、rollup 996、dispute 1575、dispute_fill 1966、
+dispute_bind 1956、dispute_book 1712、dispute_claw 1780（上限 2000）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
@@ -1474,11 +1548,10 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
   只可能来自更早已 finalize 的谎言，不再判定）；watcher 在金库记录未知时不构造依赖它的
   P-adr；dispute_fill 余量 29 ops
 - 第 5 轮的 CRITICAL（两条腿的 claw 金额没有互相绑定）由第 6 轮 P-claw 处理（§10.12），
-  第 6b 轮补上成交 ↔ op 绑定与第三方账户（§10.13）；范围是普通市场的零成交 / 单成交 unit
-  （资金费率市场、逐仓清算目标、多成交 unit 仍不判；运营方可以编造第二笔成交把单成交
-  unit 变成"多成交"，项 19）。这些保护以 op 串如实提交为前提，项 10 未修。
-  ADL（kind 2）价格没有绑定到 mark（假价格不能再造钱，但能在 target 与对手方之间转移已实现
-  盈亏，以对手方的 collateral 为限）。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry
+  第 6b 轮补上成交 ↔ op 绑定与第三方账户（§10.13）；第 7 轮（§10.14）把 ops 叶绑定到签名的
+  unit（P-opbind）、让引擎每个 unit 至多产生一笔成交（多成交即欺诈，P-fsane），并把 ADL
+  价格绑定到 clamp(mark, band)。仍不判：资金费率市场的现金腿、逐仓清算目标；unit 签名
+  有效性只由 watcher 检查（Oscript 无 ed25519，DA 残留）。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry
   比较。带成交的 unit 的 op 是 `x:` 时 P-claw 直接判欺诈（第 6b 轮）。数量与仓位低于
   `QTY_CAP = 1e15`（引擎强制），pre 仓位 ≥ 1e15 时 P-claw / fill_math bounce。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
   devnet 测试。P-fsane 的"被拒 Place"臂需要 op 账户的 pre 叶。cap bounce 的 P-deposit

@@ -11,7 +11,7 @@ README 是概览；这里是"为什么这样设计"。
 
 | 符号 | 含义 |
 |---|---|
-| unit | 用户操作的最小单元：`{parents, op, pubkey, sig}`，id = sha256(canonical bytes) |
+| unit | 用户操作的最小单元：`{parents, op, pubkey, sig}`，id = sha256("mnu3\|" + hex(canonical bytes) + "\|" + ops 描述串)（第 7 轮，MECHANISMS §10.14） |
 | height | 批次序号；每个批次把侧链推进一个高度 |
 | operator | 把侧链批次提交到 Obyte AA 的角色（当前为单一 operator） |
 | keeper | 触发清算的账户，收取清算奖励 |
@@ -157,11 +157,13 @@ docs/MECHANISMS.md「spot_only 的偿付不变量」。提款后既不得落入 
 
 ### 2.4 清算、keeper 与保险基金
 
-- `Place` 成交后会复核双方；仍可清算的一方可能在同一单元内被强制卖出。
+- 第 7 轮起每个 unit 至多产生**一笔**成交：Market / IOC 单吃到第一个 maker 即停，Limit + Gtc
+  单若还会吃到第二个 maker 则整单拒绝；`Place` 不再在同一单元内 force-sell 仍可清算的成交方
+  （留给之后的 keeper `Liquidate`）。
   keeper 发起的 `Liquidate` 由 `caller` 签名，禁止自我清算，也不能把保险账户
-  作为 caller 或 target。普通市场先用 Market IOC 吃簿；目标仍可清算时，剩余
-  仓位按 mark 价 ADL 给反向持仓者，按仓位绝对值降序、`AccountId` 升序确定
-  次序。对手仓位不足时剩余仓位保留在目标账户，不由保险基金接盘。
+  作为 caller 或 target。普通市场先用 Market IOC 吃簿（一笔）；簿内没有成交且目标仍可清算时，
+  按 mark 价（夹进价格带）ADL 给一个反向持仓者，按仓位绝对值降序、`AccountId` 升序选第一个。
+  剩余仓位留给下一次 `Liquidate`，不由保险基金接盘。
 - 普通双非保险方成交若使一方 collateral 为负，只从另一方可用正 collateral
   clawback：金额不超过其可支付余额、转账保持零和。余额不足时缺口仍留在负
   collateral，不会把 equity 钳零或转记保险基金。
@@ -231,7 +233,7 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
-`assertion_version` 当前为 **3**（#47 B8 升到 2；第 6/6b 轮升到 3，见 ROLLUP-UPGRADE §7），
+`assertion_version` 当前为 **4**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4，见 ROLLUP-UPGRADE §7），
 rollup AA 只接受等于 3 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
@@ -421,6 +423,14 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
 - **QTY_CAP（R6-H1，执行规则）**：`place` 拒绝 `|仓位| + 该市场挂单剩余量 + qty ≥ 1e15` 的
   下单；P-fsane 判成交量 ≥ 1e15 为欺诈，P-claw / fill_math 对 ≥ 1e15 的 pre 仓位 bounce。
 
+第 7 轮规则（MECHANISMS §10.14）：
+- **P-opbind（项 10）**：unit id = `sha256("mnu3|" + hex(canonical) + "|" + E)`，E 是该 unit 的
+  ops 描述串（无则 `x`）。挑战者提交在第二个 `|` 处切开的 `u_pre` / `u_op`；`sha256(u_pre‖u_op)`
+  等于 units 叶 k、而 ops 叶 k ≠ `u_op`（`x` → `x:{id}`）即欺诈。
+- **一笔成交（项 19，执行规则）**：每个 unit 至多一笔成交；P-fsane 判 idx ≠ 0 的成交为欺诈。
+- **ADL 价格（项 28）**：witness 新增 `band:{market}:{min}:{max}` 叶；普通市场 kind 2 成交价
+  ≠ clamp(pre mark, band) 时 P-claw 判欺诈（给出 band 证明时）。
+
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
 “不变”也不是“正确变化”的值才判 fraud（#47 跨 PR 一致性修复）。
@@ -504,6 +514,12 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 （R3-E-2，取舍）；`resting_open_im` 逐仓挂单扣除 `margin_left`、现货挂单不与仓位轧差；
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
+
+第 7 轮部署变化：unit id 改为文本哈希、每个 unit 一笔成交、witness 新增 `band:` 叶（共识级，
+出块方与 watcher 同时升级）；dispute（P-opbind）、dispute_book（P-fsane idx）、dispute_claw
+（ADL 价格）、rollup（版本门）定义变化。op 预算：vault 364、rollup 996、dispute 1575、
+dispute_fill 1966、dispute_bind 1956、dispute_book 1712、dispute_claw 1780；rollup 只接受
+`assertion_version == 4`。
 
 第 6 轮部署变化：新增 dispute_claw；rollup 新占位与 case。第 6b 轮 op 预算：vault 364、rollup 996、dispute 1383、dispute_fill 1966、dispute_bind 1956、dispute_book 1708、dispute_claw 1706（上限 2000）；rollup 只接受 `assertion_version == 3`。
 

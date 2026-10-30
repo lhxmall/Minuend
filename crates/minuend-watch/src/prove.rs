@@ -2929,6 +2929,34 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
 
 /// R6-C1 regular-market rule (`$fr0`): after the funding gate a kind-1
 /// fill, or a Liquidate whose target is not the taker, is fraud.
+/// Round 7 (未修复项 28) mirror of P-claw's `$badp`: a kind-2 ADL fill's
+/// price is not `clamp(pre mark, band)` (floor first, then ceiling; 0 =
+/// unbounded, as `minuend_exec::clamp_to_band`). `None` when a value is
+/// not an exact Oscript integer (|x| >= 1e15) — no proof then.
+fn adl_price_bad(fill: &str, meta: &str, band: &str) -> Option<bool> {
+    let exact = |s: &str| {
+        s.parse::<i128>()
+            .ok()
+            .filter(|v| v.unsigned_abs() < 1_000_000_000_000_000)
+    };
+    let f: Vec<&str> = fill.split(':').collect();
+    let m: Vec<&str> = meta.split(':').collect();
+    let b: Vec<&str> = band.split(':').collect();
+    if f.len() != 14 || m.len() != 11 || b.len() != 4 {
+        return None;
+    }
+    let (price, mark) = (exact(f[8])?, exact(m[8])?);
+    let (lo, hi) = (exact(b[2])?, exact(b[3])?);
+    let mut ex = mark;
+    if lo != 0 && ex < lo {
+        ex = lo;
+    }
+    if hi != 0 && ex > hi {
+        ex = hi;
+    }
+    Some(price != ex)
+}
+
 fn claw_regular_rule(fill: &str, op: &str) -> bool {
     let f: Vec<&str> = fill.split(':').collect();
     oscript_num(f.get(12).copied().unwrap_or("")) == Some(1.0)
@@ -3028,6 +3056,26 @@ fn claw_proof(
     // R6-C1 (`$fr0`): kind 1 / a foreign Liquidate target on a regular market.
     if claw_regular_rule(&f, &op) {
         return (!honest_pair).then(|| built(data));
+    }
+    // Round 7 (未修复项 28, `$badp`): a kind-2 ADL off clamp(mark, band).
+    if kind == "2" {
+        if let Some(band) = pre_leaves
+            .iter()
+            .find(|l| l.starts_with(&format!("band:{market}:")))
+        {
+            if adl_price_bad(&f, &meta, band) == Some(true) {
+                if honest_pair {
+                    return None; // the model disagrees with the replay
+                }
+                let obj = data.as_object_mut()?;
+                obj.insert("band".into(), band.clone().into());
+                obj.insert(
+                    "band_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, band)?),
+                );
+                return Some(built(data));
+            }
+        }
     }
     let c = claw_eval(&f, &op, pre_leaves, &posted)?;
     let leg_bad = c.dt.abs() > 2 * c.slack || c.dm.abs() > 2 * c.slack;
@@ -4968,6 +5016,13 @@ mod tests {
         assert_eq!(batch.fills.len(), 1, "single-fill unit: {:?}", batch.fills);
         assert_eq!(batch.fills[0].split(':').nth(12), Some(kind));
         let pre = minuend_state::wit_leaves(&replay.state);
+        // Round 7: an honest ADL print is clamp(pre mark, band).
+        if kind == "2" {
+            let mk = batch.fills[0].split(':').nth(7).unwrap();
+            let meta = pre.iter().find(|l| l.starts_with(&format!("meta:{mk}:"))).unwrap();
+            let band = pre.iter().find(|l| l.starts_with(&format!("band:{mk}:"))).unwrap();
+            assert_eq!(adl_price_bad(&batch.fills[0], meta, band), Some(false));
+        }
         let c = claw_eval(&batch.fills[0], &batch.ops[0], &pre, &batch.leaf_trace[0])
             .expect("P-claw judges this shape");
         assert_eq!((c.dt, c.dm), (0, 0), "model == engine on both legs: {c:?}");
@@ -5891,5 +5946,33 @@ mod tests {
         assert_eq!(pr.pred, "fsane");
         assert!(pr.data.get("units_proof").is_some());
         assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+    }
+
+    /// Round 7 (未修复项 28): the ADL print is bound to clamp(mark, band).
+    #[test]
+    fn r7_adl_price_is_bound_to_mark_and_band() {
+        let f = |px: &str| {
+            format!(
+                "f:{}:0:{}:{}:{}:{}:1:{px}:100:9:1:2:0",
+                "11".repeat(32),
+                "22".repeat(32),
+                "33".repeat(32),
+                "44".repeat(32),
+                "0".repeat(64)
+            )
+        };
+        let meta = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:0"), Some(false));
+        assert_eq!(adl_price_bad(&f("9000"), meta, "band:1:0:0"), Some(true));
+        // Ceiling 8000 < mark: the honest print is 8000.
+        assert_eq!(adl_price_bad(&f("8000"), meta, "band:1:0:8000"), Some(false));
+        assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:8000"), Some(true));
+        // Floor 9000 > mark (negative grid allowed).
+        assert_eq!(adl_price_bad(&f("9000"), meta, "band:1:9000:0"), Some(false));
+        assert_eq!(adl_price_bad(&f("-5"), meta, "band:1:-10:0"), Some(true));
+        assert_eq!(adl_price_bad(&f("1000000000000000"), meta, "band:1:0:0"), None);
+        // The genesis market carries its band leaf.
+        let leaves = minuend_state::wit_leaves(&Engine::new().state);
+        assert!(leaves.iter().any(|l| l.starts_with("band:1:")));
     }
 }

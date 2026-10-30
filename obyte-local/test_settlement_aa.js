@@ -3479,6 +3479,30 @@ async function main() {
     await triggerBounce(challenger, book, fsPayload(84, one, f1, 0), 20000, "no fraud");
     await live(84, "honest single fill");
     console.log("66. one fill per unit: a fabricated idx-1 fill → frozen (P-fsane); honest idx-0 fill → 'no fraud'");
+
+    // ---- 67. ADL price bound to clamp(mark, band) (未修复项 28) ----------
+    // 61 (c)'s ADL (T long 1 @ 100k ADL'd onto M, keeper M) with the pre
+    // meta's mark at 86k and the market's band leaf in the pre tree.
+    const META8 = `meta:1:1:1000:500:5:100:0:8600000000000:0:0`;
+    const BAND8 = `band:1:0:0`;
+    const P8 = await clawSetup(85, "r7-p8", [
+      acct(T, 15000000000), acct(M, 1000000000000), META8, BAND8,
+      `pos:${T}:1:100000000:10000000000000:0:0`, `pos:${M}:1:-100000000:10000000000000:0:0`, END,
+    ]);
+    const post8 = (tc, mc) => [acct(T, tc), acct(M, mc), META8, BAND8, END];
+    const bandFields = (P) => ({ band: BAND8, band_proof: P.proof(BAND8) });
+    const clawPayload8 = (P, h, u) => Object.assign(clawPayload(P, h, u, null), { pre_meta: META8, pre_meta_proof: P.proof(META8) }, bandFields(P));
+    // ADL printed at 90k (above the 86k mark, no band): T keeps 4k more.
+    const f8bad = `f:${isoUnit}:0:${T}:${M}:${LO}:${"0".repeat(64)}:1:9000000000000:100000000:9:1:2:0`;
+    const adlBad = clawUnit(P8, "r7-adl-bad", op3, [f8bad], post8(4100000000, 1010900000000));
+    await submitAt(86, adlBad);
+    await triggerVerdict(challenger, claw, clawPayload8(P8, 86, adlBad), 20000, "ADL price off clamp(mark, band)");
+    await frozen(86, "ADL price off the mark");
+    const adlOk = clawUnit(P8, "r7-adl-ok", op3, [f3], post8(140000000, 1014860000000));
+    await submitAt(86, adlOk);
+    await triggerBounce(challenger, claw, clawPayload8(P8, 86, adlOk), 20000, "no fraud");
+    await live(86, "honest ADL at the mark");
+    console.log("67. ADL at 90k with mark 86k (band leaf proven) → frozen (P-claw); honest ADL at the mark → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

@@ -21,6 +21,7 @@
 	//   ops_root, units_root, fill, fill_proof, units_proof, right,
 	//   right_proof, pre_wit (+pre_proof k>0), post_wit, post_proof, op,
 	//   ops_proof, pre_meta, pre_meta_proof, maker_ord(+proof, kind != 2),
+	//   band(+band_proof: round 7, kind 2 ADL price = clamp(mark, band)),
 	//   and for X in t (taker) / m (maker): X_pre_acct, X_post_acct (+proofs),
 	//   X_pre_pos (+proof) or, when the party had no position on the
 	//   market, X_pleft / X_pright (+proofs): the adjacent pre leaves that
@@ -211,9 +212,24 @@
 						// Funding-rate market: peg cash between all holders.
 						if ($M[9] != 0) bounce('no fraud');
 						$price = $F[8] + 0;
+						// Round 7 (未修复项 28): a kind-2 ADL prints at
+						// clamp(pre mark, band) (exec clamp_to_band: floor then
+						// ceiling, 0 = unbounded). One fill per unit means the
+						// book filled nothing in this unit, so the mark is the
+						// PRE meta's. Judged when the band leaf is given.
+						$bnd = trigger.data.band;
+						if ($kind == 2 AND typeof($bnd) == 'string') {
+							$B = split($bnd, ':');
+							if (!is_valid_merkle_proof($bnd, trigger.data.band_proof) OR trigger.data.band_proof.root != $pre_wit
+								OR array_length($B) != 4 OR $B[0] != 'band' OR $B[1] != $market)
+								bounce('bad band');
+							$ex1 = ($B[2] != 0 AND $M[8] < $B[2]) ? $B[2] : $M[8];
+							$ex2 = ($B[3] != 0 AND $ex1 > $B[3]) ? $B[3] : $ex1;
+							$badp = $price != $ex2;
+						} else $badp = false;
 						// Regular market (R6-C1): kind 1 never occurs and a
 						// Liquidate's target is always the taker.
-						$fr0 = $kind == 1 OR (substring($op, 0, 2) == 'L:' AND $tg != $tk);
+						$fr0 = $badp OR $kind == 1 OR (substring($op, 0, 2) == 'L:' AND $tg != $tk);
 						if ($kind == 0) {
 							$margin = ($OP[6] == '1') ? $OP[7] : 0;
 							$tp = ($qty >= $OP[5]) ? $margin : floor($margin * $qty / $OP[5]);
