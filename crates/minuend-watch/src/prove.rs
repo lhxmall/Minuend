@@ -2374,10 +2374,13 @@ mod tests {
             Some(&[ev(false, &addr, &other)])
         )
         .is_some());
-        assert!(
-            binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&[ev(true, &addr, &a)]))
-                .is_some()
-        );
+        assert!(binding_violation(
+            &d,
+            &[],
+            &format!("adr:{addr}:{a}"),
+            Some(&[ev(true, &addr, &a)])
+        )
+        .is_some());
         // round-2 d: carries the anchor: the old 4-part shape is refused
         let d4 = format!("d:{a}:5:{addr}");
         assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), Some(&good)).is_some());

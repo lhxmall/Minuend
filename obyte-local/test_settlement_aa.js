@@ -1998,7 +1998,7 @@ async function main() {
     const li = GENESIS_LEAVES.indexOf(FILL_TAKER_PRE);
     const ri = GENESIS_LEAVES.indexOf(META1);
     if (ri !== li + 1) throw new Error("fixture: adr neighbors not adjacent");
-    const adrPayload = (u) => ({
+    const adrPayload = (u, leaf = adr) => ({
       rollup: ROLLUP_ADDR,
       k: 0,
       op: u.op,
@@ -2008,8 +2008,8 @@ async function main() {
       pre_wit: WIT_ROOT,
       post_wit: u.wit,
       post_proof: merkle.getMerkleProof(u.trace, 0),
-      post_leaf: adr,
-      post_leaf_proof: u.leafProof(adr),
+      post_leaf: leaf,
+      post_leaf_proof: u.leafProof(leaf),
       left: GENESIS_LEAVES[li],
       left_proof: genProof(GENESIS_LEAVES[li]),
       right: GENESIS_LEAVES[ri],
@@ -2028,9 +2028,7 @@ async function main() {
     const adrOk = `adr:${payer37}:${DEP_ACCT}`;
     const honest = oneUnit("adr", `d:${DEP_ACCT}:100:${payer37}:${dep37}`, [adrOk, `adrx:${DEP_ACCT}:${payer37}`, `acct:${DEP_ACCT}:1000100:0:0`]);
     await submitAt(32, honest);
-    await triggerBounce(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(honest), {
-      post_leaf: adrOk, post_leaf_proof: honest.leafProof(adrOk),
-    }), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(honest, adrOk)), 20000, "no fraud");
     st = await vars(rollup);
     if (Number(st.frozen_32 || 0) !== 0) throw new Error("honest first binding froze h32!");
     console.log("37. P-adr: binding without its deposit -> frozen; d: with that address -> 'no fraud'");
