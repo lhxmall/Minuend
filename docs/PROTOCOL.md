@@ -400,6 +400,15 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
   （PERP 退回、不写 `depp_`）。`vault_deposit_of` 只镜像无状态部分（单笔 > 上限）；因额度已满
   被 bounce 的充值由生产者 / `post_batch.js` 的 `depp_` 记录核对与 watcher 的 hub 读取覆盖。
 
+第 6 轮 AA 规则（MECHANISMS §10.12）：
+- **P-claw**（dispute_claw，`pred: 'claw'`）：单成交 unit 的两条腿一起判——按引擎重算 taker 与
+  maker 的成交阶段 collateral、claw（先 taker 后 maker，零和）、逐仓 taker 未留簿托管的退款
+  与 keeper 扣取（都在 claw 之后），任一方 post collateral 偏离超过
+  `4 × (16 + floor(S/1e12))` 即欺诈。范围：普通市场的 kind 0（taker 自己的 `p:` 下）与
+  kind 2/3（`L:{caller}:{taker}:{market}` 下、cross target），taker ≠ maker、都不是保险账户。
+- **Reveal 转发**：`Reveal{Place}` / `Reveal{Liquidate}` 的 op 串是内层的 `p:` / `L:`
+  （此前是 `x:{unit}`）。
+
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
 “不变”也不是“正确变化”的值才判 fraud（#47 跨 PR 一致性修复）。
@@ -432,7 +441,11 @@ counts_root_h`。header 内容 == 链上根不可链上证明，由 watcher 检�
 DA MISMATCH，高度不验证）。帧由 `post_batch.js` 逐字节透传（R2-R-4，
 `frame_stamp.js` 只在充值帧末尾拼 `"e"` evidence），`data_root` 覆盖透传后的字节。
 
-## 4. 结算层：六个 AA、多类谓词（CHAIN_ID=minuend-v2）
+## 4. 结算层：七个 AA、多类谓词（CHAIN_ID=minuend-v2）
+
+第 6 轮：新增 `minuend_dispute_claw.aa`（P-claw），与其它 dispute AA 一起在 rollup 之前部署；
+rollup 多一个占位 `DISPUTE_CLAW_AA_HERE`、case `{set_dispute_claw:1}`、变量 `dispute_claw_aa`，
+verdict 也接受它；claw AA 用 `{bind_claw:1, rollup}` 绑定。
 
 第 2 轮部署单元：vault base → dispute / dispute_fill / dispute_bind / dispute_book
 （dispute 硬编码 vault base）→ rollup（硬编码四个 dispute 地址）→ vault 实例
@@ -442,7 +455,8 @@ DA MISMATCH，高度不验证）。帧由 `post_batch.js` 逐字节透传（R2-R
 状态变量（rollup AA；`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa,
+  dispute_claw_aa             # 第 6 轮
 submitted_at_h, state_root_h, aa_forest_h (1024 hex), prev_h,
   wit_root_h, trace_root_h, units_root_h, units_set_root_h,
   ops_root_h, fills_root_h, counts_root_h, unit_count_h, wit_count_h, fill_count_h
@@ -479,6 +493,8 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
 
+第 6 轮部署变化：新增 dispute_claw；op 预算 vault 364、rollup 996、dispute 1383、dispute_fill 1959、dispute_bind 1618、dispute_book 1704、dispute_claw 1434（上限 2000）；rollup 新占位与 case。
+
 第 5 轮部署变化：vault 新增 `pperp_total` 与 `perp cap` bounce（vault base 哈希改变，部署
 脚本推导）；op 预算 vault 364、rollup 976、dispute 1383、dispute_fill 1959、dispute_bind 1618、
 dispute_book 1704。
@@ -506,9 +522,10 @@ submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个
 
 fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              deposit | withdraw | escrow(Cancel only) | fill_math | ghost | skip
-             | wpin | adr | tip | keep | mirror | mbind | frame | fsane
+             | wpin | adr | tip | keep | mirror | mbind | frame | fsane | claw
              （第 2 轮：ghost/skip → dispute_book；wpin/adr/tip/keep/mirror → dispute_bind；
              第 4 轮：mbind → dispute_book，frame → dispute_bind；第 5 轮：fsane → dispute_book；
+             第 6 轮：claw → dispute_claw；
              fill_math → dispute_fill；其余 → dispute。verdict 后挑战者得 floor(罚没/5)）
              （#47：p: op 为 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}；
              fill_math 的 kind 0/1 taker 腿按 op 重算 taker_post 与挂单余额；kind 2/3 只在

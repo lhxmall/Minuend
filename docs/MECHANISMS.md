@@ -732,10 +732,11 @@ acct:{account_hex_64}:{collateral}:{perp}:{W}   # W = 累计已借记提款
 
 ## 10. 结算 AA 状态机（CHAIN_ID=minuend-v2）
 
-六个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、四个 dispute AA
+七个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、五个 dispute AA
 （`minuend_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`minuend_dispute_fill.aa` 成交、
 `minuend_dispute_bind.aa`（#47 A2 新增）W 列 / 地址绑定 / tip / keep / mirror、
-`minuend_dispute_book.aa`（第 2 轮新增）P-ghost 与 P-skip）和
+`minuend_dispute_book.aa`（第 2 轮新增）P-ghost 与 P-skip、
+`minuend_dispute_claw.aa`（第 6 轮新增）P-claw：一笔成交的两条腿一起判，见 §10.12）和
 `minuend_vault.aa`（托管；第 2 轮起为 base AA + 参数化实例
 `{base_aa, params:{rollup}}`）。金库无 owner key，claim 在 rollup。
 
@@ -749,7 +750,8 @@ dispute_bind 1596、dispute_book 1117；dispute_fill 只剩 29 ops 余量。
 rollup 状态变量（`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa,
+dispute_claw_aa                                    # 第 6 轮
 submitted_at_h, state_root_h, aa_forest_h(1024 hex), prev_h
 wit_root_h, trace_root_h, units_root_h, units_set_root_h
 ops_root_h, fills_root_h, counts_root_h, unit_count_h, wit_count_h, fill_count_h
@@ -799,6 +801,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | wpin（P-wpin） | dispute_bind | #47 A2：某账户 `acct:` 叶的 W 列在 unit k 发生变化，但该 unit 的 op 不是**该账户自己的** `w:{acct}:{amount}:{nonce}`；合法结果只有 W1 == W0（含被拒）或 W1 == W0 + amount。新账户用 pre 非成员证明（左右邻叶）代替 pre 叶 |
 | adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈；第 4 轮（R4-A-4）：新绑定还要求金库 `dep_<anchor>`（`D:` 为 `depp_<anchor>`）记录存在且 payer == A、account == X，否则判欺诈 |
 | mbind（P-mbind） | dispute_book | 第 4 轮 R4-A-1：成交 F 的 maker 订单在 pre_wit 中的 `ord:` 叶与 F 不符——owner、市场、方向（maker 与 taker 方向相反）、价格不同，或剩余量 < 成交量 |
+| claw（P-claw） | dispute_claw | 第 6 轮：单成交 unit 的**两条腿**——taker 与 maker 的 pre/post `acct:` 叶、两者的 pre 仓位、maker 订单、unit op——按引擎重算两方的成交阶段 collateral、claw（先 taker 后 maker，零和）、逐仓 taker 未留簿托管的退款（claw 之后）与 keeper 扣取（claw 之后，记给 caller）；任一方 post collateral 偏离超出舍入容差即欺诈（§10.12） |
 | frame（P-frame） | dispute_bind | 第 4 轮 R4-A-3：在 `c:` / `d:` / `w:` / `D:` / `W:` 单元里，`pos:` / `ord:` 叶不得出现、消失或被改写；唯一例外是 `c:` 撤掉的、属于该 `c:` 账户的那张订单 |
 | tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
 | keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
@@ -1084,6 +1087,70 @@ fill 判定都必须先腾出预算。
 dispute_bind 1618、dispute_book 1704（上限 2000）。vault base 哈希改变（部署脚本推导，
 没有写死的字面量）。快照布局未变（`SNAPSHOT_FORMAT_VERSION` 仍为 8，布局指纹测试通过）。
 
+### 10.12 第 6 轮（#47 R6）P-claw：一笔成交的两条腿
+
+**问题（PR #51 未修复项 27，第 5 轮仍未修的 CRITICAL）**：fill_math 每条腿单独判定，
+claw（一方成交阶段 collateral 为负时，引擎从**另一方**扣回、以对方能付的为上限，
+`minuend-state::apply_fill_pair`）只能写成每条腿各自的区间。于是一条腿真实为负时，运营方
+可以给收款方记上 claw 却不扣付款方（凭空造钱），或者扣了付款方却不记给收款方。
+
+**新 AA `minuend_dispute_claw.aa`（`pred: 'claw'`）**。输入：成交串与 fills/units 证明、右邻
+（单成交完整性，与 fill_math 相同）、pre_wit / post_wit 证明、unit op（ops_root 证明）、
+pre `meta:`、maker 订单 pre 叶（kind ≠ 2），以及两方各自的 `X_pre_acct` / `X_post_acct`、
+`X_pre_pos` 或（无仓位时）`X_pleft` / `X_pright`（X = `t` / `m`；夹住 `pos:{acct}:{market}:`
+前缀的相邻 pre 叶——市场自己的 `meta:` 叶一定排在前面，`~:end` 一定排在后面）。
+
+判定（全部是引擎的精确算术，Rust 截断）：
+
+1. 两方的成交阶段 collateral：
+   - taker：`m_t = col_t − margin + release_t + pnl_t + back_t − fee`（margin = 逐仓 `p:` 在
+     下单时托管的金额；back = 纯减仓时托管份额回到 collateral；fee = kind 0/3 的 bps）；
+   - maker：`m_m = col_m + release_m + pnl_m + back_m`（back = maker 订单 `margin_left` 的
+     pro-rata 份额，纯减仓时回到 collateral）。
+2. claw：`x = m_t < 0 ? min(−m_t, max(m_m, 0)) : (m_m < 0 ? −min(−m_m, max(m_t, 0)) : 0)`，
+   taker `+x`、maker `−x`（零和，保险基金不参与）。
+3. claw 之后：逐仓 taker 未留簿部分的托管退款 `refund = margin − tp`（留簿时为 0）；
+   kind 2/3 的 keeper 奖励 `kpay = min(reward, max(m_t + x, 0))` 从 target 扣除，caller 是
+   maker 时记给 maker。
+4. `exp_t = m_t + x + refund − kpay`、`exp_m = m_m − x (+ kpay)`；两方 post collateral 必须
+   都在 `slack = 4 × (16 + floor(S / 1e12))` 之内，S 只含已证明的量（两方 |pre col|、2·|t2|、
+   两方 |pnl|、bucket、mml、margin、|qty|·|entry|/1e10）。claw 与 keeper 扣取对两方成交
+   阶段都是 1-Lipschitz，所以 4 倍的单腿容差之和覆盖 Oscript 15 位精度的误差。
+
+**判定范围**（其余一律 bounce `no fraud`；这些门要么读已证明的值，要么读的字段一旦
+造假本身就是别的谓词的欺诈）：单成交 unit；普通市场（pre `meta:` usd_per_unit = 0；资金费率
+市场的 peg 在所有持仓者之间移动现金，R2-A-7）；kind 0 必须在 taker 自己的 `p:` 下（账户 /
+市场 / 方向 / qty ≤ op qty，否则是 fill_math 的 op 绑定欺诈）；kind 2/3 必须在
+`L:{caller}:{taker}:{market}` 下，且 target 仓位为 cross（逐仓 target 可能在同一 unit 收到 STP
+托管退款）；kind 1 只在资金费率市场出现（否则是 P-fsane 的欺诈）；taker ≠ maker、都不是
+保险账户；maker 订单的 owner / 价格 / 剩余量不符是 P-mbind 的欺诈。账户 / 订单 / unit id
+一律用原始子串比较（纯数字的 64 位 hex 经 `split()` 会被读成 Decimal）。
+
+**Reveal 转发（未修复项 30）**：`ops_element` 对 `Reveal{Place}` / `Reveal{Liquidate}` 也提交
+内层的 `p:` / `L:` 描述串（此前是不透明的 `x:{unit}`，隐藏了 margin、tif 与 keeper）。
+Reveal 执行的就是同一个 `dispatch`，所以 fill_math 的托管恒等式、P-claw、P-fsane 的
+"被拒 Place" 臂对它们和直接 op 完全一样。诚实引擎下 kind 0/1 成交从此一定带 `p:`，
+fill_math 的 `$xt`（只判上限）分支只剩造假的 op 串会走到。这改变了含 Reveal{Place} /
+Reveal{Liquidate} 的批次的 ops_root（共识级承诺格式变化，随整套重新部署）。
+
+**watcher**：`prove.rs::claw_eval` 精确镜像（i128），`claw_proof` 在 fill_math 之后对单成交
+unit 运行；只在某一腿偏离超过 2 倍 slack（AA 判定确定）且——对重放产生的成交——诚实树在
+同一模型下通过时才出证明。`BuiltProof::target()` → `claw`；`--dispute-claw <addr>`；
+`script_helpers.js targetForPred('claw')` → claw AA（`dispute_claw_aa_address` /
+`MINUEND_DISPUTE_CLAW_AA` / `{bind_claw:1}` / rollup 变量 `dispute_claw_aa`）。
+Rust 测试用真实引擎跑 6 种诚实 claw（maker 窟窿、taker 窟窿、逐仓 taker 退款、ADL 窟窿、
+ADL keeper = maker、清算部分 claw），两条腿的模型偏差都是 0。
+
+**部署**：rollup 新占位 `DISPUTE_CLAW_AA_HERE`、新 case `{set_dispute_claw:1}`、verdict
+接受 `dispute_claw_aa`；claw AA 在 rollup 之前部署，绑定 `{bind_claw:1, rollup}`。
+
+部署 op 预算（第 6 轮）：vault 364、rollup 996、dispute 1383、dispute_fill 1959、
+dispute_bind 1618、dispute_book 1704、dispute_claw 1434（上限 2000）。
+
+**仍未解决**：ADL（kind 2）价格没有绑定到 mark（witness 里没有价格带边界）——P-claw 让
+两条腿互相绑定后，假 ADL 价格不能再造钱，但仍能在 target 与对手方之间按假价格转移已实现
+盈亏（以对手方自己的 collateral 为限）；多成交 unit 仍不判（未修复项 19）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
@@ -1332,13 +1399,12 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
   bucket、托管份额与挂单余量比较；PERP 只在引擎上限以下精确判定（pre PERP 列 > 14 位
   只可能来自更早已 finalize 的谎言，不再判定）；watcher 在金库记录未知时不构造依赖它的
   P-adr；dispute_fill 余量 29 ops
-- 第 5 轮仍未解决（§10.11）：**两条腿的 claw 金额没有互相绑定**（CRITICAL）——每条腿单独
-  判定，当一条腿的成交阶段 collateral 为负时，运营者可以只给收款方记 claw 而不扣付款方
-  （或在付款方正的成交阶段余额内烧掉其余额而不记给任何人），用自己控制的账户仍能凭空
-  造钱，上限是亏空 / 付款方的正余额；关闭它需要把两条腿放进同一个谓词（ops 预算不够，
-  需要新 AA）。ADL（kind 2）价格没有绑定到 mark，假 ADL 价格仍是"自洽的假成交"，容差 S
-  也随该价格增长。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry 比较。`x:` taker
-  只判 collateral 上限。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
+- 第 5 轮的 CRITICAL（两条腿的 claw 金额没有互相绑定）已由第 6 轮 P-claw 关闭（§10.12），
+  范围是单成交 unit 的普通市场 kind 0/2/3（资金费率市场、逐仓清算目标、多成交 unit 仍不判）。
+  ADL（kind 2）价格没有绑定到 mark（假价格不能再造钱，但能在 target 与对手方之间转移已实现
+  盈亏，以对手方的 collateral 为限）。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry
+  比较。`x:` taker 只判 collateral 上限——第 6 轮起 Reveal{Place} 提交内层 `p:`，诚实批次不再有
+  这种形状。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
   devnet 测试。P-fsane 的"被拒 Place"臂需要 op 账户的 pre 叶。cap bounce 的 P-deposit
   只在 watcher 读到 hub 时成立。
 

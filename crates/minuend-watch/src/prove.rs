@@ -2698,7 +2698,7 @@ fn claw_proof(
     if c.dt.abs() <= 2 * c.slack && c.dm.abs() <= 2 * c.slack {
         return None;
     }
-    if honest_fills.iter().any(|h| *h == f) {
+    if honest_fills.contains(&f) {
         match claw_eval(&f, &op, pre_leaves, post_leaves) {
             Some(h) if h.dt.abs() <= h.slack && h.dm.abs() <= h.slack => {}
             _ => return None, // the model does not reproduce the replay
