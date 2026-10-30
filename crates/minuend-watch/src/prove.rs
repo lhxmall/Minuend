@@ -35,7 +35,11 @@ impl BuiltProof {
             "bind"
         } else if self.fill_aa {
             "fill"
-        } else if self.pred == "ghost" || self.pred == "skip" || self.pred == "mbind" {
+        } else if self.pred == "ghost"
+            || self.pred == "skip"
+            || self.pred == "mbind"
+            || self.pred == "fsane"
+        {
             "book"
         } else {
             "main"
@@ -526,9 +530,16 @@ fn frame_proof(
         return None;
     }
     let posted = batch.leaf_trace.get(k)?;
+    // R5-A-1: acct leaves of accounts other than the op's are frozen too
+    // (the op account is op[2..66] for all five shapes).
+    let op_acct = op.get(2..66);
     let framed = |l: &str| {
         let n = l.split(':').count();
-        (l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10)
+        let foreign_acct = n == 5
+            && l.starts_with("acct:")
+            && l.as_bytes().get(69) == Some(&b':')
+            && l.get(5..69) != op_acct;
+        (l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10) || foreign_acct
     };
     let cancelled = |l: &str| {
         let q: Vec<&str> = l.split(':').collect();
@@ -589,6 +600,147 @@ fn frame_proof(
             bind_aa: true,
             data,
         });
+    }
+    None
+}
+
+/// R5-A-2: the P-fsane shape rule on a fill string (mirrors the book AA's
+/// `$bad`): not 14 fields, qty not a positive integer, price / taker_post
+/// not integers, taker_post < 0, side not 0/1, kind not 0..3, or kind 2/3
+/// with taker_post != 0.
+fn fsane_shape_bad(parts: &[&str]) -> bool {
+    if parts.len() != 14 {
+        return true;
+    }
+    let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
+    let Some(q) = int(parts[9]) else { return true };
+    if q <= 0.0 || int(parts[8]).is_none() {
+        return true;
+    }
+    let Some(tp) = int(parts[13]) else {
+        return true;
+    };
+    if tp < 0.0 {
+        return true;
+    }
+    if oscript_eq(parts[11], "0") != Some(true) && oscript_eq(parts[11], "1") != Some(true) {
+        return true;
+    }
+    let Some(kd) = int(parts[12]).filter(|k| (0.0..=3.0).contains(k)) else {
+        return true;
+    };
+    kd >= 2.0 && tp != 0.0
+}
+
+/// R5-A-2 P-fsane proof for one posted fill of unit `k` (see the book AA).
+fn fsane_proof(
+    batch: &Batch,
+    k: usize,
+    f: &str,
+    pre_leaves: &[String],
+    fills_tree: &[String],
+    unit_hexes: &[String],
+) -> Option<BuiltProof> {
+    let parts: Vec<&str> = f.split(':').collect();
+    let idx = index_of(&batch.fills, f)?;
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(fills_tree, idx),
+    });
+    let built = |data: serde_json::Value| BuiltProof {
+        pred: "fsane".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    };
+    if fsane_shape_bad(&parts) {
+        if parts.len() == 14 {
+            data.as_object_mut()?
+                .insert("units_proof".into(), proof_json(unit_hexes, k));
+        }
+        return Some(built(data));
+    }
+    if unit_hexes.get(k).map(String::as_str) != Some(parts[1]) {
+        return None;
+    }
+    data.as_object_mut()?
+        .insert("units_proof".into(), proof_json(unit_hexes, k));
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    let kind = parts[12];
+    // Kind vs market (usd_per_unit != 0 = funding-rate market).
+    if let Some(meta) = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{}:", parts[7])))
+    {
+        let m: Vec<&str> = meta.split(':').collect();
+        if let Some(usd) = m
+            .get(9)
+            .and_then(|v| v.parse::<i128>().ok())
+            .filter(|_| m.len() == 11)
+        {
+            let fund = usd != 0;
+            if (kind == "0" && fund) || (kind == "1" && !fund) || (kind == "3" && fund) {
+                let mut d = data.clone();
+                let o = d.as_object_mut()?;
+                o.insert("pre_meta".into(), meta.clone().into());
+                o.insert(
+                    "pre_meta_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+                );
+                return Some(built(d));
+            }
+        }
+    }
+    // Rejected direct Place: cross with margin != 0, or isolated with a
+    // margin > 0 above the op account's pre collateral.
+    let op = batch.ops.get(k)?;
+    let o: Vec<&str> = op.split(':').collect();
+    if o.len() == 10 && o[0] == "p" {
+        if let Ok(margin) = o[7].parse::<i128>() {
+            let mut d = data.clone();
+            {
+                let obj = d.as_object_mut()?;
+                obj.insert("op".into(), op.clone().into());
+                obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
+            }
+            if o[6] == "0" && margin != 0 {
+                return Some(built(d));
+            }
+            if o[6] == "1" && margin > 0 {
+                let key = format!("acct:{}:", op.get(2..66)?);
+                if let Some(acct) = pre_leaves.iter().find(|l| l.starts_with(&key)) {
+                    let col = acct.split(':').nth(2).and_then(|c| c.parse::<i128>().ok());
+                    if col.is_some_and(|c| margin > c) && acct.split(':').count() == 5 {
+                        let obj = d.as_object_mut()?;
+                        obj.insert("pre_acct".into(), acct.clone().into());
+                        obj.insert(
+                            "pre_acct_proof".into(),
+                            proof_json(pre_leaves, index_of(pre_leaves, acct)?),
+                        );
+                        return Some(built(d));
+                    }
+                }
+            }
+        }
+    }
+    // Absent fill party.
+    for (who, hexs) in [("taker", parts[3]), ("maker", parts[4])] {
+        if hexs.bytes().all(|b| b.is_ascii_digit()) {
+            continue; // Oscript would read it as a number
+        }
+        if let Some(abs) = prefix_absence(pre_leaves, &format!("acct:{hexs}:")) {
+            let mut d = data.clone();
+            let obj = d.as_object_mut()?;
+            obj.insert("who".into(), who.into());
+            obj.extend(abs.as_object()?.clone());
+            return Some(built(d));
+        }
     }
     None
 }
@@ -968,19 +1120,6 @@ fn range_straddle(
     None
 }
 
-fn acct_pos_range(
-    tree: &[String],
-    acct_hex: &str,
-    allow_last: bool,
-) -> Option<(usize, Option<usize>)> {
-    range_straddle(
-        tree,
-        &format!("pos:{acct_hex}:"),
-        &format!("pos:{acct_hex};"),
-        allow_last,
-    )
-}
-
 fn mkt_pos_range(
     tree: &[String],
     acct_hex: &str,
@@ -1009,9 +1148,9 @@ struct TakerPlace<'a> {
     side: &'a str,
     price: &'a str,
     remaining: i128,
-    /// R4-A-5: the op qty is at/above 1e14 — the AA skips the resting
-    /// order's remaining compare.
-    remaining_big: bool,
+    /// R5-A-2: the AA compares the resting order's remaining to within
+    /// floor(op qty / 1e12) (0 below 1e12); this mirror allows twice that.
+    remaining_tol: i128,
     iso: &'a str,
 }
 
@@ -1031,8 +1170,8 @@ struct Leg<'a> {
     exp_qty: i64,
     exp_entry: i64,
     exp_absent: bool,
-    /// Some(expected post bucket) when the AA checks it.
-    exp_bucket: Option<i128>,
+    /// Some((expected post bucket, mirror tolerance)) when the AA checks it.
+    exp_bucket: Option<(i128, i128)>,
     exp_fill: i128,
     taker_place: Option<TakerPlace<'a>>,
     liq: Option<LiqLeg>,
@@ -1040,31 +1179,128 @@ struct Leg<'a> {
     /// The other fill party (claw guard: its proven post collateral must be
     /// > 0 before a collateral mismatch on THIS leg is fraud).
     counterparty: &'a str,
-    /// #47 claw guard: may a collateral mismatch count at all? False for a
-    /// kind 0/1 maker leg whose taker Place is isolated (its escrow refund
-    /// lands on the taker after the claw, so "taker post > 0" proves
-    /// nothing) — the AA bounces such a mismatch.
+    /// R5-A-2 claw range: may a proven positive counterparty rule out a
+    /// payment by THIS leg? False for a kind 0/1 maker leg whose taker
+    /// Place is not a known cross one (an isolated taker's refund lands
+    /// after the claw) and for a kind 2/3 leg whose keeper may be the
+    /// maker (a keeper credit can lift a clawed maker above 0).
     claw_checkable: bool,
-    /// R3-A-3: an input or intermediate magnitude at/above the AA's
-    /// 1e14 precision ceiling (minus the mirror margin). R4-A-5: the AA
-    /// then skips ONLY the collateral leg; every other leg is still judged.
-    size_bounce: bool,
+    /// R5-A-2: the AA's rounding tolerance, 6 + S / 1e12 over the proven
+    /// magnitudes (exact here).
+    tol: i128,
+    /// R2-A-7: kind 1 — the collateral leg is never judged.
+    col_skip: bool,
+    /// R5-A-2: keeper reward a kind 2/3 maker that may be the keeper can
+    /// additionally hold (0 otherwise).
+    kx: i128,
+    /// R5-A-2: a kind 0/1 taker under a non-`p:` descriptor (Reveal{Place}
+    /// is `x:`): Some(max(pre collateral, 0)) — the cross identity is only a
+    /// ceiling, fill-stage = ceiling - that floor, no lower bound.
+    xt_floor: Option<i128>,
+    /// R5-A-2: an ADL take larger than the leg's pre position (fraud).
+    adl_over: bool,
     /// R4-A-5: price / entry / qty at or above 1e14 — the AA skips the
     /// position leg's numeric qty/entry compare (the leaf must still exist
     /// or be proven absent as expected).
     pos_big: bool,
 }
 
-/// R3-A-3: the fill AA checks the collateral identity to +-FILL_TOL (ocore
-/// Oscript arithmetic keeps 15 significant digits; each truncated term may
-/// land 1 off, fee/keeper 2 off). This mirror builds a proof only when the
-/// AA's verdict is certain whatever its rounding: |posted - exact| >
-/// 2*FILL_TOL, exact fill stage >= 2*FILL_TOL, magnitudes below
-/// FILL_MAX - FILL_MARGIN.
+/// R3-A-3: the fill AA checks the collateral identity to a tolerance of
+/// FILL_TOL + S / 1e12 (ocore Oscript arithmetic keeps 15 significant
+/// digits; R5-A-2 replaced the old 1e14 skip gates with that relative
+/// slack). This mirror builds a proof only when the AA's verdict is certain
+/// whatever its rounding: it widens every band by three AA tolerances.
 const FILL_TOL: i128 = 6;
 const FILL_MAX: i128 = 100_000_000_000_000;
 const FILL_MARGIN: i128 = 16;
 const FILL_LIM: i128 = FILL_MAX - FILL_MARGIN;
+const FILL_REL: i128 = 1_000_000_000_000;
+
+/// R5-A-6: how Oscript reads a numeric-looking `split()` field — ocore
+/// `string_utils.toNumber` (`^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$`, then
+/// parseFloat, finite only) into a 15-digit Decimal; anything else stays a
+/// string (None).
+fn oscript_num(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let digits = |i: &mut usize| {
+        let st = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i > st
+    };
+    if !digits(&mut i) {
+        return None;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        if !digits(&mut i) {
+            return None;
+        }
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        if !digits(&mut i) {
+            return None;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    let f: f64 = s.parse().ok()?;
+    if !f.is_finite() {
+        return None;
+    }
+    Some(if f == 0.0 { 0.0 } else { f })
+}
+
+/// R5-A-6: Oscript `a == b` on two `split()` fields, when certain: numbers
+/// compare numerically (exact below 1e15), strings as strings, a number
+/// never equals a string. None = 15-digit rounding could go either way.
+fn oscript_eq(a: &str, b: &str) -> Option<bool> {
+    match (oscript_num(a), oscript_num(b)) {
+        (Some(x), Some(y)) => {
+            let exact = x.abs() < 1e15 && y.abs() < 1e15 && x.fract() == 0.0 && y.fract() == 0.0;
+            if x == y {
+                Some(true)
+            } else if exact || (x - y).abs() > 1e-12 * x.abs().max(y.abs()) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        (None, None) => Some(a == b),
+        _ => Some(false),
+    }
+}
+
+/// R5-A-3: the AA's `!is_integer(q) OR q <= 0 OR q > remaining` on a fill
+/// qty field against an honest remaining, when certain.
+fn oscript_qty_bad(q: &str, rem: &str) -> Option<bool> {
+    let r = oscript_num(rem)?;
+    let Some(x) = oscript_num(q) else {
+        return Some(true); // a string: is_integer() is false
+    };
+    if x.fract() != 0.0 || x <= 0.0 {
+        return Some(true);
+    }
+    if x.abs() < 1e15 && r.abs() < 1e15 {
+        Some(x > r)
+    } else if x > r * (1.0 + 1e-12) {
+        Some(true)
+    } else if x < r * (1.0 - 1e-12) {
+        Some(false)
+    } else {
+        None
+    }
+}
 
 fn acct_col(tree: &[String], acct_hex: &str) -> Option<i128> {
     tree.iter()
@@ -1109,13 +1345,9 @@ fn aa_fill_verdict(
         }
         None => true,
     };
-    // #47 claw guard: a proven POSITIVE counterparty post leaf. Required
-    // outright for kind 2/3 (B1/B2); for kind 0/1 it only gates whether a
-    // collateral mismatch counts (see `col_ok` below).
+    // #47 claw guard: a proven POSITIVE counterparty post leaf rules out a
+    // payment by this leg (R5-A-2: a range bound, never a bounce).
     let cp_pos = matches!(acct_col(tree, leg.counterparty), Some(c) if c > 0);
-    if leg.liq.is_some() && !cp_pos {
-        return false;
-    }
     // Position leg.
     let pos_leaf = tree.iter().find(|l| {
         l.starts_with("pos:") && {
@@ -1126,11 +1358,9 @@ fn aa_fill_verdict(
     let (pos_ok, pos_bail) = if leg.exp_absent {
         if pos_leaf.is_some() {
             (false, false) // surviving leaf where the engine removed it
-        } else if acct_pos_range(tree, leg.acct_hex, false).is_some() {
-            // The AA's acct-wide arm has no final-tree after-max branch;
-            // that shape falls through to the market-range check below.
-            (true, false)
         } else {
+            // R5-A-2: the AA proves absence by the market-range straddle
+            // only (the acct-wide arm was dropped for ops budget).
             match mkt_pos_range(tree, leg.acct_hex, leg.market, leg.allow_last) {
                 Some(_) => (true, false),
                 None => (false, true),
@@ -1148,9 +1378,9 @@ fn aa_fill_verdict(
                             .unwrap_or(false)))
                     && leg
                         .exp_bucket
-                        .map(|b| {
+                        .map(|(b, btol)| {
                             o[6].parse::<i128>()
-                                .map(|x| (x - b).abs() <= 1)
+                                .map(|x| (x - b).abs() <= btol)
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true);
@@ -1188,7 +1418,9 @@ fn aa_fill_verdict(
                     && o[2] == leg.market
                     && o[3] == tp.side
                     && o[4] == tp.price
-                    && (tp.remaining_big || o[6].parse::<i128>().ok() == Some(tp.remaining))
+                    && o[6]
+                        .parse::<i128>()
+                        .is_ok_and(|r| (r - tp.remaining).abs() <= tp.remaining_tol)
                     && o[7] == leg.acct_hex
                     && o[8] == tp.iso
                     && o[9].parse::<i128>().ok() == Some(tp.tml);
@@ -1207,20 +1439,28 @@ fn aa_fill_verdict(
         // identity adds -(taker_post + still) + post_back.
         let e = leg.exp_fill - tp.tpost - still + tp.pback;
         (e, e - tp.tml + still, ord_ok, ord_bail)
+    } else if let Some(floor) = leg.xt_floor {
+        // x: taker: cross identity as the ceiling, fill-stage below it.
+        (leg.exp_fill, leg.exp_fill - floor, true, true)
     } else {
         (leg.exp_fill, leg.exp_fill, true, true)
     };
-    // Negative fill-stage collateral: the claw's effect is unprovable from
-    // these leaves — the AA skips the collateral leg for that shape. R3-A-3:
-    // the AA skips below 6 on its rounded value; certain only from 12.
-    // R4-A-5: the size / near-zero gate silences the collateral leg only.
-    let col_skip = leg.size_bounce || mid < 2 * FILL_TOL || expected.abs() >= FILL_LIM;
-    // #47 claw guard: a mismatch counts only when no claw can have moved
-    // this leg (positive counterparty; cross taker for a kind 0/1 maker).
-    // R3-A-3: the AA tolerates +-FILL_TOL; certain verdict beyond 2x.
-    let col_ok =
-        col_skip || (post_col - expected).abs() <= 2 * FILL_TOL || !(cp_pos && leg.claw_checkable);
-    (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || (!ord_bail && !ord_ok)
+    // R5-A-2 claw range (mirrors the AA): pays at most max(mid, 0) — none
+    // when a positive counterparty rules the claw out — and receives at
+    // most max(-mid, 0) (+ a keeper reward on a maybe-keeper maker). Every
+    // band is widened by three AA tolerances so a verdict here is certain.
+    let slack = 3 * leg.tol + 2;
+    let d = post_col - expected;
+    let lo = if leg.xt_floor.is_some() {
+        i128::MIN
+    } else if cp_pos && leg.claw_checkable {
+        -slack
+    } else {
+        -(mid.max(0) + slack)
+    };
+    let hi = (-mid).max(0) + leg.kx + slack;
+    let col_ok = leg.col_skip || (d >= lo && d <= hi);
+    (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || leg.adl_over || (!ord_bail && !ord_ok)
 }
 
 fn fill_proof(
@@ -1340,10 +1580,11 @@ fn fill_proof(
     }
     // R4-A-1 P-mbind (book dispute AA): a book fill (kind 0/1/3, any idx)
     // must match its maker order's PRE leaf — owner, market, opposite side,
-    // price — and fit its remaining qty. Mirrors the AA's checks exactly
-    // (canonical integers: a longer qty is larger; equal lengths compare
-    // numerically up to 15 digits). Gated on the fill not being a replay
-    // fill (an honest fill always matches).
+    // price — and fit its remaining qty. R5-A-3 / R5-A-6: mirrors the AA's
+    // NUMERIC reading of split() fields (`1e13` equals `10000000000000`,
+    // `1e30` / `-5` / `0` are bad quantities); built only when the AA's
+    // outcome is certain. Gated on the fill not being a replay fill (an
+    // honest fill always matches).
     for f in &unit_fills {
         if honest_fills.iter().any(|h| h == *f) {
             continue;
@@ -1364,17 +1605,15 @@ fn fill_proof(
             continue;
         }
         let opp = if parts[11] == "0" { "1" } else { "0" };
-        let (ql, rl) = (parts[9].len(), mo[6].len());
-        let qty_bad = ql > rl
-            || (ql == rl
-                && ql <= 15
-                && match (parts[9].parse::<u128>(), mo[6].parse::<u128>()) {
-                    (Ok(q), Ok(r)) => q > r,
-                    _ => false,
-                });
-        let bound =
-            mo[7] == parts[4] && mo[2] == parts[7] && mo[3] == opp && mo[4] == parts[8] && !qty_bad;
-        if bound {
+        let eqs = [
+            oscript_eq(mo[7], parts[4]),
+            oscript_eq(mo[2], parts[7]),
+            oscript_eq(mo[3], opp),
+            oscript_eq(mo[4], parts[8]),
+            oscript_qty_bad(parts[9], mo[6]).map(|b| !b),
+        ];
+        // Any uncertain comparison: stay silent; all bound: no fraud.
+        if eqs.iter().any(|e| e.is_none()) || eqs.iter().all(|e| *e == Some(true)) {
             continue;
         }
         let idx = index_of(&batch.fills, f)?;
@@ -1397,6 +1636,18 @@ fn fill_proof(
             bind_aa: false,
             data,
         });
+    }
+    // R5-A-2 P-fsane (book dispute AA): a posted fill the engine can never
+    // emit — bad shape, kind vs market, a fill in a unit whose direct Place
+    // is rejected before matching, or a fill party absent from the pre
+    // tree. Only for fills the honest replay did not produce.
+    for f in &unit_fills {
+        if honest_fills.iter().any(|h| h == *f) {
+            continue;
+        }
+        if let Some(p) = fsane_proof(batch, k, f, pre_leaves, &fills_tree, &unit_hexes) {
+            return Some(p);
+        }
     }
     // Skip: another live order strictly better than the filled maker.
     // #37-9 / #47 B3: only the unit's FIRST fill (idx 0) — pre_wit is the
@@ -1571,16 +1822,10 @@ fn fill_proof(
             continue;
         }
         let maker_side = if taker_side == "0" { "1" } else { "0" };
-        // #47 B1/B2: kind 2/3 at idx 0 of a single-fill unit is judged only
-        // on the Liquidate book path: taker == target, caller != maker.
-        if kind >= 2
-            && !(op_liq
-                && op_parts[2] == taker_hex
-                && op_parts[3] == market
-                && op_parts[1] != maker_hex)
-        {
-            continue;
-        }
+        // R5-A-2: on a regular market every kind 2/3 fill is the book-path
+        // Liquidate of its taker; the op only tells whether the keeper is
+        // known to differ from the maker (`kc` = it may be the maker).
+        let kc = kind >= 2 && !(op_liq && op_parts[1] != maker_hex);
         let pre_meta = match pre_leaves
             .iter()
             .find(|l| l.starts_with(&format!("meta:{market}:")))
@@ -1600,12 +1845,15 @@ fn fill_proof(
             Ok(v) => v,
             Err(_) => continue,
         };
-        // usd_per_unit must parse (the AA reads the meta leaf shape) but
-        // is no longer used: kind-1 fee/PnL are not modelled (R2-A-7).
-        let _usd: i128 = match mparts[9].parse() {
+        // usd_per_unit: != 0 marks a funding-rate market, where kind 2 is
+        // the off-book ADL the AA bounces (R5-A-2).
+        let usd: i128 = match mparts[9].parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
+        if kind >= 2 && usd != 0 {
+            continue;
+        }
         // Price notional (engine notional_usd, i128 trunc chain): fee base
         // of kind 0/3, keeper base of kind 2/3. Funding markets (kind 1)
         // price the fee off the multiplier. Kind 2 (ADL) pays no fee.
@@ -1635,9 +1883,9 @@ fn fill_proof(
                 continue; // AA bails on the insurance account's own leaf
             }
             let who_taker = who == "taker";
-            if who_taker && kind <= 1 && !op_place {
-                continue; // AA bounces a kind 0/1 taker leg on a non-place op
-            }
+            // R5-A-2: a kind 0/1 taker under a non-`p:` descriptor (x:) gets
+            // the position leg and a collateral ceiling only.
+            let xt = who_taker && kind <= 1 && !op_place;
             let delta: i64 = if side_acct == "0" {
                 qty as i64
             } else {
@@ -1683,11 +1931,11 @@ fn fill_proof(
             if who_taker && kind >= 2 && iso {
                 continue;
             }
-            // The AA requires the maker's PRE ord leaf on every order-book
-            // maker leg (#47: its margin mode decides the bucket check of a
-            // maker with no prior position), except for ADL (kind 2: no
-            // maker order, no escrow).
-            let maker_ord = if !who_taker && kind != 2 {
+            // R5-A-2: the AA reads the maker's PRE ord leaf on every
+            // order-book leg — a taker leg whenever supplied (always here)
+            // and necessarily at price / qty >= 1e14 — except for ADL
+            // (kind 2: no maker order, no escrow).
+            let maker_ord = if kind != 2 {
                 pre_leaves
                     .iter()
                     .find(|l| l.starts_with(&format!("ord:{}:", parts[6])))
@@ -1695,21 +1943,33 @@ fn fill_proof(
             } else {
                 None
             };
-            if !who_taker && kind != 2 && maker_ord.is_none() {
-                continue;
-            }
-            // The AA bounces ('bad maker ord') a maker leg whose order is
-            // not this account's; that lie is P-mbind's (R4-A-1).
-            if maker_ord
-                .as_ref()
-                .is_some_and(|l| l.split(':').nth(7) != Some(acct_hex))
+            // A taker leg may omit it only below 1e14 price / qty.
+            if kind != 2
+                && maker_ord.is_none()
+                && (!who_taker
+                    || i128::from(price).abs() >= FILL_MAX
+                    || i128::from(qty) >= FILL_MAX)
             {
                 continue;
             }
-            let mo_iso = maker_ord
-                .as_ref()
-                .map(|l| l.split(':').nth(8) == Some("1"))
-                .unwrap_or(false);
+            // The AA bounces ('bad maker ord') a fill whose maker order is
+            // not the maker's, or whose price / qty leave the order: those
+            // lies are P-mbind's (R4-A-1 / R5-A-3).
+            if let Some(l) = &maker_ord {
+                let o: Vec<&str> = l.split(':').collect();
+                if o.len() != 10
+                    || o[7] != maker_hex
+                    || oscript_eq(o[4], parts[8]) != Some(true)
+                    || oscript_qty_bad(parts[9], o[6]) != Some(false)
+                {
+                    continue;
+                }
+            }
+            let mo_iso = !who_taker
+                && maker_ord
+                    .as_ref()
+                    .map(|l| l.split(':').nth(8) == Some("1"))
+                    .unwrap_or(false);
             // R3-A-3: the AA's $mml (maker order margin_left; 0 otherwise).
             let mml: i128 = maker_ord
                 .as_ref()
@@ -1729,6 +1989,7 @@ fn fill_proof(
                 _ => 0,
             };
             let post_any = if who_taker { taker_post } else { mpost_any };
+            let mpost_any = if who_taker { 0 } else { mpost_any };
             let tfee = if who_taker { fee } else { 0 };
             // Fill-stage collateral by kind: pre + release + pnl - taker fee
             // (+ maker pro-rata refund). Exact — the AA recomputes it.
@@ -1823,18 +2084,17 @@ fn fill_proof(
             // #47 A3: the bucket is checked where its inflow is known —
             // an isolated taker Place (kind 0/1) or an isolated maker
             // pre position.
-            // R4-A-5 (mirrors the AA): no bucket compare once an escrow
-            // input leaves Oscript's exact range.
+            // R5-A-2 (mirrors the AA): never skipped; the AA's tolerance is
+            // 1 + (bucket + escrow share) / 1e12, doubled here (+2).
             let chk_b = if who_taker {
-                kind <= 1 && op_parts.get(6) == Some(&"1")
+                kind <= 1 && !xt && op_parts.get(6) == Some(&"1")
             } else {
                 iso || mo_iso
-            } && bucket < FILL_LIM
-                && mml < FILL_LIM
-                && taker_post < FILL_LIM;
+            };
+            let btol = 4 + 2 * ((bucket + post_any).max(0) / FILL_REL);
             // #47 A3: kind 0/1 taker — bind the fill to its own Place op and
             // derive the resting escrow from typ/tif instead of F[5]'s leaf.
-            let (taker_place, op_lie) = if who_taker && kind <= 1 {
+            let (taker_place, op_lie) = if who_taker && kind <= 1 && !xt {
                 let oqty: i128 = op_parts[5].parse().unwrap_or(0);
                 let margin: i128 = op_parts[7].parse().unwrap_or(0);
                 let op_iso = op_parts[6] == "1";
@@ -1846,14 +2106,14 @@ fn fill_proof(
                 } else {
                     margin * q / oqty
                 };
-                // R4-A-5: the AA skips the escrow-share compare once the
-                // margin leaves Oscript's exact range.
+                // R5-A-2: the AA's share tolerance is 1 + margin / 1e12
+                // (no skip); a certain lie is beyond twice that (+2).
                 let op_ok = op_parts[1] == taker_hex
                     && op_parts[2] == market
                     && op_parts[3] == taker_side
                     && q <= oqty
                     && taker_post >= 0
-                    && (margin >= FILL_LIM || (taker_post - tpost_exp).abs() <= 1)
+                    && (taker_post - tpost_exp).abs() <= 4 + 2 * (margin.max(0) / FILL_REL)
                     && (op_iso || taker_post == 0);
                 let rest = op_parts[9] == "0" && op_parts[8] == "0" && q < oqty;
                 let tml = if op_iso { margin - taker_post } else { 0 };
@@ -1867,7 +2127,7 @@ fn fill_proof(
                         side: taker_side,
                         price: op_parts[4],
                         remaining: oqty - q,
-                        remaining_big: oqty >= FILL_LIM,
+                        remaining_tol: 2 * (oqty.max(0) / FILL_REL),
                         iso: op_parts[6],
                     }),
                     !op_ok,
@@ -1882,6 +2142,22 @@ fn fill_proof(
             } else {
                 None
             };
+            // R5-A-2: the AA's tolerance 6 + S / 1e12 over proven magnitudes
+            // (old collateral, notional, pnl, bucket, maker margin_left, the
+            // op margin of a `p:` taker, old entry notional).
+            let sx: i128 = if who_taker && kind <= 1 && !xt {
+                op_parts[7].parse::<i128>().unwrap_or(0).abs()
+            } else {
+                0
+            };
+            let s_mag = old_col.abs()
+                + t2.abs()
+                + pnl_v.abs()
+                + bucket.abs()
+                + mml.abs()
+                + sx
+                + abs_old * i128::from(old_entry).abs() / 10_000_000_000;
+            let tol = FILL_TOL + s_mag / FILL_REL;
             let tord_hex = taker_place.as_ref().map(|t| t.tord.to_string());
             let leg = Leg {
                 acct_hex,
@@ -1889,7 +2165,11 @@ fn fill_proof(
                 exp_qty,
                 exp_entry,
                 exp_absent,
-                exp_bucket: if chk_b { Some(exp_bucket) } else { None },
+                exp_bucket: if chk_b {
+                    Some((exp_bucket, btol))
+                } else {
+                    None
+                },
                 exp_fill,
                 taker_place,
                 liq,
@@ -1899,17 +2179,19 @@ fn fill_proof(
                 } else {
                     taker_hex.as_str()
                 },
+                claw_checkable: !kc
+                    && (who_taker
+                        || kind >= 2
+                        || (op_parts.len() == 10 && op_parts.get(6) == Some(&"0"))),
+                tol,
                 // R2-A-7: never for kind 1 (funding peg may move collateral).
-                claw_checkable: kind != 1
-                    && (who_taker || kind >= 2 || op_parts.get(6) == Some(&"0")),
-                // R3-A-3 (mirrors the AA's magnitude bounce, with margin).
-                size_bounce: t2.abs() >= FILL_LIM
-                    || pnl_v.abs() >= FILL_LIM
-                    || old_col.abs() >= FILL_LIM
-                    || bucket >= FILL_LIM
-                    || mml >= FILL_LIM,
-                pos_big: i128::from(price) >= FILL_LIM
-                    || i128::from(old_entry) >= FILL_LIM
+                col_skip: kind == 1,
+                kx: if !who_taker && kc { reward } else { 0 },
+                xt_floor: if xt { Some(old_col.max(0)) } else { None },
+                adl_over: kind == 2 && i128::from(qty) > abs_old,
+                // R5-A-4: magnitudes (negative prices round the same).
+                pos_big: i128::from(price).abs() >= FILL_LIM
+                    || i128::from(old_entry).abs() >= FILL_LIM
                     || abs_old >= FILL_LIM
                     || i128::from(qty) >= FILL_LIM,
             };
@@ -1982,17 +2264,13 @@ fn fill_proof(
             // Op gate: every leg proves the unit op (Place or Liquidate).
             obj.insert("op".into(), op_str.clone().into());
             obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
-            // #47 claw guard: the counterparty's post collateral (required
-            // for kind 2/3, needed for a kind 0/1 collateral mismatch).
+            // #47 claw guard: the counterparty's post collateral (tightens
+            // the claw range's lower bound when positive).
             let cp = if who_taker { &maker_hex } else { &taker_hex };
             let key = format!("acct:{cp}:");
-            match posted_post.iter().position(|l| l.starts_with(&key)) {
-                Some(ci) => {
-                    obj.insert("cp_acct".into(), posted_post[ci].clone().into());
-                    obj.insert("cp_acct_proof".into(), proof_json(&posted_post, ci));
-                }
-                None if kind >= 2 => return None,
-                None => {}
+            if let Some(ci) = posted_post.iter().position(|l| l.starts_with(&key)) {
+                obj.insert("cp_acct".into(), posted_post[ci].clone().into());
+                obj.insert("cp_acct_proof".into(), proof_json(&posted_post, ci));
             }
             if let Some(tord) = &tord_hex {
                 // Resting-order leg: the taker order's own post ord leaf, or
@@ -2086,23 +2364,8 @@ fn fill_proof(
                     });
                 }
             }
-            // Regime proofs: the acct-wide pos range empty on the posted
-            // tree, or the market-range straddle, back a claimed-absent
-            // post pos.
-            if let Some((li, rj)) = acct_pos_range(&posted_post, acct_hex, false) {
-                obj.insert("eleft".into(), posted_post[li].clone().into());
-                obj.insert("eleft_proof".into(), {
-                    let p = obyte_merkle::proof(&posted_post, li);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                });
-                if let Some(rj) = rj {
-                    obj.insert("eright".into(), posted_post[rj].clone().into());
-                    obj.insert("eright_proof".into(), {
-                        let p = obyte_merkle::proof(&posted_post, rj);
-                        serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                    });
-                }
-            }
+            // The market-range straddle backs a claimed-absent post pos
+            // (R5-A-2: the AA's acct-wide arm is gone).
             if exp_absent && posted_pos_opt.is_none() {
                 if let Some((li, rj)) = mkt_pos_range(&posted_post, acct_hex, &market, allow_last) {
                     obj.insert("post_pleft".into(), posted_post[li].clone().into());
@@ -3091,13 +3354,15 @@ mod tests {
 
     #[test]
     fn forged_taker_post_is_fill_math_fraud() {
-        // #47 A3: the liar writes a NEGATIVE taker_post into the fill and
-        // inflates alice's collateral by the same amount — the old identity
-        // (which trusted F[13]) balanced; the op-bound one does not.
+        // #47 A3: the liar writes a wrong taker_post into the fill and moves
+        // alice's collateral by the same amount — the old identity (which
+        // trusted F[13]) balanced; the op-bound one does not. (R5-A-2: a
+        // NEGATIVE taker_post is now P-fsane's shape lie, so the forged
+        // share here is an inflated positive one.)
         let q = minuend_types::QTY_SCALE / 1000;
         let (mut batch, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
         let honest_tpost: i128 = batch.fills[0].split(':').nth(13).unwrap().parse().unwrap();
-        let forged = honest_tpost - 1_000_000_000;
+        let forged = honest_tpost + 1_000_000_000;
         set_fill_field(&mut batch, 0, 13, &forged.to_string());
         let alice_hex = hex::encode(a.0);
         bump_col(&mut batch, 1, &alice_hex, honest_tpost - forged);
@@ -3379,7 +3644,11 @@ mod tests {
             allow_last: false,
             counterparty: cp,
             claw_checkable: true,
-            size_bounce: false,
+            tol: FILL_TOL,
+            col_skip: false,
+            kx: 0,
+            xt_floor: None,
+            adl_over: false,
             pos_big: false,
         }
     }
@@ -3398,7 +3667,11 @@ mod tests {
             allow_last: false,
             counterparty: cp,
             claw_checkable: cross_taker,
-            size_bounce: false,
+            tol: FILL_TOL,
+            col_skip: false,
+            kx: 0,
+            xt_floor: None,
+            adl_over: false,
             pos_big: false,
         }
     }
@@ -3437,6 +3710,104 @@ mod tests {
             assert!(proof.data.get("maker_ord_proof").is_some());
             assert!(proof.data.get("units_proof").is_some());
         }
+    }
+
+    /// R5-A-3 / R5-A-6: P-mbind compares numerically, like the AA reads
+    /// split() fields — `1e30`, a negative and a zero qty are fraud; a
+    /// price written `1e13` that equals the maker's `10000000000000` is not
+    /// a P-mbind lie (the AA would bounce it).
+    #[test]
+    fn r5a3_mbind_numeric_qty_and_price() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        for v in ["1e30", "1e21", "-50000000", "0"] {
+            let mut batch = honest.clone();
+            set_fill_field(&mut batch, 0, 9, v);
+            let mut replay = funded_replay(&[a, b]);
+            let proof = build_proof(&batch, &mut replay, &[], 0)
+                .unwrap_or_else(|| panic!("qty {v}: no proof"));
+            assert_eq!(proof.pred, "mbind", "qty {v}");
+        }
+        let px: i64 = honest.fills[0].split(':').nth(8).unwrap().parse().unwrap();
+        assert_eq!(px, 10_000_000_000_000, "test assumes px = 1e13");
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 8, "1e13");
+        let mut replay = funded_replay(&[a, b]);
+        if let Some(p) = build_proof(&batch, &mut replay, &[], 0) {
+            assert_ne!(p.pred, "mbind", "numerically equal price is not P-mbind");
+        }
+        assert_eq!(oscript_eq("1e13", "10000000000000"), Some(true));
+        assert_eq!(oscript_eq("007", "7"), Some(true));
+        assert_eq!(oscript_eq("abc", "abc"), Some(true));
+        assert_eq!(oscript_eq("abc", "0"), Some(false));
+        assert_eq!(oscript_qty_bad("1e30", "100000"), Some(true));
+        assert_eq!(oscript_qty_bad("100000", "100000"), Some(false));
+        assert_eq!(oscript_qty_bad("1.5", "100000"), Some(true));
+    }
+
+    /// R5-A-2 P-fsane: kind 2/3 with taker_post != 0, a kind 0 fill tagged
+    /// kind 1 on a regular market, and a fill under a Place whose isolated
+    /// margin exceeds the pre collateral are fraud on proven values alone.
+    #[test]
+    fn r5a2_fsane_rules() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        // kind 1 on BTC_USD (usd_per_unit 0).
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 12, "1");
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("fsane kind proof");
+        assert_eq!(p.pred, "fsane");
+        assert_eq!(p.target(), "book");
+        assert!(p.data.get("pre_meta").is_some());
+        // kind 3 with a non-zero taker_post.
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 12, "3");
+        set_fill_field(&mut batch, 0, 13, "5");
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("fsane shape proof");
+        assert_eq!(p.pred, "fsane");
+        assert!(p.data.get("pre_meta").is_none());
+        // Shape helper.
+        let f = "f:u:0:t:m:to:mo:1:5:7:1:0:0:0";
+        let parts: Vec<&str> = f.split(':').collect();
+        assert!(!fsane_shape_bad(&parts));
+        for (i, v) in [
+            (9, "0"),
+            (9, "1.5"),
+            (8, "x"),
+            (13, "-1"),
+            (11, "2"),
+            (12, "4"),
+        ] {
+            let mut p2 = parts.clone();
+            p2[i] = v;
+            assert!(fsane_shape_bad(&p2), "field {i} = {v}");
+        }
+        // Isolated Place with margin > pre collateral (alice had 10 000 USD;
+        // rewrite the op's margin to 20 000 USD, fill untouched).
+        let mut batch = honest.clone();
+        let k = batch
+            .ops
+            .iter()
+            .position(|o| o.starts_with("p:") && o.split(':').nth(6) == Some("1"))
+            .expect("iso place op");
+        let mut o: Vec<String> = batch.ops[k].split(':').map(String::from).collect();
+        o[7] = (20_000 * minuend_types::USD_SCALE).to_string();
+        batch.ops[k] = o.join(":");
+        batch.checkpoint.ops_root = obyte_merkle::root(&batch.ops);
+        let pre = batch.leaf_trace[k - 1].clone();
+        let unit_hexes: Vec<String> = batch
+            .checkpoint
+            .unit_ids
+            .iter()
+            .map(|id| hex::encode(id.0))
+            .collect();
+        let tree = minuend_settle::fills_root_elements(&batch.fills);
+        let f0 = batch.fills[0].clone();
+        let p = fsane_proof(&batch, k, &f0, &pre, &tree, &unit_hexes).expect("fsane op proof");
+        assert!(p.data.get("pre_acct").is_some());
+        assert!(p.data.get("op").is_some());
     }
 
     /// Alice rests an isolated bid that bob's ask partly fills, then
@@ -3567,6 +3938,58 @@ mod tests {
         assert_eq!(p.data["ins"], serde_json::json!(false));
     }
 
+    /// R5-A-1: a foreign account's acct leaf rewritten (or dropped, or a
+    /// fake one inserted) in a c: unit is P-frame fraud; the cancelling
+    /// account's own leaf is not framed.
+    #[test]
+    fn r5a1_foreign_acct_change_in_cancel_unit_builds_frame_proof() {
+        let (honest, a, b, _oid) = cancel_batch();
+        assert!(honest.ops[2].starts_with("c:"), "{}", honest.ops[2]);
+        let canceller = honest.ops[2][2..66].to_string();
+        let other = if canceller == hex::encode(a.0) {
+            hex::encode(b.0)
+        } else {
+            hex::encode(a.0)
+        };
+        // (a) the other account's collateral zeroed (rewrite).
+        let mut batch = honest.clone();
+        let mut hit = false;
+        for l in batch.leaf_trace[2].iter_mut() {
+            if l.starts_with(&format!("acct:{other}:")) {
+                let mut p: Vec<String> = l.split(':').map(String::from).collect();
+                p[2] = "0".into();
+                *l = p.join(":");
+                hit = true;
+            }
+        }
+        assert!(hit, "other account has an acct leaf");
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct proof");
+        assert_eq!(p.pred, "frame");
+        assert!(p.data["leaf"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("acct:{other}:")));
+        // (b) a fake acct leaf inserted.
+        let mut batch = honest.clone();
+        let fake = format!("acct:{}:777:0:0", "ab".repeat(32));
+        batch.leaf_trace[2].push(fake.clone());
+        batch.leaf_trace[2].sort();
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct ins proof");
+        assert_eq!(p.pred, "frame");
+        assert_eq!(p.data["ins"], serde_json::json!(true));
+        assert_eq!(p.data["leaf"].as_str(), Some(fake.as_str()));
+        // (c) the frame closure itself never frames the op account.
+        let pre = &honest.leaf_trace[1];
+        let post = &honest.leaf_trace[2];
+        assert!(frame_proof(&honest, 2, &honest.ops[2], pre, post).is_none());
+    }
+
     /// R4-A-5: the size/near-zero gate silences only the collateral leg —
     /// a surviving position where the engine closed it is still fraud.
     #[test]
@@ -3574,7 +3997,7 @@ mod tests {
         let a = "aa".repeat(32);
         let c = "cc".repeat(32);
         let mut leg = place_leg(&a, &c, 1_000, true);
-        leg.size_bounce = true;
+        leg.col_skip = true;
         let mut t = vec![
             format!("acct:{a}:600:0:0"),
             format!("acct:{c}:5:0:0"),
@@ -3619,13 +4042,34 @@ mod tests {
         // leaf proves nothing — never a collateral verdict.
         let iso = place_leg(&a, &c, 1_000, false);
         assert!(!aa_fill_verdict(&tree(600, 5), &iso, false, None));
+        // R5-A-2: a claw can lift a leg at most to 0 from a NEGATIVE fill
+        // stage; a positive fill stage can never receive — minting above
+        // the identity is fraud whatever the counterparty shows.
+        assert!(aa_fill_verdict(&tree(1_500, 0), &leg, false, None));
+        assert!(aa_fill_verdict(&tree(1_500, -5), &iso, false, None));
+        // Negative fill stage (-300): honest post anywhere in [-300, 0].
+        let neg = place_leg(&a, &c, -300, true);
+        assert!(!aa_fill_verdict(&tree(0, 5), &neg, false, None));
+        assert!(!aa_fill_verdict(&tree(-300, 5), &neg, false, None));
+        assert!(aa_fill_verdict(
+            &tree(1_000_000_000_000, 5),
+            &neg,
+            false,
+            None
+        ));
+        // x: taker: ceiling max(cross identity, pre floor), no lower bound.
+        let mut xt = place_leg(&a, &c, 100, true);
+        xt.xt_floor = Some(400);
+        assert!(!aa_fill_verdict(&tree(400, 5), &xt, false, None));
+        assert!(!aa_fill_verdict(&tree(-9_000, 5), &xt, false, None));
+        assert!(aa_fill_verdict(&tree(5_000, 5), &xt, false, None));
     }
 
     #[test]
-    fn kind2_legs_bounce_without_positive_counterparty() {
+    fn kind2_legs_judged_as_claw_range() {
         // #47 B1: a counterparty at <= 0 may mean the claw moved this leg's
-        // collateral — the AA (and this mirror) must stay silent even when
-        // the leg's own collateral differs from the fill-stage identity.
+        // collateral (a payment of at most its fill stage) — silent then.
+        // R5-A-2: no longer a bounce: a post ABOVE the identity is fraud.
         let a = "aa".repeat(32);
         let c = "cc".repeat(32);
         let tree = |acol: i128, ccol: i128| -> Vec<String> {
@@ -3643,6 +4087,18 @@ mod tests {
         assert!(aa_fill_verdict(&tree(600, 5), &maker, false, None));
         // Honest maker leg: exact fill-stage.
         assert!(!aa_fill_verdict(&tree(1_000, 5), &maker, false, None));
+        // R5-A-2: minted above the identity with the counterparty at 0.
+        assert!(aa_fill_verdict(&tree(5_000, 0), &maker, false, None));
+        // A maker that may be the keeper holds up to the reward on top.
+        let mut keeper = liq_leg(&a, &c, false, 1_000);
+        keeper.kx = 30;
+        keeper.claw_checkable = false;
+        assert!(!aa_fill_verdict(&tree(1_030, 5), &keeper, false, None));
+        assert!(aa_fill_verdict(&tree(1_100, 5), &keeper, false, None));
+        // An ADL take past the pre position is fraud on its own.
+        let mut over = liq_leg(&a, &c, false, 1_000);
+        over.adl_over = true;
+        assert!(aa_fill_verdict(&tree(1_000, 5), &over, false, None));
     }
 
     #[test]
