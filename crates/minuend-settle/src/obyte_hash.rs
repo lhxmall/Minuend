@@ -175,6 +175,17 @@ pub fn get_json_source(v: &Value) -> String {
     get_json_source_string(v).expect("value has an Obyte canonical JSON source")
 }
 
+/// Obyte `payload_hash` of a message payload inside `unit` (ocore
+/// `objectHash.getBase64Hash(payload, version != '1.0')`): standard base64
+/// of sha256 over the canonical source. The unit hash covers only this
+/// hash (payloads are stripped), so a caller reading a payload must check
+/// it against the message's `payload_hash` (R3-A-5).
+pub fn get_payload_hash(payload: &Value, unit: &Value) -> Result<String, String> {
+    let h = get_base64_hash(payload, !version_is_legacy(unit))?;
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(h))
+}
+
 /// data_hash = sha256(get_json_source(v)), hex-encoded by callers.
 pub fn get_data_hash(v: &Value) -> [u8; 32] {
     Sha256::digest(get_json_source(v).as_bytes()).into()

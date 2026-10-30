@@ -71,6 +71,13 @@ pub struct ChainState {
     /// endorsing PERP are distinct entries. Deposit ops referencing units
     /// outside this set are rejected.
     pub deposits_allowed: HashSet<([u8; 32], bool)>,
+    /// R3-A-5 / R3-E-3: the sidechain account the PAYER designated for a
+    /// deposit anchor (vault `trigger.data.account`, installed from verified
+    /// evidence like `deposits_allowed`; transient, never committed). A
+    /// Deposit/GovDeposit of any other account is rejected, so nobody can
+    /// front-run a payment to credit or bind it to themselves.
+    #[serde(default)]
+    pub deposit_accounts: HashMap<[u8; 32], AccountId>,
     /// Highest consumed GovWithdraw nonce per account: strict watermark —
     /// nonces must be strictly increasing per account (`nonce <= watermark`
     /// bounces). Bounded by the account count, unlike a spent-nonce set.
@@ -248,6 +255,7 @@ impl ChainState {
             seen_aa_units: HashMap::new(),
             seen_client_seq: HashMap::new(),
             deposits_allowed: HashSet::new(),
+            deposit_accounts: HashMap::new(),
             seen_gov_nonces: HashMap::new(),
             aa_addresses: BTreeMap::new(),
             aa_address_owners: BTreeMap::new(),
@@ -282,6 +290,9 @@ impl ChainState {
                 false
             }
         });
+        let allowed = &self.deposits_allowed;
+        self.deposit_accounts
+            .retain(|unit, _| allowed.contains(&(*unit, false)) || allowed.contains(&(*unit, true)));
     }
     /// Window prune (2048 from genesis, mainnet launch). Same `window` on
     /// producer and replay keeps batch commits deterministic.

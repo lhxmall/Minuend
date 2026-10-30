@@ -1387,6 +1387,19 @@ impl Engine {
         Ok(Vec::new())
     }
 
+    /// R3-A-5 / R3-E-3: the anchor's payer-designated account (vault
+    /// `trigger.data.account`, installed from verified evidence) must be
+    /// the op's account. Production replay (`Batch::validate_inner`)
+    /// installs an entry for every deposit anchor it verifies; an anchor
+    /// without one (unit-test fixtures seeding `deposits_allowed` directly)
+    /// keeps the pre-R3 behaviour.
+    fn deposit_target_ok(&self, account: AccountId, aa_unit: [u8; 32]) -> Result<(), RejectReason> {
+        match self.state.deposit_accounts.get(&aa_unit) {
+            Some(want) if *want != account => Err(RejectReason::BadAccount),
+            _ => Ok(()),
+        }
+    }
+
     fn deposit(
         &mut self,
         account: AccountId,
@@ -1404,6 +1417,9 @@ impl Engine {
         if !self.state.deposits_allowed.contains(&(aa_unit, false)) {
             return Err(RejectReason::UnbackedDeposit);
         }
+        // R3-A-5 / R3-E-3: only the account the payer designated may claim
+        // (and bind) this anchor — a front-running Deposit is rejected.
+        self.deposit_target_ok(account, aa_unit)?;
         // The withdrawal address must be a well-formed Obyte address: it is
         // the key of this account's AA-side merkle leaf.
         if !valid_obyte_addr(addr) {
@@ -2184,6 +2200,8 @@ impl Engine {
         if !self.state.deposits_allowed.contains(&(aa_unit, true)) {
             return Err(RejectReason::UnbackedDeposit);
         }
+        // R3-A-5 / R3-E-3 / R3-A-7: same payer-designated account rule.
+        self.deposit_target_ok(account, aa_unit)?;
         // Same address rule as a collateral deposit: the account's AA leaf is
         // keyed by this address regardless of asset kind.
         if !valid_obyte_addr(addr) {

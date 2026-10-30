@@ -55,6 +55,13 @@ pub struct DepositEvidence {
     /// sidechain op's bound `addr`, so a real payment can only credit the
     /// sidechain account its on-chain payer designated (#8 payer binding).
     pub payer: String,
+    /// R3-A-5 / R3-E-3: the sidechain account (64 lowercase hex) the payer
+    /// named in the vault payment's data message (`trigger.data.account`,
+    /// payload-hash verified against the joint). Only this account can be
+    /// credited (or bound) by the anchor; an op of another account is a
+    /// rejected unit, not an evidence failure.
+    #[serde(default)]
+    pub account: String,
     /// Full Obyte joint as returned by hub getJoint (unit + messages + authors).
     pub joint: serde_json::Value,
 }
@@ -240,13 +247,22 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
                 base64::engine::general_purpose::STANDARD.encode(aa_unit)
             )
         }
+        // R3-A-7: a PERP deposit commits its vault anchor too (the vault's
+        // `depp_<unit>` key), so P-deposit can require its backing.
         GovDeposit {
             account,
             addr,
             amount,
-            ..
+            aa_unit,
         } => {
-            format!("D:{}:{}:{}", hex::encode(account.0), amount, addr)
+            use base64::Engine as _;
+            format!(
+                "D:{}:{}:{}:{}",
+                hex::encode(account.0),
+                amount,
+                addr,
+                base64::engine::general_purpose::STANDARD.encode(aa_unit)
+            )
         }
         Withdraw {
             account,
@@ -747,8 +763,17 @@ impl Batch {
             if vault.is_empty() && !self.deposit_evidences.is_empty() {
                 return Err(SettleError::DepositEvidence);
             }
-            deposit_verify::verify_all(&self.units, &self.deposit_evidences, &vault, &PERP_ASSET)
-                .map_err(|_| SettleError::DepositEvidence)?;
+            let verified = deposit_verify::verify_all(
+                &self.units,
+                &self.deposit_evidences,
+                &vault,
+                &PERP_ASSET,
+            )
+            .map_err(|_| SettleError::DepositEvidence)?;
+            // R3-A-5: the payer-designated account of every anchor.
+            for (anchor, (_, account)) in verified {
+                replay.state.deposit_accounts.insert(anchor, account);
+            }
         }
         for u in &self.units {
             match &u.op {
@@ -1376,7 +1401,13 @@ mod tests {
     /// `n` salts the timestamp so two joints never collide on unit hash;
     /// `payer` is the first author — must equal the sidechain op's bound
     /// `addr` for the evidence to verify (#8).
-    fn payment_joint(n: u8, amount: u64, asset: Option<&str>, payer: &str) -> serde_json::Value {
+    fn payment_joint(
+        n: u8,
+        amount: u64,
+        asset: Option<&str>,
+        payer: &str,
+        account: minuend_types::AccountId,
+    ) -> serde_json::Value {
         let outputs = serde_json::json!([{
             "address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "amount": amount,
@@ -1385,11 +1416,24 @@ mod tests {
             None => serde_json::json!({ "outputs": outputs }),
             Some(a) => serde_json::json!({ "outputs": outputs, "asset": a }),
         };
+        // R3-A-5: the vault trigger names the credited account; payload
+        // hashes bind both payloads to the unit hash.
+        let data = if asset.is_none() {
+            serde_json::json!({ "deposit": 1, "account": hex::encode(account.0) })
+        } else {
+            serde_json::json!({ "deposit_perp": 1, "account": hex::encode(account.0) })
+        };
+        let unit_v = serde_json::json!({ "version": "4.0dev" });
+        let ph = obyte_hash::get_payload_hash(&payload, &unit_v).unwrap();
+        let dh = obyte_hash::get_payload_hash(&data, &unit_v).unwrap();
         serde_json::json!({
             "version": "4.0dev",
             "alt": "3",
             "authors": [{ "address": payer }],
-            "messages": [{ "app": "payment", "payload": payload }],
+            "messages": [
+                { "app": "data", "payload_location": "inline", "payload_hash": dh, "payload": data },
+                { "app": "payment", "payload_location": "inline", "payload_hash": ph, "payload": payload }
+            ],
             "parent_units": [
                 "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
             ],
@@ -1411,12 +1455,17 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        let account = joint["messages"][0]["payload"]["account"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         DepositEvidence {
             aa_unit: hex::encode(h),
             is_perp,
             amount,
             vault_address: crate::TEST_VAULT_ADDRESS.to_string(),
             payer,
+            account,
             joint: joint.clone(),
         }
     }
@@ -1437,7 +1486,7 @@ mod tests {
         let mut applied = Vec::new();
         // Evidence-consistent deposit anchors: the joint is hashed with the same
         // getUnitHash port the verifier uses, so evidence and op agree by construction.
-        let j1 = payment_joint(1, 10_000 * USD_SCALE, None, &test_addr(1));
+        let j1 = payment_joint(1, 10_000 * USD_SCALE, None, &test_addr(1), acct_of(&sk(1)));
         let a1: [u8; 32] = obyte_hash::get_unit_hash(&j1).unwrap();
         // The AA feed endorses exactly these unit hashes (arbitrary bytes, not
         // covered by the blanket [b; 32] preseed below).
@@ -1454,7 +1503,7 @@ mod tests {
         );
         applied.push(unit_id(&d1));
         eng.ingest(d1).unwrap();
-        let j2 = payment_joint(2, 10_000 * USD_SCALE, None, &test_addr(2));
+        let j2 = payment_joint(2, 10_000 * USD_SCALE, None, &test_addr(2), acct_of(&sk(2)));
         let a2: [u8; 32] = obyte_hash::get_unit_hash(&j2).unwrap();
         eng.state.deposits_allowed.insert((a2, false));
         let d2 = sign_unit(
@@ -1814,6 +1863,7 @@ mod tests {
             5_000,
             Some(&hex::encode(minuend_types::PERP_ASSET)),
             &test_addr(1),
+            alice,
         );
         let ga: [u8; 32] = obyte_hash::get_unit_hash(&gj).unwrap();
         evidences.push(evidence_from(&gj, 5_000.to_string(), true));
@@ -1931,7 +1981,7 @@ mod tests {
         eng.state
             .markets
             .insert(BTC_USD, minuend_types::genesis_params());
-        let j = payment_joint(9, 5_000_000_000, None, &test_addr(4));
+        let j = payment_joint(9, 5_000_000_000, None, &test_addr(4), acct_of(&sk(4)));
         let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
         eng.state.deposits_allowed.insert((a, false));
         let pre = eng.clone();
@@ -1963,6 +2013,110 @@ mod tests {
             .validate_against(pre.state.state_root(), &mut rp)
             .unwrap();
         assert_eq!(rp.state.state_root(), eng.state.state_root());
+    }
+
+    /// R3-A-5: the evidence's amount is read from the payment payload; a
+    /// payload that no longer matches its payload_hash is not the paid one.
+    #[test]
+    fn tampered_payment_payload_is_rejected() {
+        let (mut eng, pre, _, id, mut ev) = one_deposit_fixture();
+        ev.joint["messages"][1]["payload"]["outputs"][0]["amount"] =
+            serde_json::json!(9_000_000_000u64);
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
+        batch.deposit_evidences = vec![ev];
+        assert_eq!(
+            batch.validate_against(pre.state.state_root(), &mut pre.clone()),
+            Err(SettleError::DepositEvidence)
+        );
+    }
+
+    /// R3-A-5: the declared account must be the joint's (hash-bound) one.
+    #[test]
+    fn tampered_designated_account_is_rejected() {
+        let (mut eng, pre, _, id, mut ev) = one_deposit_fixture();
+        ev.account = hex::encode([9u8; 32]);
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
+        batch.deposit_evidences = vec![ev.clone()];
+        assert_eq!(
+            batch.validate_against(pre.state.state_root(), &mut pre.clone()),
+            Err(SettleError::DepositEvidence)
+        );
+        // Rewriting the data payload too breaks its payload_hash.
+        ev.joint["messages"][0]["payload"]["account"] = serde_json::json!(ev.account.clone());
+        batch.deposit_evidences = vec![ev];
+        assert_eq!(
+            batch.validate_against(pre.state.state_root(), &mut pre.clone()),
+            Err(SettleError::DepositEvidence)
+        );
+    }
+
+    /// R3-A-5 / R3-E-3: a front-running Deposit (another account citing the
+    /// victim's anchor and address) is a REJECTED unit — no credit, no
+    /// binding — and the victim's own Deposit still credits the victim.
+    #[test]
+    fn front_running_deposit_is_rejected() {
+        let mut eng = Engine::new();
+        eng.state
+            .markets
+            .insert(BTC_USD, minuend_types::genesis_params());
+        let victim = sk(4);
+        let thief = sk(9);
+        let j = payment_joint(11, 5_000_000_000, None, &test_addr(4), acct_of(&victim));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 5_000_000_000i128.to_string(), false);
+        assert_eq!(ev.account, hex::encode(acct_of(&victim).0));
+        let pre = eng.clone();
+        // Producer side: the anchor and its designated account.
+        eng.state.deposits_allowed.insert((a, false));
+        eng.state.deposit_accounts.insert(a, acct_of(&victim));
+        let steal = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&thief),
+                addr: test_addr(4),
+                amount: 5_000_000_000,
+                aa_unit: a,
+            },
+            &thief,
+        );
+        let sid = unit_id(&steal);
+        let evs = eng.ingest(steal).unwrap();
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                minuend_exec::ExecEvent::Rejected {
+                    reason: minuend_exec::RejectReason::BadAccount,
+                    ..
+                }
+            )),
+            "front-run must be rejected: {evs:?}"
+        );
+        assert!(!eng.state.accounts.contains_key(&acct_of(&thief)));
+        assert!(eng.state.aa_address_owners.get(&test_addr(4)).is_none());
+        let own = sign_unit(
+            vec![sid],
+            Op::Deposit {
+                account: acct_of(&victim),
+                addr: test_addr(4),
+                amount: 5_000_000_000,
+                aa_unit: a,
+            },
+            &victim,
+        );
+        let oid = unit_id(&own);
+        eng.ingest(own).unwrap();
+        assert_eq!(eng.state.accounts[&acct_of(&victim)].collateral, 5_000_000_000);
+        assert_eq!(eng.state.aa_address_owners.get(&test_addr(4)), Some(&acct_of(&victim)));
+        // Validator replay: evidence installs the designated account, the
+        // thief's unit replays as rejected, roots agree.
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[sid, oid]).unwrap();
+        batch.deposit_evidences = vec![ev];
+        let mut rp = pre.clone();
+        batch
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert!(!rp.state.accounts.contains_key(&acct_of(&thief)));
     }
 
     #[test]
@@ -2008,7 +2162,7 @@ mod tests {
             .markets
             .insert(BTC_USD, minuend_types::genesis_params());
         let wrong_asset = hex::encode([7u8; 32]); // != PERP_ASSET ([0u8;32])
-        let j = payment_joint(8, 5_000, Some(&wrong_asset), &test_addr(5));
+        let j = payment_joint(8, 5_000, Some(&wrong_asset), &test_addr(5), acct_of(&sk(5)));
         let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
         eng.state.deposits_allowed.insert((a, true));
         let pre = eng.clone();
@@ -2038,7 +2192,7 @@ mod tests {
         // #8: evidence whose payer is not the joint's first author must
         // not verify — the batch cannot vouch for someone else's payment.
         let secret = sk(3);
-        let j = payment_joint(6, 5_000, None, &test_addr(6));
+        let j = payment_joint(6, 5_000, None, &test_addr(6), acct_of(&sk(3)));
         let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
         let mut ev = evidence_from(&j, 5_000i128.to_string(), false);
         assert_eq!(ev.payer, test_addr(6));
@@ -2264,7 +2418,7 @@ mod tests {
             let g = genesis_id();
             let secret = sk(6);
             let acct = acct_of(&secret);
-            let j = payment_joint(7, 10_000 * USD_SCALE, None, &test_addr(6));
+            let j = payment_joint(7, 10_000 * USD_SCALE, None, &test_addr(6), acct_of(&sk(6)));
             let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
             let ev = evidence_from(&j, (10_000 * USD_SCALE as i128).to_string(), false);
             eng.state.deposits_allowed.insert((a, false));
@@ -2486,7 +2640,7 @@ mod tests {
             .insert(BTC_USD, minuend_types::genesis_params());
         eng.state.height = minuend_types::COMMIT_REVEAL_ACTIVATION_HEIGHT;
         // Evidence-consistent deposit anchor (same pattern as one_deposit_fixture).
-        let j = payment_joint(7, 10_000 * USD_SCALE, None, &test_addr(1));
+        let j = payment_joint(7, 10_000 * USD_SCALE, None, &test_addr(1), acct_of(&sk(1)));
         let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
         eng.state.deposits_allowed.insert((a, false));
         let prev_root = eng.state.state_root();
@@ -2808,7 +2962,12 @@ mod tests {
         };
         assert_eq!(
             ops_element("u", &gop),
-            format!("D:{}:9:{}", hex::encode([3u8; 32]), "B".repeat(32))
+            format!(
+                "D:{}:9:{}:{}",
+                hex::encode([3u8; 32]),
+                "B".repeat(32),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            )
         );
     }
 

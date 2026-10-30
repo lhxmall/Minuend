@@ -183,7 +183,8 @@ fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
                 let c0n: i128 = c0.parse().ok()?;
                 let w1: i128 = p[4].parse().ok()?;
                 let c1: i128 = p[2].parse().ok()?;
-                Some(amt > 0 && w1 == w0n + amt && c1 == c0n - amt)
+                // R3-A-1: an accepted withdrawal never leaves col < 0.
+                Some(amt > 0 && w1 == w0n + amt && c1 == c0n - amt && c1 >= 0)
             })()
             .unwrap_or(false);
         return if accepted { None } else { Some(()) };
@@ -198,8 +199,8 @@ fn binding_violation(op: &str, pre: &[String], post_leaf: &str) -> Option<()> {
                 let bound = pre
                     .iter()
                     .any(|l| l.starts_with(&format!("adrx:{}:", p[2])));
-                let shape = (o.first() == Some(&"d") && o.len() == 5)
-                    || (o.first() == Some(&"D") && o.len() == 4);
+                // R3-A-7: D: carries its anchor too (5 parts).
+                let shape = (o.first() == Some(&"d") || o.first() == Some(&"D")) && o.len() == 5;
                 let ok = !bound && shape && o[1] == p[2] && o[3] == p[1];
                 if ok {
                     None
@@ -288,6 +289,11 @@ fn keep_mirror_proof(
     let posted = batch.leaf_trace.get(k)?;
     let permanent =
         |l: &&String| l.starts_with("adr:") || l.starts_with("adrx:") || l.starts_with("dep:");
+    // R3-A-6: an account leaf may change but its account never vanishes.
+    let acct_key = |l: &str| -> Option<String> {
+        let q: Vec<&str> = l.split(':').collect();
+        (q.len() == 5 && q[0] == "acct" && q[1].len() == 64).then(|| format!("acct:{}:", q[1]))
+    };
     let base = || {
         serde_json::json!({
             "trace_root": batch.checkpoint.trace_root,
@@ -315,6 +321,29 @@ fn keep_mirror_proof(
                 .as_object()?
                 .clone(),
         );
+        return Some(BuiltProof {
+            pred: "keep".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    // R3-A-6 P-keep (acct:): a pre account with no posted post leaf while
+    // the honest post tree still holds it.
+    for l in pre_leaves.iter() {
+        let Some(key) = acct_key(l) else { continue };
+        if posted.iter().any(|p| p.starts_with(&key)) || !post_leaves.iter().any(|p| p.starts_with(&key)) {
+            continue;
+        }
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("leaf".into(), l.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, l)?),
+        );
+        obj.extend(prefix_absence(posted, &key)?.as_object()?.clone());
         return Some(BuiltProof {
             pred: "keep".into(),
             fill_aa: false,
@@ -465,8 +494,8 @@ fn deposit_proof(
     pre_leaves: &[String],
     is_deposit: bool,
 ) -> Option<BuiltProof> {
-    // Parse op: d:{acct}:{amount}:{addr}:{aa_unit_b64} (round 2),
-    // D:{acct}:{amount}:{addr}, w:/W:{acct}:{amount}:{nonce}.
+    // Parse op: d:/D:{acct}:{amount}:{addr}:{aa_unit_b64} (round 2/3),
+    // w:/W:{acct}:{amount}:{nonce}.
     let parts: Vec<&str> = op.split(':').collect();
     if parts.len() < 3 {
         return None;
@@ -569,12 +598,23 @@ fn deposit_proof(
     let col_ok = col_pinned
         .map(|c| Some(c) == gov_col_must_match)
         .unwrap_or(true);
+    // R3-A-1 (mirrors the AA): an ACCEPTED withdrawal never leaves the
+    // moving column negative, and a pre-absent account can only have its
+    // withdrawal REJECTED (col 0).
+    let wd_ok = is_deposit || unchanged || (pre_hit.is_some() && liar_val >= 0);
     // R2-A-3 (mirrors the AA's credit arm): a credited collateral deposit
-    // is also judged on its anchor marker `dep:{aa_unit}` — already in the
-    // pre tree (re-credit) or missing from the posted post tree. The
-    // vault-ledger backing (dep_<unit>) is on-chain state this offline
-    // builder cannot read; the AA checks it on every deposit challenge.
-    let credited = !is_gov && is_deposit && amount > 0 && liar_val == expected && !unchanged;
+    // (R3-A-7: or PERP `D:` deposit) is also judged on its anchor marker
+    // `dep:{aa_unit}` — already in the pre tree (re-credit) or missing from
+    // the posted post tree — and (R3-A-4) on the binding
+    // `adr:{addr}:{acct}`, which must be in the posted post tree. The
+    // vault-ledger backing (dep_/depp_<unit> = payer:amount:account) is
+    // on-chain state this offline builder cannot read; the AA checks it on
+    // every deposit challenge.
+    let credited = is_deposit
+        && amount > 0
+        && liar_val == expected
+        && !unchanged
+        && (!is_gov || (pre_hit.is_some() && col_ok));
     let mut dep_extra = serde_json::Map::new();
     if credited {
         if let Some(u) = parts.get(4) {
@@ -586,9 +626,17 @@ fn deposit_proof(
             }
         }
         if dep_extra.is_empty() {
-            return None; // credited, marker fine — honest leg (as far as offline data shows)
+            if let Some(addr) = parts.get(3) {
+                let ak = format!("adr:{addr}:{acct_hex}");
+                if let Some(a) = exact_absence(&posted_post, &ak, "aleft", "aright") {
+                    dep_extra.extend(a.as_object()?.clone());
+                }
+            }
         }
-    } else if !gov_fresh && (liar_val == expected || unchanged) && col_ok {
+        if dep_extra.is_empty() {
+            return None; // credited, marker + binding fine — honest leg (as far as offline data shows)
+        }
+    } else if !gov_fresh && (liar_val == expected || unchanged) && col_ok && wd_ok {
         return None; // honest leg — keep scanning
     }
     let mut roots = trace_roots(batch);
@@ -774,7 +822,21 @@ struct Leg<'a> {
     /// lands on the taker after the claw, so "taker post > 0" proves
     /// nothing) — the AA bounces such a mismatch.
     claw_checkable: bool,
+    /// R3-A-3: an input or intermediate magnitude at/above the AA's
+    /// 1e14 precision ceiling (minus the mirror margin) — the AA bounces.
+    size_bounce: bool,
 }
+
+/// R3-A-3: the fill AA checks the collateral identity to +-FILL_TOL (ocore
+/// Oscript arithmetic keeps 15 significant digits; each truncated term may
+/// land 1 off, fee/keeper 2 off). This mirror builds a proof only when the
+/// AA's verdict is certain whatever its rounding: |posted - exact| >
+/// 2*FILL_TOL, exact fill stage >= 2*FILL_TOL, magnitudes below
+/// FILL_MAX - FILL_MARGIN.
+const FILL_TOL: i128 = 6;
+const FILL_MAX: i128 = 100_000_000_000_000;
+const FILL_MARGIN: i128 = 16;
+const FILL_LIM: i128 = FILL_MAX - FILL_MARGIN;
 
 fn acct_col(tree: &[String], acct_hex: &str) -> Option<i128> {
     tree.iter()
@@ -823,6 +885,9 @@ fn aa_fill_verdict(
     // outright for kind 2/3 (B1/B2); for kind 0/1 it only gates whether a
     // collateral mismatch counts (see `col_ok` below).
     let cp_pos = matches!(acct_col(tree, leg.counterparty), Some(c) if c > 0);
+    if leg.size_bounce {
+        return false;
+    }
     if leg.liq.is_some() && !cp_pos {
         return false;
     }
@@ -920,13 +985,15 @@ fn aa_fill_verdict(
         (leg.exp_fill, leg.exp_fill, true, true)
     };
     // Negative fill-stage collateral: the claw's effect is unprovable from
-    // these leaves — the AA bounces (no verdict) for that shape.
-    if mid < 0 {
+    // these leaves — the AA bounces (no verdict) for that shape. R3-A-3:
+    // the AA bounces below 6 on its rounded value; certain only from 12.
+    if mid < 2 * FILL_TOL || expected.abs() >= FILL_LIM {
         return false;
     }
     // #47 claw guard: a mismatch counts only when no claw can have moved
     // this leg (positive counterparty; cross taker for a kind 0/1 maker).
-    let col_ok = post_col == expected || !(cp_pos && leg.claw_checkable);
+    // R3-A-3: the AA tolerates +-FILL_TOL; certain verdict beyond 2x.
+    let col_ok = (post_col - expected).abs() <= 2 * FILL_TOL || !(cp_pos && leg.claw_checkable);
     (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || (!ord_bail && !ord_ok)
 }
 
@@ -1349,6 +1416,11 @@ fn fill_proof(
                 .as_ref()
                 .map(|l| l.split(':').nth(8) == Some("1"))
                 .unwrap_or(false);
+            // R3-A-3: the AA's $mml (maker order margin_left; 0 otherwise).
+            let mml: i128 = maker_ord
+                .as_ref()
+                .and_then(|l| l.split(':').nth(9).and_then(|v| v.parse().ok()))
+                .unwrap_or(0);
             let mpost_any: i128 = match maker_ord.as_ref().map(|l| l.split(':').collect::<Vec<_>>())
             {
                 Some(o) if o.len() == 10 => {
@@ -1369,7 +1441,7 @@ fn fill_proof(
             let abs_old = old_qty.unsigned_abs() as i128;
             let abs_delta = delta.unsigned_abs() as i128;
             let same = old_qty == 0 || (old_qty > 0 && delta > 0) || (old_qty < 0 && delta < 0);
-            let (exp_qty, exp_entry, exp_fill, exp_absent, pback, exp_bucket) = if same {
+            let (exp_qty, exp_entry, exp_fill, exp_absent, pback, exp_bucket, pnl_v) = if same {
                 let eq = old_qty + delta;
                 let ee = if old_qty == 0 {
                     price
@@ -1380,7 +1452,7 @@ fn fill_proof(
                 let ec = if who_taker { old_col - tfee } else { old_col };
                 // Same-sign fills always produce open qty: the post escrows
                 // into the bucket, never back to collateral.
-                (eq, ee, ec, false, 0, bucket + post_any)
+                (eq, ee, ec, false, 0, bucket + post_any, 0i128)
             } else {
                 let close = abs_old.min(abs_delta);
                 // Isolated release: engine releases bucket*close/old (whole
@@ -1437,7 +1509,7 @@ fn fill_proof(
                     bucket - release
                 };
                 if leftover == 0 && open == 0 {
-                    (0, 0, ec, true, pback, eb)
+                    (0, 0, ec, true, pback, eb, pnl)
                 } else {
                     let q = if leftover == 0 {
                         if delta > 0 {
@@ -1451,7 +1523,7 @@ fn fill_proof(
                         -(leftover as i64)
                     };
                     let e = if leftover == 0 { price } else { old_entry };
-                    (q, e, ec, false, pback, eb)
+                    (q, e, ec, false, pback, eb, pnl)
                 }
             };
             // #47 A3: the bucket is checked where its inflow is known —
@@ -1529,6 +1601,12 @@ fn fill_proof(
                 // R2-A-7: never for kind 1 (funding peg may move collateral).
                 claw_checkable: kind != 1
                     && (who_taker || kind >= 2 || op_parts.get(6) == Some(&"0")),
+                // R3-A-3 (mirrors the AA's magnitude bounce, with margin).
+                size_bounce: t2.abs() >= FILL_LIM
+                    || pnl_v.abs() >= FILL_LIM
+                    || old_col.abs() >= FILL_LIM
+                    || bucket >= FILL_LIM
+                    || mml >= FILL_LIM,
             };
             // AA verdict mirror: silent unless the honest replay passes
             // every leg and the committed legs fail one of them. A fill
@@ -2825,6 +2903,7 @@ mod tests {
             allow_last: false,
             counterparty: cp,
             claw_checkable: true,
+            size_bounce: false,
         }
     }
 
@@ -2842,6 +2921,7 @@ mod tests {
             allow_last: false,
             counterparty: cp,
             claw_checkable: cross_taker,
+            size_bounce: false,
         }
     }
 
