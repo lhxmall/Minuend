@@ -729,6 +729,35 @@ fn check_height_without_replay(
     Ok(None)
 }
 
+/// R4-A-4: the vault's `dep_`/`depp_<anchor>` records for every
+/// `d:`/`D:` op of a batch, read from the hub. `Ok(None)` (var absent) is
+/// recorded as known-absent; a transport error or a non-string value
+/// leaves the key out (unknown — the proof builder then stays silent on
+/// the backing condition instead of risking a bounced challenge).
+fn read_vault_ledger<H: HubClient>(hub: &H, vault: &str, ops: &[String]) -> prove::VaultLedger {
+    let mut ledger = prove::VaultLedger::new();
+    if vault.is_empty() {
+        return ledger;
+    }
+    for key in ops.iter().filter_map(|op| prove::vault_key_of_op(op)) {
+        if ledger.contains_key(&key) {
+            continue;
+        }
+        match hub.get_aa_state_var(vault, &key) {
+            Ok(None) => {
+                ledger.insert(key, None);
+            }
+            Ok(Some(v)) => {
+                if let Some(r) = v.as_str() {
+                    ledger.insert(key, Some(r.to_string()));
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    ledger
+}
+
 /// Replay one height and advance the engine; surface only actionable alerts.
 /// Returns `Ok(None)` = nothing actionable (no da_unit, or replay clean),
 /// `Ok(Some(alert))` = a mismatch worth surfacing.
@@ -795,7 +824,18 @@ fn check_height(
                     .collect()
             })
             .unwrap_or_default();
-        prove::build_proof(&batch, &mut scratch, &inbox, win.submitted_at)
+        // R4-A-4: read the vault ledger records the binding AA would read
+        // for this batch's deposit anchors, so a P-adr proof is built only
+        // when the AA would actually judge it (a hub error leaves the key
+        // unknown, never "absent").
+        let vault_ledger = read_vault_ledger(hub, &config.vault_address, &batch.ops);
+        prove::build_proof_with_vault(
+            &batch,
+            &mut scratch,
+            &inbox,
+            win.submitted_at,
+            &vault_ledger,
+        )
     };
     Ok(Some(alert_and_maybe_challenge(
         h,

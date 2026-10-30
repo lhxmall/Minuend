@@ -37,6 +37,8 @@ jobs:
       - run: node obyte-local/golden_vector_check.js
       - run: node obyte-local/test_batch_frames.js
       - run: node obyte-local/test_script_helpers.js
+      - run: node obyte-local/test_frame_stamp.js
+      - run: node obyte-local/test_deposit_evidence.js
 
   e2e:
     runs-on: ubuntu-latest

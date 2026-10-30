@@ -240,8 +240,10 @@ cd obyte-local && node test_settlement_aa.js
 # 部署结算 AA 到 Obyte 测试网（需已发行的 PERP asset id）
 cd obyte-local && node deploy_testnet.js
 
-# 本地 aa-testkit 发包/最终化演练；不是生产主网流程
-cd obyte-local && node post_batch.js
+# 本地 aa-testkit 发包/最终化演练；不是生产主网流程。
+# export_batch 的示例充值引用的锚点在临时 devnet 上不存在，演练必须跳过充值证据
+#（watcher 会拒绝这样的高度）：
+cd obyte-local && MINUEND_DRILL_NO_EVIDENCE=1 node post_batch.js
 ```
 
 实测数据（开发机）：`bench_raw` ≈ 5 500 ops/s；`hft_onedag`（8 市场、

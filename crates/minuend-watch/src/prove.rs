@@ -62,6 +62,41 @@ pub fn build_proof(
     inbox: &[(String, u64)],
     submit_ts: u64,
 ) -> Option<BuiltProof> {
+    build_proof_with_vault(batch, replay, inbox, submit_ts, &VaultLedger::new())
+}
+
+/// The vault AA's deposit ledger as read from the hub for the anchors a
+/// batch cites: key `dep_<anchor_b64>` / `depp_<anchor_b64>` →
+/// `Some("payer:amount:account")` (recorded) or `None` (read, absent). A
+/// key missing from the map is UNKNOWN (not read / hub error).
+pub type VaultLedger = std::collections::HashMap<String, Option<String>>;
+
+/// The vault ledger key the binding AA reads for a `d:`/`D:` op
+/// (`d:{acct}:{amount}:{addr}:{anchor_b64}`), if the op has that shape.
+pub fn vault_key_of_op(op: &str) -> Option<String> {
+    let o: Vec<&str> = op.split(':').collect();
+    match (o.first(), o.len()) {
+        (Some(&"d"), 5) => Some(format!("dep_{}", o[4])),
+        (Some(&"D"), 5) => Some(format!("depp_{}", o[4])),
+        _ => None,
+    }
+}
+
+/// [`build_proof`] with the vault deposit records the caller read from the
+/// hub. R4-A-4: a P-adr proof that rests on the vault record (a new
+/// binding whose anchor is unbacked / paid by someone else / for another
+/// account / of the other asset kind) is built only when that record is
+/// KNOWN — from `vault`, or from verified deposit evidence of that anchor
+/// in the batch. An unknown record (e.g. an anchor the vault recorded but
+/// the producer did not apply, so no evidence was stamped, and the hub was
+/// not read) never yields a proof the AA might bounce.
+pub fn build_proof_with_vault(
+    batch: &Batch,
+    replay: &mut Engine,
+    inbox: &[(String, u64)],
+    submit_ts: u64,
+    vault: &VaultLedger,
+) -> Option<BuiltProof> {
     let n = batch.units.len();
     if n == 0 || batch.checkpoint.unit_ids.len() != n || batch.ops.len() != n {
         return None;
@@ -78,6 +113,24 @@ pub fn build_proof(
             return omit_proof(batch, &unit_hexes, id);
         }
     }
+    // R4-A-4: vault-record knowledge for P-adr, built once per batch.
+    let vault_aa = minuend_settle::expected_vault();
+    let backing = Backing {
+        ledger: vault,
+        evs: batch
+            .unit_evidences
+            .iter()
+            .flatten()
+            .filter(|e| {
+                minuend_settle::deposit_verify::verify_evidence(
+                    e,
+                    &vault_aa,
+                    &minuend_types::PERP_ASSET,
+                )
+                .is_ok()
+            })
+            .collect(),
+    };
     // 2+. Walk units: ingest one at a time, compare wit root + ops string.
     for (k, unit_hex) in unit_hexes.iter().enumerate() {
         let pre_leaves = minuend_state::wit_leaves(&replay.state);
@@ -134,7 +187,7 @@ pub fn build_proof(
         }
         // #47 A2: the two witness columns the vault pays against (W and
         // the adr: binding), pinned on EVERY unit by the binding dispute AA.
-        if let Some(p) = binding_proof(batch, k, &op, &pre_leaves, &post_leaves) {
+        if let Some(p) = binding_proof(batch, k, &op, &pre_leaves, &post_leaves, &backing) {
             return Some(p);
         }
         // Round 2: permanent leaves kept, binding mirror intact.
@@ -158,7 +211,7 @@ fn binding_violation(
     op: &str,
     pre: &[String],
     post_leaf: &str,
-    evs: Option<&[minuend_settle::DepositEvidence]>,
+    backing: Option<&Backing>,
 ) -> Option<()> {
     let p: Vec<&str> = post_leaf.split(':').collect();
     let o: Vec<&str> = op.split(':').collect();
@@ -212,13 +265,19 @@ fn binding_violation(
                 let shape = (o.first() == Some(&"d") || o.first() == Some(&"D")) && o.len() == 5;
                 // R4-A-4: the AA also requires the vault's dep_/depp_
                 // record of the anchor, paid by this address for this
-                // account. Offline mirror: the batch's deposit evidence
-                // for that anchor (the vault ledger itself is on-chain).
+                // account. Judged only when the record is KNOWN (hub read
+                // or verified batch evidence); unknown = no verdict here.
                 let ok = !bound
                     && shape
                     && o[1] == p[2]
                     && o[3] == p[1]
-                    && evs.is_none_or(|e| anchor_backed(e, o[0] == "D", o[4], o[3], o[1]));
+                    && backing.is_none_or(|b| match b.record(o[0] == "D", o[4]) {
+                        None => true,
+                        Some(None) => false,
+                        Some(Some((payer, account))) => {
+                            payer == o[3] && account.eq_ignore_ascii_case(o[1])
+                        }
+                    });
                 if ok {
                     None
                 } else {
@@ -230,27 +289,42 @@ fn binding_violation(
     None
 }
 
-/// R4-A-4 offline mirror of the binding AA's vault-ledger check: some
-/// deposit evidence in the batch names this anchor (base64 in the op, hex
-/// in the evidence), this asset kind, this payer and this account.
-fn anchor_backed(
-    evs: &[minuend_settle::DepositEvidence],
-    is_perp: bool,
-    anchor_b64: &str,
-    payer: &str,
-    account_hex: &str,
-) -> bool {
-    use base64::Engine as _;
-    let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(anchor_b64) else {
-        return false;
-    };
-    let hex_anchor = hex::encode(raw);
-    evs.iter().any(|e| {
-        e.aa_unit.eq_ignore_ascii_case(&hex_anchor)
-            && e.is_perp == is_perp
-            && e.payer == payer
-            && e.account.eq_ignore_ascii_case(account_hex)
-    })
+/// R4-A-4: what the watcher knows of the vault AA's deposit ledger for
+/// one batch — the hub reads (`ledger`) and the batch's deposit evidences
+/// that VERIFY against the vault (each one fully determines the vault's
+/// record of its anchor: the vault writes `dep_` or `depp_`, never both).
+pub(crate) struct Backing<'a> {
+    pub(crate) ledger: &'a VaultLedger,
+    pub(crate) evs: Vec<&'a minuend_settle::DepositEvidence>,
+}
+
+impl Backing<'_> {
+    /// The vault record the binding AA reads for (`is_perp`, anchor):
+    /// `Some(Some((payer, account_hex)))` recorded, `Some(None)` known
+    /// absent, `None` unknown.
+    fn record(&self, is_perp: bool, anchor_b64: &str) -> Option<Option<(String, String)>> {
+        let key = format!("{}{anchor_b64}", if is_perp { "depp_" } else { "dep_" });
+        if let Some(v) = self.ledger.get(&key) {
+            return Some(v.as_ref().and_then(|r| {
+                let q: Vec<&str> = r.split(':').collect();
+                (q.len() == 3).then(|| (q[0].to_string(), q[2].to_string()))
+            }));
+        }
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(anchor_b64)
+            .ok()?;
+        let hex_anchor = hex::encode(raw);
+        let ev = self
+            .evs
+            .iter()
+            .find(|e| e.aa_unit.eq_ignore_ascii_case(&hex_anchor))?;
+        if ev.is_perp == is_perp {
+            Some(Some((ev.payer.clone(), ev.account.clone())))
+        } else {
+            Some(None)
+        }
+    }
 }
 
 /// Prefix non-membership of `key` in the sorted `leaves`, in the AA's two
@@ -544,10 +618,11 @@ fn binding_proof(
     op: &str,
     pre_leaves: &[String],
     post_leaves: &[String],
+    backing: &Backing,
 ) -> Option<BuiltProof> {
     let posted_post = batch.leaf_trace.get(k)?;
     let liar = posted_post.iter().find(|l| {
-        binding_violation(op, pre_leaves, l, Some(&batch.deposit_evidences)).is_some()
+        binding_violation(op, pre_leaves, l, Some(backing)).is_some()
             && !post_leaves.iter().any(|h| h == *l)
     })?;
     if post_leaves
@@ -2066,6 +2141,13 @@ fn fill_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_backing(ledger: &VaultLedger) -> Backing<'_> {
+        Backing {
+            ledger,
+            evs: Vec::new(),
+        }
+    }
     use ed25519_dalek::SigningKey;
     use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
     use minuend_types::{account_id_from_pubkey, AccountId};
@@ -2223,14 +2305,14 @@ mod tests {
             &format!("w:{}:1000:1", hex::encode(acct.0)),
             &pre,
             &format!("acct:{}:-900:0:1000", hex::encode(acct.0)),
-            Some(&[])
+            Some(&no_backing(&VaultLedger::new()))
         )
         .is_some());
         assert!(binding_violation(
             &format!("w:{}:100:1", hex::encode(acct.0)),
             &pre,
             &format!("acct:{}:0:0:100", hex::encode(acct.0)),
-            Some(&[])
+            Some(&no_backing(&VaultLedger::new()))
         )
         .is_none());
     }
@@ -2327,7 +2409,9 @@ mod tests {
         let a = "aa".repeat(32);
         let pre = vec![format!("acct:{a}:1000:0:0")];
         let op = format!("w:{a}:100:1");
-        let v = |leaf: String| binding_violation(&op, &pre, &leaf, Some(&[]));
+        let empty = VaultLedger::new();
+        let nb = no_backing(&empty);
+        let v = |leaf: String| binding_violation(&op, &pre, &leaf, Some(&nb));
         assert!(v(format!("acct:{a}:900:0:100")).is_none(), "accepted");
         assert!(v(format!("acct:{a}:1000:0:0")).is_none(), "rejected");
         assert!(
@@ -2341,7 +2425,7 @@ mod tests {
                 &format!("w:{f}:100:1"),
                 &pre,
                 &format!("acct:{f}:0:0:100"),
-                Some(&[])
+                Some(&nb)
             )
             .is_some(),
             "W minted on a rejected (fresh) withdraw"
@@ -2359,31 +2443,46 @@ mod tests {
         };
         // anchor "A"*43 + "=" is 32 zero bytes.
         let d = d.replace(&"A".repeat(44), &format!("{}=", "A".repeat(43)));
+        let bk = |ledger: &VaultLedger, evs: &[minuend_settle::DepositEvidence]| {
+            binding_violation(
+                &d,
+                &[],
+                &format!("adr:{addr}:{a}"),
+                Some(&Backing {
+                    ledger,
+                    evs: evs.iter().collect(),
+                }),
+            )
+        };
         let good = [ev(false, &addr, &a)];
         let bound = vec![format!("adrx:{a}:{}", "R".repeat(32))];
-        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}"), Some(&good)).is_some());
-        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&good)).is_none());
-        // R4-A-4: no vault-backed deposit of that anchor by that payer for
-        // that account → the new binding is fraud.
-        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&[])).is_some());
+        let good_b = Backing {
+            ledger: &empty,
+            evs: good.iter().collect(),
+        };
+        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}"), Some(&good_b)).is_some());
+        assert!(bk(&empty, &good).is_none());
+        // R4-A-4: the vault record is UNKNOWN (no verified evidence for the
+        // anchor, hub not read) → no verdict, no proof the AA might bounce.
+        assert!(bk(&empty, &[]).is_none());
+        // Known absent (hub read: no dep_ record) → fraud.
+        let key = vault_key_of_op(&d).unwrap();
+        let absent: VaultLedger = [(key.clone(), None)].into_iter().collect();
+        assert!(bk(&absent, &[]).is_some());
+        // Hub record names another payer / another account → fraud; the
+        // exact record → accepted.
         let other = "bb".repeat(32);
-        assert!(binding_violation(
-            &d,
-            &[],
-            &format!("adr:{addr}:{a}"),
-            Some(&[ev(false, &addr, &other)])
-        )
-        .is_some());
-        assert!(binding_violation(
-            &d,
-            &[],
-            &format!("adr:{addr}:{a}"),
-            Some(&[ev(true, &addr, &a)])
-        )
-        .is_some());
+        let rec = |r: String| -> VaultLedger { [(key.clone(), Some(r))].into_iter().collect() };
+        assert!(bk(&rec(format!("{}:5:{a}", "P".repeat(32))), &[]).is_some());
+        assert!(bk(&rec(format!("{addr}:5:{other}")), &[]).is_some());
+        assert!(bk(&rec(format!("{addr}:5:{a}")), &[]).is_none());
+        // Verified evidence for that anchor: other account → fraud; other
+        // asset kind → the vault wrote only depp_, so dep_ is absent → fraud.
+        assert!(bk(&empty, &[ev(false, &addr, &other)]).is_some());
+        assert!(bk(&empty, &[ev(true, &addr, &a)]).is_some());
         // round-2 d: carries the anchor: the old 4-part shape is refused
         let d4 = format!("d:{a}:5:{addr}");
-        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), Some(&good)).is_some());
+        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), Some(&good_b)).is_some());
     }
 
     /// R2-A-8: a posted binding without its adrx: mirror → P-mirror.

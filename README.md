@@ -301,8 +301,10 @@ cd obyte-local && node test_settlement_aa.js
 # deploy settlement AAs to Obyte testnet (requires an issued PERP asset id)
 cd obyte-local && node deploy_testnet.js
 
-# local aa-testkit poster/finalization drill only; not a production mainnet flow
-cd obyte-local && node post_batch.js
+# local aa-testkit poster/finalization drill only; not a production mainnet flow.
+# export_batch's sample deposits cite anchors that do not exist on the throwaway
+# devnet, so the drill must skip deposit evidence (watchers reject such a height):
+cd obyte-local && MINUEND_DRILL_NO_EVIDENCE=1 node post_batch.js
 ```
 
 Measured on this machine: `bench_raw` ≈ 5 500 ops/s; `hft_onedag` (8 markets,
