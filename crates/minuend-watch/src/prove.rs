@@ -483,8 +483,11 @@ fn frame_proof(
             continue;
         }
         let mut data = base(l, false, pre_leaves)?;
-        data.as_object_mut()?
-            .extend(exact_absence(posted, l, "left", "right")?.as_object()?.clone());
+        data.as_object_mut()?.extend(
+            exact_absence(posted, l, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
         return Some(BuiltProof {
             pred: "frame".into(),
             fill_aa: false,
@@ -1138,9 +1141,8 @@ fn aa_fill_verdict(
     // #47 claw guard: a mismatch counts only when no claw can have moved
     // this leg (positive counterparty; cross taker for a kind 0/1 maker).
     // R3-A-3: the AA tolerates +-FILL_TOL; certain verdict beyond 2x.
-    let col_ok = col_skip
-        || (post_col - expected).abs() <= 2 * FILL_TOL
-        || !(cp_pos && leg.claw_checkable);
+    let col_ok =
+        col_skip || (post_col - expected).abs() <= 2 * FILL_TOL || !(cp_pos && leg.claw_checkable);
     (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || (!ord_bail && !ord_ok)
 }
 
@@ -2363,11 +2365,17 @@ mod tests {
         // that account → the new binding is fraud.
         assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[]).is_some());
         let other = "bb".repeat(32);
+        assert!(binding_violation(
+            &d,
+            &[],
+            &format!("adr:{addr}:{a}"),
+            &[ev(false, &addr, &other)]
+        )
+        .is_some());
         assert!(
-            binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[ev(false, &addr, &other)])
+            binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[ev(true, &addr, &a)])
                 .is_some()
         );
-        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[ev(true, &addr, &a)]).is_some());
         // round-2 d: carries the anchor: the old 4-part shape is refused
         let d4 = format!("d:{a}:5:{addr}");
         assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), &good).is_some());
@@ -3302,10 +3310,10 @@ mod tests {
         assert!(build_proof(&honest, &mut r0, &[], 0).is_none());
         let px: i64 = honest.fills[0].split(':').nth(8).unwrap().parse().unwrap();
         let cases: Vec<(usize, String)> = vec![
-            (8, (px * 10).to_string()),       // price != maker price
-            (4, hex::encode(a.0)),            // maker != order owner
-            (9, (2 * q).to_string()),         // qty > remaining
-            (11, "1".to_string()),            // taker on the maker's side
+            (8, (px * 10).to_string()), // price != maker price
+            (4, hex::encode(a.0)),      // maker != order owner
+            (9, (2 * q).to_string()),   // qty > remaining
+            (11, "1".to_string()),      // taker on the maker's side
         ];
         for (field, v) in cases {
             let mut batch = honest.clone();
@@ -3318,7 +3326,10 @@ mod tests {
             assert!(proof.data["maker_ord"]
                 .as_str()
                 .unwrap()
-                .starts_with(&format!("ord:{}:", batch.fills[0].split(':').nth(6).unwrap())));
+                .starts_with(&format!(
+                    "ord:{}:",
+                    batch.fills[0].split(':').nth(6).unwrap()
+                )));
             assert!(proof.data.get("maker_ord_proof").is_some());
             assert!(proof.data.get("units_proof").is_some());
         }
@@ -3362,7 +3373,15 @@ mod tests {
         let u0 = place(vec![genesis_id()], bob_id, Side::Ask, q, false, 0, &bob);
         let i0 = unit_id(&u0);
         eng.ingest(u0).unwrap();
-        let u1 = place(vec![i0], alice_id, Side::Bid, 2 * q, true, 40 * USD_SCALE, &alice);
+        let u1 = place(
+            vec![i0],
+            alice_id,
+            Side::Bid,
+            2 * q,
+            true,
+            40 * USD_SCALE,
+            &alice,
+        );
         let i1 = unit_id(&u1);
         eng.ingest(u1).unwrap();
         let oid = minuend_types::order_id(alice_id, BTC_USD, 1);
@@ -3390,11 +3409,15 @@ mod tests {
         assert!(honest.ops[2].starts_with("c:"), "{}", honest.ops[2]);
         let alice_hex = hex::encode(a.0);
         assert!(
-            honest.leaf_trace[1].iter().any(|l| l.starts_with(&format!("ord:{oid}:"))),
+            honest.leaf_trace[1]
+                .iter()
+                .any(|l| l.starts_with(&format!("ord:{oid}:"))),
             "the remainder rests before the cancel"
         );
         assert!(
-            !honest.leaf_trace[2].iter().any(|l| l.starts_with(&format!("ord:{oid}:"))),
+            !honest.leaf_trace[2]
+                .iter()
+                .any(|l| l.starts_with(&format!("ord:{oid}:"))),
             "the cancel removes it"
         );
         let mut r0 = funded_replay(&[a, b]);
@@ -3420,11 +3443,7 @@ mod tests {
         assert!(p.data.get("left").is_some());
         // (b) a fake order of bob's inserted (insertion arm).
         let mut batch = honest.clone();
-        let fake = format!(
-            "ord:{}:1:0:1:9:5:{}:0:0",
-            "ab".repeat(32),
-            hex::encode(b.0)
-        );
+        let fake = format!("ord:{}:1:0:1:9:5:{}:0:0", "ab".repeat(32), hex::encode(b.0));
         batch.leaf_trace[2].push(fake.clone());
         retrace(&mut batch, 2);
         batch.checkpoint.wit_root = batch.trace[2].clone();
@@ -3458,9 +3477,15 @@ mod tests {
             format!("pos:{a}:1:5:100:0:0"),
         ];
         t.sort();
-        assert!(aa_fill_verdict(&t, &leg, false, None), "position lie judged");
+        assert!(
+            aa_fill_verdict(&t, &leg, false, None),
+            "position lie judged"
+        );
         t.retain(|l| !l.starts_with("pos:"));
-        assert!(!aa_fill_verdict(&t, &leg, false, None), "collateral skipped");
+        assert!(
+            !aa_fill_verdict(&t, &leg, false, None),
+            "collateral skipped"
+        );
     }
 
     #[test]
