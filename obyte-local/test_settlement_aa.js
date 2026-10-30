@@ -2850,7 +2850,7 @@ async function main() {
       unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(tree), fillCount: 1,
     });
     const fmPayload = (u, acctLeaf) => ({
-      pred: "fill_math", height: 61, rollup: ROLLUP_ADDR, k: 0,
+      pred: "fill_math", height: 62, rollup: ROLLUP_ADDR, k: 0,
       trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot,
       units_root: ISO_UNITS_ROOT, units_proof: ISO_UNITS_PROOF,
       fill: f, fill_proof: merkle.getMerkleProof(tree, 0),
@@ -2868,10 +2868,10 @@ async function main() {
       who: "taker",
     });
     const mint = mk("r5-a2-mint", mintLeaf);
-    await submitAt(61, mint);
+    await submitAt(62, mint);
     await triggerVerdict(challenger, fill, fmPayload(mint, mintLeaf), 20000, "R5-A-2 mint under the near-zero gate");
     st = await vars(rollup);
-    if (Number(st.frozen_61) !== 2) throw new Error("R5-A-2: zero-balance fake-fill mint did not freeze h61");
+    if (Number(st.frozen_62) !== 2) throw new Error("R5-A-2: zero-balance fake-fill mint did not freeze h62");
     // P-fsane (book AA): fills the engine never emits.
     const fsUnit = (tag, fill, opStr) => {
       const t = fillsTree([fill]);
@@ -2880,7 +2880,7 @@ async function main() {
       });
     };
     const fsPayload = (u, extra) => Object.assign({
-      pred: "fsane", height: 61, rollup: ROLLUP_ADDR, k: 0,
+      pred: "fsane", height: 62, rollup: ROLLUP_ADDR, k: 0,
       trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot, units_root: ISO_UNITS_ROOT,
       units_proof: ISO_UNITS_PROOF, fill: u.fill, fill_proof: merkle.getMerkleProof(u.ftree, 0),
       pre_wit: WIT_ROOT,
@@ -2901,21 +2901,21 @@ async function main() {
         () => Object.assign({ who: "taker" }, absentIn(GENESIS_LEAVES, `acct:${"9a".repeat(32)}:`))],
     ];
     for (const [tag, u, extra] of fsLiars) {
-      await submitAt(61, u);
+      await submitAt(62, u);
       await triggerVerdict(challenger, book, fsPayload(u, extra ? extra(u) : null), 20000, "R5-A-2 fsane " + tag);
       st = await vars(rollup);
-      if (Number(st.frozen_61) !== 2) throw new Error("R5-A-2: fsane " + tag + " did not freeze h61");
+      if (Number(st.frozen_62) !== 2) throw new Error("R5-A-2: fsane " + tag + " did not freeze h62");
     }
     // Honest: an isolated Place within the pre collateral (DEP_ACCT 1e6,
     // margin 5e5), a kind-0 fill on a regular market, a present taker.
     const okFs = fsUnit("r5-fs-ok", isoFill, isoOp);
-    await submitAt(61, okFs);
+    await submitAt(62, okFs);
     await triggerBounce(challenger, book, fsPayload(okFs, {
       op: okFs.op, ops_proof: merkle.getMerkleProof(okFs.ops, 0), pre_acct: DEP_PRE, pre_acct_proof: genProof(DEP_PRE),
       pre_meta: META1, pre_meta_proof: genProof(META1),
     }), 20000, "no fraud");
     st = await vars(rollup);
-    if (Number(st.frozen_61 || 0) !== 0) throw new Error("R5-A-2: honest fill froze h61 via fsane!");
+    if (Number(st.frozen_62 || 0) !== 0) throw new Error("R5-A-2: honest fill froze h62 via fsane!");
     console.log("58. R5-A-2: zero-balance mint / kind-3 taker_post / over-collateral iso margin / kind 1 on a regular market / absent taker → frozen; honest → 'no fraud'");
   }
 
@@ -2925,7 +2925,7 @@ async function main() {
     const ORD_B = `ord:${OB}:1:1:100000000:3:100000000:${FILL_TAKER}:0:0`;
     const MB_PRE = GENESIS_LEAVES.concat([ORD_B]).sort();
     const MB_WIT = merkle.getMerkleRoot(MB_PRE);
-    await submitAt(62, Object.assign(oneUnit("r5-mb-commit", "x:" + sha256Hex("r5mbc"), [DEP_PRE]), { witRoot: MB_WIT }));
+    await submitAt(63, Object.assign(oneUnit("r5-mb-commit", "x:" + sha256Hex("r5mbc"), [DEP_PRE]), { witRoot: MB_WIT }));
     const mkFill = (qty) =>
       `f:${isoUnit}:0:${DEP_ACCT}:${FILL_TAKER}:${"5".repeat(64)}:${OB}:1:100000000:${qty}:9:0:0:0`;
     const mbUnit = (tag, f) => {
@@ -2935,7 +2935,7 @@ async function main() {
       });
     };
     const mbPayload = (u, f) => ({
-      pred: "mbind", height: 63, rollup: ROLLUP_ADDR, k: 0,
+      pred: "mbind", height: 64, rollup: ROLLUP_ADDR, k: 0,
       trace_root: u.traceRoot, fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT,
       units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(u.tree, 0),
       pre_wit: MB_WIT, maker_ord: ORD_B, maker_ord_proof: merkle.getMerkleProof(MB_PRE, MB_PRE.indexOf(ORD_B)),
@@ -2943,17 +2943,17 @@ async function main() {
     for (const q of ["1e30", "1e21", "-50000000", "0"]) {
       const f = mkFill(q);
       const u = mbUnit("r5-mb-" + q, f);
-      await submitAt(63, u);
+      await submitAt(64, u);
       await triggerVerdict(challenger, book, mbPayload(u, f), 20000, "R5-A-3 qty " + q);
       st = await vars(rollup);
-      if (Number(st.frozen_63) !== 2) throw new Error("R5-A-3: qty " + q + " did not freeze h63");
+      if (Number(st.frozen_64) !== 2) throw new Error("R5-A-3: qty " + q + " did not freeze h64");
     }
     const okF = mkFill("100000000");
     const okU = mbUnit("r5-mb-ok", okF);
-    await submitAt(63, okU);
+    await submitAt(64, okU);
     await triggerBounce(challenger, book, mbPayload(okU, okF), 20000, "no fraud");
     st = await vars(rollup);
-    if (Number(st.frozen_63 || 0) !== 0) throw new Error("R5-A-3: honest fill froze h63!");
+    if (Number(st.frozen_64 || 0) !== 0) throw new Error("R5-A-3: honest fill froze h64!");
     console.log("59. R5-A-3: qty 1e30 / 1e21 / negative / 0 → frozen; qty == remaining → 'no fraud'");
   }
 
@@ -2971,7 +2971,7 @@ async function main() {
     const NP_PRE = [DEP_PRE, CP_LEAF, META1, NPOS, NORD].sort();
     const NP_WIT = merkle.getMerkleRoot(NP_PRE);
     const npProof = (l) => merkle.getMerkleProof(NP_PRE, NP_PRE.indexOf(l));
-    await submitAt(64, Object.assign(oneUnit("r5-np-commit", "x:" + sha256Hex("r5npc"), [DEP_PRE]), { witRoot: NP_WIT }));
+    await submitAt(65, Object.assign(oneUnit("r5-np-commit", "x:" + sha256Hex("r5npc"), [DEP_PRE]), { witRoot: NP_WIT }));
     const f = `f:${isoUnit}:0:${DEP_ACCT}:${MK}:${"8".repeat(64)}:${NO}:1:${P}:14:9:0:0:0`;
     const tree = fillsTree([f]);
     const op = `p:${DEP_ACCT}:1:0:${P}:14:0:0:1:1`;
@@ -2982,7 +2982,7 @@ async function main() {
     const npPayload = (u, col) => {
       const acctLeaf = `acct:${DEP_ACCT}:${col}:0:0`;
       return {
-        pred: "fill_math", height: 65, rollup: ROLLUP_ADDR, k: 0,
+        pred: "fill_math", height: 66, rollup: ROLLUP_ADDR, k: 0,
         trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot,
         units_root: ISO_UNITS_ROOT, units_proof: ISO_UNITS_PROOF,
         fill: f, fill_proof: merkle.getMerkleProof(tree, 0),
@@ -3000,15 +3000,15 @@ async function main() {
       };
     };
     const liar = mk("r5-np-liar", 999584); // collateral +100
-    await submitAt(65, liar);
+    await submitAt(66, liar);
     await triggerVerdict(challenger, fill, npPayload(liar, 999584), 20000, "R5-A-4 collateral lie on a negative-price add");
     st = await vars(rollup);
-    if (Number(st.frozen_65) !== 2) throw new Error("R5-A-4: collateral lie on the negative-price add did not freeze h65");
+    if (Number(st.frozen_66) !== 2) throw new Error("R5-A-4: collateral lie on the negative-price add did not freeze h66");
     const ok = mk("r5-np-ok", 999484);
-    await submitAt(65, ok);
+    await submitAt(66, ok);
     await triggerBounce(challenger, fill, npPayload(ok, 999484), 20000, "no fraud");
     st = await vars(rollup);
-    if (Number(st.frozen_65 || 0) !== 0) throw new Error("R5-A-4: honest negative-price add froze h65!");
+    if (Number(st.frozen_66 || 0) !== 0) throw new Error("R5-A-4: honest negative-price add froze h66!");
     console.log("60. R5-A-4: honest add at price <= -1e14 (vwap rounds 4 off in Oscript) → 'no fraud'; collateral lie → frozen");
   }
 
