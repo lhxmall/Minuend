@@ -10798,7 +10798,8 @@ mod tests {
             4,
         );
         tip = unit_id(&u);
-        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        let evs = eng.ingest(u).unwrap();
+        assert!(applied_with_fills(&evs), "IOC close: {evs:?}");
         assert!(!eng.state.accounts[&al].positions.contains_key(&meme));
         // 3. Dave lifts the resting ask: alice opens a short 1 @ ask_px.
         let u = place_on(
