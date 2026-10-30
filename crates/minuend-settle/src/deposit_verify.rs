@@ -4,14 +4,55 @@
 //! real Obyte joint that actually paid the vault AA. Verification is
 //! caller-parameterized (`expected_vault`, `perp_asset`) so replays never
 //! trust an evidence's self-declared payee.
+//!
+//! R4 (R4-E-2 / R4-R-3 / R4-A-2 / R4-A-7): the acceptance rule mirrors how
+//! the vault AA (`obyte-local/agents/minuend_vault.aa`) and ocore
+//! (`aa_composer.js` `getTrigger`, `formula/evaluation.js`) turn the joint
+//! into a `dep_<unit>` / `depp_<unit>` record:
+//!
+//! * `trigger.address` = first author; `trigger.data` = the FIRST `data`
+//!   message's payload; `trigger.output[[asset=X]]` = the SUM of every
+//!   output to the vault in asset X over all payment messages;
+//! * a primary trigger carrying less than the 10000-byte bounce fee, or a
+//!   unit with `max_aa_responses: 0`, bounces;
+//! * the case order decides the kind: an Oscript-truthy `data.deposit` is a
+//!   BASE deposit (even if `deposit_perp` is also set), else an
+//!   Oscript-truthy `data.deposit_perp` is a PERP deposit, else no deposit;
+//! * `data.account` must be a 64-char lowercase-hex STRING that Oscript does
+//!   not convert to a number;
+//! * BASE amount = base sum − 10000 and must be > 0; PERP amount = sum of the
+//!   governed PERP asset and must be > 0.
+//!
+//! The evidence must declare exactly what this derivation yields. The
+//! producer admits an anchor only when this check AND the vault record
+//! agree ([`admit_deposit`]); see `work/r4-dep-format.md` / PROTOCOL.
 
 use crate::DepositEvidence;
 use crate::SettleError;
-use minuend_dag::Op;
 use minuend_types::{AccountId, DEPOSIT_EVIDENCE_MAX_BYTES};
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::obyte_hash::{get_payload_hash, get_unit_hash};
+
+/// R4-R-2: largest admissible single evidence (serde-serialized JSON). A
+/// deposit whose evidence is larger is not admissible: the producer must
+/// not apply it and the replay does not endorse it (per-unit rejection).
+pub const DEPOSIT_EVIDENCE_UNIT_MAX_BYTES: usize = 256 * 1024;
+/// Total evidence of one batch (all stamped frames). Only APPLIED deposits
+/// carry evidence, so this is under the producer's control: it cuts the
+/// batch before the budget is exceeded (`post_batch.js` refuses to post).
+pub const DEPOSIT_EVIDENCE_BATCH_MAX_BYTES: usize = DEPOSIT_EVIDENCE_MAX_BYTES;
+/// The vault's `bounce_fees.base` (ocore `MIN_BYTES_BOUNCE_FEE`).
+pub const VAULT_BOUNCE_FEE: u128 = 10_000;
+/// ocore `constants.MAX_AA_STRING_LENGTH`.
+const MAX_AA_STRING_LENGTH: usize = 4096;
+
+/// Serialized size of one evidence (the measure both caps use).
+pub fn evidence_len(ev: &DepositEvidence) -> usize {
+    serde_json::to_vec(ev)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
+}
 
 /// R3-A-5: a message's payload is covered by the unit hash only through
 /// its `payload_hash` — check it before trusting the payload.
@@ -25,29 +66,111 @@ fn payload_hash_ok(msg: &serde_json::Value, unit: &serde_json::Value) -> bool {
     }
 }
 
-/// R3-A-5 / R3-E-3: the sidechain account the payer named in the vault
-/// payment (`trigger.data.account`): the joint's ONE `data` message, payload
-/// hash verified, `account` = 64 lowercase hex. The vault bounces a deposit
-/// without it, so a joint lacking it is no deposit at all.
-fn designated_account(unit: &serde_json::Value) -> Option<AccountId> {
-    let msgs = unit.get("messages")?.as_array()?;
-    let mut data = msgs
-        .iter()
-        .filter(|m| m.get("app").and_then(|a| a.as_str()) == Some("data"));
-    let msg = data.next()?;
-    if data.next().is_some() || !payload_hash_ok(msg, unit) {
+/// ocore `string_utils.toNumber` (post-aa2, unlimited precision): `Some(f)`
+/// when Oscript converts the string to a number.
+fn oscript_to_number(s: &str) -> Option<f64> {
+    // /^[+-]?(\d+(\.\d+)?)([eE][+-]?(\d+))?$/
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let m_start = i;
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == int_start {
         return None;
     }
-    let acct = msg.get("payload")?.get("account")?.as_str()?;
-    if acct.len() != 64
-        || !acct
+    if i < b.len() && b[i] == b'.' {
+        let fs = i + 1;
+        let mut j = fs;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == fs {
+            return None;
+        }
+        i = j;
+    }
+    let mantissa = &s[m_start..i];
+    let mut abs_exp: Option<&str> = None;
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        let es = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == es {
+            return None;
+        }
+        abs_exp = Some(&s[es..j]);
+        i = j;
+    }
+    if i != b.len() {
+        return None;
+    }
+    let f: f64 = s.parse().ok()?;
+    if !f.is_finite() {
+        return None;
+    }
+    // `f === 0 && mantissa > 0 && abs_exp > 0`: underflow (e.g. 1.23e-700).
+    let mant_pos = mantissa.parse::<f64>().map(|m| m > 0.0).unwrap_or(false);
+    let exp_pos = abs_exp
+        .and_then(|e| e.parse::<f64>().ok())
+        .map(|e| e > 0.0)
+        .unwrap_or(false);
+    if f == 0.0 && mant_pos && exp_pos {
+        return None;
+    }
+    Some(if f == 0.0 { 0.0 } else { f })
+}
+
+/// Oscript truthiness of `trigger.data.<key>` used as a case `if`:
+/// `Ok(false)` for a missing key; `Err(())` where ocore raises (the AA then
+/// bounces): `null`, or a string longer than `MAX_AA_STRING_LENGTH`.
+fn oscript_truthy(v: Option<&serde_json::Value>) -> Result<bool, ()> {
+    use serde_json::Value;
+    match v {
+        None => Ok(false),
+        Some(Value::Null) => Err(()),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(Value::Number(n)) => Ok(n.as_f64().map(|f| f != 0.0).unwrap_or(true)),
+        Some(Value::String(s)) => {
+            if s.encode_utf16().count() > MAX_AA_STRING_LENGTH {
+                return Err(());
+            }
+            match oscript_to_number(s) {
+                Some(f) => Ok(f != 0.0),
+                None => Ok(!s.is_empty()),
+            }
+        }
+        Some(Value::Array(_)) | Some(Value::Object(_)) => Ok(true),
+    }
+}
+
+/// The vault's account rule: a STRING (after Oscript's numeric conversion)
+/// of exactly 64 lowercase hex chars.
+fn vault_account(v: Option<&serde_json::Value>) -> Option<AccountId> {
+    let s = v?.as_str()?;
+    if s.len() != 64
+        || !s
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return None;
     }
+    if oscript_to_number(s).is_some() {
+        // e.g. an all-digit id: Oscript reads a number, `typeof != 'string'`
+        // → the vault bounces 'bad account'.
+        return None;
+    }
     let mut out = [0u8; 32];
-    out.copy_from_slice(&hex::decode(acct).ok()?);
+    out.copy_from_slice(&hex::decode(s).ok()?);
     Some(AccountId(out))
 }
 
@@ -74,91 +197,150 @@ fn asset_matches(s: &str, want: &[u8; 32]) -> bool {
         .unwrap_or(false)
 }
 
-/// Finds the first output paying `vault` in the expected asset kind; accepts
-/// an output to ANY address when `vault` is None (vault address not
-/// configured pre-deploy). Asset-class binding is enforced either way so a
-/// PERP evidence can never ride a non-PERP payment.
-fn find_payment_output_opt(
-    unit: &serde_json::Value,
-    vault: Option<&str>,
-    is_perp: bool,
-    perp_asset: &[u8; 32],
-) -> Option<(String, Option<String>)> {
-    let messages = unit.get("messages")?.as_array()?;
-    for msg in messages {
-        if msg.get("app").and_then(|a| a.as_str()) != Some("payment") {
-            continue;
-        }
-        // R3-A-5: the amount is read from the payload — it must be the
-        // payload the unit hash commits to.
-        if !payload_hash_ok(msg, unit) {
-            continue;
-        }
-        let payload = msg.get("payload")?;
-        let outputs = payload.get("outputs")?.as_array()?;
-        let asset = payload
-            .get("asset")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let is_base = match &asset {
-            None => true,
-            Some(a) => a == "base",
-        };
-        if is_perp == is_base {
-            // Wrong asset class for this evidence kind.
-            continue;
-        }
-        if is_perp {
-            // PERP-class payment must carry exactly the governed PERP asset.
-            if !asset
-                .as_deref()
-                .map(|a| asset_matches(a, perp_asset))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-        }
-        for out in outputs {
-            let addr = out.get("address")?.as_str()?;
-            if let Some(v) = vault {
-                if addr != v {
-                    continue;
-                }
-            }
-            let amount_val = out.get("amount")?;
-            let amount_str = if let Some(n) = amount_val.as_u64() {
-                n.to_string()
-            } else if let Some(n) = amount_val.as_i64() {
-                n.to_string()
-            } else if let Some(s) = amount_val.as_str() {
-                s.to_string()
-            } else {
-                continue;
-            };
-            return Some((amount_str, asset));
-        }
-    }
-    None
+/// What the vault records for a joint: `(is_perp, amount, payer, account)`,
+/// or `None` when the vault would not record a deposit for it (no trigger,
+/// bounce, other case). `Err` = the joint itself is malformed / forged
+/// (payload not bound by its hash).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultDeposit {
+    pub is_perp: bool,
+    pub amount: u128,
+    pub payer: String,
+    pub account: AccountId,
 }
 
-/// Base-asset joint amount vs credited amount. Production rule: joint pays
-/// ev.amount + the 10000 bounce fee. Test fixtures may post without the fee,
-/// hence the `cfg(test)` relaxation — never enable it outside tests.
-#[cfg(not(test))]
-fn base_amount_matches(joint_amt: i128, ev_amt: i128) -> bool {
-    joint_amt == ev_amt + 10_000
-}
-#[cfg(test)]
-fn base_amount_matches(joint_amt: i128, ev_amt: i128) -> bool {
-    joint_amt == ev_amt + 10_000 || joint_amt == ev_amt
+/// R4-E-2 / R4-R-3: derive the vault's deposit record from a joint exactly
+/// like ocore + the vault AA (module docs). `vault` must be non-empty.
+pub fn vault_deposit_of(
+    joint: &serde_json::Value,
+    vault: &str,
+    perp_asset: &[u8; 32],
+) -> Result<Option<VaultDeposit>, SettleError> {
+    if vault.is_empty() {
+        return Err(SettleError::DepositContentMismatch);
+    }
+    let unit = joint.get("unit").unwrap_or(joint);
+    let payer = unit
+        .get("authors")
+        .and_then(|a| a.get(0))
+        .and_then(|a| a.get("address"))
+        .and_then(|a| a.as_str())
+        .ok_or(SettleError::DepositContentMismatch)?
+        .to_string();
+    if let Some(m) = unit.get("max_aa_responses") {
+        if m.as_u64() == Some(0) {
+            return Ok(None);
+        }
+    }
+    let msgs = unit
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .ok_or(SettleError::DepositContentMismatch)?;
+    let mut data: Option<&serde_json::Value> = None;
+    // asset string -> summed amount paid to the vault.
+    let mut outputs: BTreeMap<String, u128> = BTreeMap::new();
+    for msg in msgs {
+        match msg.get("app").and_then(|a| a.as_str()) {
+            Some("data") if data.is_none() => {
+                // ocore uses the FIRST data message, payload included as is;
+                // we only trust it when its hash binds it to the unit.
+                if !payload_hash_ok(msg, unit) {
+                    return Err(SettleError::DepositContentMismatch);
+                }
+                data = msg.get("payload");
+            }
+            Some("payment") => {
+                let Some(payload) = msg.get("payload") else {
+                    continue; // private payment: getTrigger skips it too
+                };
+                let outs = payload
+                    .get("outputs")
+                    .and_then(|o| o.as_array())
+                    .ok_or(SettleError::DepositContentMismatch)?;
+                let pays_vault = outs
+                    .iter()
+                    .any(|o| o.get("address").and_then(|a| a.as_str()) == Some(vault));
+                if !pays_vault {
+                    continue;
+                }
+                if !payload_hash_ok(msg, unit) {
+                    return Err(SettleError::DepositContentMismatch);
+                }
+                let asset = match payload.get("asset") {
+                    None => "base".to_string(),
+                    Some(a) => a
+                        .as_str()
+                        .ok_or(SettleError::DepositContentMismatch)?
+                        .to_string(),
+                };
+                for o in outs {
+                    if o.get("address").and_then(|a| a.as_str()) != Some(vault) {
+                        continue;
+                    }
+                    let amt = o
+                        .get("amount")
+                        .and_then(|a| a.as_u64())
+                        .ok_or(SettleError::DepositContentMismatch)?;
+                    let e = outputs.entry(asset.clone()).or_insert(0);
+                    *e = e.saturating_add(u128::from(amt));
+                }
+            }
+            _ => {}
+        }
+    }
+    if outputs.is_empty() {
+        return Ok(None); // not a trigger of the vault
+    }
+    let base_sum = outputs.get("base").copied().unwrap_or(0);
+    if base_sum < VAULT_BOUNCE_FEE {
+        return Ok(None); // 'received bytes are not enough to cover bounce fees'
+    }
+    // `trigger.data` is false for a missing / non-object / empty payload.
+    let Some(data) = data.and_then(|d| d.as_object()).filter(|o| !o.is_empty()) else {
+        return Ok(None);
+    };
+    let is_perp = match oscript_truthy(data.get("deposit")) {
+        Err(()) => return Ok(None),
+        Ok(true) => false,
+        Ok(false) => match oscript_truthy(data.get("deposit_perp")) {
+            Ok(true) => true,
+            _ => return Ok(None),
+        },
+    };
+    let Some(account) = vault_account(data.get("account")) else {
+        return Ok(None);
+    };
+    let amount = if is_perp {
+        let sum: u128 = outputs
+            .iter()
+            .filter(|(a, _)| a.as_str() != "base" && asset_matches(a, perp_asset))
+            .map(|(_, v)| *v)
+            .fold(0u128, |a, b| a.saturating_add(b));
+        if sum == 0 {
+            return Ok(None); // 'bad deposit'
+        }
+        sum
+    } else {
+        let a = base_sum - VAULT_BOUNCE_FEE;
+        if a == 0 {
+            return Ok(None); // 'deposit too small'
+        }
+        a
+    };
+    Ok(Some(VaultDeposit {
+        is_perp,
+        amount,
+        payer,
+        account,
+    }))
 }
 
 /// R3 (unified deposit pipeline): what a verified evidence proves about
 /// its anchor — the on-chain payment, independent of any sidechain op.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedDeposit {
-    /// Amount in the deposit's own unit (base: joint output − bounce fee;
-    /// PERP: joint output).
+    /// Amount in the deposit's own unit (base: vault outputs − bounce fee;
+    /// PERP: PERP outputs to the vault).
     pub amount: u128,
     /// The paying Obyte address (`joint.authors[0].address`).
     pub payer: String,
@@ -166,39 +348,25 @@ pub struct VerifiedDeposit {
     pub account: AccountId,
 }
 
-/// Verifies ONE evidence on its own: the joint hashes to `ev.aa_unit`, its
-/// first author is `ev.payer`, it pays `expected_vault` exactly `ev.amount`
-/// (+ bounce fee for base) in the asset class `ev.is_perp` names, both the
-/// payment and the data message are payload-hash bound, and the data
-/// message designates `ev.account`. The sidechain op is NOT consulted:
-/// whether an op may consume the anchor (same amount, payer address and
-/// account) is the engine's per-unit decision against the recorded backing
-/// (`ChainState::allow_deposit`), so an op that does not match — a
-/// front-run with another account or address, a wrong amount — is a
-/// REJECTED unit on producer and replay alike instead of an evidence
-/// failure that would stall the whole height.
+/// Verifies ONE evidence on its own: size within
+/// [`DEPOSIT_EVIDENCE_UNIT_MAX_BYTES`], the joint hashes to `ev.aa_unit`,
+/// and the vault record the joint produces ([`vault_deposit_of`]) is a
+/// deposit of exactly `ev.is_perp`, `ev.amount`, `ev.payer`, `ev.account`
+/// to `ev.vault_address == expected_vault`. The sidechain op is NOT
+/// consulted: whether an op may consume the anchor is the engine's per-unit
+/// decision against the recorded backing.
 pub fn verify_evidence(
     ev: &DepositEvidence,
     expected_vault: &str,
     perp_asset: &[u8; 32],
 ) -> Result<([u8; 32], bool, VerifiedDeposit), SettleError> {
-    // Payer binding (#8): the evidence's payer must be the joint's first
-    // author; the engine then requires the op's bound address to equal it.
-    let joint_authors = if let Some(u) = ev.joint.get("unit") {
-        u.get("authors")
-    } else {
-        ev.joint.get("authors")
-    };
-    let first_author = joint_authors
-        .and_then(|a| a.get(0))
-        .and_then(|a| a.get("address"))
-        .and_then(|a| a.as_str());
-    match first_author {
-        Some(a) if a == ev.payer => {}
-        _ => return Err(SettleError::DepositContentMismatch),
+    if evidence_len(ev) > DEPOSIT_EVIDENCE_UNIT_MAX_BYTES {
+        return Err(SettleError::DepositEvidenceTooLarge);
+    }
+    if expected_vault.is_empty() || ev.vault_address != expected_vault {
+        return Err(SettleError::DepositContentMismatch);
     }
     let ev_bytes = parse_hex32(&ev.aa_unit)?;
-    // The credited amount: a non-negative decimal in canonical form.
     let amount: u128 = ev
         .amount
         .parse()
@@ -206,125 +374,117 @@ pub fn verify_evidence(
     if amount.to_string() != ev.amount {
         return Err(SettleError::DepositContentMismatch);
     }
-    // Payee check (H2): the declared vault must equal the caller's expected
-    // vault — an evidence can no longer vouch for itself.
-    if ev.vault_address != expected_vault {
-        return Err(SettleError::DepositContentMismatch);
-    }
-    // hash check
     let computed = get_unit_hash(&ev.joint).map_err(|_| SettleError::DepositContentMismatch)?;
     if computed != ev_bytes {
         return Err(SettleError::DepositContentMismatch);
     }
-    let unit_obj = if let Some(u) = ev.joint.get("unit") {
-        u
-    } else {
-        &ev.joint
-    };
-    // Content check: the joint must actually pay the expected vault the
-    // claimed (amount, asset). Pre-deploy (empty expected vault) any payee
-    // is accepted, but the asset-class binding below still applies.
-    let vault_arg = if expected_vault.is_empty() {
-        None
-    } else {
-        Some(expected_vault)
-    };
-    // R3-A-5: the payer-designated account, declared in the evidence and
-    // read from the joint's payload-hash-verified data message.
-    let designated = designated_account(unit_obj).ok_or(SettleError::DepositContentMismatch)?;
-    if ev.account != hex::encode(designated.0) {
-        return Err(SettleError::DepositContentMismatch);
+    let rec = vault_deposit_of(&ev.joint, expected_vault, perp_asset)?
+        .ok_or(SettleError::DepositContentMismatch)?;
+    if rec.is_perp != ev.is_perp {
+        return Err(SettleError::DepositKindMismatch);
     }
-    match find_payment_output_opt(unit_obj, vault_arg, ev.is_perp, perp_asset) {
-        Some((joint_amount_str, _asset)) => {
-            if ev.is_perp {
-                // For PERP, joint amount should equal ev.amount directly.
-                if joint_amount_str != ev.amount {
-                    return Err(SettleError::DepositContentMismatch);
-                }
-            } else {
-                // For base, joint amount is ev.amount + 10000 bounce fee;
-                // see `base_amount_matches` (fixtures post without the fee).
-                let ev_amt =
-                    i128::try_from(amount).map_err(|_| SettleError::DepositContentMismatch)?;
-                let joint_amt: i128 = joint_amount_str
-                    .parse()
-                    .map_err(|_| SettleError::DepositContentMismatch)?;
-                if !base_amount_matches(joint_amt, ev_amt) {
-                    return Err(SettleError::DepositContentMismatch);
-                }
-            }
-        }
-        None => return Err(SettleError::DepositContentMismatch),
+    if rec.amount != amount || rec.payer != ev.payer || hex::encode(rec.account.0) != ev.account {
+        return Err(SettleError::DepositContentMismatch);
     }
     Ok((
         ev_bytes,
         ev.is_perp,
         VerifiedDeposit {
             amount,
-            payer: ev.payer.clone(),
-            account: designated,
+            payer: rec.payer,
+            account: rec.account,
         },
     ))
 }
 
-/// R3-R-4 + R3-E-1 + R3-A-5: per-deposit verification for replay — the one
-/// deposit path of `Batch::validate_against`.
-///
-/// Structural problems of the evidence list itself (over the size cap,
-/// duplicate anchors, malformed anchor hex) are hard errors. Otherwise each
-/// Deposit/GovDeposit unit's anchor is endorsed iff an evidence for it
-/// exists, names the same asset kind as the op, and [`verify_evidence`]
-/// accepts it; the result maps each endorsed `(aa_unit, is_perp)` to the
-/// verified payment. Missing or failing evidence → simply not endorsed: the
-/// replay rejects that unit (`UnbackedDeposit`) exactly like the producer,
-/// whose vault feed never held it. The caller records each endorsed anchor
-/// with [`minuend_state::ChainState::allow_deposit`] (amount, payer,
-/// account), so the engine accepts only the exact payment for the
-/// designated account, and must still require that every deposit the
-/// replay APPLIED was endorsed.
-pub fn verify_each(
-    units: &[minuend_dag::Unit],
-    evidences: &[DepositEvidence],
+/// R4-E-1 / R4-E-4: the per-unit check the replay applies to the evidence
+/// stamped on ONE Deposit/GovDeposit frame: the evidence verifies and names
+/// exactly that unit's `(anchor, kind)`.
+pub fn verify_unit_evidence(
+    ev: &DepositEvidence,
+    anchor: [u8; 32],
+    is_perp: bool,
     expected_vault: &str,
     perp_asset: &[u8; 32],
-) -> Result<HashMap<([u8; 32], bool), VerifiedDeposit>, SettleError> {
-    let total_bytes: usize = evidences
-        .iter()
-        .map(|e| serde_json::to_vec(e).map(|v| v.len()).unwrap_or(0))
-        .sum();
-    if total_bytes > DEPOSIT_EVIDENCE_MAX_BYTES {
-        return Err(SettleError::DepositEvidenceTooLarge);
+) -> Result<VerifiedDeposit, SettleError> {
+    let (a, k, v) = verify_evidence(ev, expected_vault, perp_asset)?;
+    if a != anchor {
+        return Err(SettleError::DepositAnchorMissing);
     }
-    let mut map: HashMap<String, &DepositEvidence> = HashMap::new();
-    for ev in evidences {
-        parse_hex32(&ev.aa_unit)?;
-        if map.insert(ev.aa_unit.to_lowercase(), ev).is_some() {
-            return Err(SettleError::DepositDuplicateAnchor);
-        }
+    if k != is_perp {
+        return Err(SettleError::DepositKindMismatch);
     }
-    let mut endorsed: HashMap<([u8; 32], bool), VerifiedDeposit> = HashMap::new();
-    let mut tried: HashSet<([u8; 32], bool)> = HashSet::new();
-    for u in units {
-        let key = match &u.op {
-            Op::Deposit { aa_unit, .. } => (*aa_unit, false),
-            Op::GovDeposit { aa_unit, .. } => (*aa_unit, true),
-            _ => continue,
-        };
-        if !tried.insert(key) {
-            continue;
-        }
-        let Some(ev) = map.get(&hex::encode(key.0)) else {
-            continue;
-        };
-        if ev.is_perp != key.1 {
-            continue;
-        }
-        if let Ok((anchor, is_perp, v)) = verify_evidence(ev, expected_vault, perp_asset) {
-            if (anchor, is_perp) == key {
-                endorsed.insert(key, v);
-            }
-        }
+    Ok(v)
+}
+
+/// R4-E-4 producer rule: admit an anchor (`ChainState::allow_deposit`) only
+/// when the evidence built from its joint verifies AND agrees field by field
+/// with the vault's on-chain record `'{payer}:{amount}:{account}'`
+/// (`dep_<unit>` for base, `depp_<unit>` for PERP — pass the one matching
+/// `ev.is_perp`). A producer following this rule and stamping the evidence
+/// on exactly the deposit units it applied is replayed identically by every
+/// watcher, whenever it learned of the vault record.
+pub fn admit_deposit(
+    ev: &DepositEvidence,
+    expected_vault: &str,
+    perp_asset: &[u8; 32],
+    vault_record: &str,
+) -> Result<([u8; 32], bool, VerifiedDeposit), SettleError> {
+    let out = verify_evidence(ev, expected_vault, perp_asset)?;
+    let parts: Vec<&str> = vault_record.split(':').collect();
+    if parts.len() != 3
+        || parts[0] != out.2.payer
+        || parts[1] != out.2.amount.to_string()
+        || parts[2] != hex::encode(out.2.account.0)
+    {
+        return Err(SettleError::DepositContentMismatch);
     }
-    Ok(endorsed)
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn oscript_numbers() {
+        assert_eq!(oscript_to_number("0"), Some(0.0));
+        assert_eq!(oscript_to_number("-0"), Some(0.0));
+        assert_eq!(oscript_to_number("1.5e3"), Some(1500.0));
+        assert_eq!(oscript_to_number("1e-700"), None);
+        assert_eq!(oscript_to_number("0e-700"), Some(0.0));
+        assert_eq!(oscript_to_number("1e400"), None);
+        assert_eq!(oscript_to_number("1."), None);
+        assert_eq!(oscript_to_number(".5"), None);
+        assert_eq!(oscript_to_number("abc"), None);
+        assert_eq!(oscript_to_number(""), None);
+        assert_eq!(oscript_to_number("0x10"), None);
+    }
+
+    #[test]
+    fn oscript_truthiness() {
+        assert_eq!(oscript_truthy(None), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!(1))), Ok(true));
+        assert_eq!(oscript_truthy(Some(&json!(0))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!(0.0))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!("0"))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!("0.00"))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!(""))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!("x"))), Ok(true));
+        assert_eq!(oscript_truthy(Some(&json!(false))), Ok(false));
+        assert_eq!(oscript_truthy(Some(&json!({}))), Ok(true));
+        assert_eq!(oscript_truthy(Some(&json!([]))), Ok(true));
+        assert_eq!(oscript_truthy(Some(&json!(null))), Err(()));
+        assert_eq!(oscript_truthy(Some(&json!("y".repeat(4097)))), Err(()));
+    }
+
+    #[test]
+    fn vault_account_rules() {
+        assert!(vault_account(Some(&json!("ab".repeat(32)))).is_some());
+        assert!(vault_account(Some(&json!("AB".repeat(32)))).is_none());
+        // all digits: Oscript converts to a number → vault bounces.
+        assert!(vault_account(Some(&json!("12".repeat(32)))).is_none());
+        assert!(vault_account(Some(&json!(5))).is_none());
+    }
 }
