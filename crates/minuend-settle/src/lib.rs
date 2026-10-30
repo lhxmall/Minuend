@@ -4249,6 +4249,28 @@ mod tests {
             .iter()
             .any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
         assert_eq!(budget.used(), each);
+        // A duplicate unit citing an already reserved anchor is not applied
+        // and must NOT release the first unit's reservation.
+        let (ev6, rec6) = r5_sized_evidence(60, 7, each);
+        let (a, p, v) = budget
+            .admit(&ev6, R4_VAULT, &minuend_types::PERP_ASSET, &rec6)
+            .unwrap();
+        eng.state.allow_deposit(a, p, v.amount, &v.payer, v.account);
+        let first = r5_deposit_unit(&ev6, 7);
+        deposit_verify::ingest_within_budget(&mut eng, &mut budget, first.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(budget.used(), 2 * each);
+        let dup = sign_unit(vec![unit_id(&first)], first.op.clone(), &sk(7));
+        let dup_id = unit_id(&dup);
+        match deposit_verify::ingest_within_budget(&mut eng, &mut budget, dup) {
+            Ok(Some(evs)) => assert!(!evs.iter().any(
+                |e| matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == dup_id)
+            )),
+            Ok(None) => panic!("a duplicate reserves nothing, so it is never deferred"),
+            Err(_) => {}
+        }
+        assert_eq!(budget.used(), 2 * each, "duplicate kept the first reservation");
     }
 
     /// R5-E-1 test 4 (batch): 0.97 MiB of applied evidence is refused by

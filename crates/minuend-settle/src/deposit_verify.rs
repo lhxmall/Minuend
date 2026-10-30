@@ -539,17 +539,20 @@ impl DepositEvidenceBudget {
     /// budget (they cannot be applied with evidence anyway), reserve
     /// nothing. `Err(DepositEvidenceBudget)` = it would push the batch
     /// over [`DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES`]: defer the unit.
-    pub fn try_reserve(&mut self, op: &minuend_dag::Op) -> Result<(), SettleError> {
+    /// `Ok(true)` = this call reserved the anchor's bytes (give them back
+    /// with [`DepositEvidenceBudget::release`] if the unit is not applied);
+    /// `Ok(false)` = nothing reserved (not a budgeted deposit, or the anchor
+    /// is already reserved by an earlier unit of this batch — a duplicate
+    /// the engine rejects; never release in that case).
+    pub fn try_reserve(&mut self, op: &minuend_dag::Op) -> Result<bool, SettleError> {
         let Some(key) = crate::deposit_key(op) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(len) = self.admitted.get(&key).copied() else {
-            return Ok(());
+            return Ok(false);
         };
         if self.reserved.contains_key(&key) {
-            // A second unit citing the same anchor in this batch is a
-            // duplicate the engine rejects: nothing more to reserve.
-            return Ok(());
+            return Ok(false);
         }
         let total = self.used.saturating_add(len);
         if total > DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES {
@@ -557,9 +560,10 @@ impl DepositEvidenceBudget {
         }
         self.used = total;
         self.reserved.insert(key, len);
-        Ok(())
+        Ok(true)
     }
-    /// Give back a reservation whose unit was not applied.
+    /// Give back a reservation whose unit was not applied (only after
+    /// `try_reserve` returned `Ok(true)` for that unit).
     pub fn release(&mut self, op: &minuend_dag::Op) {
         if let Some(key) = crate::deposit_key(op) {
             if let Some(len) = self.reserved.remove(&key) {
@@ -587,9 +591,10 @@ pub fn ingest_within_budget(
     budget: &mut DepositEvidenceBudget,
     unit: minuend_dag::Unit,
 ) -> Result<Option<Vec<minuend_exec::ExecEvent>>, minuend_exec::ExecError> {
-    if budget.try_reserve(&unit.op).is_err() {
-        return Ok(None);
-    }
+    let reserved = match budget.try_reserve(&unit.op) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
     let op = unit.op.clone();
     let uid = minuend_dag::unit_id(&unit);
     match engine.ingest(unit) {
@@ -597,13 +602,15 @@ pub fn ingest_within_budget(
             let applied = events.iter().any(
                 |e| matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == uid),
             );
-            if !applied {
+            if !applied && reserved {
                 budget.release(&op);
             }
             Ok(Some(events))
         }
         Err(e) => {
-            budget.release(&op);
+            if reserved {
+                budget.release(&op);
+            }
             Err(e)
         }
     }
