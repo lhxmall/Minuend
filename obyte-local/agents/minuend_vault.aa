@@ -41,7 +41,8 @@
 	// State vars: wd_<account_hex> (cumulative base withdrawn PER ACCOUNT —
 	// R2-A-8: a second address bound to the same account can never spend
 	// the same W twice), wp_<addr> (cumulative PERP withdrawn),
-	// pperp_<addr> (PERP deposits received), dep_<unit> =
+	// pperp_<addr> (PERP deposits received), pperp_total (all recorded PERP
+	// deposits; R5-A-5 caps it at PERP_SUPPLY_MAX), dep_<unit> =
 	// '{payer}:{amount}:{account}' (R2-A-3 + R3-A-5: every base deposit,
 	// keyed by the trigger unit hash in base64 — the anchor a `d:` op must
 	// cite; {account} = trigger.data.account, the payer-chosen sidechain
@@ -91,6 +92,20 @@
 					if (!params.rollup) bounce('base AA');
 					if (!(trigger.output[[asset='PERP_ASSET_ID_HERE']] > 0))
 						bounce('bad deposit');
+					// R5-A-5 / R5-E-2: the sidechain caps PERP supply at
+					// PERP_SUPPLY_MAX = 99999999999999 (engine gov_deposit
+					// rejects past it) and PERP never leaves this vault
+					// (redemption is disabled, burns only shrink the
+					// sidechain supply), so every credited GovDeposit is
+					// backed by a recorded depp_ and supply <= pperp_total.
+					// Bounce (refunding the PERP) any deposit that would push
+					// the recorded total past the cap: an accepted deposit
+					// can then never be refused by the engine for the cap,
+					// so no PERP gets stuck here. Cost: burned PERP keeps
+					// occupying the total (the room only shrinks).
+					$pt = (var['pperp_total'] otherwise 0) + trigger.output[[asset='PERP_ASSET_ID_HERE']];
+					if ($pt > 99999999999999)
+						bounce('perp cap');
 					// R3-A-5/R3-A-7: same payer-chosen account as a base deposit.
 					$acct = trigger.data.account;
 					if (typeof($acct) != 'string' OR length($acct) != 64
@@ -102,6 +117,7 @@
 						app: "state",
 						state: "{
 							var['pperp_' || trigger.address] = (var['pperp_' || trigger.address] otherwise 0) + trigger.output[[asset='PERP_ASSET_ID_HERE']];
+							var['pperp_total'] = $pt;
 							// R3-A-7: per-unit PERP deposit ledger, the backing a
 							// credited `D:` op must cite (P-deposit).
 							var['depp_' || trigger.unit] = trigger.address || ':' || trigger.output[[asset='PERP_ASSET_ID_HERE']] || ':' || $acct;

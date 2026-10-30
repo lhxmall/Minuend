@@ -617,7 +617,9 @@ fn fsane_shape_bad(parts: &[&str]) -> bool {
     if q <= 0.0 || int(parts[8]).is_none() {
         return true;
     }
-    let Some(tp) = int(parts[13]) else { return true };
+    let Some(tp) = int(parts[13]) else {
+        return true;
+    };
     if tp < 0.0 {
         return true;
     }
@@ -677,7 +679,11 @@ fn fsane_proof(
         .find(|l| l.starts_with(&format!("meta:{}:", parts[7])))
     {
         let m: Vec<&str> = meta.split(':').collect();
-        if let Some(usd) = m.get(9).and_then(|v| v.parse::<i128>().ok()).filter(|_| m.len() == 11) {
+        if let Some(usd) = m
+            .get(9)
+            .and_then(|v| v.parse::<i128>().ok())
+            .filter(|_| m.len() == 11)
+        {
             let fund = usd != 0;
             if (kind == "0" && fund) || (kind == "1" && !fund) || (kind == "3" && fund) {
                 let mut d = data.clone();
@@ -1261,11 +1267,10 @@ fn oscript_num(s: &str) -> Option<f64> {
 fn oscript_eq(a: &str, b: &str) -> Option<bool> {
     match (oscript_num(a), oscript_num(b)) {
         (Some(x), Some(y)) => {
+            let exact = x.abs() < 1e15 && y.abs() < 1e15 && x.fract() == 0.0 && y.fract() == 0.0;
             if x == y {
                 Some(true)
-            } else if x.abs() < 1e15 && y.abs() < 1e15 && x.fract() == 0.0 && y.fract() == 0.0 {
-                Some(false)
-            } else if (x - y).abs() > 1e-12 * x.abs().max(y.abs()) {
+            } else if exact || (x - y).abs() > 1e-12 * x.abs().max(y.abs()) {
                 Some(false)
             } else {
                 None
@@ -3342,13 +3347,15 @@ mod tests {
 
     #[test]
     fn forged_taker_post_is_fill_math_fraud() {
-        // #47 A3: the liar writes a NEGATIVE taker_post into the fill and
-        // inflates alice's collateral by the same amount — the old identity
-        // (which trusted F[13]) balanced; the op-bound one does not.
+        // #47 A3: the liar writes a wrong taker_post into the fill and moves
+        // alice's collateral by the same amount — the old identity (which
+        // trusted F[13]) balanced; the op-bound one does not. (R5-A-2: a
+        // NEGATIVE taker_post is now P-fsane's shape lie, so the forged
+        // share here is an inflated positive one.)
         let q = minuend_types::QTY_SCALE / 1000;
         let (mut batch, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
         let honest_tpost: i128 = batch.fills[0].split(':').nth(13).unwrap().parse().unwrap();
-        let forged = honest_tpost - 1_000_000_000;
+        let forged = honest_tpost + 1_000_000_000;
         set_fill_field(&mut batch, 0, 13, &forged.to_string());
         let alice_hex = hex::encode(a.0);
         bump_col(&mut batch, 1, &alice_hex, honest_tpost - forged);
@@ -3758,7 +3765,14 @@ mod tests {
         let f = "f:u:0:t:m:to:mo:1:5:7:1:0:0:0";
         let parts: Vec<&str> = f.split(':').collect();
         assert!(!fsane_shape_bad(&parts));
-        for (i, v) in [(9, "0"), (9, "1.5"), (8, "x"), (13, "-1"), (11, "2"), (12, "4")] {
+        for (i, v) in [
+            (9, "0"),
+            (9, "1.5"),
+            (8, "x"),
+            (13, "-1"),
+            (11, "2"),
+            (12, "4"),
+        ] {
             let mut p2 = parts.clone();
             p2[i] = v;
             assert!(fsane_shape_bad(&p2), "field {i} = {v}");
@@ -4030,7 +4044,12 @@ mod tests {
         let neg = place_leg(&a, &c, -300, true);
         assert!(!aa_fill_verdict(&tree(0, 5), &neg, false, None));
         assert!(!aa_fill_verdict(&tree(-300, 5), &neg, false, None));
-        assert!(aa_fill_verdict(&tree(1_000_000_000_000, 5), &neg, false, None));
+        assert!(aa_fill_verdict(
+            &tree(1_000_000_000_000, 5),
+            &neg,
+            false,
+            None
+        ));
         // x: taker: ceiling max(cross identity, pre floor), no lower bound.
         let mut xt = place_leg(&a, &c, 100, true);
         xt.xt_floor = Some(400);
