@@ -566,6 +566,24 @@ Rust 侧移植于 `minuend_settle::obyte_hash::get_json_source`），
 ocore 校验器（base64 `getBase64Hash(data, true)` / `object_length`），
 post_batch.js 把信封两字段直接委托给 ocore，不手写副本。
 
+**DA 绑定 da_bind（第 2 轮 R2-R-1）**：submit 单元必须只含**一条** temp_data
+（header）。header 与 `submitData` 都携带 `data_root`、`counts_root` 与
+
+```
+da_bind = hex(sha256('minuend-da-v1|' chain_id '|' height '|' prev_state_hash '|'
+  state_root '|' aa_root '|' wit_root '|' trace_root '|' units_root '|'
+  units_set_root '|' ops_root '|' fills_root '|' counts_root '|' unit_count '|'
+  wit_count '|' fill_count '|' assertion_version '|' data_root))
+```
+
+整数按十进制、字符串原样（Rust `minuend_settle::da_bind_hash`，JS
+`script_helpers.daBindHash`，二者对拍同一测试向量）。rollup 在 submit 时重算
+并 bounce `bad da_bind`，并存 `da_bind_h`、`da_hash_h`（temp_data 的
+`payload.data_hash`，24h 剥离后仍在）、`data_root_h`、`counts_root_h`。AA 读不到
+temp_data 正文，所以"header 字段 == 链上根"不可链上证明；watcher 必须核对
+`da_hash_h`、从 header 重算 `da_bind` 并与 `da_bind_h` 比对、核 `data_root_h`，
+任一不符即报 DA MISMATCH、该高度不验证、也不用该 header 构造欺诈证明。
+
 ### 8.3 validate_against（任何人可审计）
 
 ```
@@ -714,24 +732,27 @@ acct:{account_hex_64}:{collateral}:{perp}:{W}   # W = 累计已借记提款
 
 ## 10. 结算 AA 状态机（CHAIN_ID=minuend-v2）
 
-五个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、三个 dispute AA
+六个 AA 分属三类职责：`minuend_rollup.aa`（主张链）、四个 dispute AA
 （`minuend_dispute.aa` 充提与 Cancel-only escrow；P-omit 禁用、`minuend_dispute_fill.aa` 成交、
-`minuend_dispute_bind.aa`（#47 A2 新增）W 列与地址绑定）和
-`minuend_vault.aa`（托管）。金库无 owner key，claim 在 rollup。
+`minuend_dispute_bind.aa`（#47 A2 新增）W 列 / 地址绑定 / tip / keep / mirror、
+`minuend_dispute_book.aa`（第 2 轮新增）P-ghost 与 P-skip）和
+`minuend_vault.aa`（托管；第 2 轮起为 base AA + 参数化实例
+`{base_aa, params:{rollup}}`）。金库无 owner key，claim 在 rollup。
 
 部署 op 预算（ocore `MAX_OPS = 2000`，`tools/check_aa_complexity.js`，
-部署时替换地址后的定义与源文件一致）：vault 221、rollup 770、dispute 1855、
-dispute_fill 1975、dispute_bind 530。dispute_fill 余量只剩 25 ops，新增
-判定须先腾出预算。
+部署时替换地址后的定义与源文件一致；第 2 轮数值）：vault 276、rollup 976、
+dispute 1255、dispute_bind 1094、dispute_book 804、dispute_fill 1919。
+dispute_fill 余量 81 ops，新增判定须先腾出预算。第 2 轮的完整变更见 §10.7。
 
 rollup 状态变量（`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa
 submitted_at_h, state_root_h, aa_forest_h(1024 hex), prev_h
 wit_root_h, trace_root_h, units_root_h, units_set_root_h
-ops_root_h, fills_root_h, unit_count_h, wit_count_h, fill_count_h
-da_unit_h, active_bond_h, fee_winner_h
+ops_root_h, fills_root_h, counts_root_h, unit_count_h, wit_count_h, fill_count_h
+da_unit_h, data_root_h, da_bind_h, da_hash_h      # 第 2 轮 R2-R-1 / I-2
+active_bond_h, fee_winner_h, slash_burned          # slash_burned：R2-A-9 锁定的 4/5 罚没
 frozen_h ∈ {∅/0=live, 2=failed}
 inbox_<unit_id_hex>, inbox_upto_h
 pool_<addr>（常备池；提交门 pool>=1e12）
@@ -771,10 +792,13 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | escrow（P-escrow） | dispute | 仅 Cancel：post collateral 必须精确等于 pre collateral + 被撤订单 pre-leaf 的 `margin_left`；Place escrow 没有此证明分支 |
 | omit | dispute | 当前禁用：force 只记录时间戳，不能证明 unit 存在；该 case 恒 bounce `no fraud` |
 | fill_math | dispute_fill | 普通受支持成交的账户/订单身份与 collateral 恒等式（含逐仓 post、释放、PnL、taker fee）；任何负的预期 collateral 都 bounce `no fraud`，不作欺诈判定；仓位 entry 比较容差为 ±1 个最小单位。#47：kind 0/1 taker 腿把 fill 绑定到本 unit 的 `p:` op（账户/市场/方向/数量），链上按 `book.rs` pro-rata 重算 `taker_post`（±1），按 op 的 typ/tif 推出剩余挂单是否留簿及其 `margin_left`，并校验逐仓 bucket；kind 2（ADL）/3（清算）只在 `L:` 单元订单簿路径（taker==target、caller≠maker、target 为 cross、对手方 post 抵押 > 0）上判定，target 腿扣除 keeper 奖励；资金费率场外 ADL 一律 bounce |
-| ghost | dispute_fill | 成交的 maker 订单 id 前缀区间不在 pre_wit |
-| skip | dispute | pre_wit 中存在更优活单未成交（#47 B3：只判 unit 的第一笔 fill，多 fill unit 也可判；B7：taker 自己的 cross 挂单豁免，自己的逐仓托管挂单在 Place 成交（kind 0/1）上不豁免） |
+| ghost | dispute_book（第 2 轮由 dispute_fill 迁入） | 成交的 maker 订单 id 前缀区间不在 pre_wit（kind 2 / 全零 maker 订单 id 一律 bounce，R2-A-6） |
+| skip | dispute_book（第 2 轮由 dispute 迁入） | pre_wit 中存在更优活单未成交（#47 B3：只判 unit 的第一笔 fill，多 fill unit 也可判；B7：taker 自己的 cross 挂单豁免，自己的逐仓托管挂单在 Place 成交（kind 0/1）上不豁免） |
 | wpin（P-wpin） | dispute_bind | #47 A2：某账户 `acct:` 叶的 W 列在 unit k 发生变化，但该 unit 的 op 不是**该账户自己的** `w:{acct}:{amount}:{nonce}`；合法结果只有 W1 == W0（含被拒）或 W1 == W0 + amount。新账户用 pre 非成员证明（左右邻叶）代替 pre 叶 |
-| adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑） |
+| adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈 |
+| tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
+| keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
+| deposit（第 2 轮加强） | dispute | R2-A-3：`d:` 入账必须由金库 `dep_<u>` 记录支撑（payer == op 地址、amount ≤ 记录值），pre 树不得已有 `dep:{u}`（重复入账），post 树必须出现 `dep:{u}` |
 
 **"被拒 = 不变"规则（#47 跨 PR）**：被拒的 unit 同样进入批次（每个执行
 过的 unit 在 trace 中占一项）。#49 让更多提款/存款被拒（现货储备、nonce
@@ -802,7 +826,8 @@ col 0 的空叶也按不变处理）。Rust 观察者 `prove.rs` 同步镜像该
 `{verdict:'fraud', height, challenger}` 给 rollup。
 ### 10.3 verdict(h) — rollup
 
-`trigger.address ∈ {dispute_aa, dispute_fill_aa, dispute_bind_aa}`
+`trigger.address ∈ {dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa}`
+（第 2 轮：`dispute_book_aa` 同样经 `{set_dispute_book:1}` 由 book AA 一次性登记）
 （第三个地址经 `{set_dispute_bind:1}` 由 bind AA 自己一次性登记，rollup
 硬编码 bind AA 地址、bind AA 不硬编码 rollup，避免 chash 循环） ∧ verdict=='fraud'
 ∧ 高度 live ∧ 窗内 ∧ challenger 是合法 32 字符地址
@@ -811,7 +836,8 @@ col 0 的空叶也按不变处理）。Rust 观察者 `prove.rs` 同步镜像该
   `last_submitted==last_finalized` 误判空闲、池子被提走；#47 A1：也绝不上调——对作废的
   更高高度下 verdict 不能把 ls 抬回去，否则陈旧高度既不能 finalize 也不能重开）、
   `pool_<operator>` 扣 min(5e11, pool)（债务上界=实际罚没额，不再固定记 5e11）、
-  slash_reward_<challenger> += 实际扣款。
+  slash_reward_<challenger> += floor(实际扣款 / 5)，其余 4/5 永久锁在 rollup
+  （`slash_burned` 计数，R2-A-9：防止运营者自己挑战自己把池子"洗"回来）。
 ### 10.4 finalize / escape_finalize(h) — rollup
 
 `{finalize}`：!frozen ∧ root 在 ∧ h == last_finalized+1
@@ -824,7 +850,9 @@ col 0 的空叶也按不变处理）。Rust 观察者 `prove.rs` 同步镜像该
 
 ### 10.5 withdraw — vault
 
-`$lf = var[ROLLUP]['last_finalized']`；`$wr = var[ROLLUP]['wit_root_'||$lf]`
+`ROLLUP = params.rollup`（第 2 轮：金库是参数化实例，见 §10.7）；
+`$lf = var[ROLLUP]['last_finalized']`；证明高度 `trigger.data.height` 可取
+`(lf−32, lf]` 内任一整数（缺省 lf，R2-A-12）；`$wr = var[ROLLUP]['wit_root_'||h]`
 （缺失 bounce 'no root'）。#47 A2：不再读 aa_forest。
 请求携带 `amount, account(64 hex), collateral, perp, withdrawn, adr_proof,
 acct_proof`，两份证明都必须 `root == $wr` 且 `is_valid_merkle_proof` 通过：
@@ -832,7 +860,7 @@ acct_proof`，两份证明都必须 `root == $wr` 且 `is_valid_merkle_proof` �
 `acct:{account}:{collateral}:{perp}:{withdrawn}`（错 bounce 'bad merkle root'）。
 付款人身份由 `adr:` 叶决定，不再由账户字段推出；该绑定与 W 列由
 dispute_bind 的 P-adr / P-wpin 逐单元守护。
-`amount + wd_ <= withdrawn`（W=侧链累计借记提款，是唯一的付款依据；
+`amount + wd_<account> <= withdrawn`（第 2 轮 R2-A-8：`wd_` 按**账户**而非地址累计；W=侧链累计借记提款，是唯一的付款依据；
 旧 `min(collateral, withdrawn)` 双重计数会永久锁死 W>col 账户）；
 一律 `bounce('perp claim needs burn')`（#12：侧链仅 GovWithdraw 减
 `perp_balances`，先兑付会双计投票权；PERP 持有者可传 `perp_amount: 0`
@@ -847,6 +875,75 @@ bounce `need pool`。`{force, unit_id 64hex}` ≥10000 bytes →
 claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
 （`last_submitted==last_finalized` **且** frozen_<last_submitted>≠2，
 否则 bounce `pool busy`）可取，全额支付并清零。
+
+### 10.7 第 2 轮（#47 R2）变更汇总
+
+**AA 侧（6 个 AA 全部重新部署）**
+
+- **dispute_book AA**：P-ghost / P-skip 拆到 `minuend_dispute_book.aa`
+  （ops 预算）。rollup 占位 `DISPUTE_BOOK_AA_HERE`、变量 `dispute_book_aa`、
+  绑定 `{bind_book:1, rollup}`。watcher 用 `--dispute-book <addr>` 指定其地址
+  （缺省时 live 发帖脚本读 rollup 的 `dispute_book_aa` 变量）。
+- **金库 base + instance**：`minuend_vault.aa` 是 base AA（不含任何地址），
+  实际金库 = `['autonomous agent', {base_aa, params:{rollup}}]`。这样
+  `minuend_dispute.aa` 只需硬编码 base 地址（占位 `VAULT_BASE_HERE`），即可用
+  `chash160` 推导出某个 rollup 唯一的真金库并读它的账本，不必信任调用方给的地址
+  （rollup 不能硬编码金库：金库指向 rollup，会形成 chash 循环）。
+- **`dep_` 记录**：金库每笔 `{deposit}` 写 `dep_<trigger.unit> = '{payer}:{amount}'`
+  （amount = 输出 − 10000 bounce 费）。
+- **`d:` 变为 5 段**：`d:{acct}:{amount}:{addr}:{aa_unit_b64}`，第 5 段即金库
+  `dep_` 键里的 unit（标准 base64）。`D:`（PERP）仍是 4 段。
+- **Reveal 描述串（R2-E-2）**：`Reveal{inner}` 的 inner 为 Deposit / GovDeposit /
+  Withdraw / GovWithdraw 时，`ops_element` 输出 inner 的描述串（`d:`/`D:`/`w:`/`W:`），
+  其余仍为 `x:{unit}`。配合执行层 R2-E-1（inner 签名账户必须等于 Reveal 账户），
+  P-wpin / P-deposit 对 Reveal 包装的资金操作同样有效。
+- **P-wpin 联合判定（R2-A-2）**：自己的 `w:` 被拒 ⇔ W 与 collateral 都不变；
+  被接受 ⇔ pre 叶存在且 W+amount、collateral−amount；其他 op 下 W 不变。
+- **da_bind（R2-R-1）**：见 §8.2 末尾；rollup 重算并存 `da_bind_h`、
+  `da_hash_h`、`data_root_h`、`counts_root_h`，submit 单元只允许一条 temp_data。
+  header ≠ 链上根本身仍无法链上证明（真正的 DA 问题），只能由 watcher 检测。
+- **罚没 1/5（R2-A-9）**、**金库证明高度窗口 32（R2-A-12）**、
+  **`wd_` 按账户（R2-A-8）**、**kind-1 collateral 腿不判（R2-A-7）**：见上文各节。
+
+**执行层（引擎）**
+
+- **R2-E-1**：Reveal 的 inner op 不能是 Commit/Reveal，且签名账户必须等于外层。
+- **R2-E-3**：提款后 equity 必须仍覆盖挂单（开仓方向）所需保证金。
+- **R2-E-4**：`spot_only` 仓位永不被清算（keeper 与 force-sell 都不行）。
+- **R2-E-5 每账户提款上限与最小额**：删除全局 `WITHDRAWALS_CAP`；
+  `MAX_PENDING_WITHDRAWALS_PER_ACCOUNT = 64`（2048 高度修剪窗口内仍在表中的条目）；
+  `MIN_WITHDRAW_AMOUNT = 1 USD`，小于 1 USD 的正数提款只有在等于全部 collateral
+  （清仓）时才允许，否则 `Risk`。
+- **R2-E-6**：逐仓 taker 手续费不能通过 claw 转嫁给 maker，也不能吃进 cross 现货储备。
+- **R2-E-7**：gov nonce 水位只看已提交状态（生产者 = 验证者）。
+- **R2-E-8 现货 / 非现货混用禁令**：cross 现货单要求账户在任何非现货市场
+  既无仓位也无挂单；任何非现货单要求账户无 cross 现货仓位或挂单。逐仓现货不受限。
+- **R2-E-9/10**：整数宽度加固（i128 累加、`qty == i64::MIN` 拒单、book 价位缓存
+  `wrapping_add_signed`）。
+- **R2-E-11**：资金费率场外清算与 Reveal 全有或全无。
+- **R2-A-11（本轮整合修复）**：资金费率场外清算的 keeper 奖励只按 ADL 实际
+  平掉的数量计算；一个对手方都没有（什么也没平）时整个 Liquidate 被拒
+  （`NotLiquidatable`、状态回滚、不付奖励）。
+- **R2-R-3**：超出编码范围的金额在 ingest 即拒（`AmountOutOfRange`）；
+  `Batch::frames()` 返回 `Result`，不再 panic。
+
+**重放 / DAG / watcher**
+
+- **PARENT_WINDOW（R2-R-6/7，共识规则）**：一个 unit 只有在它的每个父单元都位于
+  最近 `PARENT_WINDOW = 2 × BATCH_MAX_UNITS` 个已执行单元之内时才执行（genesis 视为
+  第一个单元之前的虚拟单元）。该窗口与快照持久化的锚点环
+  `DAG_ANCHOR_LIMIT` 相同，因此从快照恢复的节点与从 genesis 运行的节点对每个
+  unit 的判断完全一致；过旧父单元、窗口外重发的旧单元都被所有节点拒绝。
+- **快照版本**：`SNAPSHOT_FORMAT_VERSION = 6`（v6 = `ChainState.aa_address_owners`，
+  #47 A2 引入但漏 bump，R2-R-14 补上），并新增布局指纹测试
+  `layout_fingerprint_is_pinned_to_format_version`：布局一变测试即失败，必须同时
+  bump 版本并重新钉指纹。旧 v5 快照不可读，需从 genesis / 已发布批次重放。
+- **帧逐字节透传（R2-R-4）**：`post_batch.js` 不再 `JSON.parse → stringify` 帧
+  （会把 > 2^53 的整数舍入），改由 `frame_stamp.js` 只在 Deposit/GovDeposit 帧
+  末尾拼接 `,"e":<evidence>`；`data_root` 覆盖拼接后的字节。
+- **watcher**：校验 `da_bind_h / da_hash_h / data_root_h`；live 发帖始终带被监视
+  的 `--rollup`，dispute AA 地址取 rollup 自己绑定的变量（R2-R-8）；同一
+  `(高度, 谓词)` 不重复付费发帖（R2-R-11）；证明文件私有、不跟随符号链接（R2-R-12）。
 
 ## 11. Witness 树与谓词承诺
 
@@ -878,7 +975,16 @@ acct:{acct_hex}:{collateral}:{perp}:{W}
 pos:{acct_hex}:{market}:{qty}:{entry}:{isolated:0|1}:{bucket}
 ord:{order_hex}:{market}:{side}:{price}:{seq}:{remaining}:{acct_hex}:{isolated:0|1}:{margin_left}
 meta:{market}:{tick}:{im}:{mm}:{taker_fee_bps}:{keeper}:{delisted}:{mark}:{usd_per_unit}:{funding_cap_bps}
+adr:{obyte_addr}:{acct_hex}       # #47 A2：地址 → 账户
+adrx:{acct_hex}:{obyte_addr}      # 第 2 轮 R2-A-8：账户 → 地址（反向镜像）
+dep:{aa_unit_base64}              # 第 2 轮 R2-A-3：已消费的充值锚点（永久）
+~:end                             # 第 2 轮 R2-A-5/10：最大哨兵，恒为最后一叶
 ```
+
+第 2 轮起每棵 witness 树都以 `~:end` 结尾，所以任何"键不存在"都可以用相邻
+两叶（或"在最小叶之前"）证明，谓词不再需要"在最大叶之后"分支，也不再读
+运营者自报的 `wit_count`。所有位置证明还要求 `index` 为非负整数、邻叶必须含
+`:`（内部节点是裸 base64，从而杜绝"节点冒充叶子"），P-tip 元素长度为 44。
 
 这些数组在 frames 内按单元拆开（`t`/`o`/`f`/`c`/`l`），header 不再带它们；
 `leaf_trace` 单帧可省略（print-only）。`validate_against` 重放复算全部根。
@@ -962,6 +1068,12 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 - 无第三方安全审计；各 AA ≤100 复杂度（探针 `check_aa_complexity.js`）
 - 独立 watcher 已可组谓词 proof；须以与 poster 分离的密钥部署后，
   互相牵制才算跑通
+- 第 2 轮仍未解决：header ↔ 链上根的一致性只能由 watcher 检测（DA 问题，
+  需交互式挑战才能链上化）；高度 1 的 unit 0 不可挑战（四个 dispute AA 硬编码
+  的 genesis pre 根是 `["empty"]` 的根，而真实 genesis witness 树含 BTC_USD 的
+  `meta:` 叶，仅为检测缺口、不会误罚诚实批次）；watcher 重放成本为
+  O(units × state)；settle 解码器对其他调用方无长度上限；`post_challenge_live.js`
+  未在真实 hub 上联调
 
 ---
 

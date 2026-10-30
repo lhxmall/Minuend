@@ -33,6 +33,15 @@ README 是概览；这里是"为什么这样设计"。
   orphan 缓冲（容量 4096，超出按盐化序 `argmin(sha256(salt ‖ unit_id))`
   驱逐；盐由最后最终化根与 epoch 派生。执行序本身是 `unit_id` 字典序、
   已去盐）。父母到达后自动链接进 pending 集合，多级孤儿链按不动点迭代解锁。
+- **父单元年龄窗口 `PARENT_WINDOW`（第 2 轮 R2-R-6/7，共识规则）**：一个 unit 只有
+  在它的每个父单元都位于最近 `PARENT_WINDOW = 2 × BATCH_MAX_UNITS` 个已执行单元之内
+  时才执行（genesis 视为第一个单元之前执行的虚拟单元）。判定发生在执行位置，
+  生产者与每个重放者完全一致；插入时若父单元已过期则提前拒绝（过期不会再变新鲜）。
+  窗口等于快照持久化的锚点环 `DAG_ANCHOR_LIMIT`，所以快照恢复节点与长跑节点
+  判断相同；引用远古父单元的 unit、以及执行后滑出窗口再被重发的旧单元都会被拒。
+- **Reveal 账户绑定（第 2 轮 R2-E-1）**：`Reveal` 的 inner op 不能是
+  Commit/Reveal，且 inner 的签名账户必须等于外层 Reveal 的账户；否则 ingest 即
+  `BadSig`、执行层 `BadAccount`。
 
 ### 1.2 执行语义
 
@@ -42,6 +51,10 @@ ingest(unit):
   dag.insert(unit)                      # 校验/缓冲/链接
   apply_ready()                         # 对所有 ready 单元按 id 序 dispatch
 ```
+
+ingest 在验签之前还检查金额可编码（R2-R-3：Deposit/Withdraw 金额 ∈
+[i64::MIN, u64::MAX]，GovDeposit/GovWithdraw ≤ u64::MAX，Reveal 内递归），
+越界返回 `AmountOutOfRange`、不进 DAG。
 
 每个 op 的拒绝原因都是显式枚举值（`DuplicateClientSeq`、`UnbackedDeposit`、
 `DuplicateNonce`、`Risk`、`BadAccount`…），全部进入事件日志，重放时可逐条比对。
@@ -294,8 +307,17 @@ acct:{acct_hex64}:{collateral}:{perp}:{W}
 pos:{acct_hex64}:{market}:{qty}:{entry}:{isolated 0|1}:{bucket}
 ord:{order_hex}:{market}:{side}:{price}:{seq}:{remaining}:{acct_hex}:{isolated}:{margin_left}
 adr:{obyte_address}:{acct_hex64}          # #47 A2：地址 → 账户绑定
+adrx:{acct_hex64}:{obyte_address}         # 第 2 轮 R2-A-8：账户 → 地址反向镜像
+dep:{aa_unit_base64}                      # 第 2 轮 R2-A-3：已消费充值锚点（永久）
 meta:{market}:{tick}:{im}:{mm}:{taker_fee}:{keeper}:{delisted}:{mark}:{usd_per_unit}:{funding_cap}
+~:end                                     # 第 2 轮 R2-A-5/10：最大哨兵，恒为最后一叶
 ```
+
+- 第 2 轮起树永不为空、恒以 `~:end` 结尾：任何键不存在都可用相邻两叶证明，
+  谓词不再有"在最大叶之后"分支、不再读 `wit_count`（仍提交，仅信息性）。
+  `wit_leaves` 是现有状态的纯函数，state_root / 快照布局不变。
+- `adrx:` 让"账户已绑定某地址"可用成员证明表达（P-adr 拒绝第二个地址）；
+  `adr:` ↔ `adrx:` 由 P-mirror 钉成对，`adrx:` / `dep:` 由 P-keep 钉永久。
 
 - `adr:` 叶按地址排序，所以“某地址没有绑定”可以用相邻两叶做非成员证明。
 - 引擎保证**一个地址最多绑定一个账户**（`deposit` / `gov_deposit` 在地址已属于
@@ -305,19 +327,27 @@ meta:{market}:{tick}:{im}:{mm}:{taker_fee}:{keeper}:{delisted}:{mark}:{usd_per_u
 - `minuend_dispute_bind.aa` 对**每个单元**钉住金库读取的两列：
   - P-wpin：`W` 只能在该账户自己的 `w:` op 下变为 `W + amount`，否则不变；
   - P-adr：新出现的 `adr:{A}:{X}` 必须对应 `d:`/`D:` op 且 op 的账户为 X、
-    地址为 A；已有绑定不得改指向。
+    地址为 A；已有绑定不得改指向；账户已有 `adrx:{X}:` 时不得再绑新地址（R2-A-8）；
+  - P-tip（R2-A-1）：trace 末元素（下标 `unit_count-1`）必须等于 `wit_root_h`；
+  - P-keep / P-mirror：见上。
   被拒单元两列都不变，所以“未变化”永远不会被判 fraud。
 
 ### 3.5 op 描述串（`ops_element`，`ops_root` 承诺）
 
 ```
-d:{acct}:{amount}:{addr}     D:{acct}:{amount}:{addr}     # #47 A2：带地址
+d:{acct}:{amount}:{addr}:{aa_unit_b64}                    # 第 2 轮 R2-A-3：5 段，带金库锚点
+D:{acct}:{amount}:{addr}                                   # PERP 充值仍 4 段
 w:{acct}:{amount}:{nonce}    W:{acct}:{amount}:{nonce}
 c:{acct}:{order_hex}
 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}   # #47 A3：typ 0=Limit 1=Market
 L:{caller}:{target}:{market}
 x:{unit_hex}                                               # 其他 op
 ```
+
+第 2 轮 R2-E-2：`Reveal{inner}` 的 inner 为 Deposit/GovDeposit/Withdraw/GovWithdraw
+时输出 inner 的描述串（`d:`/`D:`/`w:`/`W:`），其余 Reveal 仍为 `x:`。P-deposit 的
+入账分支要求：金库 `dep_<aa_unit>` 记录存在且 payer == op 地址、amount ≤ 记录值，
+pre 树无 `dep:{u}`（防重复入账），post 树有 `dep:{u}`。
 
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
@@ -335,16 +365,39 @@ x:{unit_hex}                                               # 其他 op
 #39 之前“包边界无分隔”和“末尾带 `\n`”的写法不再被接受（主网未上线，现有
 Rust / JS 生产者都不产生这两种形状）。
 
-## 4. 结算层：三个 AA、两类谓词（CHAIN_ID=minuend-v2）
+### 3.7 DA 绑定 da_bind（第 2 轮 R2-R-1）
+
+submit 单元恰好一条 temp_data（header）+ 一条 data（submitData）。两者都带
+`data_root`（64 hex）、`counts_root`（44 b64）与：
+
+```
+da_bind = hex(sha256(join('|', ['minuend-da-v1', chain_id, height, prev_state_hash,
+  state_root, aa_root, wit_root, trace_root, units_root, units_set_root, ops_root,
+  fills_root, counts_root, unit_count, wit_count, fill_count, assertion_version, data_root])))
+```
+
+rollup 重算并要求相等（否则 `bad da_bind`），存 `da_bind_h / da_hash_h / data_root_h /
+counts_root_h`。header 内容 == 链上根不可链上证明，由 watcher 检查（不符 ⇒
+DA MISMATCH，高度不验证）。帧由 `post_batch.js` 逐字节透传（R2-R-4，
+`frame_stamp.js` 只在充值帧末尾拼 `"e"` evidence），`data_root` 覆盖透传后的字节。
+
+## 4. 结算层：六个 AA、多类谓词（CHAIN_ID=minuend-v2）
+
+第 2 轮部署单元：vault base → dispute / dispute_fill / dispute_bind / dispute_book
+（dispute 硬编码 vault base）→ rollup（硬编码四个 dispute 地址）→ vault 实例
+`{base_aa: vault_base, params:{rollup}}` → 四个 dispute 各自 `bind*` 到 rollup。
+金库实例由 base + rollup 唯一确定，dispute AA 用 `chash160` 推导它并读 `dep_` 账本。
 
 状态变量（rollup AA；`<h>` 为高度后缀）：
 
 ```
-last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa
+last_submitted, last_finalized, dispute_aa, dispute_fill_aa, dispute_bind_aa, dispute_book_aa
 submitted_at_h, state_root_h, aa_forest_h (1024 hex), prev_h,
   wit_root_h, trace_root_h, units_root_h, units_set_root_h,
-  ops_root_h, fills_root_h, unit_count_h, wit_count_h, fill_count_h
+  ops_root_h, fills_root_h, counts_root_h, unit_count_h, wit_count_h, fill_count_h
 da_unit_h                     # DA 绑定 = 组合单元 hash
+data_root_h, da_bind_h, da_hash_h   # 第 2 轮 R2-R-1（§3.7）
+slash_burned                  # 第 2 轮 R2-A-9：罚没中锁定的 4/5
 active_bond_<h>, fee_winner_<h>, frozen_<h> ∈ {∅/0=live, 2=failed}
 inbox_<unit_id_hex>, inbox_upto_<h>   # inbox_upto = submit 时间戳
 pool_<addr>                    # 常备池：提交门 pool>=1e12
@@ -353,7 +406,16 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>   # sbond 仅遗留路径
 
 侧链 ChainState（PERP 治理，§7）不变：markets、perp_balances/supply/burned、
 proposals、oracle 账本。金库 vault AA 只有 `deposit` / `deposit_perp` /
-`withdraw`，提款读 `var[ROLLUP]['wit_root_'||last_finalized]`（#47 A2，§3.4）。
+`withdraw`，提款读 `var[params.rollup]['wit_root_'||h]`，h ∈ (lf−32, lf]（缺省
+last_finalized；#47 A2，§3.4；第 2 轮 R2-A-12）。金库状态：`wd_<account>`（按账户
+累计已提，R2-A-8）、`wp_<addr>`、`pperp_<addr>`、`dep_<unit>='{payer}:{amount}'`（R2-A-3）。
+
+执行层第 2 轮新增的提款限制（只会拒更多，AA 无需感知）：每账户在 2048 高度
+修剪窗口内最多 `MAX_PENDING_WITHDRAWALS_PER_ACCOUNT = 64` 笔待处理提款（取代全局
+`WITHDRAWALS_CAP`）；`MIN_WITHDRAW_AMOUNT = 1 USD`，更小的正数提款只在等于全部
+collateral（清仓）时允许；提款后 equity 必须仍覆盖挂单开仓保证金（R2-E-3）。
+cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永不被清算（R2-E-4）。
+快照格式 `SNAPSHOT_FORMAT_VERSION = 6`，由布局指纹测试钉住。
 
 ### 生命周期（高度 h）
 
@@ -373,6 +435,9 @@ submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个
 
 fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              deposit | withdraw | escrow(Cancel only) | fill_math | ghost | skip
+             | wpin | adr | tip | keep | mirror
+             （第 2 轮：ghost/skip → dispute_book；wpin/adr/tip/keep/mirror → dispute_bind；
+             fill_math → dispute_fill；其余 → dispute。verdict 后挑战者得 floor(罚没/5)）
              （#47：p: op 为 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}；
              fill_math 的 kind 0/1 taker 腿按 op 重算 taker_post 与挂单余额；kind 2/3 只在
              L: 单元的订单簿路径、对手方 post 抵押 > 0、caller ≠ maker 时判定；skip 判每个
@@ -397,11 +462,10 @@ finalize(h)  !frozen ∧ h == last_finalized+1 ∧ prev_<h>==state_root_{h-1}
 claim        'reward'|'sbond'|'slash' 按旧键支付；'pool' 仅链空闲
              （last_submitted==last_finalized 且 frozen_<last_submitted>≠2）可取，全额支付并清零
 
-withdraw     vault：leaf_account==trigger.address；先复核 finalized
-             forest 折叠到 aa_root_<lf>；amount + wd_<addr> ≤ withdrawn(W)；
-             leaf = sha256('acct:'+address+':'+collateral+':'+perp+':'+withdrawn,'hex')
-             reduce(...,16,...) == substring(aa_forest_h, shard*64, 64)
-             → 支付抵押品并累加 wd_（PERP 领取一律 bounce
+withdraw     vault（参数化实例，rollup = params.rollup）：
+             adr:{trigger.address}:{account} 与 acct:{account}:{col}:{perp}:{W}
+             都必须在 wit_root_<h>（h ∈ (lf−32, lf]）中；amount + wd_<account> ≤ W
+             → 支付抵押品并累加 wd_<account>（PERP 领取一律 bounce
              'perp claim needs burn'，见 MECHANISMS 10.5 / #12）
 
 force(id)    rollup：{force, unit_id 64hex} → inbox_<id>=timestamp；
@@ -422,7 +486,7 @@ gzip wrapper。watcher 必须先按这些未修改字节校验 root；对旧 pro
 关键安全性质：
 
 - **余额权威是 proof 叶子**——operator 腐化也改不了提款上限。
-- **leaf_account == trigger.address**：只能为自己证明。
+- **`adr:{trigger.address}:{account}` 绑定**：只能为自己绑定的账户证明；同一账户的第二个地址被 P-adr 拒绝，`wd_` 按账户累计（R2-A-8）。
 - **无 owner key / 无原地升级**：若部署新 AA，用户需自行通过 finalized-root 证明
   从旧 vault 提款再存入新部署；当前没有自动迁移工具。
 - 常量注释映射 Rust 权威定义（CHAIN_ID / POOL_MIN / POOL_MAX_INFLIGHT /

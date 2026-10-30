@@ -1,10 +1,12 @@
 "use strict";
 
-// MINUEND four-AA deployment — Obyte MAINNET (GBYTE collateral).
+// MINUEND six-AA deployment — Obyte MAINNET (GBYTE collateral).
 //
-// Posts minuend_rollup.aa, minuend_dispute.aa, minuend_dispute_fill.aa and
-// minuend_vault.aa via a light headless wallet (default mainnet hub),
-// binds both dispute AAs, smoke-triggers the vault, and writes
+// Posts the vault BASE, minuend_dispute.aa, minuend_dispute_fill.aa,
+// minuend_dispute_bind.aa, minuend_dispute_book.aa, minuend_rollup.aa and
+// the vault INSTANCE {base_aa, params:{rollup}} via a light headless wallet
+// (default mainnet hub), binds all four dispute AAs, smoke-triggers the
+// vault, and writes
 // obyte-local/deployment.json.
 //
 //   MINUEND_DEPLOY_MNEMONIC="word word ... " PERP_ASSET_ID=<44-char id> \
@@ -135,7 +137,7 @@ async function main() {
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 
-  // 3. Bind both dispute AAs (20000 each, rollup address in trigger data);
+  // 3. Bind all four dispute AAs (20000 each, rollup address in trigger data);
   // assert via AA state.
   await triggerAa(
     { to: dispute.address, amount: 20000, data: { bind: 1, rollup: rollup.address } },
@@ -163,7 +165,7 @@ async function main() {
     throw new Error("dispute_bind_aa not bound: " + JSON.stringify(state.dispute_bind_aa));
   if (String(state.dispute_book_aa) !== String(bookAa.address))
     throw new Error("dispute_book_aa not bound: " + JSON.stringify(state.dispute_book_aa));
-  console.log("all three dispute AAs bound");
+  console.log("all four dispute AAs bound");
 
   // 4. Write deployment.json.
   const info = {
