@@ -3026,6 +3026,194 @@ async function main() {
     console.log("60. R5-A-4: honest add at price <= -1e14 (vwap rounds 4 off in Oscript) → 'no fraud'; collateral lie → frozen");
   }
 
+  // ===================== ROUND 6 (fix/47-r6-claw) =========================
+  // ---- 61. P-claw: both legs of one fill (claw AA) -----------------------
+  // Real numbers on market 1 (META1: fee 5 bps, keeper 100 bps). Each pre
+  // tree is committed as wit_root of a filler height, the challenged unit
+  // is k=0 of the next height.
+  {
+    const T = "e1".repeat(32);
+    const M = "e2".repeat(32);
+    const K = "e3".repeat(32);
+    const TO = "e4".repeat(32);
+    const END = "~:end";
+    const acct = (a, c) => `acct:${a}:${c}:0:0`;
+    const clawSetup = async (hCommit, tag, leaves) => {
+      const pre = leaves.slice().sort();
+      const wit = merkle.getMerkleRoot(pre);
+      await submitAt(hCommit, Object.assign(oneUnit(tag + "-commit", "x:" + sha256Hex(tag), [DEP_PRE]), { witRoot: wit }));
+      return { pre, wit, proof: (l) => merkle.getMerkleProof(pre, pre.indexOf(l)) };
+    };
+    // Every case commits its pre tree's root as wit_root, so the next
+    // height's k=0 unit can be judged against the same pre tree.
+    const clawUnit = (P, tag, op, fills, post) => {
+      const tree = fillsTree(fills);
+      return Object.assign(oneUnit(tag, op, post), {
+        unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(tree), fillCount: fills.length, tree, fill: fills[0],
+        witRoot: P.wit,
+      });
+    };
+    const legFields = (P, u, x, a) => {
+      const pre = P.pre.find((l) => l.startsWith(`acct:${a}:`));
+      const post = u.post.find((l) => l.startsWith(`acct:${a}:`));
+      if (!pre || !post) throw new Error("fixture: acct leaf of " + a);
+      const o = {};
+      o[x + "_pre_acct"] = pre; o[x + "_pre_acct_proof"] = P.proof(pre);
+      o[x + "_post_acct"] = post; o[x + "_post_acct_proof"] = u.leafProof(post);
+      const lo = `pos:${a}:1:`;
+      const pos = P.pre.find((l) => l.startsWith(lo));
+      if (pos) {
+        o[x + "_pre_pos"] = pos; o[x + "_pre_pos_proof"] = P.proof(pos);
+      } else {
+        const i = P.pre.findIndex((l) => l > lo);
+        if (i < 1 || !(P.pre[i] >= `pos:${a}:1;`)) throw new Error("fixture: pos straddle of " + a);
+        o[x + "_pleft"] = P.pre[i - 1]; o[x + "_pleft_proof"] = P.proof(P.pre[i - 1]);
+        o[x + "_pright"] = P.pre[i]; o[x + "_pright_proof"] = P.proof(P.pre[i]);
+      }
+      return o;
+    };
+    const clawPayload = (P, h, u, mord) => Object.assign({
+      pred: "claw", height: h, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot, units_root: ISO_UNITS_ROOT,
+      units_proof: ISO_UNITS_PROOF, fill: u.fill, fill_proof: merkle.getMerkleProof(u.tree, 0),
+      right: u.tree[1], right_proof: merkle.getMerkleProof(u.tree, 1),
+      pre_wit: P.wit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      pre_meta: META1, pre_meta_proof: P.proof(META1),
+    }, mord ? { maker_ord: mord, maker_ord_proof: P.proof(mord) } : {},
+      legFields(P, u, "t", T), legFields(P, u, "m", M));
+    const frozen = async (h, what) => {
+      const s = await vars(rollup);
+      if (Number(s["frozen_" + h]) !== 2) throw new Error("P-claw: " + what + " did not freeze h" + h);
+    };
+    const live = async (h, what) => {
+      const s = await vars(rollup);
+      if (Number(s["frozen_" + h] || 0) !== 0) throw new Error("P-claw: " + what + " froze h" + h + "!");
+    };
+
+    // (a) kind 0 — maker M long 1 @ 100k with 1000 USD; its resting ask @
+    // 90k is hit by cross taker T (50k USD). M's 10k loss: fill stage
+    // -9000 USD, clawed from T (fill stage 50000 - 45 fee).
+    const MO = "e5".repeat(32);
+    const MORD = `ord:${MO}:1:1:9000000000000:3:100000000:${M}:0:0`;
+    const P1 = await clawSetup(67, "r6-claw-p1", [
+      acct(T, 50000000000), acct(M, 1000000000), META1, MORD,
+      `pos:${M}:1:100000000:10000000000000:0:0`, END,
+    ]);
+    const f1 = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:9000000000000:100000000:9:0:0:0`;
+    const op1 = `p:${T}:1:0:9000000000000:100000000:0:0:0:0`;
+    const tPos1 = `pos:${T}:1:100000000:9000000000000:0:0`;
+    const post1 = (tc, mc) => [acct(T, tc), acct(M, mc), META1, tPos1, END];
+    // Money print (the R5 residual): T keeps its whole fill stage, M is
+    // still lifted to 0 — 9000 USD out of nowhere.
+    const print = clawUnit(P1, "r6-claw-print", op1, [f1], post1(49955000000, 0));
+    await submitAt(68, print);
+    // fill_math alone cannot see it: each leg sits inside its claw range.
+    const pl = P1.pre.findIndex((l) => l > `pos:${T}:1:`);
+    await triggerBounce(challenger, fill, {
+      pred: "fill_math", height: 68, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: print.traceRoot, fills_root: print.fillsRoot, ops_root: print.opsRoot,
+      units_root: ISO_UNITS_ROOT, units_proof: ISO_UNITS_PROOF,
+      fill: f1, fill_proof: merkle.getMerkleProof(print.tree, 0),
+      right: print.tree[1], right_proof: merkle.getMerkleProof(print.tree, 1),
+      op: print.op, ops_proof: merkle.getMerkleProof(print.ops, 0),
+      pre_wit: P1.wit, post_wit: print.wit, post_proof: merkle.getMerkleProof(print.trace, 0),
+      pre_acct: acct(T, 50000000000), pre_acct_proof: P1.proof(acct(T, 50000000000)),
+      post_acct: acct(T, 49955000000), post_acct_proof: print.leafProof(acct(T, 49955000000)),
+      post_pos: tPos1, post_pos_proof: print.leafProof(tPos1),
+      pre_meta: META1, pre_meta_proof: P1.proof(META1),
+      pos_absent: true,
+      pleft: P1.pre[pl - 1], pleft_proof: P1.proof(P1.pre[pl - 1]),
+      pright: P1.pre[pl], pright_proof: P1.proof(P1.pre[pl]),
+      maker_ord: MORD, maker_ord_proof: P1.proof(MORD),
+      cp_acct: acct(M, 0), cp_acct_proof: print.leafProof(acct(M, 0)),
+      who: "taker",
+    }, 20000, "no fraud");
+    await triggerVerdict(challenger, claw, clawPayload(P1, 68, print, MORD), 20000, "P-claw money print (kind 0)");
+    await frozen(68, "kind-0 money print");
+    // Burn: T pays the 9000, M is not credited.
+    const burn = clawUnit(P1, "r6-claw-burn", op1, [f1], post1(40955000000, -9000000000));
+    await submitAt(68, burn);
+    await triggerVerdict(challenger, claw, clawPayload(P1, 68, burn, MORD), 20000, "P-claw burn (kind 0)");
+    await frozen(68, "kind-0 burn");
+    // Honest: T pays exactly the 9000 that lifts M to 0.
+    const ok1 = clawUnit(P1, "r6-claw-ok1", op1, [f1], post1(40955000000, 0));
+    await submitAt(68, ok1);
+    await triggerBounce(challenger, claw, clawPayload(P1, 68, ok1, MORD), 20000, "no fraud");
+    await live(68, "honest kind-0 claw");
+    // Isolated IOC taker for 2 (margin 20000 USD): one fills, its share
+    // (10000) moves to the bucket, the unfilled half's 10000 returns AFTER
+    // the claw — honest post 50000 - 20000 - 45 - 9000 + 10000.
+    const fIso = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:9000000000000:100000000:9:0:0:10000000000`;
+    const opIso = `p:${T}:1:0:9000000000000:200000000:1:20000000000:1:0`;
+    const isoU = clawUnit(P1, "r6-claw-iso", opIso, [fIso],
+      [acct(T, 30955000000), acct(M, 0), META1, `pos:${T}:1:100000000:9000000000000:1:10000000000`, END]);
+    await submitAt(69, isoU);
+    await triggerBounce(challenger, claw, clawPayload(P1, 69, isoU, MORD), 20000, "no fraud");
+    await live(69, "honest isolated-taker claw");
+    // A multi-fill unit is not judged (single-fill completeness), even with
+    // the money-print post.
+    const f1b = `f:${isoUnit}:1:${T}:${M}:${TO}:${MO}:1:9000000000000:1:9:0:0:0`;
+    const multi = clawUnit(P1, "r6-claw-multi", op1, [f1, f1b], post1(49955000000, 0));
+    await submitAt(70, multi);
+    await triggerBounce(challenger, claw, clawPayload(P1, 70, multi, MORD), 20000, "no fraud");
+    await live(70, "multi-fill unit");
+
+    // (b) kind 3 — liquidation of T (long 1 @ 100k, 15000 USD) at a crashed
+    // mark into M's resting bid @ 1 USD (M 50000 USD, no position): T's
+    // fill stage -84999000500 is clawed from M, which can only pay 50000
+    // USD; keeper K gets nothing (T stays negative).
+    const MO2 = "e6".repeat(32);
+    const MORD2 = `ord:${MO2}:1:0:100000000:4:100000000:${M}:0:0`;
+    const P2 = await clawSetup(71, "r6-claw-p2", [
+      acct(T, 15000000000), acct(M, 50000000000), META1, MORD2,
+      `pos:${T}:1:100000000:10000000000000:0:0`, END,
+    ]);
+    const LO = "e7".repeat(32);
+    const f2 = `f:${isoUnit}:0:${T}:${M}:${LO}:${MO2}:1:100000000:100000000:9:1:3:0`;
+    const op2 = `L:${K}:${T}:1`;
+    const mPos2 = `pos:${M}:1:100000000:100000000:0:0`;
+    const post2 = (tc, mc) => [acct(T, tc), acct(M, mc), META1, mPos2, END];
+    const print2 = clawUnit(P2, "r6-claw-print2", op2, [f2], post2(-34999000500, 50000000000));
+    await submitAt(72, print2);
+    await triggerVerdict(challenger, claw, clawPayload(P2, 72, print2, MORD2), 20000, "P-claw money print (kind 3)");
+    await frozen(72, "kind-3 money print");
+    const burn2 = clawUnit(P2, "r6-claw-burn2", op2, [f2], post2(-84999000500, 0));
+    await submitAt(72, burn2);
+    await triggerVerdict(challenger, claw, clawPayload(P2, 72, burn2, MORD2), 20000, "P-claw burn (kind 3)");
+    await frozen(72, "kind-3 burn");
+    const ok2 = clawUnit(P2, "r6-claw-ok2", op2, [f2], post2(-34999000500, 0));
+    await submitAt(72, ok2);
+    await triggerBounce(challenger, claw, clawPayload(P2, 72, ok2, MORD2), 20000, "no fraud");
+    await live(72, "honest partial claw (kind 3)");
+    // Multi-fill (a second fill of the same unit follows): not judged.
+    const f2b = `f:${isoUnit}:1:${T}:${K}:${LO}:${"e8".repeat(32)}:1:100000000:1:9:1:3:0`;
+    const multi2 = clawUnit(P2, "r6-claw-multi2", op2, [f2, f2b], post2(-34999000500, 50000000000));
+    await submitAt(73, multi2);
+    await triggerBounce(challenger, claw, clawPayload(P2, 73, multi2, MORD2), 20000, "no fraud");
+    await live(73, "multi-fill liquidation unit");
+
+    // (c) kind 2 — ADL of T (long 1 @ 100k, 15000 USD) at mark 86k onto
+    // M (short 1 @ 100k, 1M USD), M also the caller (keeper): no claw, the
+    // keeper reward 860 USD is seized from T and credited to M.
+    const P3 = await clawSetup(74, "r6-claw-p3", [
+      acct(T, 15000000000), acct(M, 1000000000000), META1,
+      `pos:${T}:1:100000000:10000000000000:0:0`, `pos:${M}:1:-100000000:10000000000000:0:0`, END,
+    ]);
+    const f3 = `f:${isoUnit}:0:${T}:${M}:${LO}:${"0".repeat(64)}:1:8600000000000:100000000:9:1:2:0`;
+    const op3 = `L:${M}:${T}:1`;
+    const post3 = (tc, mc) => [acct(T, tc), acct(M, mc), META1, END];
+    const over3 = clawUnit(P3, "r6-claw-keep-over", op3, [f3], post3(140000000, 1015720000000));
+    await submitAt(75, over3);
+    await triggerVerdict(challenger, claw, clawPayload(P3, 75, over3, null), 20000, "P-claw keeper credit doubled (kind 2)");
+    await frozen(75, "kind-2 doubled keeper credit");
+    const ok3 = clawUnit(P3, "r6-claw-ok3", op3, [f3], post3(140000000, 1014860000000));
+    await submitAt(75, ok3);
+    await triggerBounce(challenger, claw, clawPayload(P3, 75, ok3, null), 20000, "no fraud");
+    await live(75, "honest ADL with keeper = maker");
+    console.log("61. P-claw: kind-0 / kind-3 money print and burn, doubled ADL keeper credit → frozen; honest isolated-taker claw, honest ADL keeper, multi-fill → 'no fraud' (fill_math alone: 'no fraud' on the print)");
+  }
+
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
   // test_vault_withdraw_aa.js: its own short chain (h1..h3 with REAL
   // forests) keeps this suite inside the 20-minute CI job.
