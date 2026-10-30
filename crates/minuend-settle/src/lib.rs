@@ -3829,6 +3829,58 @@ mod tests {
 
     /// Evidence on a non-deposit frame is a malformed (operator) batch.
     #[test]
+    fn r5_vault_perp_cap_is_mirrored_in_rust_js_and_aa() {
+        // The vault's literal cap == PERP_SUPPLY_MAX == the JS mirror.
+        let vault_aa = include_str!("../../../obyte-local/agents/minuend_vault.aa");
+        let cap = minuend_types::PERP_SUPPLY_MAX.to_string();
+        assert!(
+            vault_aa.contains(&format!("if ($pt > {cap})")),
+            "vault cap literal drifted from PERP_SUPPLY_MAX"
+        );
+        let js = include_str!("../../../obyte-local/deposit_evidence.js");
+        assert!(
+            js.contains(&format!("const PERP_SUPPLY_MAX = {cap}n;")),
+            "deposit_evidence.js PERP_SUPPLY_MAX drifted"
+        );
+        // Stateless part of the cap bounce: one deposit above the cap
+        // records nothing; exactly the cap (and split outputs summing to
+        // it) is recorded.
+        let payer = "P".repeat(32);
+        let acct = "ab".repeat(32);
+        let d = |p: serde_json::Value| ("data", p);
+        let perp = |amts: &[u64]| {
+            let outs: Vec<serde_json::Value> = amts
+                .iter()
+                .map(|a| serde_json::json!({"address": R4_VAULT, "amount": a}))
+                .collect();
+            serde_json::json!({"asset": hex::encode(minuend_types::PERP_ASSET), "outputs": outs})
+        };
+        let max = u64::try_from(minuend_types::PERP_SUPPLY_MAX).unwrap();
+        let mk = |n: u8, amts: &[u64]| {
+            joint_with(
+                n,
+                &payer,
+                &[
+                    d(serde_json::json!({"deposit_perp": 1, "account": acct})),
+                    ("payment", perp(amts)),
+                    ("payment", base_pay(&[10_000])),
+                ],
+            )
+        };
+        let r = vd(&mk(40, &[max])).unwrap();
+        assert_eq!(
+            (r.is_perp, r.amount),
+            (true, minuend_types::PERP_SUPPLY_MAX)
+        );
+        assert_eq!(
+            vd(&mk(41, &[max - 5, 5])).map(|r| r.amount),
+            Some(u128::from(max))
+        );
+        assert_eq!(vd(&mk(42, &[max + 1])), None);
+        assert_eq!(vd(&mk(43, &[max, 1])), None);
+    }
+
+    #[test]
     fn r4_evidence_on_non_deposit_frame_fails() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();

@@ -24,6 +24,14 @@
 //   (every watcher would reject the height). Retry later or re-cut the batch.
 
 const VAULT_BOUNCE_FEE = 10000n;
+// R5-A-5 / R5-E-2: the vault bounces ('perp cap') a PERP deposit when
+// pperp_total + amount > PERP_SUPPLY_MAX. pperp_total is vault STATE, so
+// only the stateless part is decided here (one deposit above the cap never
+// records); a deposit bounced because the cap was already filled has no
+// depp_ record, which `readRecord` (the producer rule) catches. Mirrored
+// from minuend-types (Rust test r5_vault_perp_cap_is_mirrored_in_rust_js_and_aa
+// reads this line).
+const PERP_SUPPLY_MAX = 99999999999999n;
 const MAX_AA_STRING_LENGTH = 4096;
 // R5-E-1 / R5-R-1: ONE set of size limits, mirrored from minuend-settle
 // deposit_verify (the Rust test r5_limits_are_strictly_ordered_and_mirrored_in_js
@@ -121,6 +129,7 @@ function vaultDepositOf(unit, vault, perpAsset) {
     amount = 0n;
     for (const [a, v] of outputs) if (assetMatches(a, perpAsset)) amount += v;
     if (amount <= 0n) return null;
+    if (amount > PERP_SUPPLY_MAX) return null; // 'perp cap'
   } else {
     amount = baseSum - VAULT_BOUNCE_FEE;
     if (amount <= 0n) return null;
@@ -207,6 +216,12 @@ async function buildAppliedEvidences(applied, frames, opts) {
     if (fd.op.addr !== undefined && fd.op.addr !== rec.payer) throw new Error(`anchor ${aaUnit}: op addr != payer ${rec.payer}`);
     if (fd.op.account !== undefined && anchorHex(fd.op.account) !== rec.account)
       throw new Error(`anchor ${aaUnit}: op account != designated account`);
+    // R5-A-5: a PERP deposit the vault bounced at its pperp_total cap
+    // still derives a "deposit" from its joint but has NO depp_ record;
+    // only the record read can tell, so it is mandatory for PERP.
+    if (rec.isPerp && !readRecord)
+      throw new Error(`anchor ${aaUnit}: a PERP deposit needs the vault depp_ record check (readRecord): ` +
+        "a deposit bounced at the vault's pperp_total cap verifies from its joint alone; not posting");
     if (readRecord) {
       const r = await readRecord(aaUnit, rec.isPerp);
       const want = `${rec.payer}:${rec.amount}:${rec.account}`;
@@ -236,6 +251,7 @@ async function buildAppliedEvidences(applied, frames, opts) {
 
 module.exports = {
   VAULT_BOUNCE_FEE,
+  PERP_SUPPLY_MAX,
   DEPOSIT_EVIDENCE_UNIT_MAX_BYTES,
   DEPOSIT_EVIDENCE_BATCH_MAX_BYTES,
   DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES,

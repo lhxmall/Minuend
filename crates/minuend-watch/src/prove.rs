@@ -174,11 +174,11 @@ pub fn build_proof_with_vault(
         let post_leaves = minuend_state::wit_leaves(&replay.state);
         let op = batch.ops.get(k)?.clone();
         if op.starts_with("d:") || op.starts_with("D:") {
-            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, true) {
+            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, true, vault) {
                 return Some(p);
             }
         } else if op.starts_with("w:") || op.starts_with("W:") {
-            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, false) {
+            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, false, vault) {
                 return Some(p);
             }
         } else {
@@ -857,6 +857,7 @@ fn deposit_proof(
     op: &str,
     pre_leaves: &[String],
     is_deposit: bool,
+    vault: &VaultLedger,
 ) -> Option<BuiltProof> {
     // Parse op: d:/D:{acct}:{amount}:{addr}:{aa_unit_b64} (round 2/3),
     // w:/W:{acct}:{amount}:{nonce}.
@@ -980,8 +981,11 @@ fn deposit_proof(
     // the posted post tree — and (R3-A-4) on the binding
     // `adr:{addr}:{acct}`, which must be in the posted post tree. The
     // vault-ledger backing (dep_/depp_<unit> = payer:amount:account) is
-    // on-chain state this offline builder cannot read; the AA checks it on
-    // every deposit challenge.
+    // on-chain state: the AA checks it on every deposit challenge, and
+    // (R5 integration) this builder judges it only from a hub read in
+    // `vault` ([`deposit_unbacked_by_ledger`]) — never from batch
+    // evidence, because a PERP deposit the vault bounced at its
+    // `pperp_total` cap still yields a verifying evidence.
     let credited = is_deposit
         && amount > 0
         && liar_val_is_expected
@@ -1005,8 +1009,8 @@ fn deposit_proof(
                 }
             }
         }
-        if dep_extra.is_empty() {
-            return None; // credited, marker + binding fine — honest leg (as far as offline data shows)
+        if dep_extra.is_empty() && !deposit_unbacked_by_ledger(vault, is_gov, &parts) {
+            return None; // credited, marker + binding fine, backing not known bad — honest leg
         }
     } else if !gov_fresh && (liar_val_is_expected || unchanged) && col_ok && wd_ok {
         return None; // honest leg — keep scanning
@@ -1055,6 +1059,38 @@ fn deposit_proof(
         bind_aa: false,
         data,
     })
+}
+
+/// R5 integration (vault `pperp_total` cap, R5-A-5): `true` only when the
+/// hub-read vault ledger CERTAINLY fails the deposit AA's `$backed` test
+/// for a credited `d:`/`D:` op `parts` = `[d|D, acct, amount, addr,
+/// anchor_b64]`: record known absent, not `payer:amount:account`, payer !=
+/// op address, account != op account (exact strings, like the AA), or
+/// op amount > recorded amount (both <= 15 digits). Unknown record or an
+/// uncertain number = `false` (no proof the AA might bounce). Batch
+/// evidence is NOT consulted: a PERP deposit bounced at the vault's cap
+/// leaves no `depp_` record although its joint still verifies.
+fn deposit_unbacked_by_ledger(vault: &VaultLedger, is_gov: bool, parts: &[&str]) -> bool {
+    if parts.len() != 5 {
+        return false;
+    }
+    let key = format!("{}{}", if is_gov { "depp_" } else { "dep_" }, parts[4]);
+    match vault.get(&key) {
+        None => false,
+        Some(None) => true,
+        Some(Some(rec)) => {
+            let r: Vec<&str> = rec.split(':').collect();
+            if r.len() != 3 || r[0] != parts[3] || r[2] != parts[1] {
+                return true;
+            }
+            let num = |s: &str| -> Option<u64> {
+                (!s.is_empty() && s.len() <= 15 && s.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| s.parse().ok())
+                    .flatten()
+            };
+            matches!((num(parts[2]), num(r[1])), (Some(a), Some(b)) if a > b)
+        }
+    }
 }
 
 fn omit_proof(batch: &Batch, unit_hexes: &[String], id: &str) -> Option<BuiltProof> {
@@ -2463,6 +2499,68 @@ mod tests {
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
         assert_eq!(proof.pred, "deposit");
         assert!(!proof.fill_aa);
+    }
+
+    /// R5 integration (vault `pperp_total` cap): a credited deposit whose
+    /// marker and binding are fine is still fraud when the hub-read vault
+    /// ledger shows no backing record (e.g. a PERP deposit the vault
+    /// bounced at its cap: the joint still verifies as evidence). Unknown
+    /// record = silent; a matching record = silent.
+    #[test]
+    fn r5_credited_deposit_unbacked_by_vault_ledger_builds_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(u).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let batch = Batch::from_applied(&prev, &mut eng, &[id]).expect("batch");
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(aa);
+        let key = format!("dep_{b64}");
+        let a = hex::encode(acct.0);
+        let run = |ledger: &VaultLedger| {
+            let mut replay = Engine::new();
+            replay.state.deposits_allowed.insert((aa, false));
+            build_proof_with_vault(&batch, &mut replay, &[], 0, ledger)
+        };
+        // Unknown record: honest as far as the watcher knows.
+        assert!(run(&VaultLedger::new()).is_none());
+        // Matching record (amount >= op amount): honest.
+        let mut l = VaultLedger::new();
+        l.insert(key.clone(), Some(format!("{}:100:{a}", test_addr())));
+        assert!(run(&l).is_none());
+        l.insert(key.clone(), Some(format!("{}:250:{a}", test_addr())));
+        assert!(run(&l).is_none());
+        // Known absent (cap-bounced / never paid): P-deposit.
+        l.insert(key.clone(), None);
+        let p = run(&l).expect("unbacked credit");
+        assert_eq!(p.pred, "deposit");
+        assert!(p.data.get("dleft").is_none() && p.data.get("aleft").is_none());
+        // Record for another payer / account / a smaller amount: P-deposit.
+        for rec in [
+            format!("{}:100:{a}", "Z".repeat(32)),
+            format!("{}:100:{}", test_addr(), "ab".repeat(32)),
+            format!("{}:99:{a}", test_addr()),
+        ] {
+            l.insert(key.clone(), Some(rec.clone()));
+            assert_eq!(run(&l).expect(&rec).pred, "deposit", "{rec}");
+        }
+        // Uncertain number in the record: silent.
+        l.insert(key.clone(), Some(format!("{}:1e3:{a}", test_addr())));
+        assert!(run(&l).is_none());
     }
 
     /// #47 (cross-PR): rejected units are committed like applied ones. An

@@ -348,6 +348,18 @@ pub fn vault_deposit_of(
         if sum == 0 {
             return Ok(None); // 'bad deposit'
         }
+        // R5-A-5 / R5-E-2 'perp cap': the vault bounces a PERP deposit when
+        // `pperp_total + amount > PERP_SUPPLY_MAX`. `pperp_total` is vault
+        // STATE, not in the joint, so only its stateless part is decidable
+        // here: one deposit above the cap always bounces. A deposit bounced
+        // because earlier deposits filled the cap still yields Some(..):
+        // such a joint verifies as evidence but has NO `depp_` record —
+        // the producer rule (`admit_deposit` against the on-chain record),
+        // the poster's record cross-check and the watcher's hub-read
+        // backing check (P-deposit) cover it; see docs/MECHANISMS.md.
+        if sum > minuend_types::PERP_SUPPLY_MAX {
+            return Ok(None);
+        }
         sum
     } else {
         let a = base_sum - VAULT_BOUNCE_FEE;

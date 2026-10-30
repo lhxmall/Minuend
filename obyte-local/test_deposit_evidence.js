@@ -54,6 +54,14 @@ assert.deepStrictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), jun
 assert.strictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, 4000)])), null);
 // both flags → base case wins.
 assert.strictEqual(vd(unit([dataMsg({ deposit: 1, deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, 4000), basePay(30000)])).isPerp, false);
+// R5-A-5 'perp cap' (stateless part): one PERP deposit above PERP_SUPPLY_MAX
+// never records; exactly the cap does (outputs summed first).
+assert.strictEqual(d.PERP_SUPPLY_MAX, 99999999999999n);
+const CAP = 99999999999999;
+assert.strictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, CAP), basePay(10000)])).amount, String(CAP));
+assert.strictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, CAP - 5), assetPay(PERP_B64, 5), basePay(10000)])).amount, String(CAP));
+assert.strictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, CAP + 1), basePay(10000)])), null);
+assert.strictEqual(vd(unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, CAP), assetPay(PERP_B64, 1), basePay(10000)])), null);
 // max_aa_responses 0 bounces; all-digit account bounces.
 assert.strictEqual(vd(unit([dataMsg({ deposit: 1, account: ACCT }), basePay(50000)], { max_aa_responses: 0 })), null);
 assert.strictEqual(vd(unit([dataMsg({ deposit: 1, account: "1".repeat(64) }), basePay(50000)])), null);
@@ -102,6 +110,21 @@ const rec = `${PAYER}:40000:${ACCT}`;
   await rejectsWith({ fetchJoint: async () => unit([dataMsg({ deposit: 1, account: ACCT }), basePay(60000)]) }, /amount/);
   await rejectsWith({ fetchJoint: async () => goodJoint, readRecord: async () => null }, /vault record/);
   await rejectsWith({ fetchJoint: async () => goodJoint, readRecord: async () => `${PAYER}:1:${ACCT}` }, /vault record/);
+  // R5-A-5: PERP deposits need the depp_ record read — a deposit bounced at
+  // the vault's pperp_total cap derives from its joint but has no record.
+  {
+    const P = "22".repeat(32);
+    const pf = [depFrame(P, 4000, "GovDeposit", PAYER)];
+    const pa = [{ index: 0, aa_unit: P, is_perp: true }];
+    const pj = async () => unit([dataMsg({ deposit_perp: 1, account: ACCT }), assetPay(PERP_B64, 4000), basePay(10000)]);
+    const base = { vault: VAULT, perpAsset: PERP_B64, sleep: noSleep, fetchJoint: pj };
+    await assert.rejects(d.buildAppliedEvidences(pa, pf, base), /depp_ record check/);
+    await assert.rejects(d.buildAppliedEvidences(pa, pf, Object.assign({ readRecord: async () => null }, base)), /vault record null/);
+    const ok = await d.buildAppliedEvidences(pa, pf, Object.assign({
+      readRecord: async (aa, isPerp) => { assert.strictEqual(isPerp, true); return `${PAYER}:4000:${ACCT}`; },
+    }, base));
+    assert.strictEqual(ok.get(0).is_perp, true);
+  }
   // Index / frame consistency.
   await rejectsWith({ fetchJoint: async () => goodJoint }, /does not match/, [{ index: 1, aa_unit: A, is_perp: false }]);
   await rejectsWith({ fetchJoint: async () => goodJoint }, /does not match/, [{ index: 2, aa_unit: A, is_perp: true }]);

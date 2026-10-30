@@ -387,6 +387,19 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
   `Risk` 拒绝，检查在绑定之前），所以 PERP 列 ≤ 14 位；dispute AA 的 gov 旧账户分支在
   pre PERP > 14 位时 bounce，算术只在 post PERP 与 amount ≤ 14 位时进行。
 
+第 5 轮 AA 规则（MECHANISMS §10.11）：
+- **P-frame**（R5-A-1）：也覆盖 op 账户以外的 `acct:` 叶（这些单元不改别人的账户）。
+- **fill_math**（R5-A-2 / R5-A-4）：collateral 腿按 claw 区间判定，没有跳过门；容差
+  `6 + floor(S/1e12)`，S 只含已证明的量；bucket、op 份额、挂单余量都带比例容差判定；
+  kind 2/3 只在资金费率市场或逐仓目标时 bounce；`x:` taker 只判 collateral 上限；
+  删除 `eleft`/`eright` 臂（用 `post_pleft`/`post_pright`）。
+- **P-fsane**（R5-A-2，dispute_book，`pred: 'fsane'`）：成交形状 / kind 与 meta / op margin /
+  成交方 pre 账户存在性，只凭已证明的值。
+- **P-mbind**（R5-A-3）：qty 数值比较 `!is_integer(q) OR q <= 0 OR q > MO[6]`。
+- **金库 PERP 上限**（R5-A-5）：`pperp_total + amount > 99999999999999` → `bounce('perp cap')`
+  （PERP 退回、不写 `depp_`）。`vault_deposit_of` 只镜像无状态部分（单笔 > 上限）；因额度已满
+  被 bounce 的充值由生产者 / `post_batch.js` 的 `depp_` 记录核对与 watcher 的 hub 读取覆盖。
+
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
 “不变”也不是“正确变化”的值才判 fraud（#47 跨 PR 一致性修复）。
@@ -446,7 +459,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>   # sbond 仅遗留路径
 proposals、oracle 账本。金库 vault AA 只有 `deposit` / `deposit_perp` /
 `withdraw`，提款读 `var[params.rollup]['wit_root_'||h]`，h ∈ (lf−32, lf]（缺省
 last_finalized；#47 A2，§3.4；第 2 轮 R2-A-12）。金库状态：`wd_<account>`（按账户
-累计已提，R2-A-8）、`wp_<addr>`、`pperp_<addr>`、`dep_<unit>='{payer}:{amount}:{account}'`
+累计已提，R2-A-8）、`wp_<addr>`、`pperp_<addr>`、`pperp_total`（R5-A-5，≤ `PERP_SUPPLY_MAX`）、`dep_<unit>='{payer}:{amount}:{account}'`
 （R2-A-3 + R3-A-5）、`depp_<unit>='{payer}:{amount}:{account}'`（R3-A-7）。存款必须带
 `{deposit:1, account:<64 位小写 hex>}`（PERP：`{deposit_perp:1, account}`），否则 bounce；
 DepositEvidence 新增 `account` 字段（= joint 中 data 消息的 account，payload_hash 校验），
@@ -465,6 +478,10 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 （R3-E-2，取舍）；`resting_open_im` 逐仓挂单扣除 `margin_left`、现货挂单不与仓位轧差；
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
+
+第 5 轮部署变化：vault 新增 `pperp_total` 与 `perp cap` bounce（vault base 哈希改变，部署
+脚本推导）；op 预算 vault 364、rollup 976、dispute 1383、dispute_fill 1959、dispute_bind 1618、
+dispute_book 1704。
 
 第 4 轮部署变化：bind AA 带 `VAULT_BASE_HERE` 占位符（R4-A-4 读金库账本），必须在
 vault base 地址算出之后再部署（vault base 本来就最先部署）；PERP 供应上限
@@ -489,9 +506,9 @@ submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个
 
 fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              deposit | withdraw | escrow(Cancel only) | fill_math | ghost | skip
-             | wpin | adr | tip | keep | mirror | mbind | frame
+             | wpin | adr | tip | keep | mirror | mbind | frame | fsane
              （第 2 轮：ghost/skip → dispute_book；wpin/adr/tip/keep/mirror → dispute_bind；
-             第 4 轮：mbind → dispute_book，frame → dispute_bind；
+             第 4 轮：mbind → dispute_book，frame → dispute_bind；第 5 轮：fsane → dispute_book；
              fill_math → dispute_fill；其余 → dispute。verdict 后挑战者得 floor(罚没/5)）
              （#47：p: op 为 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}；
              fill_math 的 kind 0/1 taker 腿按 op 重算 taker_post 与挂单余额；kind 2/3 只在
@@ -576,7 +593,9 @@ Oscript 实现细节（踩过的坑）：
 stability。P-escrow 只验证 Cancel 退款的精确变化，不覆盖 Place escrow。`temp_data`
 正文保留 24h。第 4 轮：P-frame 只覆盖 `c:`/`d:`/`w:`/`D:`/`W:`；P-mbind 对同位数 > 15 位的
 剩余量不比较；R4-A-5 在 ≥ 1e14 量级跳过若干数值比较；watcher 在金库记录未知时不构造依赖
-它的 P-adr。默认执行序 UnitId 字典序
+它的 P-adr。第 5 轮：两条成交腿的 claw 金额没有互相绑定（CRITICAL，仍可用自己的账户
+造钱，需新 AA）；ADL 价格不绑定 mark；≥ 1e14 仍跳过仓位比较；`x:` taker 只判 collateral
+上限；金库 PERP 上限先到先得、烧毁的 PERP 仍占额度、触顶 bounce 未在 devnet 测试。默认执行序 UnitId 字典序
 （v2 commit-reveal 高度 0 生效）；报价质量受债券多数约束。
 主网部署前需正式 oscript 审计。「纯永续 → 图灵完备」升级路径见
 [ROLLUP-UPGRADE.md](ROLLUP-UPGRADE.md)。

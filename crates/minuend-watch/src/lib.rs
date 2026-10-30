@@ -1229,9 +1229,29 @@ pub type VaultReadCache = std::collections::HashMap<String, Result<Option<String
 /// * not when a verified deposit evidence in the batch already
 ///   determines the record of that anchor.
 ///
+/// R5 integration (vault `pperp_total` cap, R5-A-5): a verified PERP
+/// evidence no longer determines the `depp_` record — the vault bounces a
+/// deposit that would push its recorded PERP total past the cap, and the
+/// joint of a bounced deposit still verifies. So a `D:` op whose anchor
+/// carries a verified PERP evidence (the operator claims it applied it)
+/// always needs the read — for P-adr and for the P-deposit backing arm
+/// (`prove::deposit_unbacked_by_ledger`). Only the operator stamps
+/// evidence, so this cannot be inflated by outsiders.
+///
 /// Deduplicated, in batch order.
 pub fn vault_keys_needed(batch: &Batch) -> Vec<String> {
     let vault = minuend_settle::expected_vault();
+    vault_keys_needed_with(batch, &|e| {
+        minuend_settle::deposit_verify::verify_evidence(e, &vault, &minuend_types::PERP_ASSET)
+            .is_ok()
+    })
+}
+
+/// [`vault_keys_needed`] with the evidence check injected (`verified`).
+fn vault_keys_needed_with(
+    batch: &Batch,
+    verified: &dyn Fn(&minuend_settle::DepositEvidence) -> bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (k, unit) in batch.units.iter().enumerate() {
         let (Some(op_str), Some(id)) = (batch.ops.get(k), batch.checkpoint.unit_ids.get(k)) else {
@@ -1251,26 +1271,25 @@ pub fn vault_keys_needed(batch: &Batch) -> Vec<String> {
             continue;
         }
         let binding = format!("adr:{}:{}", o[3], o[1]);
-        if !batch
+        let binds = batch
             .leaf_trace
             .get(k)
-            .is_some_and(|ls| ls.contains(&binding))
-        {
-            continue;
-        }
+            .is_some_and(|ls| ls.contains(&binding));
         let anchor_hex = minuend_settle::deposit_key(&unit.op)
             .map(|(a, _)| hex::encode(a))
             .unwrap_or_default();
-        let covered = batch.unit_evidences.iter().flatten().any(|e| {
-            e.aa_unit.eq_ignore_ascii_case(&anchor_hex)
-                && minuend_settle::deposit_verify::verify_evidence(
-                    e,
-                    &vault,
-                    &minuend_types::PERP_ASSET,
-                )
-                .is_ok()
-        });
-        if covered || out.contains(&key) {
+        let is_gov = o[0] == "D";
+        let evs: Vec<&minuend_settle::DepositEvidence> = batch
+            .unit_evidences
+            .iter()
+            .flatten()
+            .filter(|e| e.aa_unit.eq_ignore_ascii_case(&anchor_hex) && verified(e))
+            .collect();
+        // A verified PERP evidence cited by a `D:` op leaves the `depp_`
+        // record open (cap bounce); any other verified evidence decides it.
+        let perp_open = is_gov && evs.iter().any(|e| e.is_perp);
+        let covered = !perp_open && !evs.is_empty();
+        if !(binds || perp_open) || covered || out.contains(&key) {
             continue;
         }
         out.push(key);
@@ -2562,6 +2581,53 @@ mod tests {
             dup.checkpoint.unit_ids.push(dup.checkpoint.unit_ids[0]);
         }
         assert_eq!(vault_keys_needed(&dup), vec![key]);
+    }
+
+    /// R5 integration (vault `pperp_total` cap): a verified base evidence
+    /// decides the `dep_` record (no read), but a verified PERP evidence
+    /// cited by a `D:` op does not (a cap-bounced deposit still verifies),
+    /// so that anchor is read even without a new binding.
+    #[test]
+    fn r5_perp_evidence_does_not_cover_depp_record() {
+        let (batch, key) = r5_deposit_batch();
+        let ev = |is_perp: bool| minuend_settle::DepositEvidence {
+            aa_unit: hex::encode([9u8; 32]),
+            is_perp,
+            amount: "100".into(),
+            vault_address: String::new(),
+            payer: "Q".repeat(32),
+            account: String::new(),
+            joint: serde_json::Value::Null,
+        };
+        let yes = |_: &minuend_settle::DepositEvidence| true;
+        let mut based = batch.clone();
+        based.unit_evidences = vec![Some(ev(false))];
+        assert!(vault_keys_needed_with(&based, &yes).is_empty());
+        // The same unit as a `D:` (GovDeposit) op with a PERP evidence.
+        let mut gov = batch.clone();
+        if let minuend_dag::Op::Deposit {
+            account,
+            addr,
+            amount,
+            aa_unit,
+        } = gov.units[0].op.clone()
+        {
+            gov.units[0].op = minuend_dag::Op::GovDeposit {
+                account,
+                addr,
+                amount: amount as u128,
+                aa_unit,
+            };
+        }
+        let id_hex = hex::encode(gov.checkpoint.unit_ids[0].0);
+        gov.ops[0] = minuend_settle::ops_element(&id_hex, &gov.units[0].op);
+        assert!(gov.ops[0].starts_with("D:"));
+        gov.leaf_trace[0].retain(|l| !l.starts_with("adr:"));
+        gov.unit_evidences = vec![Some(ev(true))];
+        let pkey = format!("depp_{}", &key[4..]);
+        assert_eq!(vault_keys_needed_with(&gov, &yes), vec![pkey]);
+        // Unverified PERP evidence and no binding: nothing to read.
+        assert!(vault_keys_needed_with(&gov, &|_| false).is_empty());
     }
 
     struct CountingHub {

@@ -1005,8 +1005,8 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
    bind AA（deploy_mainnet.js / deploy_testnet.js / test_settlement_aa.js 已按此替换）。
    watcher 侧（`prove.rs`）只在**确知**金库记录时才用这一条构造 P-adr：记录来自 hub
    读取（`read_vault_ledger`：变量不存在 = 已知缺失，读失败 = 未知）或批次里**验证通过**
-   的该锚点 evidence（一份 evidence 决定金库对该锚点的全部记录：金库只写 `dep_` 或
-   `depp_` 之一）。未知时（例如锚点已被金库记账但生产者没有执行、因此没有 evidence，
+   的该锚点 evidence（一份 base evidence 决定金库对该锚点的全部记录：金库只写 `dep_` 或
+   `depp_` 之一；第 5 轮起 PERP evidence 不再决定 `depp_`，见 §10.11 第 6 条）。未知时（例如锚点已被金库记账但生产者没有执行、因此没有 evidence，
    且 hub 未读到）不构造，避免发出会被 AA bounce 的付费挑战。
 4. **R4-A-5（dispute_fill）**：R3-A-3 的量级 / 近零门（`$exp_m < 6`）不再让整个谓词
    bounce，只并入 `$col_ok`（只跳过 collateral 腿）；仓位、perp/W 钉、op、挂单余量腿
@@ -1025,6 +1025,64 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
 部署 op 预算（第 4 轮）：vault 353、rollup 976、dispute 1383、dispute_fill 1971、
 dispute_bind 1596、dispute_book 1117（上限 2000）。dispute_fill 只剩 29 ops，后续任何
 fill 判定都必须先腾出预算。
+
+### 10.11 第 5 轮（#47 R5）AA 与集成变更
+
+1. **P-frame 覆盖他人账户叶（R5-A-1，dispute_bind）**：`c:`/`d:`/`D:`/`w:`/`W:` 单元的
+   `leaf` 现在也可以是**op 账户以外**的 `acct:` 叶（5 段，`acct:` + 64 字符 + `:`；op 账户 =
+   `substring(op, 2, 64)`，按子串比较，不用 `split()`）。同样的 ins / 删除两臂：这类单元
+   不会改动别人的账户，出现、消失或被改写即欺诈；op 自己账户的叶 → `no fraud`（由
+   P-deposit / P-withdraw / P-wpin 判）。watcher `frame_proof` 同步镜像。
+2. **fill_math 的 claw 区间（R5-A-2 / R5-A-4，dispute_fill）**：collateral 腿不再有任何
+   "跳过门"。设 m = 成交阶段 collateral（`exp_m`），判定区间为
+   `exp_t − (cpx ? tol : max(tol, m)) ≤ post ≤ exp_t + max(tol, −m)`（maker 可能同时是 keeper
+   时上界再加奖励）。cpx = 已证明的对手方为正 且 keeper 已知 ≠ maker（kind 2/3）且（taker 腿
+   或 kind ≥ 2 或直接 cross `p:` taker）。容差 `tol = 6 + floor(S / 1e12)`，S 只由**已证明**的
+   量构成（|旧 col|、|t2|、|pnl|、bucket、mml、`p:` taker 的 margin、|旧 qty|·|旧 entry|/1e10）。
+   bucket 比较不再跳过（容差 1 + floor((bucket + 托管份额)/1e12)）；op 份额
+   `|tpost − tpost_exp| ≤ 1 + floor(margin/1e12)`；挂单余量 `|rem − (oqty−qty)| ≤ floor(oqty/1e12)`。
+   kind 2/3 不再按 op 形状 bounce，只在资金费率市场（链下 ADL）或逐仓目标时 bounce；
+   kind 0/1 `x:`（Reveal{Place}）taker 只判仓位腿与 collateral **上限**。maker 的 PRE 订单叶在
+   maker 腿必需，在 taker 腿可选（|price| / qty ≥ 1e14 时必需）。kind 2 成交量 > |pre 仓位|
+   → 欺诈。`$big` 用 `abs(price)` / `abs(old_entry)`（R5-A-4）。为省 ops 删除了账户级 post 空
+   区间臂（`eleft`/`eright`）；平仓后叶不存在只能用市场区间夹逼（`post_pleft`/`post_pright`）。
+3. **P-fsane（R5-A-2，dispute_book 新 case `pred: 'fsane'`）**：只凭已证明的值判欺诈——成交
+   不是 14 段；qty 不是正整数；price / taker_post 不是整数；taker_post < 0；side ∉ {0,1}；
+   kind ∉ 0..3；kind 2/3 但 taker_post ≠ 0；pre `meta:` 与 kind 不符（kind 0 且 usd≠0、kind 1
+   且 usd=0、kind 3 且 usd≠0）；op 是直接 cross `p:` 却 margin ≠ 0，或逐仓 margin > 0 > op
+   账户 pre collateral；成交的 taker / maker 在 PRE 树中没有 `acct:` 叶。watcher 在 P-mbind
+   之后、P-skip 之前对重放没有产生的成交运行；`BuiltProof::target()` 与
+   `script_helpers.js targetForPred` 都把 `fsane` 路由到 dispute_book。
+4. **P-mbind 数值比较（R5-A-3 / R5-A-6）**：qty 按数值判断
+   `!is_integer(q) OR q <= 0 OR q > MO[6]`；watcher 镜像（`oscript_num` / `oscript_eq` /
+   `oscript_qty_bad`，ocore toNumber 正则 + 15 位语义）只在每个比较都确定且有一个不成立时
+   才出证明。
+5. **金库 PERP 上限（R5-A-5 / R5-E-2，vault）**：新状态 `pperp_total`；
+   `pperp_total + amount > 99999999999999`（= `PERP_SUPPLY_MAX`）时 `bounce('perp cap')`，PERP
+   随 bounce 退回。PERP 不会离开金库（赎回已禁用），所以侧链供应 ≤ `pperp_total` ≤ 上限：
+   金库收下的 PERP 充值永远不会因上限被引擎拒绝、卡在金库里。代价：上限先到先得；烧毁的
+   PERP 仍占用 `pperp_total`（额度只减不增）。Rust 测试核对金库字面量 == `PERP_SUPPLY_MAX`
+   == JS 镜像。devnet 未测试真正触顶的 bounce（需要约 1e14 最小单位）。
+6. **cap bounce 与 evidence（集成）**：`pperp_total` 是金库**状态**，不在 joint 里。
+   `vault_deposit_of`（Rust）/ `vaultDepositOf`（JS）只能镜像无状态的部分——单笔 PERP
+   充值 > `PERP_SUPPLY_MAX` 一定 bounce，返回"无记账"。因为之前的充值已填满额度而被 bounce
+   的 PERP 充值，joint 仍能通过 evidence 验证，但金库**没有** `depp_` 记录。覆盖它的是：
+   生产者规则（`admit_deposit` 对照链上记录，没有记录就不 `allow_deposit`）；
+   `deposit_evidence.js` 对 PERP 充值**强制**读取 `depp_` 记录（没有 `readRecord` 直接拒发，
+   记录为空拒发）；watcher 不再把 PERP evidence 当作 `depp_` 记录的证据——`D:` op 带已验证
+   PERP evidence 时总会读 hub（`vault_keys_needed`），P-deposit 入账分支在 hub 读到"无记录 /
+   payer、account 不符 / 记录金额 < op 金额"时出证明（`deposit_unbacked_by_ledger`；
+   读不到 = 未知 = 不出证明）。
+7. **producer 要求（R5-E-1 / R5-R-1）**：见 §10.9 第 3、5 条：`DepositEvidenceBudget`
+   （`admit` / `try_reserve` / `release` / `on_batch_cut`）、`ingest_within_budget`
+   （放不下的充值本批不 ingest，返回 `Ok(None)`）、`admit_deposit`（evidence > 240 KiB 拒绝）。
+8. **watcher 新增的 `unsafe`（R5-R-6 / R5-R-7）**：为了不加新依赖，用 `extern "C"` 直接调用
+   libc 的 `signal`（SIGINT/SIGTERM 只置一个 `AtomicBool`，handler 里不做别的）和
+   `flock(LOCK_EX|LOCK_NB)`（临时目录属主锁，仅 unix）。这是两处小的 `unsafe` FFI。
+
+部署 op 预算（第 5 轮）：vault 364、rollup 976、dispute 1383、dispute_fill 1959、
+dispute_bind 1618、dispute_book 1704（上限 2000）。vault base 哈希改变（部署脚本推导，
+没有写死的字面量）。快照布局未变（`SNAPSHOT_FORMAT_VERSION` 仍为 8，布局指纹测试通过）。
 
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
@@ -1127,7 +1185,8 @@ v7 及更早的检查点不可读；watcher 会按 R3-R-7 明确报错，需清�
   是否存活（跨 PID 命名空间有效），没有锁文件的目录不动。
 - **R5-R-2**：金库 `dep_`/`depp_` 记录只为证明可能用到的锚点读取：key 从 unit 自身的 op
   推导（`ops[k]` 必须等于 `ops_element(unit_k)`），且只在发布的 post 树含该 op 的新绑定
-  `adr:{addr}:{acct}`、批内没有已验证 evidence 时读；每高度每轮最多 64 次、60 s，且不晚于
+  `adr:{addr}:{acct}`、批内没有已验证 evidence 时读（集成：`D:` op 带已验证 PERP evidence
+  时也读，因为金库 cap bounce 后 evidence 仍能验证，§10.11 第 6 条）；每高度每轮最多 64 次、60 s，且不晚于
   发帖截止前 300 s；失败按轮缓存；hub 连接 10 s 超时。
 - **R5-R-4**：`last_submitted` 低于已验证高度，但 `frozen_<ls> ≠ 2` 且 `da_unit_<ls>` 仍是
   我们重放过的那个（或为空）时视为自相矛盾的读数，整轮跳过；`da_unit_<ls>` 换成新 unit
@@ -1273,6 +1332,15 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
   bucket、托管份额与挂单余量比较；PERP 只在引擎上限以下精确判定（pre PERP 列 > 14 位
   只可能来自更早已 finalize 的谎言，不再判定）；watcher 在金库记录未知时不构造依赖它的
   P-adr；dispute_fill 余量 29 ops
+- 第 5 轮仍未解决（§10.11）：**两条腿的 claw 金额没有互相绑定**（CRITICAL）——每条腿单独
+  判定，当一条腿的成交阶段 collateral 为负时，运营者可以只给收款方记 claw 而不扣付款方
+  （或在付款方正的成交阶段余额内烧掉其余额而不记给任何人），用自己控制的账户仍能凭空
+  造钱，上限是亏空 / 付款方的正余额；关闭它需要把两条腿放进同一个谓词（ops 预算不够，
+  需要新 AA）。ADL（kind 2）价格没有绑定到 mark，假 ADL 价格仍是"自洽的假成交"，容差 S
+  也随该价格增长。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry 比较。`x:` taker
+  只判 collateral 上限。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
+  devnet 测试。P-fsane 的"被拒 Place"臂需要 op 账户的 pre 叶。cap bounce 的 P-deposit
+  只在 watcher 读到 hub 时成立。
 
 ---
 
