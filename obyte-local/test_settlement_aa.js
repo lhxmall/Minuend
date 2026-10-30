@@ -105,6 +105,9 @@ const CLAW_SRC = writeResolved("minuend_dispute_claw.aa", {}, ".e2e_claw.aa");
 const CLAW_ADDR = chashOf(fs.readFileSync(CLAW_SRC, "utf8"));
 const XF_SRC = writeResolved("minuend_dispute_xframe.aa", {}, ".e2e_xframe.aa");
 const XF_ADDR = chashOf(fs.readFileSync(XF_SRC, "utf8"));
+// Round 8: P-mframe / P-noband on the m-frame dispute AA.
+const MF_SRC = writeResolved("minuend_dispute_mframe.aa", {}, ".e2e_mframe.aa");
+const MF_ADDR = chashOf(fs.readFileSync(MF_SRC, "utf8"));
 // R4-A-4: P-adr derives the vault from the base (deposit ledger backing).
 const BIND_SRC = writeResolved("minuend_dispute_bind.aa", { VAULT_BASE_HERE: VAULT_BASE_ADDR }, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
@@ -117,6 +120,7 @@ const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_BOOK_AA_HERE: BOOK_ADDR,
   DISPUTE_CLAW_AA_HERE: CLAW_ADDR,
   DISPUTE_XFRAME_AA_HERE: XF_ADDR,
+  DISPUTE_MFRAME_AA_HERE: MF_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
 const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
@@ -226,7 +230,7 @@ function submitDataBase(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 5,
+    assertion_version: 6,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -340,6 +344,7 @@ async function main() {
     .with.agent({ bind: BIND_SRC })
     .with.agent({ claw: CLAW_SRC })
     .with.agent({ xframe: XF_SRC })
+    .with.agent({ mframe: MF_SRC })
     .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
@@ -354,6 +359,8 @@ async function main() {
   const claw = network.agent.claw;
   const xframe = network.agent.xframe;
   if (xframe !== XF_ADDR) throw new Error(`xframe address mismatch: ${xframe} != ${XF_ADDR}`);
+  const mframe = network.agent.mframe;
+  if (mframe !== MF_ADDR) throw new Error(`mframe address mismatch: ${mframe} != ${MF_ADDR}`);
   if (claw !== CLAW_ADDR) throw new Error(`claw address mismatch: ${claw} != ${CLAW_ADDR}`);
   if (vault !== VAULT_ADDR) throw new Error(`vault address mismatch: ${vault} != ${VAULT_ADDR}`);
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
@@ -366,7 +373,9 @@ async function main() {
   await trigger(operator, book, { bind_book: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, claw, { bind_claw: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, xframe, { bind_xframe: 1, rollup: ROLLUP_ADDR }, 20000);
+  await trigger(operator, mframe, { bind_mframe: 1, rollup: ROLLUP_ADDR }, 20000);
   let st = await vars(rollup);
+  if (String(st.dispute_mframe_aa) !== mframe) throw new Error("dispute_mframe_aa not set: " + JSON.stringify(st.dispute_mframe_aa));
   if (String(st.dispute_xframe_aa) !== xframe) throw new Error("dispute_xframe_aa not set: " + JSON.stringify(st.dispute_xframe_aa));
   if (String(st.dispute_claw_aa) !== claw) throw new Error("dispute_claw_aa not set: " + JSON.stringify(st.dispute_claw_aa));
   if (String(st.dispute_book_aa) !== book) throw new Error("dispute_book_aa not set: " + JSON.stringify(st.dispute_book_aa));
@@ -382,6 +391,7 @@ async function main() {
   await triggerBounce(operator, rollup, { set_dispute_book: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_claw: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_xframe: 1 }, 20000, "not authorized");
+  await triggerBounce(operator, rollup, { set_dispute_mframe: 1 }, 20000, "not authorized");
   // A second bind succeeds on the dispute AA (it just re-forwards), but the
   // rollup bounces the secondary 'not authorized' verdict — dispute_aa var
   // must be unchanged afterwards.
@@ -3655,9 +3665,10 @@ async function main() {
       const pre = P9.pre.find((l) => l.startsWith(`acct:${a}:`));
       return Object.assign(xfBase("xframe", h, u), { post_acct: post, post_acct_proof: u.leafProof(post), pre_acct: pre, pre_acct_proof: P9.proof(pre) });
     };
+    // R8-C6: "no position in the op's market" (xText reports market 0).
     const noPos = (a) => {
-      const i = P9.pre.findIndex((l) => l > `pos:${a}:`);
-      return { pleft: P9.pre[i - 1], pleft_proof: P9.proof(P9.pre[i - 1]), pright: P9.pre[i], pright_proof: P9.proof(P9.pre[i]) };
+      const i = P9.pre.findIndex((l) => l > `pos:${a}:0:`);
+      return { fmkt: 0, pleft: P9.pre[i - 1], pleft_proof: P9.proof(P9.pre[i - 1]), pright: P9.pre[i], pright_proof: P9.proof(P9.pre[i]) };
     };
     const xfLeaf = (pred, h, u, leaf, ins) => Object.assign(xfBase(pred, h, u), {
       leaf, ins, leaf_proof: ins ? u.leafProof(leaf) : P9.proof(leaf),
@@ -3697,28 +3708,38 @@ async function main() {
     const P9b = P9;
     const bandLie = xUnit("0e", "r7b-bandlie", [tA(1000000000, 10000), mA(2000000000), META1, "band:1:0:5", posM9, END]);
     await submitAt(95, bandLie);
-    await triggerVerdict(challenger, xframe, xfLeaf("mframe", 95, bandLie, BAND1, false), 20000, "P-mframe: band rewritten");
+    await triggerVerdict(challenger, mframe, xfLeaf("mframe", 95, bandLie, BAND1, false), 20000, "P-mframe: band rewritten");
     await frozen(95, "band rewritten");
     const noBand = xUnit("0e", "r7b-noband", [tA(1000000000, 10000), mA(2000000000), META1, posM9, END]);
     await submitAt(95, noBand);
     const nbi = noBand.post.findIndex((l) => l > "band:1:");
-    await triggerVerdict(challenger, xframe, Object.assign(xfBase("noband", 95, noBand), {
+    await triggerVerdict(challenger, mframe, Object.assign(xfBase("noband", 95, noBand), {
       meta: META1, meta_proof: noBand.leafProof(META1),
       left: noBand.post[nbi - 1], left_proof: noBand.leafProof(noBand.post[nbi - 1]),
       right: noBand.post[nbi], right_proof: noBand.leafProof(noBand.post[nbi]),
     }), 20000, "P-noband: market without its band");
     await frozen(95, "band deleted");
-    const META1m = "meta:1:1:1000:500:5:100:0:777:0:0";
+    const META1m = "meta:1:1:1000:500:5:100:0:105:0:0";
     const markLie = xUnit("0e", "r7b-marklie", [tA(1000000000, 10000), mA(2000000000), META1m, BAND1, posM9, END]);
     const metaPair = (h, u) => Object.assign(xfBase("mframe", h, u), {
       pre_meta: META1, pre_meta_proof: P9b.proof(META1), post_meta: META1m, post_meta_proof: u.leafProof(META1m),
     });
     await submitAt(95, markLie);
-    await triggerVerdict(challenger, xframe, metaPair(95, markLie), 20000, "P-mframe: mark moved by a Stake");
+    await triggerVerdict(challenger, mframe, metaPair(95, markLie), 20000, "P-mframe: mark moved by a Stake");
     await frozen(95, "mark moved outside a price op");
-    const markOk = xUnit("06", "r7b-markok", [tA(1000000000, 60000), mA(2000000000), META1m, BAND1, posM9, END]);
+    // R8-H1: a ReportPrice moves only its own market's mark (u32 LE after
+    // the oracle account), here market 1, within 10 %.
+    const markOk = Object.assign(xUnit("06", "r7b-markok", [tA(1000000000, 60000), mA(2000000000), META1m, BAND1, posM9, END]), {});
+    {
+      const uPre = "mnu3|" + "4f44583101" + "ab".repeat(32) + "06" + T + "01000000" + "6900000000000000" + "|";
+      markOk.uPre = uPre;
+      markOk.id = sha256Hex(uPre + "x");
+      const mo = oneUnit("r7b-markok", "x:" + markOk.id, markOk.post);
+      Object.assign(markOk, mo, { units: pad2([markOk.id], "r7b-markok-units") });
+      markOk.unitsRoot = merkle.getMerkleRoot(markOk.units);
+    }
     await submitAt(95, markOk);
-    await triggerBounce(challenger, xframe, metaPair(95, markOk), 20000, "no fraud");
+    await triggerBounce(challenger, mframe, metaPair(95, markOk), 20000, "no fraud");
     await live(95, "honest mark update by ReportPrice");
     console.log("71. R7-H2: band rewritten / band deleted / mark moved by a Stake → frozen (P-mframe / P-noband); mark moved by ReportPrice → 'no fraud'");
 
@@ -3771,6 +3792,247 @@ async function main() {
     await triggerBounce(challenger, xframe, xfNx(98, wOk, P9.pre, P9.wit, T), 20000, "no fraud");
     await live(98, "honest w: by the oracle with its bond returned at unit 0");
     console.log("72. R7b-N2: bond returned at unit 0 under c: / p: / w: → 'no fraud' (P-xframe; P-frame refuses acct: leaves); PERP past the bond, op-account PERP under w: → frozen");
+
+    // ===================== ROUND 8 (fix/47-r8) =============================
+    // Pool occupancy (ls - lf < 50): finalize what we can first.
+    {
+      await network.timetravel({ shift: "3600s" });
+      let s0 = await vars(rollup);
+      for (let fh = Number(s0.last_finalized) + 1; fh <= 98; fh++) {
+        await trigger(operator, rollup, { finalize: 1, height: fh }, 20000);
+        s0 = await vars(rollup);
+        if (Number(s0.last_finalized) !== fh) break;
+      }
+      console.log(`r8 prep: ls=${s0.last_submitted} lf=${s0.last_finalized}`);
+    }
+    const leHex = (v, bytes) => {
+      let x = BigInt(v);
+      if (x < 0n) x += 1n << BigInt(8 * bytes);
+      let o = "";
+      for (let i = 0; i < bytes; i++) { o += Number(x & 255n).toString(16).padStart(2, "0"); x >>= 8n; }
+      return o;
+    };
+    const xTextA = (tag, acct, rest) => "mnu3|" + "4f44583101" + "ab".repeat(32) + tag + acct + rest + "|";
+    const xUnitP = (P, tag, acct, rest, name, post) => {
+      const uPre = xTextA(tag, acct, rest);
+      const id = sha256Hex(uPre + "x");
+      const units = pad2([id], name + "-units");
+      return Object.assign(oneUnit(name, "x:" + id, post), { id, uPre, units, unitsRoot: merkle.getMerkleRoot(units), witRoot: P.wit });
+    };
+    const xfB = (pred, h, P, u, noText) => Object.assign({
+      pred, height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot, ops_root: u.opsRoot, units_root: u.unitsRoot,
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0), pre_wit: P.wit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+    }, noText ? {} : { unit: u.id, units_proof: merkle.getMerkleProof(u.units, 0), u_pre: u.uPre });
+    const xfA8 = (h, P, u, a, extra) => {
+      const post = u.post.find((l) => l.startsWith(`acct:${a}:`));
+      const pre = P.pre.find((l) => l.startsWith(`acct:${a}:`));
+      const d = Object.assign(xfB("xframe", h, P, u), { post_acct: post, post_acct_proof: u.leafProof(post) });
+      if (pre) Object.assign(d, { pre_acct: pre, pre_acct_proof: P.proof(pre) });
+      else Object.assign(d, absentIn(P.pre, `acct:${a}:`));
+      return Object.assign(d, extra || {});
+    };
+    // Prefix absence [lo, hi) in a sorted tree, renamed to l / r.
+    const gap = (tree, lo, hi, l, r) => {
+      const i = tree.findIndex((x) => x >= lo);
+      if (i < 0 || tree[i] < hi) throw new Error("fixture: prefix present " + lo);
+      const o = {};
+      if (i === 0) { o[l] = tree[0]; o[l + "_proof"] = merkle.getMerkleProof(tree, 0); return o; }
+      o[l] = tree[i - 1]; o[l + "_proof"] = merkle.getMerkleProof(tree, i - 1);
+      o[r] = tree[i]; o[r + "_proof"] = merkle.getMerkleProof(tree, i);
+      return o;
+    };
+    const metaP = (h, P, u, m0, m1, noText) => Object.assign(xfB("mframe", h, P, u, noText), {
+      pre_meta: m0, pre_meta_proof: P.proof(m0), post_meta: m1, post_meta_proof: u.leafProof(m1),
+    });
+    const OBT = `obond:${T}:0`;
+    const P10 = await clawSetup(99, "r8-p10", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBT, END]);
+    const keep10 = [mA(2000000000), BAND1, posM9, OBT, END];
+    const rp = (mkt, px) => leHex(mkt, 4) + leHex(px, 8);
+
+    // ---- 73. R8-C1: P-mframe requires the unit text of an x: op ----------
+    const META1r = "meta:1:1:1000:500:5:100:0:105:0:0";
+    const rpOk = xUnitP(P10, "06", T, rp(1, 105), "r8-rpok", [tA(1000000000, 60000), META1r].concat(keep10));
+    await submitAt(100, rpOk);
+    await triggerBounce(challenger, mframe, metaP(100, P10, rpOk, META1, META1r, true), 20000, "bad unit");
+    await triggerBounce(challenger, mframe, metaP(100, P10, rpOk, META1, META1r), 20000, "no fraud");
+    await live(100, "honest ReportPrice with u_pre omitted");
+    const META1k = "meta:1:1:1000:500:5:200:0:100:0:0";
+    const fpOk = xUnitP(P10, "0d", T, leHex(7, 8), "r8-fpok", [tA(1000000000, 60000), META1k].concat(keep10));
+    await submitAt(101, fpOk);
+    await triggerBounce(challenger, mframe, metaP(101, P10, fpOk, META1, META1k, true), 20000, "bad unit");
+    await triggerBounce(challenger, mframe, metaP(101, P10, fpOk, META1, META1k), 20000, "no fraud");
+    await live(101, "honest FinalizeProposal with u_pre omitted");
+    console.log("73. R8-C1: honest ReportPrice / FinalizeProposal judged without their unit text → 'bad unit'; with it → 'no fraud'");
+
+    // ---- 74. R8-C5 (interim): FinalizeProposal changes one legal key ----
+    const META1x = "meta:1:1:1000:500:5:10000:0:100:0:0";
+    const fpLie = xUnitP(P10, "0d", T, leHex(999, 8), "r8-fplie", [tA(1000000000, 60000), META1x].concat(keep10));
+    await submitAt(102, fpLie);
+    await triggerVerdict(challenger, mframe, metaP(102, P10, fpLie, META1, META1x), 20000, "R8-C5: keeper 100 -> 10000 under a (rejected) FinalizeProposal");
+    await frozen(102, "illegal keeper via FinalizeProposal");
+    const META1t = "meta:1:1:1000:600:6:100:0:100:0:0";
+    const fpTwo = xUnitP(P10, "0d", T, leHex(998, 8), "r8-fptwo", [tA(1000000000, 60000), META1t].concat(keep10));
+    await submitAt(102, fpTwo);
+    await triggerVerdict(challenger, mframe, metaP(102, P10, fpTwo, META1, META1t), 20000, "R8-C5: two keys under one FinalizeProposal");
+    await frozen(102, "two keys via FinalizeProposal");
+    await submitAt(102, fpOk);
+    await live(102, "honest resubmit");
+    console.log("74. R8-C5: keeper 10000 / two keys under a FinalizeProposal → frozen (P-mframe)");
+
+    // ---- 75. R8-C6: funding only for holders of the reported market ------
+    const mCredit = (tag, acct, rest, name) => xUnitP(P10, tag, acct, rest, name,
+      [tA(1000000000, 60000), mA(1000000002000000000), META1].concat(keep10.filter((l) => !l.startsWith(`acct:${M}:`))));
+    const rejRp = mCredit("06", K, rp(1, 100), "r8-rejrp");
+    await submitAt(103, rejRp);
+    await triggerBounce(challenger, xframe, xfA8(103, P10, rejRp, M), 20000, "no fraud");
+    await triggerVerdict(challenger, xframe, xfA8(103, P10, rejRp, M, gap(P10.pre, `obond:${K}:`, `obond:${K};`, "bleft", "bright")), 20000, "R8-C6: credit under a ReportPrice of an unbonded oracle");
+    await frozen(103, "credit under a rejected ReportPrice");
+    const m2Rp = mCredit("06", T, rp(2, 100), "r8-m2rp");
+    await submitAt(103, m2Rp);
+    await triggerVerdict(challenger, xframe, xfA8(103, P10, m2Rp, M, Object.assign({ fmkt: 2 }, gap(P10.pre, `pos:${M}:2:`, `pos:${M}:2;`, "pleft", "pright"))), 20000, "R8-C6: credit to a holder of another market");
+    await frozen(103, "credit to a holder of another market");
+    const xpReg = mCredit("11", T, rp(1, 100) + "01", "r8-xpreg");
+    await submitAt(103, xpReg);
+    await triggerVerdict(challenger, xframe, xfA8(103, P10, xpReg, M, { fmkt: 1, fmeta: META1, fmeta_proof: P10.proof(META1) }), 20000, "R8-C6: UpdateExternalPrice on a regular market moved collateral");
+    await frozen(103, "external price on a regular market");
+    const fundOk8 = xUnitP(P10, "06", T, rp(1, 100), "r8-fundok", [tA(1000000000, 60000), mA(1999000000), META1].concat(keep10.filter((l) => !l.startsWith(`acct:${M}:`))));
+    await submitAt(103, fundOk8);
+    await triggerBounce(challenger, xframe, xfA8(103, P10, fundOk8, M, Object.assign({ fmkt: 1 }, { fmeta: META1, fmeta_proof: P10.proof(META1) })), 20000, "no fraud");
+    await live(103, "honest funding to a holder of the reported market");
+    console.log("75. R8-C6: credit under an unbonded oracle's ReportPrice / to another market's holder / under an 11 on a regular market → frozen; honest funding → 'no fraud'");
+
+    // ---- 76. R8-H1: the mark moves only in its op's market, bounded ------
+    const META1far = "meta:1:1:1000:500:5:100:0:120:0:0";
+    const rpFar = xUnitP(P10, "06", T, rp(1, 120), "r8-rpfar", [tA(1000000000, 60000), META1far].concat(keep10));
+    await submitAt(104, rpFar);
+    await triggerVerdict(challenger, mframe, metaP(104, P10, rpFar, META1, META1far), 20000, "R8-H1: ReportPrice moved the mark 20 %");
+    await frozen(104, "mark +20 %");
+    const rpM2 = xUnitP(P10, "06", T, rp(2, 105), "r8-rpm2", [tA(1000000000, 60000), META1r].concat(keep10));
+    await submitAt(104, rpM2);
+    await triggerVerdict(challenger, mframe, metaP(104, P10, rpM2, META1, META1r), 20000, "R8-H1: ReportPrice of market 2 moved market 1");
+    await frozen(104, "another market's mark");
+    const xpMark = xUnitP(P10, "11", T, rp(1, 105) + "01", "r8-xpmark", [tA(1000000000, 60000), META1r].concat(keep10));
+    await submitAt(104, xpMark);
+    await triggerVerdict(challenger, mframe, metaP(104, P10, xpMark, META1, META1r), 20000, "R8-H1: UpdateExternalPrice moved the mark");
+    await frozen(104, "mark under an 11");
+    const rpK = xUnitP(P10, "06", K, rp(1, 105), "r8-rpk", [tA(1000000000, 60000), META1r].concat(keep10));
+    await submitAt(104, rpK);
+    await triggerVerdict(challenger, mframe, Object.assign(metaP(104, P10, rpK, META1, META1r), gap(P10.pre, `obond:${K}:`, `obond:${K};`, "bleft", "bright")), 20000, "R8-H1: unbonded oracle moved the mark");
+    await frozen(104, "unbonded oracle's mark");
+    await submitAt(104, rpOk);
+    await live(104, "honest resubmit");
+    console.log("76. R8-H1: ReportPrice +20 % / of another market / by an unbonded oracle, UpdateExternalPrice → frozen (P-mframe)");
+
+    // ---- 77. R8-C4: an x: op moves its own PERP only by its exact amount --
+    const commitMint = xUnitP(P10, "12", T, "cd".repeat(32) + leHex(5, 8), "r8-mint", [tA(1000000000, 1000000000000), META1].concat(keep10));
+    await submitAt(105, commitMint);
+    await triggerVerdict(challenger, xframe, xfA8(105, P10, commitMint, T), 20000, "R8-C4: operator Commit minted its own PERP");
+    await frozen(105, "PERP minted by a Commit");
+    const slashOk = xUnitP(P10, "10", M, T + leHex(1, 4), "r8-slash", [tA(1000000000, 60000), `acct:${M}:2000000000:25000:0`, META1, BAND1, posM9, END]);
+    await submitAt(105, slashOk);
+    await triggerBounce(challenger, xframe, xfA8(105, P10, slashOk, M), 20000, "no fraud");
+    await triggerBounce(challenger, mframe, Object.assign(xfB("mframe", 105, P10, slashOk), {
+      leaf: OBT, ins: false, leaf_proof: P10.proof(OBT),
+    }, absentIn(slashOk.post, OBT)), 20000, "no fraud");
+    await live(105, "honest SlashOracle");
+    console.log("77. R8-C4: Commit minting the op account's PERP → frozen (P-xframe); honest Slash (+25000, bond leaf removed) → 'no fraud'");
+
+    // ---- 78. R8-H2: the k == 0 bond allowance needs an expiring bond ------
+    // T unstaked earlier: obond:T:100 (unlock 100 <= h - 1 at h107).
+    const OBU = `obond:${T}:100`;
+    const P11 = await clawSetup(106, "r8-p11", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBU, END]);
+    const keep11 = [META1, BAND1, posM9, END];
+    const vote = (name, post) => xUnitP(P11, "0c", M, leHex(1, 8) + "01", name, post);
+    const relOk = vote("r8-relok", [tA(1000000000, 110000), mA(2000000000)].concat(keep11));
+    await submitAt(107, relOk);
+    await triggerBounce(challenger, xframe, xfA8(107, P11, relOk, T, { obond: OBU, obond_proof: P11.proof(OBU) }), 20000, "no fraud");
+    await triggerBounce(challenger, mframe, Object.assign(xfB("mframe", 107, P11, relOk), {
+      leaf: OBU, ins: false, leaf_proof: P11.proof(OBU),
+    }, absentIn(relOk.post, OBU)), 20000, "no fraud");
+    await live(107, "honest bond release at unit 0");
+    const relM = vote("r8-relm", [tA(1000000000, 110000), `acct:${M}:2000000000:50000:0`].concat(keep11));
+    await submitAt(108, relM);
+    await triggerBounce(challenger, xframe, xfA8(108, P11, relM, M), 20000, "no fraud");
+    await triggerVerdict(challenger, xframe, xfA8(108, P11, relM, M, gap(P11.pre, `obond:${M}:`, `obond:${M};`, "oleft", "oright")), 20000, "R8-H2: +50000 at k == 0 to an account without a bond");
+    await frozen(108, "bond allowance without a bond");
+    const relKeep = vote("r8-relkeep", [tA(1000000000, 110000), mA(2000000000), OBU].concat(keep11));
+    await submitAt(108, relKeep);
+    await triggerVerdict(challenger, mframe, Object.assign(xfB("mframe", 108, P11, relKeep), {
+      leaf: OBU, keep: true, leaf_proof: P11.proof(OBU), keep_proof: relKeep.leafProof(OBU),
+    }), 20000, "R8-H2: expired bond kept after its release");
+    await frozen(108, "expired bond kept");
+    const OBM = `obond:${M}:0`;
+    const voteBond = vote("r8-votebond", [tA(1000000000, 110000), mA(2000000000), OBM].concat(keep11));
+    await submitAt(108, voteBond);
+    await triggerVerdict(challenger, mframe, Object.assign(xfB("mframe", 108, P11, voteBond), {
+      leaf: OBM, ins: true, leaf_proof: voteBond.leafProof(OBM),
+    }, absentIn(P11.pre, OBM)), 20000, "R8-H2: a Vote created a bond");
+    await frozen(108, "bond created by a Vote");
+    await submitAt(108, relOk);
+    await live(108, "honest resubmit");
+    console.log("78. R8-H2: +50000 without a bond, expired bond kept, bond created by a Vote → frozen; honest release → 'no fraud'");
+
+    // ---- 79. R8-C2: units-tree index aliasing can no longer hide a fill ---
+    // Two single-fill Places (units 0 and 1) and a w: (unit 2); unit 1's
+    // maker M1 is exempt; a fright from unit 0 posed at index 0 + 4 > k.
+    {
+      const T0 = "71".repeat(32), M0 = "72".repeat(32), T1 = "73".repeat(32), M1 = "74".repeat(32);
+      const ac = (a, c) => `acct:${a}:${c}:0:0`;
+      const pz = (a, q) => `pos:${a}:1:${q}:100:0:0`;
+      const base = [META1, BAND1, END];
+      const w0 = [...base, ac(T0, 1000), ac(M0, 1000), ac(T1, 1000), ac(M1, 1000), pz(M1, -5)].sort();
+      const w1 = [...base, ac(T0, 990), ac(M0, 1010), ac(T1, 1000), ac(M1, 1000), pz(M1, -5), pz(T0, 1), pz(M0, -1)].sort();
+      const w2 = [...base, ac(T0, 990), ac(M0, 1010), ac(T1, 980), ac(M1, 1020), pz(M1, -6), pz(T0, 1), pz(M0, -1), pz(T1, 1)].sort();
+      const ops = [`p:${T0}:1:0:100:1:0:0:1:1`, `p:${T1}:1:0:100:1:0:0:1:1`, `w:${"79".repeat(32)}:0:1`];
+      const U = ops.map((o, i) => sha256Hex("r8-alias-unit" + i));
+      const fl = (u, t, m) => `f:${u}:0:${t}:${m}:${"7a".repeat(32)}:${"7b".repeat(32)}:1:100:1:1:0:0:0`;
+      const fills = [fl(U[0], T0, M0), fl(U[1], T1, M1), "n:2"];
+      const roots = [w0, w1, w2, w2].map((w) => merkle.getMerkleRoot(w));
+      const trace = roots.slice(1);
+      const A = { opsRoot: merkle.getMerkleRoot(ops), traceRoot: merkle.getMerkleRoot(trace), unitsRoot: merkle.getMerkleRoot(U),
+        fillsRoot: merkle.getMerkleRoot(fills), fillCount: 2, unitCount: 3, witRoot: roots[3] };
+      await submitAt(109, Object.assign(oneUnit("r8-alias-pre", "x:" + sha256Hex("r8-alias-pre"), [DEP_PRE]), { witRoot: roots[0] }));
+      await submitAt(110, A);
+      const pf = (w, l) => merkle.getMerkleProof(w, w.indexOf(l));
+      const fu = merkle.getMerkleProof(U, 0);
+      const common = { height: 110, rollup: ROLLUP_ADDR, k: 1, trace_root: A.traceRoot, ops_root: A.opsRoot, units_root: A.unitsRoot,
+        fills_root: A.fillsRoot, op: ops[1], ops_proof: merkle.getMerkleProof(ops, 1), post_wit: roots[2], post_proof: merkle.getMerkleProof(trace, 1),
+        pre_wit: roots[1], pre_proof: merkle.getMerkleProof(trace, 0), unit: U[1], units_proof: merkle.getMerkleProof(U, 1),
+        pre_meta: META1, pre_meta_proof: pf(w1, META1), fright: fills[0], fright_proof: merkle.getMerkleProof(fills, 0) };
+      const xa = Object.assign({ pred: "xframe" }, common, { post_acct: ac(M1, 1020), post_acct_proof: pf(w2, ac(M1, 1020)),
+        pre_acct: ac(M1, 1000), pre_acct_proof: pf(w1, ac(M1, 1000)) });
+      await triggerBounce(challenger, xframe, Object.assign({}, xa, { fright_up: Object.assign({}, fu, { index: fu.index + 4 }) }), 20000, "no fraud");
+      await triggerBounce(challenger, xframe, Object.assign({}, xa, { fright_up: fu }), 20000, "no fraud");
+      const L = pz(M1, -5);
+      const fa = Object.assign({ pred: "frame" }, common, { leaf: L, leaf_proof: pf(w1, L), ins: false }, absentIn(w2, L));
+      await triggerBounce(challenger, bindAa, Object.assign({}, fa, { fright_up: Object.assign({}, fu, { index: fu.index + 4 }) }), 20000, "no fraud");
+      await live(110, "honest two-fill batch vs aliased fills evidence");
+    }
+    console.log("79. R8-C2: fright_up index aliased past k (P-xframe / P-frame) on an honest two-fill batch → 'no fraud'");
+
+    // ---- 80. R8-C3: a PERP-only holder's acct: leaf (credited D:) --------
+    {
+      const FR = "cc".repeat(32);
+      const chalAddr = await challenger.getAddress();
+      const dUnit = (await trigger(challenger, vault, { deposit_perp: 1, account: FR }, 7000)).unit;
+      const dOp = `D:${FR}:7000:${chalAddr}:${dUnit}`;
+      const okLeaf = `acct:${FR}:0:7000:0`;
+      const dPost = [okLeaf, "dep:" + dUnit, `adr:${chalAddr}:${FR}`, `adrx:${FR}:${chalAddr}`];
+      await submitAt(111, oneUnit("r8-c3-pre", "x:" + sha256Hex("r8-c3-pre"), [DEP_PRE]));
+      const li = GENESIS_LEAVES.findIndex((l) => l > `acct:${FR}:`);
+      const preAbs = { pre_absent: true, left: GENESIS_LEAVES[li - 1], left_proof: genProof(GENESIS_LEAVES[li - 1]),
+        right: GENESIS_LEAVES[li], right_proof: genProof(GENESIS_LEAVES[li]) };
+      const lieLeaf = `acct:${FR}:0:7001:0`;
+      const lie = oneUnit("r8-c3-lie", dOp, [lieLeaf].concat(dPost.slice(1)));
+      await submitAt(112, lie);
+      await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 112 }, depositPayload(lie, lieLeaf), preAbs), 20000, "R8-C3: fresh PERP holder credited past the deposit");
+      await frozen(112, "fresh PERP credit past the deposit");
+      const ok = oneUnit("r8-c3-ok", dOp, dPost);
+      await submitAt(112, ok);
+      await triggerBounce(challenger, dispute, Object.assign({ pred: "deposit", height: 112 }, depositPayload(ok, okLeaf), preAbs), 20000, "no fraud");
+      await live(112, "honest D: creating a PERP-only holder's leaf");
+    }
+    console.log("80. R8-C3: credited D: on a fresh account (acct:X:0:amount:0) → 'no fraud'; credited past the deposit → frozen (P-deposit)");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

@@ -235,7 +235,7 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 确定性状态转移一旦改变，新版 watcher 重放旧引擎产出的高度就会得到不同的
 `state_root`，误报 ROOT MISMATCH；op / 叶格式一旦改变，旧 AA 与新 watcher 也会
 互判 fraud。因此 **#47 把以下全部变更合并成一次协调的链重置，并把
-`ASSERTION_VERSION` 从 1 升到 2**（第 6/6b 轮再升到 3、第 7 轮升到 4、第 7b 轮升到 5，见下表最后三行；Rust `minuend_types::ASSERTION_VERSION` 与
+`ASSERTION_VERSION` 从 1 升到 2**（第 6/6b 轮再升到 3、第 7 轮升到 4、第 7b 轮升到 5、第 8 轮升到 6，见下表最后四行；Rust `minuend_types::ASSERTION_VERSION` 与
 `minuend_rollup.aa` 的 `assertion_version != N` 门同时修改；
 `rollup_aa_pins_the_rust_assertion_version` 测试锁住两者一致）：
 
@@ -247,6 +247,7 @@ Obyte 单次复杂度仍是 100：验一条指令做得到，验整段程序做�
 | #47 执行层 | spot_only 最坏情况预留、ADL 成交价钳进价格区间、gov-nonce 水位只在成功时推进、Place/清算撤销日志、无成交的清算不留任何状态、一个地址只能绑定一个账户、对不存在账户的提款不再创建空账户 |
 | #47 承诺格式 | `p:` op 增加 `typ`；`d:`/`D:` op 增加地址；witness 树增加 `adr:` 叶；快照格式 v5 |
 | #47 AA | rollup / dispute / dispute_fill 定义变化，新增 dispute_bind，vault 改为按 `wit_root` 付款 |
+| #47 第 8 轮 → **6** | witness 给每个 PERP / W 持有者 `acct:` 叶（R8-C3）并新增 `obond:{acct}:{unlock}` 叶（R8-H2）（承诺格式）；新增 dispute_mframe（P-mframe / P-noband），dispute_xframe（P-xframe / P-tsize）/ dispute / dispute_bind / rollup 定义变化；快照格式不变（v9，见证叶由状态派生） |
 | #47 第 7b 轮 → **5** | `Reveal{Cancel}` 的 ops 叶提交内层 `c:`（承诺格式）；第一个 maker 不足目标仓位 1/10 时清算直接 ADL（执行语义）；快照格式 v9；新增 dispute_xframe（P-xframe / P-mframe / P-noband / P-tsize），dispute / dispute_book / dispute_claw / dispute_bind / dispute_fill / rollup 定义变化 |
 | #47 第 7 轮 → **4** | unit id = `sha256("mnu3\|" + hex(canonical) + "\|" + ops 描述串)`（承诺 / 签名格式，P-opbind）；每个 unit 至多一笔成交、`place` 不再同单元 force-sell、清算簿内有成交时不 ADL、ADL 只取一个对手方（执行语义）；witness 新增 `band:` 叶；dispute / dispute_book / dispute_claw / rollup 定义变化 |
 | #47 第 6/6b 轮 → **3** | `Reveal{Place\|Liquidate}` 的 ops 叶提交内层 `p:` / `L:`（承诺格式）；`place` 执行 `QTY_CAP`（`\|仓位\| + 挂单剩余量 + qty < 1e15`，执行语义）；新增 dispute_claw，dispute_bind / dispute_book / dispute_fill / rollup 定义变化 |

@@ -37,7 +37,7 @@ function resolveAa(agentFile, subs, outName) {
   fs.writeFileSync(out, src);
   return out;
 }
-function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr) {
+function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr) {
   return resolveAa("minuend_rollup.aa", {
     DISPUTE_AA_HERE: disputeAddr,
     DISPUTE_FILL_AA_HERE: fillAddr,
@@ -45,6 +45,7 @@ function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xf
     DISPUTE_BOOK_AA_HERE: bookAddr,
     DISPUTE_CLAW_AA_HERE: clawAddr,
     DISPUTE_XFRAME_AA_HERE: xfAddr,
+    DISPUTE_MFRAME_AA_HERE: mfAddr,
   }, ".minuend_rollup.resolved.aa");
 }
 function resolveBookAa() {
@@ -54,9 +55,13 @@ function resolveBookAa() {
 function resolveClawAa() {
   return resolveAa("minuend_dispute_claw.aa", {}, ".minuend_dispute_claw.resolved.aa");
 }
-// Round 7b: P-xframe / P-mframe / P-noband / P-tsize on a sixth dispute AA.
+// Round 7b: P-xframe (+ P-tsize since round 8) on a sixth dispute AA.
 function resolveXframeAa() {
   return resolveAa("minuend_dispute_xframe.aa", {}, ".minuend_dispute_xframe.resolved.aa");
+}
+// Round 8: P-mframe / P-noband on a seventh dispute AA.
+function resolveMframeAa() {
+  return resolveAa("minuend_dispute_mframe.aa", {}, ".minuend_dispute_mframe.resolved.aa");
 }
 // R4-A-4: P-adr derives the vault from the base too (deposit ledger).
 function resolveBindAa(vaultBaseAddr) {
@@ -116,7 +121,9 @@ async function main() {
   const clawAddr = chashOf(clawPath);
   const xfPath = resolveXframeAa();
   const xfAddr = chashOf(xfPath);
-  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr);
+  const mfPath = resolveMframeAa();
+  const mfAddr = chashOf(mfPath);
+  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr);
 
   const network = await Network.create()
     .with.agent({ vaultBase: vaultBasePath })
@@ -134,6 +141,7 @@ async function main() {
     .with.agent({ book: bookPath })
     .with.agent({ claw: clawPath })
     .with.agent({ xframe: xfPath })
+    .with.agent({ mframe: mfPath })
     .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ operator: 1e14 })
     .run();
@@ -143,6 +151,7 @@ async function main() {
   const bookAa = network2.agent.book;
   const clawAa = network2.agent.claw;
   const xfAa = network2.agent.xframe;
+  const mfAa = network2.agent.mframe;
   const vault = network2.agent.vault;
   console.log("dispute AA address:", dispute);
   console.log("fill AA address   :", fill);
@@ -198,6 +207,14 @@ async function main() {
   if (xb.error || !xb.unit) throw new Error("xframe-dispute bind failed: " + xb.error);
   await network2.witnessUntilStable(xb.unit);
   console.log("xframe dispute bound; unit =", xb.unit);
+  const mb = await op2.triggerAaWithData({
+    toAddress: mfAa,
+    amount: 20000,
+    data: { bind_mframe: 1, rollup },
+  });
+  if (mb.error || !mb.unit) throw new Error("mframe-dispute bind failed: " + mb.error);
+  await network2.witnessUntilStable(mb.unit);
+  console.log("mframe dispute bound; unit =", mb.unit);
 
   const v = await operator.readAAStateVars(rollup);
   const vars_ = v.vars || v;
@@ -213,6 +230,8 @@ async function main() {
     throw new Error("dispute_claw_aa not bound: " + JSON.stringify(vars_.dispute_claw_aa));
   if (String(vars_.dispute_xframe_aa) !== String(xfAa))
     throw new Error("dispute_xframe_aa not bound: " + JSON.stringify(vars_.dispute_xframe_aa));
+  if (String(vars_.dispute_mframe_aa) !== String(mfAa))
+    throw new Error("dispute_mframe_aa not bound: " + JSON.stringify(vars_.dispute_mframe_aa));
   if (Number(vars_.last_submitted || 0) !== 0)
     throw new Error("boot last_submitted wrong");
   if (Number(vars_.last_finalized || 0) !== 0)
@@ -228,12 +247,13 @@ async function main() {
     dispute_book_aa_address: bookAa,
     dispute_claw_aa_address: clawAa,
     dispute_xframe_aa_address: xfAa,
+    dispute_mframe_aa_address: mfAa,
     vault_aa_address: vault,
     vault_base_aa_address: vaultBaseAddr,
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
-    assertion_version: 5,
+    assertion_version: 6,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };

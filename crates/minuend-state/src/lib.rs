@@ -1918,16 +1918,31 @@ pub fn aa_sharded_proof_for_account(
 /// Hex is lowercase `hex::encode` of the 32-byte id.
 pub fn wit_leaves(state: &ChainState) -> Vec<String> {
     let mut leaves = Vec::new();
-    for (id, acct) in &state.accounts {
+    // R8-C3 (ASSERTION_VERSION 6): every account that holds PERP or W gets
+    // an `acct:` leaf, not only the ones with an `accounts` entry. A gov
+    // deposit (`D:`) or a Slash reward never creates an `accounts` entry,
+    // so before this its PERP was invisible until the account's first
+    // collateral op made the leaf appear "with" PERP — which P-xframe
+    // judged as a PERP change (honest batch slashable).
+    let ids: std::collections::BTreeSet<AccountId> = state
+        .accounts
+        .keys()
+        .chain(state.perp_balances.keys())
+        .chain(state.withdrawn_total.keys())
+        .copied()
+        .collect();
+    for id in &ids {
         let perp = state.perp_balances.get(id).copied().unwrap_or(0);
         let w = state.withdrawn_total.get(id).copied().unwrap_or(0);
+        let acct = state.accounts.get(id);
         leaves.push(format!(
             "acct:{}:{}:{}:{}",
             hex::encode(id.0),
-            acct.collateral,
+            acct.map(|a| a.collateral).unwrap_or(0),
             perp,
             w
         ));
+        let Some(acct) = acct else { continue };
         for (market, pos) in &acct.positions {
             // isolated 0/1 + the account's escrowed bucket for this market:
             // the fill predicate needs both to recompute the proportional
@@ -1983,6 +1998,19 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
                 base64::engine::general_purpose::STANDARD.encode(u)
             ));
         }
+    }
+    // R8-H2 (ASSERTION_VERSION 6): one `obond:{acct}:{unlock}` leaf per
+    // bonded oracle (`unlock` = 0 while bonded, the unbonding height after
+    // UnstakeOracle), so a bond returned at the batch boundary
+    // (`prune_oracle_unbonding`) is provable and the x-frame AA's k == 0
+    // +ORACLE_BOND_PERP allowance applies only to an oracle whose bond
+    // actually releases.
+    for acct in state.oracle_bonds.keys() {
+        leaves.push(format!(
+            "obond:{}:{}",
+            hex::encode(acct.0),
+            state.oracle_unbonding.get(acct).copied().unwrap_or(0)
+        ));
     }
     for (market, params) in &state.markets {
         let mark = state.marks.get(market).copied().unwrap_or(0);

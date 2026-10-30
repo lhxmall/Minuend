@@ -533,10 +533,15 @@
 						// is idx 0 of unit k. Zero fills: fills are committed
 						// in unit order, so fill belongs to an earlier unit
 						// and fright to a later one (or is the sentinel).
-						$nf = (var[$rollup]['fill_count_' || $h] otherwise 0) == 0;
+						// R8-C2: every compared index is an integer inside its
+						// tree ([0, c)): Obyte's verifier reads only the low d
+						// bits of an index (leaf shapes pin d), so j + 2^d or a
+						// padding slot would otherwise prove leaf j.
+						$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+						$nf = $fc == 1;
 						$rt = trigger.data.fright;
 						$ri = trigger.data.fright_proof.index;
-						if (!$nf AND !($rt AND is_integer($ri) AND $ri >= 0 AND trigger.data.fright_proof.root == trigger.data.fills_root
+						if (!$nf AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND trigger.data.fright_proof.root == trigger.data.fills_root
 							AND is_valid_merkle_proof($rt, trigger.data.fright_proof)
 							AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND !starts_with($rt, 'f:' || $u || ':')))))
 							bounce('no fraud');
@@ -545,10 +550,10 @@
 							AND is_valid_merkle_proof($fl, trigger.data.fill_proof)))
 							bounce('no fraud');
 						$one = !$nf AND $ri > 0 AND starts_with($fl, 'f:' || $u || ':0:');
-						if (!$nf AND !$one AND !(($ri == 0 OR (starts_with($fl, 'f:') AND trigger.data.fill_up.index < $k
+						if (!$nf AND !$one AND !(($ri == 0 OR (starts_with($fl, 'f:') AND is_integer(trigger.data.fill_up.index) AND trigger.data.fill_up.index >= 0 AND trigger.data.fill_up.index < $k
 								AND trigger.data.fill_up.root == trigger.data.units_root
 								AND is_valid_merkle_proof(substring($fl, 2, 64), trigger.data.fill_up)))
-							AND (starts_with($rt, 'n:') OR (trigger.data.fright_up.index > $k
+							AND (starts_with($rt, 'n:') OR (is_integer(trigger.data.fright_up.index) AND trigger.data.fright_up.index > $k AND trigger.data.fright_up.index < $n
 								AND trigger.data.fright_up.root == trigger.data.units_root
 								AND is_valid_merkle_proof(substring($rt, 2, 64), trigger.data.fright_up)))))
 							bounce('no fraud');

@@ -63,7 +63,10 @@ pub const CHAIN_ID: &str = "minuend-v2";
 ///   liquidation whose best book level covers less than
 ///   1/`LIQ_MIN_BOOK_FILL_DIV` of the remaining position takes the ADL
 ///   path in the same unit instead of a dust book fill (R7-H1).
-pub const ASSERTION_VERSION: u32 = 5;
+/// - 6 (#47 round 8, with the m-frame rollup redeploy): the witness gives
+///   every PERP / W holder an `acct:` leaf (R8-C3) and every bonded oracle
+///   an `obond:{acct}:{unlock}` leaf (R8-H2).
+pub const ASSERTION_VERSION: u32 = 6;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

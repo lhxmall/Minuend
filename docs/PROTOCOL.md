@@ -233,7 +233,7 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
-`assertion_version` 当前为 **5**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5，见 ROLLUP-UPGRADE §7），
+`assertion_version` 当前为 **6**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5；第 8 轮升到 6，见 ROLLUP-UPGRADE §7），
 rollup AA 只接受等于 5 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
@@ -530,6 +530,25 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 （R3-E-2，取舍）；`resting_open_im` 逐仓挂单扣除 `margin_left`、现货挂单不与仓位轧差；
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
+
+第 8 轮规则（MECHANISMS §10.16，m-frame AA = `minuend_dispute_mframe.aa`）：
+- **witness**：每个持有 PERP 或 W 的账户都有 `acct:` 叶（没有 `accounts` 条目时 collateral 0）；
+  每个质押中的预言机一片 `obond:{acct}:{unlock}`（unlock 0 = 未解押）。
+- **P-mframe**（m-frame AA）：`x:` op 必须带 `u_pre`；0d 只改一个参数到合法组合或 delist；
+  mark 只在 op 自己的市场变化（`p:` / `L:` = 本 unit 成交价，06 = 已质押、普通非 spot 市场、
+  ±10%；11 不改 mark）；`obond:` 叶只按 0e / 0f / 0x10 / 批次边界出现、消失。
+- **P-xframe**：所有比较的下标在 `[0, 叶数)` 且深度精确；`x:` op 的 op 账户 PERP 只能按
+  0e −50000 / 0a −10000 / 0x10 +25000 变化；06 / 11 下 collateral 变化可由"X 在该市场无仓位 /
+  预言机无 bond / 该市场不付资金费"三类证据判欺诈；k == 0 的 +50000 可由"X 没有到期的
+  bond"证据判欺诈。
+- **P-frame**（dispute_bind）：同样的下标边界。**P-deposit**：gov `D:` 在新账户上产生
+  `acct:X:0:{amount}:…` 视为已入账。
+
+第 8 轮部署变化：新增 dispute_mframe（rollup 新占位 `DISPUTE_MFRAME_AA_HERE`、新 case
+`set_dispute_mframe`、verdict 白名单）；dispute_xframe（P-mframe / P-noband 移走，P-tsize 留下）、
+dispute（P-deposit pre-absent gov）、dispute_bind（下标边界）、rollup（版本门 6）定义变化；
+witness 叶格式变化（`obond:`、PERP-only `acct:`）是共识变化。op 预算见 MECHANISMS §10.16；
+rollup 只接受 `assertion_version == 6`。
 
 第 7b 轮部署变化：新增 dispute_xframe（rollup 新占位 `DISPUTE_XFRAME_AA_HERE`、新 case
 `set_dispute_xframe`、verdict 白名单）；dispute（P-opbind 深度门）、dispute_book（P-fsane 哨兵 /

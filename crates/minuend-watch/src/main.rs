@@ -186,6 +186,7 @@ struct Args {
     dispute_book: Option<String>,
     dispute_claw: Option<String>,
     dispute_xframe: Option<String>,
+    dispute_mframe: Option<String>,
     hub: String,
     from_height: Option<u64>,
     state_dir: Option<PathBuf>,
@@ -201,6 +202,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dispute_book = None;
     let mut dispute_claw = None;
     let mut dispute_xframe = None;
+    let mut dispute_mframe = None;
     let mut state_dir = None;
     let mut hub = None;
     let mut from_height = None;
@@ -224,6 +226,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dispute-claw" => {
                 dispute_claw = Some(it.next().ok_or("--dispute-claw needs a value")?)
+            }
+            "--dispute-mframe" => {
+                dispute_mframe = Some(it.next().ok_or("--dispute-mframe needs a value")?)
             }
             "--dispute-xframe" => {
                 dispute_xframe = Some(it.next().ok_or("--dispute-xframe needs a value")?)
@@ -271,6 +276,7 @@ fn parse_args() -> Result<Args, String> {
         dispute_book,
         dispute_claw,
         dispute_xframe,
+        dispute_mframe,
         hub: hub.ok_or("missing --hub")?,
         from_height,
         state_dir,
@@ -282,7 +288,7 @@ fn parse_args() -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "minuend-watch --rollup <rollup-aa-addr> --vault <vault-aa-addr> --hub <hub-url> [--dispute <dispute-aa-addr>] \
- [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--dispute-claw <addr>] [--dispute-xframe <addr>] [--state-dir <dir>] [--from-height <u64>] \
+ [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--dispute-claw <addr>] [--dispute-xframe <addr>] [--dispute-mframe <addr>] [--state-dir <dir>] [--from-height <u64>] \
  [--poll-interval <secs>] [--bond <gross-bytes>]\n\
  \n\
 Polls the rollup's da_unit_<h> assertions, checks the DA header against the roots the\n\
@@ -381,9 +387,12 @@ struct ChallengeCtx {
     /// Round 6: P-claw lives on `minuend_dispute_claw.aa` (rollup var
     /// `dispute_claw_aa`).
     dispute_claw: Option<String>,
-    /// Round 7b: P-xframe / P-mframe / P-noband / P-tsize live on
+    /// Round 7b: P-xframe (+ P-tsize since round 8) lives on
     /// `minuend_dispute_xframe.aa` (rollup var `dispute_xframe_aa`).
     dispute_xframe: Option<String>,
+    /// Round 8: P-mframe / P-noband live on `minuend_dispute_mframe.aa`
+    /// (rollup var `dispute_mframe_aa`).
+    dispute_mframe: Option<String>,
     proof_dir: PathBuf,
 }
 
@@ -396,6 +405,7 @@ impl ChallengeCtx {
             "book" => self.dispute_book.as_deref(),
             "claw" => self.dispute_claw.as_deref(),
             "xframe" => self.dispute_xframe.as_deref(),
+            "mframe" => self.dispute_mframe.as_deref(),
             "fill" => self.dispute_fill.as_deref(),
             "bind" => self.dispute_bind.as_deref(),
             _ => None,
@@ -1001,6 +1011,7 @@ fn maybe_post_challenge(h: u64, submission: &str, alert: &str, proof: Option<&pr
             "book" => args.push("--book".into()),
             "claw" => args.push("--claw".into()),
             "xframe" => args.push("--xframe".into()),
+            "mframe" => args.push("--mframe".into()),
             _ => {}
         }
         cmd.args(args)
@@ -1422,6 +1433,7 @@ fn main() -> anyhow::Result<()> {
         dispute_book: args.dispute_book.clone(),
         dispute_claw: args.dispute_claw.clone(),
         dispute_xframe: args.dispute_xframe.clone(),
+        dispute_mframe: args.dispute_mframe.clone(),
         proof_dir,
     });
 
@@ -1872,6 +1884,7 @@ mod tests {
             dispute_book: Some("K".repeat(32)),
             dispute_claw: Some("C".repeat(32)),
             dispute_xframe: Some("Q".repeat(32)),
+            dispute_mframe: Some("R".repeat(32)),
             proof_dir: Default::default(),
         };
         let s = std::path::Path::new("/x/p.js");
@@ -1935,8 +1948,14 @@ mod tests {
         assert_eq!(cl[t + 1], "claw");
         let j = cl.iter().position(|a| a == "--dispute-address").unwrap();
         assert_eq!(cl[j + 1], "C".repeat(32));
-        // Round 7b: x-frame proofs target the x-frame AA.
-        for pred in ["xframe", "mframe", "noband", "tsize"] {
+        // Round 7b: x-frame proofs target the x-frame AA; round 8: the
+        // m-frame predicates target the m-frame AA.
+        for (pred, tgt, addr) in [
+            ("xframe", "xframe", "Q"),
+            ("tsize", "xframe", "Q"),
+            ("mframe", "mframe", "R"),
+            ("noband", "mframe", "R"),
+        ] {
             let xf = minuend_watch::prove::BuiltProof {
                 pred: pred.into(),
                 fill_aa: false,
@@ -1945,9 +1964,9 @@ mod tests {
             };
             let a = strs(live_challenge_args(s, 3, &xf, p, "mainnet", &ctx));
             let t = a.iter().position(|x| x == "--target").unwrap();
-            assert_eq!(a[t + 1], "xframe");
+            assert_eq!(a[t + 1], tgt);
             let j = a.iter().position(|x| x == "--dispute-address").unwrap();
-            assert_eq!(a[j + 1], "Q".repeat(32));
+            assert_eq!(a[j + 1], addr.repeat(32));
         }
     }
 

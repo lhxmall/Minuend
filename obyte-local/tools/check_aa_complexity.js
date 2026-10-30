@@ -52,6 +52,13 @@ async function check(f) {
 				console.error(`${f}: ops ${sumOps} > ${constants.MAX_OPS}`);
 				process.exit(2);
 			}
+			// Round 8: ocore's aa_validation accumulates complexity over the
+			// WHOLE definition (like ops), so the per-formula max is not the
+			// gate that matters; this sum slightly over-counts (conservative).
+			if (sumCx > constants.MAX_COMPLEXITY) {
+				console.error(`${f}: AA-wide complexity ${sumCx} > ${constants.MAX_COMPLEXITY}`);
+				process.exit(2);
+			}
 			return runNext();
 		}
 		const [p, v] = items[i++];

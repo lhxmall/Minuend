@@ -198,13 +198,17 @@
 							AND $ghi <= trigger.data.left
 							AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
 						if (!$hit1 AND !$hit2) bounce('no fraud');
-						// #47 B6: gov ops never create an account, so a proven
-						// post leaf on a pre-absent account is fraud for D:/W:.
-						// A rejected op leaves no leaf (or an empty one, col 0).
-						// R3-A-1: a withdrawal from a pre-absent account can
-						// only have been REJECTED (no cash): col 0.
-						$match = !$gov AND ($col1 == '0' OR ($deposit AND 0 + $amount == $col1));
-						$cred = !$gov AND $deposit AND $col1 != '0' AND 0 + $amount == $col1;
+						// R8-C3 (was #47 B6): a credited gov deposit (D:) on a
+						// pre-absent account now gets its leaf (every PERP
+						// holder has one): col 0, PERP == amount (credited,
+						// backing judged below). A gov withdrawal (W:) from a
+						// pre-absent account can only have been rejected (no
+						// PERP), and a rejected op leaves no leaf (or an empty
+						// one, col 0). R3-A-1: a withdrawal from a pre-absent
+						// account can only have been REJECTED (no cash): col 0.
+						$gcr = $gov AND $deposit AND $col1 == '0' AND length($amount) <= 14 AND $perp1 == 0 + $amount;
+						$match = $gov ? $gcr : ($col1 == '0' OR ($deposit AND 0 + $amount == $col1));
+						$cred = $gcr OR (!$gov AND $deposit AND $col1 != '0' AND 0 + $amount == $col1);
 					} else {
 						if (typeof($pre_leaf) == 'boolean'
 							OR !is_valid_merkle_proof($pre_leaf, trigger.data.pre_leaf_proof)

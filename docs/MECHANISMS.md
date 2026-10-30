@@ -1397,6 +1397,64 @@ Stake 单元给第三方加钱 / 改仓位、ReportPrice 给无仓位账户加�
 部署 op 预算（第 7b 轮）：vault 364、rollup 1016、dispute 1601、dispute_fill 1974、
 dispute_bind 1960、dispute_book 1801、dispute_claw 1827、dispute_xframe 1598（上限 2000）。
 
+### 10.16 第 8 轮（#47 R8）：m-frame AA、诚实批次可判的三处、op 账户 PERP、治理 / 价格 op 的边界
+
+第 8 轮审查（`findings/round-8-review.md`）的 6 个 Critical、2 个 High。`ASSERTION_VERSION = 6`；
+新增第七个 dispute AA `minuend_dispute_mframe.aa`（rollup 变量 `dispute_mframe_aa`，占位
+`DISPUTE_MFRAME_AA_HERE`，绑定 `{bind_mframe:1}`）：P-mframe / P-noband 从 x-frame AA 移过去
+（op 预算），P-tsize 留在 x-frame AA。watcher 新增 `--dispute-mframe`，`post_challenge*.js`
+新增 `--mframe` / `--target mframe`，`targetForPred('mframe'|'noband') = 'mframe'`。
+
+1. **R8-C1（诚实批次可判）**：P-mframe 的全部 tag 豁免（0a / 0d / 06）取决于挑战者是否交
+   `u_pre`。修法：`x:` op 必须带 `{unit, units_proof, u_pre}`，否则 bounce `bad unit` /
+   `bad unit text`（与 P-xframe 相同）。
+2. **R8-C2（诚实批次可判）**：Obyte 的验证只看 `index` 的低 d 位，`fill_up.index < k` /
+   `fright_up.index > k` 可以用 j + 2^d 伪造，让有成交的 `p:` / `L:` 被说成"无成交"。修法：
+   P-xframe 与 dispute_bind 的 P-frame 里所有参与比较的下标都要求 `is_integer`、`>= 0`、
+   `< 叶数`（units：`unit_count`；fills：`fill_count + 1`），x-frame 另外要求精确深度。
+   其余 AA 的下标比较已审计：`== k` / `== k - 1` 在叶形状固定深度下是精确的；witness
+   树的相邻夹逼回绕时只能是（`~:end`, 最小叶），不可能夹住任何键；fills 树的
+   `right == fill + 1` 回绕到的位置只能是 `n:` 哨兵。
+3. **R8-C3（诚实批次可判，r7c 回归）**：只做过 `D:` / 拿过 Slash 奖励的账户没有 `acct:` 叶。
+   修法（Rust + 版本号）：`wit_leaves` 遍历 `accounts ∪ perp_balances ∪ withdrawn_total`，
+   没有 `accounts` 条目的输出 `acct:{id}:0:{perp}:{w}`。P-deposit 的 pre-absent 分支随之改为：
+   gov `D:` 在 pre 不存在的账户上 post 叶 = `acct:X:0:{amount}:…` 视为已入账（背书照判），
+   其余 gov 情况仍是欺诈。顺带：`D:` 到新账户的 PERP 现在可见、可判。
+4. **R8-C4（运营方造币）**：`x:` op 的 op 账户 PERP 只能按引擎的精确金额变化：0e −50000、
+   0a −10000、0x10 +25000（bond 未烧掉的一半），其余 tag 0；也可以不变（被拒）。
+5. **R8-C5（临时收紧，提案不在见证里）**：0d 下参数变化只能改 im / mm / fee / keeper 中的
+   **一个**且新参数组满足 `risk_params_ok`（spot 市场 fee 不得上调），或 delist 0 → 1；
+   tick / usd / cap / mark 不得变化。根本修法（`prop:` 叶 + 投票权重快照入见证）未做，
+   剩余风险：运营方自签一个被拒的 FinalizeProposal 仍能把某个参数改到合法上限
+   （例如 keeper 500 bps）。
+6. **R8-C6（运营方掏空金库）**：06 / 11 下 collateral 变化仍默认放行（资金费公式依赖不在
+   见证里的 funding index），但挑战者现在可以用三种证据判欺诈：X 在 op 的市场 m（`u_pre`
+   里 account 后的 u32 LE，挑战者给 `fmkt`，AA 自己算 LE hex 比对）没有 `pos:X:m:`；06 的
+   预言机在 pre 里没有任何 `obond:` 叶（引擎忽略未质押的报价：被拒）；m 的 `meta` 说明该
+   op 不付资金费（spot 市场 im 10000 两者都拒；普通市场 usd 0 上的 11 只记 external ring）。
+   剩余风险：已质押的预言机在普通市场、对持有该市场仓位的账户，金额仍不判。
+7. **R8-H1**：mark 只能在 op 自己的市场变化——`p:` / `L:` 只能变成本 unit 那笔成交的价格
+   （成交证据或"本 unit 无成交"的证明是**必交**的，漏交 bounce，不会误判诚实批次；普通
+   市场另外限 ±10%），06 只能是普通、非 spot 市场、预言机未被证明无 bond、在旧 mark 的
+   ±10% 内（`|n − o| ≤ |o|/10 + 1`），11 永不改 mark。
+8. **R8-H2**：witness 新增 `obond:{acct}:{unlock}`（质押中 unlock = 0，Unstake 后为执行高度
+   h − 1 + 256）。P-xframe 的 k == 0 `+50000` 默认放行（漏交证据不能判诚实批次），但挑战者
+   给出 X 在 pre 里唯一的 `obond:` 叶 unlock 为 0 或 > h − 1、或 `[obond:X:, obond:X;)` 夹逼时
+   判欺诈。P-mframe 框住 `obond:` 叶：只有 X 的 0e（unlock 0）或 0f（unlock h + 255）能新建
+   （挑战者可再证明 0e 被拒：X 已有 bond 叶、或 X 的 PERP 没有减少；0f 被拒：X 没有 bond 或
+   bond 已在解押），只有 X 的 0f（unlock 0 的叶）、0x10 的 target、或 k == 0 且
+   0 < unlock ≤ h − 1 能删除；`keep`：这样的过期叶仍出现在 unit 0 的 post 树里是欺诈。
+   剩余：`D:` / `W:` 的 op 账户 PERP 由 P-deposit 判，其 `$bk` 仍允许 k == 0 的 +50000
+   （不看 `obond:`）；被拒的 SlashOracle 删除别人的 bond 叶并拿 +25000 不可证明
+   （资格依赖不在见证里的报价历史）。
+
+op 预算：vault 364、rollup 1037、dispute 1660、dispute_fill 1984、dispute_bind 1955、
+dispute_book 1801、dispute_claw 1827、dispute_xframe 1930、dispute_mframe 1962。
+
+watcher 已知限制（未变）：k == 0 的证明用重放引擎的 pre 状态（批次提交时已执行
+`prune_oracle_unbonding`），与链上 `wit_root_{h−1}`（提交前计算）在有 bond 释放的边界上
+不一致，这种边界上的 k == 0 证明会 bounce `bad pre wit`（浪费手续费，不会误判）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
