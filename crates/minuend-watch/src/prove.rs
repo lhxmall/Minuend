@@ -2531,7 +2531,9 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
     if qty <= 0 || qty >= EXACT || price.abs() >= EXACT {
         return None;
     }
-    let meta = pre.iter().find(|l| l.starts_with(&format!("meta:{market}:")))?;
+    let meta = pre
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{market}:")))?;
     let m: Vec<&str> = meta.split(':').collect();
     if m.len() != 11 || m[9].parse::<i128>().ok()? != 0 {
         return None;
@@ -2583,7 +2585,11 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
     };
     let t2 = (qty * price / 100_000_000 * 1_000_000 / 100_000_000).abs();
     let fee = if kind == 2 { 0 } else { t2 * fee_bps / 10_000 };
-    let reward = if kind == 0 { 0 } else { t2 * keeper_bps / 10_000 };
+    let reward = if kind == 0 {
+        0
+    } else {
+        t2 * keeper_bps / 10_000
+    };
     let col_of = |tree: &[String], a: &str| -> Option<i128> {
         tree.iter()
             .find(|l| l.starts_with(&format!("acct:{a}:")))?
@@ -2723,11 +2729,7 @@ fn claw_proof(
         "ops_proof": proof_json(&batch.ops, k),
     });
     let obj = data.as_object_mut()?;
-    obj.extend(
-        pre_wit_fields(batch, k, pre_leaves)
-            .as_object()?
-            .clone(),
-    );
+    obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
     let mut put = |key: &str, tree: &[String], leaf: &String| -> Option<()> {
         let i = index_of(tree, leaf)?;
         obj.insert(key.into(), leaf.clone().into());
@@ -4562,7 +4564,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn claw_place(
-        parents: Vec<UnitId>,
+        parents: Vec<minuend_types::UnitId>,
         secret: &[u8; 32],
         side: minuend_types::Side,
         tif: minuend_types::TimeInForce,
@@ -4674,15 +4676,37 @@ mod tests {
             .marks
             .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
         let px = 90_000 * PRICE_SCALE as i64;
-        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
         let i0 = unit_id(&ask);
         eng.ingest(ask).unwrap();
         // bob's 10k loss now exceeds his collateral: the claw covers 9k.
         claw_set_col(&mut eng, b, 1_000);
-        let bid = claw_place(vec![i0], &alice, Side::Bid, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
         let (batch, replay) = claw_batch(&mut eng, bid);
         let c = claw_check(&batch, &replay, "0");
-        assert_eq!(c.x, -(9_000 * USD_SCALE as i128), "maker received 9k from the taker");
+        assert_eq!(
+            c.x,
+            -(9_000 * USD_SCALE as i128),
+            "maker received 9k from the taker"
+        );
         claw_forgeries(&batch, &replay, &c);
     }
 
@@ -4694,17 +4718,40 @@ mod tests {
         let mut eng = Engine::new();
         claw_set_col(&mut eng, a, 50_000);
         claw_set_col(&mut eng, b, 50_000);
-        claw_set_pos(&mut eng, a, -(QTY_SCALE as i64), 90_000 * PRICE_SCALE as i64);
+        claw_set_pos(
+            &mut eng,
+            a,
+            -(QTY_SCALE as i64),
+            90_000 * PRICE_SCALE as i64,
+        );
         eng.state
             .marks
             .insert(minuend_types::BTC_USD, 90_000 * PRICE_SCALE as i64);
         let px = 100_000 * PRICE_SCALE as i64;
-        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
         let i0 = unit_id(&ask);
         eng.ingest(ask).unwrap();
         claw_set_col(&mut eng, a, 1_000);
         // alice buys back her short 10k higher: her hole is clawed from bob.
-        let bid = claw_place(vec![i0], &alice, Side::Bid, TimeInForce::Ioc, px, QTY_SCALE, 1, None);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
         let (batch, replay) = claw_batch(&mut eng, bid);
         let c = claw_check(&batch, &replay, "0");
         assert!(c.x > 0, "taker received from the maker: {c:?}");
@@ -4724,7 +4771,16 @@ mod tests {
             .marks
             .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
         let px = 90_000 * PRICE_SCALE as i64;
-        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
         let i0 = unit_id(&ask);
         eng.ingest(ask).unwrap();
         claw_set_col(&mut eng, b, 1_000);
@@ -4756,7 +4812,12 @@ mod tests {
         claw_set_col(&mut eng, a, 15_000);
         claw_set_col(&mut eng, b, 1_000_000);
         claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
-        claw_set_pos(&mut eng, b, -(QTY_SCALE as i64), 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(
+            &mut eng,
+            b,
+            -(QTY_SCALE as i64),
+            100_000 * PRICE_SCALE as i64,
+        );
         // Mark crash, empty book: the remainder is ADL'd at the mark.
         eng.state
             .marks
@@ -4785,7 +4846,12 @@ mod tests {
         claw_set_col(&mut eng, a, 15_000);
         claw_set_col(&mut eng, b, 1_000_000);
         claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
-        claw_set_pos(&mut eng, b, -(QTY_SCALE as i64), 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(
+            &mut eng,
+            b,
+            -(QTY_SCALE as i64),
+            100_000 * PRICE_SCALE as i64,
+        );
         // 14k under water with 15k collateral: liquidatable, no claw; the
         // ADL counterparty is also the keeper and gets the reward.
         eng.state
@@ -4863,7 +4929,10 @@ mod tests {
         let u = "11".repeat(32);
         let ord = "33".repeat(32);
         let fill = |tk: &str, mk: &str, kind: &str| {
-            format!("f:{u}:0:{tk}:{mk}:{}:{ord}:1:100:5:9:0:{kind}:0", "77".repeat(32))
+            format!(
+                "f:{u}:0:{tk}:{mk}:{}:{ord}:1:100:5:9:0:{kind}:0",
+                "77".repeat(32)
+            )
         };
         let mut pre = vec![
             format!("acct:{t}:1000:0:0"),
