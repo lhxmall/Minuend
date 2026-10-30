@@ -43,9 +43,10 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// help). History: v4 = `(ChainState, anchors)` tuple (#45); v5 =
 /// `MarketParams` gained `min_price`/`max_price` (#46, M3 in #47); v6 =
 /// `ChainState.aa_address_owners` (#47 A2, added after the v5 bump without
-/// one — R2-R-14). `layout_fingerprint_is_pinned_to_format_version` pins
+/// one — R2-R-14); v7 = `ChainState.deposit_backing` (R3-E-1).
+/// `layout_fingerprint_is_pinned_to_format_version` pins
 /// the layout so the next change cannot land without a bump.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
 /// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
 /// restored engine cannot rebuild the DAG, so these ids are treated as
 /// already-executed ancestors when replaying post-snapshot batches.
@@ -389,8 +390,8 @@ mod tests {
         let body = bincode::serialize(&(&st, vec![[1u8; 32]])).unwrap();
         let fp = hex::encode(minuend_types::sha256(&body));
         const PINNED: (u32, &str) = (
-            6,
-            "e0ceb8bfffccee0f34446cc9787297ff61807499c6f73d36175a219393e87ba9",
+            7,
+            "c482cb149679f551d65ff3807485d02e837884d36c485bc74be154897a6422b1",
         );
         assert_eq!(
             (SNAPSHOT_FORMAT_VERSION, fp.as_str()),

@@ -72,8 +72,13 @@ pub fn encode_funding_price(rate_bps: i64) -> Price {
 }
 
 /// Inverse of [`encode_funding_price`]: recover the funding rate in bps.
+///
+/// R3-E-5: saturating, so an attacker-chosen price near `i64::MIN` cannot
+/// overflow the subtraction (debug panic / release wrap). Any price this
+/// saturates on decodes far outside the ±10 000 bps band and is refused by
+/// every caller's band check, exactly as the wrapped value was.
 pub fn funding_rate_bps(price: Price) -> i64 {
-    (price - FUNDING_PRICE_OFFSET) / FUNDING_BPS_UNIT
+    price.saturating_sub(FUNDING_PRICE_OFFSET) / FUNDING_BPS_UNIT
 }
 
 pub const CHALLENGE_SECS: u64 = 3600;

@@ -519,10 +519,20 @@ fn account_matches(unit: &Unit) -> bool {
 /// outer Reveal's account. Shared by ingest (`account_matches`) and the
 /// executor (`reveal_op`) so both enforce the exact same rule.
 pub fn reveal_inner_ok(outer: &Op, inner: &Op) -> bool {
-    if matches!(inner, Op::Commit { .. } | Op::Reveal { .. }) {
-        return false;
-    }
-    op_signer(inner) == op_signer(outer)
+    reveal_inner_kind_ok(inner) && op_signer(inner) == op_signer(outer)
+}
+
+/// Op kinds a Reveal may NOT carry. Commit/Reveal may not nest (R2-E-1).
+/// R3-E-1: Deposit/GovDeposit may only ever be top-level ops — their
+/// on-chain payment evidence is verified (and their anchor admitted) only
+/// for top-level deposit ops, so a revealed deposit could otherwise spend a
+/// real anchor with an arbitrary amount. Deposits are triggered by a public
+/// on-chain payment anyway, so commit-reveal buys them nothing.
+pub fn reveal_inner_kind_ok(inner: &Op) -> bool {
+    !matches!(
+        inner,
+        Op::Commit { .. } | Op::Reveal { .. } | Op::Deposit { .. } | Op::GovDeposit { .. }
+    )
 }
 
 /// The account whose key must sign `op` (the per-variant signing field).
@@ -622,6 +632,20 @@ pub struct Dag {
     /// executed unit gets this sequence number.
     next_seq: u64,
     parent_window: usize,
+    /// R3-R-5: bodies of executed units that left the parent window before
+    /// they were exported in a batch. They are no longer DAG members (not
+    /// valid parents, not served by `get`), but `Batch::from_applied` still
+    /// needs them; released by [`Dag::release_batched`]. Bounded by the
+    /// producer's unbatched backlog.
+    retained: HashMap<UnitId, Unit>,
+    /// R3-R-5: in-window units already exported in a batch: their bodies are
+    /// dropped (not retained) when they leave the window. Bounded by the
+    /// window.
+    batched: HashSet<UnitId>,
+    /// R3-R-5: whether out-of-window unbatched bodies are retained (default
+    /// true). A node that never exports or validates batches (a pure relay)
+    /// should turn it off to keep the R2-R-5 memory bound.
+    retain_unbatched: bool,
     /// Set by `ready_linearized` when it had to hold back a pending unit
     /// with a stale parent; the next mutable call purges such units.
     stale_pending: Cell<bool>,
@@ -662,6 +686,9 @@ impl Dag {
             window_seq: HashMap::new(),
             next_seq: 0,
             parent_window: parent_window.max(1),
+            retained: HashMap::new(),
+            batched: HashSet::new(),
+            retain_unbatched: true,
             stale_pending: Cell::new(false),
         }
     }
@@ -893,7 +920,14 @@ impl Dag {
             // valid parent again, so its body, child list and executed mark
             // are dropped. A re-send of it then finds only stale or unknown
             // parents and can never execute again.
-            self.units.remove(&old);
+            // R3-R-5: a body not yet exported in a batch is moved aside
+            // (not DAG-visible any more), never lost.
+            let body = self.units.remove(&old);
+            if !self.batched.remove(&old) && self.retain_unbatched {
+                if let Some(body) = body {
+                    self.retained.insert(old, body);
+                }
+            }
             self.children.remove(&old);
             self.executed.remove(&old);
             self.ancestors.remove(&old);
@@ -996,6 +1030,37 @@ impl Dag {
 
     pub fn get(&self, id: UnitId) -> Option<&Unit> {
         self.units.get(&id)
+    }
+
+    /// R3-R-5: body of an executed unit for batch export: a DAG member, or
+    /// one that left the parent window before it was exported.
+    pub fn batch_body(&self, id: UnitId) -> Option<&Unit> {
+        self.units.get(&id).or_else(|| self.retained.get(&id))
+    }
+
+    /// R3-R-5: `ids` were exported in a batch. Retained bodies among them
+    /// are dropped now; in-window ones are dropped (not retained) when they
+    /// leave the window.
+    pub fn release_batched(&mut self, ids: &[UnitId]) {
+        for id in ids {
+            if self.retained.remove(id).is_none() && self.window_seq.contains_key(id) {
+                self.batched.insert(*id);
+            }
+        }
+    }
+
+    /// R3-R-5: turn body retention for unbatched units on/off (see
+    /// `retain_unbatched`). Turning it off drops what is retained.
+    pub fn set_retain_unbatched(&mut self, on: bool) {
+        self.retain_unbatched = on;
+        if !on {
+            self.retained.clear();
+        }
+    }
+
+    /// R3-R-5: number of out-of-window bodies kept for batch export.
+    pub fn retained_count(&self) -> usize {
+        self.retained.len()
     }
 
     /// Read-only P2P-layer support (docs/mainnet/04 §2.4.3): a WantUnits
@@ -1440,6 +1505,36 @@ mod tests {
             ids.push(tip);
         }
         ids
+    }
+
+    /// R3-R-5: bodies of executed units that leave the parent window before
+    /// they were exported stay available to batch export (but are no
+    /// longer DAG members); exporting releases them, and in-window
+    /// exported units are dropped, not retained, when they leave.
+    #[test]
+    fn r3r5_unbatched_bodies_survive_window_until_released() {
+        let g = genesis_id();
+        let mut dag = Dag::with_parent_window(3);
+        let ids = chain(&mut dag, g, 8, 3);
+        for id in &ids {
+            assert!(dag.batch_body(*id).is_some());
+        }
+        assert!(dag.get(ids[0]).is_none(), "not a DAG member any more");
+        assert_eq!(dag.retained_count(), 5);
+        // Still not a valid parent.
+        assert!(dag.insert(dep_n(vec![ids[0]], 77)).is_err());
+        dag.release_batched(&ids[..6]);
+        assert_eq!(dag.retained_count(), 0);
+        assert!(dag.batch_body(ids[0]).is_none());
+        assert!(dag.batch_body(ids[5]).is_some(), "in window");
+        chain(&mut dag, ids[7], 3, 4);
+        // ids[5] was exported: dropped. ids[6], ids[7] were not: retained.
+        assert!(dag.batch_body(ids[5]).is_none());
+        assert!(dag.batch_body(ids[6]).is_some() && dag.batch_body(ids[7]).is_some());
+        assert_eq!(dag.retained_count(), 2);
+        // A relay that never exports can switch retention off.
+        dag.set_retain_unbatched(false);
+        assert_eq!(dag.retained_count(), 0);
     }
 
     #[test]

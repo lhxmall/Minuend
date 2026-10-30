@@ -312,12 +312,11 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
         // pin (collateral, PERP, W, adr:) the committed descriptor is the
         // INNER op's — otherwise an honest Reveal{Withdraw} raises W under
         // an `x:` tag and P-wpin verdicts it. Other inner ops keep `x:`
-        // (no predicate judges them through a Reveal).
+        // (no predicate judges them through a Reveal). R3-E-1: a Reveal can
+        // no longer carry Deposit/GovDeposit (refused at ingest and in
+        // `reveal_op`), so only the withdrawal kinds are forwarded.
         Reveal { op: inner, .. }
-            if matches!(
-                inner.as_ref(),
-                Deposit { .. } | GovDeposit { .. } | Withdraw { .. } | GovWithdraw { .. }
-            ) =>
+            if matches!(inner.as_ref(), Withdraw { .. } | GovWithdraw { .. }) =>
         {
             ops_element(unit_hex, inner)
         }
@@ -400,8 +399,16 @@ impl Batch {
             return Err(SettleError::TooManyUnits);
         }
         let mut units = Vec::with_capacity(applied.len());
+        // R3-R-5: `batch_body` also serves units that already left the
+        // parent window but were never exported in a batch (their bodies are
+        // retained until `release_batched` below), so a backlog larger than
+        // the window can still be cut.
         for id in applied {
-            let u = engine.dag.get(*id).cloned().ok_or(SettleError::Replay)?;
+            let u = engine
+                .dag
+                .batch_body(*id)
+                .cloned()
+                .ok_or(SettleError::Replay)?;
             units.push(u);
         }
         let applied_set: HashSet<&UnitId> = applied.iter().collect();
@@ -493,6 +500,9 @@ impl Batch {
         let _ = engine.compact_journal_if_needed();
         let last_unit = *applied.last().unwrap();
         let aa_shard_roots = minuend_state::aa_sharded_roots_of_state(&engine.state);
+        // R3-R-5: these units are now exported; their bodies may go once
+        // they are out of the parent window (or right away if already out).
+        engine.dag.release_batched(applied);
         Ok(Self {
             chain_id: CHAIN_ID.to_string(),
             checkpoint: Checkpoint {
@@ -750,16 +760,46 @@ impl Batch {
             deposit_verify::verify_all(&self.units, &self.deposit_evidences, &vault, &PERP_ASSET)
                 .map_err(|_| SettleError::DepositEvidence)?;
         }
+        // R3-E-1: every admitted anchor carries the payment it was verified
+        // against (`verify_all` checked each top-level op's amount and
+        // payer == addr against its evidence), so the engine credits
+        // exactly that payment and nothing else can spend the anchor with a
+        // different amount. Only TOP-LEVEL deposit ops admit anchors; a
+        // Reveal may not carry a deposit at all.
         for u in &self.units {
             match &u.op {
-                minuend_dag::Op::Deposit { aa_unit, .. } => {
-                    replay.state.deposits_allowed.insert((*aa_unit, false));
-                }
+                minuend_dag::Op::Deposit {
+                    aa_unit,
+                    amount,
+                    addr,
+                    ..
+                } => match u128::try_from(*amount) {
+                    Ok(a)
+                        if !replay
+                            .state
+                            .deposit_backing
+                            .contains_key(&(*aa_unit, false)) =>
+                    {
+                        replay.state.allow_deposit(*aa_unit, false, a, addr);
+                    }
+                    // A second op on the same anchor keeps the first backing
+                    // (the engine rejects it as a duplicate anyway); a
+                    // negative amount admits the anchor with no matching
+                    // backing (u128 cannot hold it) — the engine rejects it.
+                    _ => {
+                        replay.state.deposits_allowed.insert((*aa_unit, false));
+                    }
+                },
                 // PERP deposits are backed by the same on-chain AA feed; the
                 // bool kind keeps a collateral endorsement from crediting
                 // PERP (and vice versa).
-                minuend_dag::Op::GovDeposit { aa_unit, .. } => {
-                    replay.state.deposits_allowed.insert((*aa_unit, true));
+                minuend_dag::Op::GovDeposit {
+                    aa_unit,
+                    amount,
+                    addr,
+                    ..
+                } if !replay.state.deposit_backing.contains_key(&(*aa_unit, true)) => {
+                    replay.state.allow_deposit(*aa_unit, true, *amount, addr);
                 }
                 _ => {}
             }
@@ -903,6 +943,10 @@ impl Batch {
                 }
             }
         }
+        // R3-R-5: a validated batch's units are exported, so a long-lived
+        // replay engine (the watcher's) never retains their bodies past the
+        // parent window.
+        replay.dag.release_batched(&self.checkpoint.unit_ids);
         Ok(())
     }
 }
@@ -1521,6 +1565,69 @@ mod tests {
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert_eq!(pre.state.state_root(), eng.state.state_root());
     }
+    /// R3-E-1: the verifier admits each deposit anchor WITH the payment it
+    /// verified (amount, payer), so the replay credits exactly that.
+    #[test]
+    fn r3e1_verifier_records_deposit_backing() {
+        let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
+        let anchors: Vec<[u8; 32]> = evidences
+            .iter()
+            .map(|e| {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&hex::decode(&e.aa_unit).unwrap());
+                a
+            })
+            .collect();
+        batch.deposit_evidences = evidences;
+        batch.validate_against(prev_root, &mut pre).unwrap();
+        assert_eq!(pre.state.state_root(), eng.state.state_root());
+        for (i, a) in anchors.iter().enumerate() {
+            assert_eq!(
+                pre.state.deposit_backing.get(&(*a, false)),
+                Some(&(10_000 * USD_SCALE as u128, test_addr(1 + i as u8)))
+            );
+        }
+    }
+
+    /// R3-R-5: a producer backlog larger than the parent window still
+    /// exports (bodies of unbatched units are retained), validates, and
+    /// releases the retained bodies on both sides.
+    #[test]
+    fn r3r5_backlog_beyond_parent_window_still_exports() {
+        let mut eng = Engine::new();
+        eng.dag = minuend_dag::Dag::with_parent_window(3);
+        eng.state
+            .markets
+            .insert(BTC_USD, minuend_types::genesis_params());
+        let prev_root = eng.state.state_root();
+        let mut pre = eng.clone();
+        let alice = sk(1);
+        let mut tip = genesis_id();
+        let mut applied = Vec::new();
+        for nonce in 1..=8u64 {
+            let u = sign_unit(
+                vec![tip],
+                Op::Withdraw {
+                    account: acct_of(&alice),
+                    amount: 1,
+                    nonce,
+                },
+                &alice,
+            );
+            tip = unit_id(&u);
+            applied.push(tip);
+            eng.ingest(u).unwrap();
+        }
+        assert_eq!(eng.dag.retained_count(), 5);
+        let batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
+        assert_eq!(batch.units.len(), 8);
+        assert_eq!(eng.dag.retained_count(), 0);
+        batch.validate_against(prev_root, &mut pre).unwrap();
+        assert_eq!(pre.state.state_root(), eng.state.state_root());
+        assert_eq!(pre.dag.retained_count(), 0);
+    }
+
     #[test]
     fn assertion_roots_committed_and_verified() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
