@@ -7556,8 +7556,7 @@ mod tests {
     #[test]
     fn funding_liq_keeper_reward_is_on_closed_qty_only() {
         let small = (QTY_SCALE / 10) as i64;
-        let (mut eng, mkt, alice, bob) =
-            funding_liq_fixture(40 * USD_SCALE as i128, Some(small));
+        let (mut eng, mkt, alice, bob) = funding_liq_fixture(40 * USD_SCALE as i128, Some(small));
         let keeper = acct_of(&sk(4));
         assert!(
             eng.state.accounts[&alice]
@@ -7569,13 +7568,16 @@ mod tests {
             .expect("partial ADL applies");
         let closed: u64 = fills.iter().map(|f| f.qty).sum();
         assert_eq!(closed, small as u64, "only bob's qty could close");
-        assert!(!eng.state.accounts[&bob].positions.contains_key(&mkt)
-            || eng.state.accounts[&bob].positions[&mkt].qty == 0);
+        assert!(
+            !eng.state.accounts[&bob].positions.contains_key(&mkt)
+                || eng.state.accounts[&bob].positions[&mkt].qty == 0
+        );
         let params = eng.state.market_params(mkt);
         let expected = bps(
             funding_notional_usd(closed, params.usd_per_unit),
             params.keeper_reward_bps,
         );
+        assert!(expected > 0, "fixture must have a non-zero keeper reward");
         assert_eq!(
             eng.state.accounts[&keeper].collateral, expected,
             "reward on the closed qty, not the planned close"
