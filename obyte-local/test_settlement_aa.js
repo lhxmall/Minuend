@@ -3493,7 +3493,9 @@ async function main() {
     ]);
     const post8 = (tc, mc) => [acct(T, tc), acct(M, mc), META8, BAND8, END];
     const bandFields = (P) => ({ band: BAND8, band_proof: P.proof(BAND8) });
-    const clawPayload8 = (P, h, u) => Object.assign(clawPayload(P, h, u, null), { pre_meta: META8, pre_meta_proof: P.proof(META8) }, bandFields(P));
+    // clawPayload proves META1; this pre tree carries META8 instead.
+    const soft = (P) => Object.assign({}, P, { proof: (l) => (P.pre.indexOf(l) < 0 ? null : P.proof(l)) });
+    const clawPayload8 = (P, h, u) => Object.assign(clawPayload(soft(P), h, u, null), { pre_meta: META8, pre_meta_proof: P.proof(META8) }, bandFields(P));
     // ADL printed at 90k (above the 86k mark, no band): T keeps 4k more.
     const f8bad = `f:${isoUnit}:0:${T}:${M}:${LO}:${"0".repeat(64)}:1:9000000000000:100000000:9:1:2:0`;
     const adlBad = clawUnit(P8, "r7-adl-bad", op3, [f8bad], post8(4100000000, 1010900000000));
