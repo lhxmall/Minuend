@@ -111,7 +111,8 @@ async function main() {
   const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "minuend_dispute.aa")];
   const fillDef = ["autonomous agent", await parseAa(fillSrc, "minuend_dispute_fill.aa")];
   // #47 A2: the binding dispute AA (W / adr: witness pins).
-  const bindSrc = readAa("minuend_dispute_bind.aa");
+  // R4-A-4: P-adr reads the vault deposit ledger too (derived from the base).
+  const bindSrc = substitute(readAa("minuend_dispute_bind.aa"), { VAULT_BASE_HERE: vaultBase.address });
   const bindDef = ["autonomous agent", await parseAa(bindSrc, "minuend_dispute_bind.aa")];
   const dispute = await postDefinition(disputeDef, "dispute");
   const fill = await postDefinition(fillDef, "fill");

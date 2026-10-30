@@ -388,6 +388,8 @@
 					// below; maker: pro-rata of its order's escrow).
 					$post_any = ($who == 'taker') ? $tpost : $mpost_any;
 					$abs_old = ($old_qty < 0) ? (0 - $old_qty) : $old_qty;
+					$big = $price >= 100000000000000 OR $old_entry >= 100000000000000
+						OR $abs_old >= 100000000000000 OR $qty >= 100000000000000;
 					$abs_delta = ($delta < 0) ? (0 - $delta) : $delta;
 					$same = ($old_qty == 0 OR (($old_qty > 0 AND $delta > 0) OR ($old_qty < 0 AND $delta < 0)));
 					if ($same){
@@ -507,9 +509,15 @@
 							$pos_bail = true;
 						} else {
 							$PS = split(trigger.data.post_pos, ':');
+							// R4-A-5: with the collateral gate no longer
+							// bouncing the whole predicate, qty/entry values
+							// past Oscript's exact range (>= 1e14) skip their
+							// numeric compare, and the bucket compare needs
+							// every escrow input below 1e14 too.
 							$pos_ok = (array_length($PS) == 7 AND $PS[1] == $acct_hex AND $PS[2] == $market
-								AND $PS[3] + 0 == $exp_qty AND abs($PS[4] + 0 - $exp_entry) <= 1
-								AND (!$chk_b OR abs($PS[6] + 0 - $exp_bucket) <= 1));
+								AND ($big OR ($PS[3] + 0 == $exp_qty AND abs($PS[4] + 0 - $exp_entry) <= 1))
+								AND (!$chk_b OR $bucket >= 100000000000000 OR $mml >= 100000000000000 OR $tpost >= 100000000000000
+									OR abs($PS[6] + 0 - $exp_bucket) <= 1));
 							$pos_bail = false;
 						}
 					}
@@ -549,7 +557,7 @@
 								? (($qty >= $oqty) ? $margin : floor($margin * $qty / $oqty))
 								: 0;
 							$op_ok = ($OP[1] == $F[3] AND $OP[2] == $market AND $OP[3] == $F[11]
-								AND $qty <= $oqty AND $tpost >= 0 AND abs($tpost - $tpost_exp) <= 1
+								AND $qty <= $oqty AND $tpost >= 0 AND ($margin >= 100000000000000 OR abs($tpost - $tpost_exp) <= 1)
 								AND ($OP[6] == '1' OR $tpost == 0));
 							// The unfilled remainder rests iff Limit (typ 0) +
 							// Gtc (tif 0) and qty is left; it then keeps
@@ -572,7 +580,7 @@
 								AND trigger.data.tord_proof.root == $post_wit) {
 								$TO = split(trigger.data.tord, ':');
 								$ord_ok = ($rest AND array_length($TO) == 10 AND $TO[2] == $market
-									AND $TO[3] == $F[11] AND $TO[4] == $OP[4] AND $TO[6] + 0 == $oqty - $qty
+									AND $TO[3] == $F[11] AND $TO[4] == $OP[4] AND ($oqty >= 100000000000000 OR $TO[6] + 0 == $oqty - $qty)
 									AND $TO[7] == $F[3] AND $TO[8] == $OP[6] AND $TO[9] + 0 == $tml);
 								$ord_bail = false;
 							} else {
@@ -622,15 +630,18 @@
 					// near-zero fill stage (where an exact negative would mean
 					// a claw) bounces; any larger magnitude bounces (no
 					// verdict) — never slash an honest height on rounding.
-					if ($exp_m < 6 OR abs($t2) >= 100000000000000 OR abs($pnl) >= 100000000000000
-						OR abs($exp_t) >= 100000000000000 OR abs($old_col) >= 100000000000000
-						OR $bucket >= 100000000000000 OR $mml >= 100000000000000)
-						bounce('no fraud');
+					// R4-A-5: that gate silences ONLY the collateral leg (the
+					// claw and the 15-digit rounding touch collateral alone);
+					// the position, perp/W pin, op and resting-order legs
+					// below are still judged.
 					// A collateral mismatch is fraud only when no claw can
 					// have moved this leg: positive counterparty, and for a
 					// kind 0/1 maker leg a CROSS Place taker (no escrow
 					// refund lands on the taker after the claw).
-					$col_ok = abs($post_col - $exp_t) <= 6 OR $kind == 1
+					$col_ok = $exp_m < 6 OR abs($t2) >= 100000000000000 OR abs($pnl) >= 100000000000000
+						OR abs($exp_t) >= 100000000000000 OR abs($old_col) >= 100000000000000
+						OR $bucket >= 100000000000000 OR $mml >= 100000000000000
+						OR abs($post_col - $exp_t) <= 6 OR $kind == 1
 						OR !($cp_ok AND ($who == 'taker' OR $kind >= 2 OR $OP[6] == '0'));
 					// Verdict only when a leg is VERIFIED wrong; a bail
 					// (missing evidence) silences its own leg only. The

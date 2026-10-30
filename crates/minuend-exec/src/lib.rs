@@ -2307,6 +2307,7 @@ impl Engine {
             .state
             .perp_supply
             .checked_add(amount)
+            .filter(|s| *s <= minuend_types::PERP_SUPPLY_MAX)
             .ok_or(RejectReason::Risk)?;
         self.state.perp_balances.insert(account, new_bal);
         self.state.perp_supply = new_supply;
@@ -9484,6 +9485,31 @@ mod tests {
         assert!(!applied(&evs), "{evs:?}");
         assert!(eng.state.aa_addresses.is_empty());
         assert!(eng.state.aa_address_owners.is_empty());
+    }
+
+    /// R4-A-6: the sidechain PERP supply (so every PERP balance) stays at
+    /// or below `PERP_SUPPLY_MAX` (< 1e14), the range the dispute AA's
+    /// 15-digit Oscript arithmetic judges exactly. Reaching the cap is fine;
+    /// one more base unit is rejected and binds nothing.
+    #[test]
+    fn r4a6_gov_deposit_respects_perp_supply_cap() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let first = gov_dep(vec![g], &sk(4), minuend_types::PERP_SUPPLY_MAX, 7);
+        let tip = unit_id(&first);
+        assert!(applied(&eng.ingest(first).unwrap()));
+        assert_eq!(eng.state.perp_supply, minuend_types::PERP_SUPPLY_MAX);
+        let over = gov_dep(vec![tip], &sk(5), 1, 8);
+        let evs = eng.ingest(over).unwrap();
+        assert!(!applied(&evs), "{evs:?}");
+        assert_eq!(eng.state.perp_supply, minuend_types::PERP_SUPPLY_MAX);
+        assert!(!eng.state.perp_balances.contains_key(&acct_of(&sk(5))));
+        assert!(!eng
+            .state
+            .aa_address_owners
+            .values()
+            .any(|a| *a == acct_of(&sk(5))));
     }
 
     /// #47 (cross-PR): a withdraw from an account that does not exist is

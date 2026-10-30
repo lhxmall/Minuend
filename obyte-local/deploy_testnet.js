@@ -48,8 +48,9 @@ function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr) {
 function resolveBookAa() {
   return resolveAa("minuend_dispute_book.aa", {}, ".minuend_dispute_book.resolved.aa");
 }
-function resolveBindAa() {
-  return resolveAa("minuend_dispute_bind.aa", {}, ".minuend_dispute_bind.resolved.aa");
+// R4-A-4: P-adr derives the vault from the base too (deposit ledger).
+function resolveBindAa(vaultBaseAddr) {
+  return resolveAa("minuend_dispute_bind.aa", { VAULT_BASE_HERE: vaultBaseAddr }, ".minuend_dispute_bind.resolved.aa");
 }
 // Round 2 (R2-A-3): the vault is a parameterized instance of a BASE AA
 // that names no address; dispute.aa hardcodes the base and derives the
@@ -99,7 +100,7 @@ async function main() {
   const bookPath = resolveBookAa();
   const bookAddr = chashOf(bookPath);
   const fillAddr = chashOf(fillPath);
-  const bindPath = resolveBindAa();
+  const bindPath = resolveBindAa(vaultBaseAddr);
   const bindAddr = chashOf(bindPath);
   const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr);
 

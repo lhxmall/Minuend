@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 pub const PRICE_SCALE: u64 = 100_000_000;
 pub const QTY_SCALE: u64 = 100_000_000;
 pub const USD_SCALE: u64 = 1_000_000;
+/// R4-A-6 (round 4 of #47): ceiling on the sidechain PERP supply (and so
+/// on every account's PERP balance, which never exceeds the supply). The
+/// PERP asset is capless on Obyte, but the dispute AAs judge the PERP
+/// column of `acct:` witness leaves with Oscript arithmetic, which is exact
+/// only to 15 significant digits: keeping every supply/balance below 1e14
+/// (<= 14 digits) keeps `balance ± amount` exact there. A GovDeposit that
+/// would lift the supply past this is rejected (`RejectReason::Risk`).
+pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
 /// Pinned by the rollup AA (`assertion_version != 2` bounces), so it can

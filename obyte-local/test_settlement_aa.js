@@ -100,7 +100,8 @@ const DISPUTE_SRC = writeResolved("minuend_dispute.aa", { VAULT_BASE_HERE: VAULT
 const BOOK_SRC = writeResolved("minuend_dispute_book.aa", {}, ".e2e_book.aa");
 const BOOK_ADDR = chashOf(fs.readFileSync(BOOK_SRC, "utf8"));
 const FILL_SRC = writeResolved("minuend_dispute_fill.aa", {}, ".e2e_fill.aa");
-const BIND_SRC = writeResolved("minuend_dispute_bind.aa", {}, ".e2e_bind.aa");
+// R4-A-4: P-adr derives the vault from the base (deposit ledger backing).
+const BIND_SRC = writeResolved("minuend_dispute_bind.aa", { VAULT_BASE_HERE: VAULT_BASE_ADDR }, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
 const FILL_ADDR = chashOf(fs.readFileSync(FILL_SRC, "utf8"));
 const BIND_ADDR = chashOf(fs.readFileSync(BIND_SRC, "utf8"));
@@ -1997,7 +1998,7 @@ async function main() {
     const li = GENESIS_LEAVES.indexOf(FILL_TAKER_PRE);
     const ri = GENESIS_LEAVES.indexOf(META1);
     if (ri !== li + 1) throw new Error("fixture: adr neighbors not adjacent");
-    const adrPayload = (u) => ({
+    const adrPayload = (u, leaf = adr) => ({
       rollup: ROLLUP_ADDR,
       k: 0,
       op: u.op,
@@ -2007,8 +2008,8 @@ async function main() {
       pre_wit: WIT_ROOT,
       post_wit: u.wit,
       post_proof: merkle.getMerkleProof(u.trace, 0),
-      post_leaf: adr,
-      post_leaf_proof: u.leafProof(adr),
+      post_leaf: leaf,
+      post_leaf_proof: u.leafProof(leaf),
       left: GENESIS_LEAVES[li],
       left_proof: genProof(GENESIS_LEAVES[li]),
       right: GENESIS_LEAVES[ri],
@@ -2019,9 +2020,15 @@ async function main() {
     await triggerVerdict(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(liar)), 20000, "adr liar predicate");
     st = await vars(rollup);
     if (Number(st.frozen_32) !== 2) throw new Error("unbacked adr binding did not freeze h32");
-    const honest = oneUnit("adr", `d:${DEP_ACCT}:100:${PAYEE}:${b6444("adr-dep-unit")}`, [adr, `acct:${DEP_ACCT}:1000100:0:0`]);
+    // R4-A-4: a new binding also needs the vault's dep_ record of the
+    // anchor, paid by that address for that account — the honest binding
+    // is the operator's own real deposit designating DEP_ACCT.
+    const payer37 = await operator.getAddress();
+    const dep37 = (await trigger(operator, vault, { deposit: 1, account: DEP_ACCT }, 10100)).unit; // 100 for DEP_ACCT
+    const adrOk = `adr:${payer37}:${DEP_ACCT}`;
+    const honest = oneUnit("adr", `d:${DEP_ACCT}:100:${payer37}:${dep37}`, [adrOk, `adrx:${DEP_ACCT}:${payer37}`, `acct:${DEP_ACCT}:1000100:0:0`]);
     await submitAt(32, honest);
-    await triggerBounce(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(honest)), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, Object.assign({ pred: "adr", height: 32 }, adrPayload(honest, adrOk)), 20000, "no fraud");
     st = await vars(rollup);
     if (Number(st.frozen_32 || 0) !== 0) throw new Error("honest first binding froze h32!");
     console.log("37. P-adr: binding without its deposit -> frozen; d: with that address -> 'no fraud'");
@@ -2546,6 +2553,238 @@ async function main() {
     st = await vars(rollup);
     if (Number(st.frozen_52 || 0) !== 0) throw new Error("R3-A-3: honest fill slashed on Oscript rounding!");
     console.log("51. R3-A-3: honest fill with a 15-digit rounding (AA fee 500, engine 499) → 'no fraud'; real lie → frozen");
+  }
+
+  // ===================== ROUND 4 (fix/47-r4-aa) =========================
+  // Exact non-membership helper over a sorted tree: adjacent straddle or
+  // before-min (the shapes P-frame / P-keep accept).
+  const absentIn = (tree, leaf) => {
+    const i = tree.findIndex((l) => l > leaf);
+    if (i < 0) throw new Error("fixture: no right neighbour for " + leaf);
+    if (tree.includes(leaf)) throw new Error("fixture: leaf present " + leaf);
+    return i === 0
+      ? { left: tree[0], left_proof: merkle.getMerkleProof(tree, 0) }
+      : {
+          left: tree[i - 1], left_proof: merkle.getMerkleProof(tree, i - 1),
+          right: tree[i], right_proof: merkle.getMerkleProof(tree, i),
+        };
+  };
+  const opA4 = await operator.getAddress();
+
+  // ---- 52. R4-A-1: a fill must be its maker order (P-mbind, book AA) ------
+  {
+    // h53 commits a pre tree holding FILL_TAKER's resting ask O_B
+    // (market 1, price 1e8, remaining 5e7).
+    const OB = "4b".repeat(32);
+    const ORD_B = `ord:${OB}:1:1:100000000:3:50000000:${FILL_TAKER}:0:0`;
+    const MB_PRE = GENESIS_LEAVES.concat([ORD_B]).sort();
+    const MB_WIT = merkle.getMerkleRoot(MB_PRE);
+    await submitAt(53, Object.assign(oneUnit("r4-mb-commit", "x:" + sha256Hex("mbc"), [DEP_PRE]), { witRoot: MB_WIT }));
+    // f:{unit}:{idx}:{taker}:{maker}:{t_ord}:{m_ord}:{mkt}:{price}:{qty}:{seq}:{side}:{kind}:{tpost}
+    const mkFill = (maker, price, qty, side) =>
+      `f:${isoUnit}:0:${DEP_ACCT}:${maker}:${"5".repeat(64)}:${OB}:1:${price}:${qty}:9:${side}:0:0`;
+    const mbUnit = (tag, f) => {
+      const tree = fillsTree([f]);
+      return Object.assign(oneUnit(tag, `p:${DEP_ACCT}:1:0:100000000:50000000:0:0:1:0`, [DEP_PRE]), {
+        unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(tree), fillCount: 1, tree,
+      });
+    };
+    const mbPayload = (u, f) => ({
+      pred: "mbind", height: 54, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT,
+      units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(u.tree, 0),
+      pre_wit: MB_WIT, maker_ord: ORD_B, maker_ord_proof: merkle.getMerkleProof(MB_PRE, MB_PRE.indexOf(ORD_B)),
+    });
+    const liars = [
+      ["owner", mkFill(FILL_TAKER.replace(/b/g, "c"), 100000000, 50000000, 0)], // victim as maker
+      ["price", mkFill(FILL_TAKER, 100000000000000, 50000000, 0)],               // arbitrary price
+      ["qty", mkFill(FILL_TAKER, 100000000, 50000001, 0)],                       // beyond remaining
+      ["side", mkFill(FILL_TAKER, 100000000, 50000000, 1)],                      // maker's own side
+    ];
+    for (const [tag, f] of liars) {
+      const u = mbUnit("r4-mb-" + tag, f);
+      await submitAt(54, u);
+      await triggerVerdict(challenger, book, mbPayload(u, f), 20000, "R4-A-1 " + tag + " mbind predicate");
+      st = await vars(rollup);
+      if (Number(st.frozen_54) !== 2) throw new Error("R4-A-1: " + tag + " fill off its maker order did not freeze h54");
+    }
+    const okF = mkFill(FILL_TAKER, 100000000, 50000000, 0);
+    const okU = mbUnit("r4-mb-ok", okF);
+    await submitAt(54, okU);
+    await triggerBounce(challenger, book, mbPayload(okU, okF), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_54 || 0) !== 0) throw new Error("R4-A-1: honest fill froze h54!");
+    console.log("52. R4-A-1: fill with foreign owner / off price / qty > remaining / same side → frozen; matching fill → 'no fraud'");
+  }
+
+  // ---- 53. R4-A-3: positions/orders frozen across c:/d:/w: (P-frame) -----
+  {
+    const OV = "6a".repeat(32); // DEP_ACCT's own order (the c: target)
+    const OX = "6b".repeat(32); // FILL_TAKER's order (never touched)
+    const ORD_V = `ord:${OV}:1:0:90000000:4:10:${DEP_ACCT}:0:0`;
+    const ORD_X = `ord:${OX}:1:1:110000000:5:10:${FILL_TAKER}:0:0`;
+    // Real witness trees end with the `~:end` max sentinel (R2-A-10).
+    const FR_PRE = GENESIS_LEAVES.concat([ORD_V, ORD_X, "~:end"]).sort();
+    const FR_WIT = merkle.getMerkleRoot(FR_PRE);
+    await submitAt(55, Object.assign(oneUnit("r4-fr-commit", "x:" + sha256Hex("frc"), [DEP_PRE]), { witRoot: FR_WIT }));
+    const cOp = `c:${DEP_ACCT}:${OV}`;
+    const base = FR_PRE.filter((l) => l !== ORD_V); // honest post: own order cancelled
+    const frPayload = (u, leaf, ins) => Object.assign({
+      pred: "frame", height: 56, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, ops_root: u.opsRoot, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      pre_wit: FR_WIT, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      leaf, ins,
+      leaf_proof: ins ? u.leafProof(leaf) : merkle.getMerkleProof(FR_PRE, FR_PRE.indexOf(leaf)),
+    }, absentIn(ins ? FR_PRE : u.post, leaf));
+    // (a) entry of FILL_TAKER's position rewritten (1e7x) under a cancel.
+    const POS2_FAKE = `pos:${FILL_TAKER}:2:50000000:900000000000000:0:0`;
+    const a = oneUnit("r4-fr-entry", cOp, base.filter((l) => l !== POS2).concat([POS2_FAKE]));
+    await submitAt(56, a);
+    await triggerVerdict(challenger, bindAa, frPayload(a, POS2, false), 20000, "R4-A-3 rewritten pos frame predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_56) !== 2) throw new Error("R4-A-3: rewritten position did not freeze h56");
+    // (b) a foreign order deleted by someone else's cancel.
+    const b = oneUnit("r4-fr-del", cOp, base.filter((l) => l !== ORD_X));
+    await submitAt(56, b);
+    await triggerVerdict(challenger, bindAa, frPayload(b, ORD_X, false), 20000, "R4-A-3 deleted order frame predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_56) !== 2) throw new Error("R4-A-3: deleted foreign order did not freeze h56");
+    // (c) a fake order of the victim inserted (the R4-A-1 bypass).
+    const FAKE = `ord:${"6c".repeat(32)}:1:0:100000000000000:6:100000000:${DEP_ACCT}:0:0`;
+    const c = oneUnit("r4-fr-ins", cOp, base.concat([FAKE]));
+    await submitAt(56, c);
+    await triggerVerdict(challenger, bindAa, frPayload(c, FAKE, true), 20000, "R4-A-3 inserted order frame predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_56) !== 2) throw new Error("R4-A-3: inserted order did not freeze h56");
+    // Honest: the cancel removes exactly its own order.
+    const ok = oneUnit("r4-fr-ok", cOp, base);
+    await submitAt(56, ok);
+    await triggerBounce(challenger, bindAa, frPayload(ok, ORD_V, false), 20000, "no fraud");
+    // An untouched leaf cannot be proven absent (its neighbours do not straddle).
+    const pi = ok.post.indexOf(POS2);
+    await triggerBounce(challenger, bindAa, Object.assign(frPayload(ok, ORD_V, false), {
+      leaf: POS2, leaf_proof: merkle.getMerkleProof(FR_PRE, FR_PRE.indexOf(POS2)),
+      left: ok.post[pi - 1], left_proof: ok.leafProof(ok.post[pi - 1]),
+      right: ok.post[pi], right_proof: ok.leafProof(ok.post[pi]),
+    }), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_56 || 0) !== 0) throw new Error("R4-A-3: honest cancel froze h56!");
+    console.log("53. R4-A-3: pos rewritten / foreign order deleted / fake order inserted under c: → frozen; own-order cancel → 'no fraud'");
+  }
+
+  // ---- 54. R4-A-4: a new binding needs a vault-backed deposit (P-adr) ----
+  {
+    const depV = (await trigger(operator, vault, { deposit: 1, account: DEP_ACCT }, 60000)).unit; // 50000 FOR DEP_ACCT
+    const adr = (x) => `adr:${opA4}:${x}`;
+    const li = GENESIS_LEAVES.indexOf(FILL_TAKER_PRE);
+    if (GENESIS_LEAVES[li + 1] !== META1 || !(FILL_TAKER_PRE < `adr:${opA4}:` && `adr:${opA4};` <= META1))
+      throw new Error("fixture: adr straddle");
+    const adrPayload = (u, x) => ({
+      pred: "adr", height: 57, rollup: ROLLUP_ADDR, k: 0,
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      trace_root: u.traceRoot, ops_root: u.opsRoot,
+      pre_wit: WIT_ROOT, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      post_leaf: adr(x), post_leaf_proof: u.leafProof(adr(x)),
+      left: FILL_TAKER_PRE, left_proof: genProof(FILL_TAKER_PRE),
+      right: META1, right_proof: genProof(META1),
+    });
+    const liars = [
+      // the payer designated DEP_ACCT; the operator binds it to FILL_TAKER
+      // (rejected deposit, collateral unchanged — R4-A-4's exploit).
+      ["foreign", `d:${FILL_TAKER}:50000:${opA4}:${depV}`, FILL_TAKER],
+      ["unbacked", `d:${DEP_ACCT}:50000:${opA4}:${b6444("never-paid-adr")}`, DEP_ACCT],
+      ["cross-kind", `D:${DEP_ACCT}:50000:${opA4}:${depV}`, DEP_ACCT], // dep_ only, no depp_
+    ];
+    for (const [tag, op, x] of liars) {
+      const u = oneUnit("r4-adr-" + tag, op, [adr(x), `adrx:${x}:${opA4}`, DEP_PRE, FILL_TAKER_PRE]);
+      await submitAt(57, u);
+      await triggerVerdict(challenger, bindAa, adrPayload(u, x), 20000, "R4-A-4 " + tag + " adr predicate");
+      st = await vars(rollup);
+      if (Number(st.frozen_57) !== 2) throw new Error("R4-A-4: " + tag + " binding did not freeze h57");
+    }
+    const okU = oneUnit("r4-adr-ok", `d:${DEP_ACCT}:50000:${opA4}:${depV}`,
+      [adr(DEP_ACCT), `adrx:${DEP_ACCT}:${opA4}`, `acct:${DEP_ACCT}:1050000:0:0`, "dep:" + depV, FILL_TAKER_PRE]);
+    await submitAt(57, okU);
+    await triggerBounce(challenger, bindAa, adrPayload(okU, DEP_ACCT), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_57 || 0) !== 0) throw new Error("R4-A-4: honest backed binding froze h57!");
+    console.log("54. R4-A-4: binding to a non-designated account / unbacked / cross-kind anchor → frozen; backed binding → 'no fraud'");
+  }
+
+  // ---- 55. R4-A-5: the near-zero collateral gate keeps the position leg --
+  {
+    // FILL_TAKER (pre col 0) buys 1e8 @ 1e8 on market 1: fill-stage
+    // collateral 0 - 500 fee < 6 → the collateral leg is skipped, but the
+    // position leg must still be judged (pre-fix: whole predicate bounced).
+    const tOrd = "8".repeat(64);
+    const f = `f:${isoUnit}:0:${FILL_TAKER}:${"c".repeat(64)}:${tOrd}:${isoMOrd}:1:100000000:100000000:9:0:0:0`;
+    const tree = fillsTree([f]);
+    const op = `p:${FILL_TAKER}:1:0:100000000:100000000:0:0:0:0`;
+    const acctLeaf = `acct:${FILL_TAKER}:-500:0:0`;
+    const mk = (tag, posLeaf) => Object.assign(oneUnit(tag, op, [acctLeaf, CP_LEAF, META1, posLeaf, POS2]), {
+      unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(tree), fillCount: 1,
+    });
+    const payload = (u, posLeaf) => ({
+      pred: "fill_math", height: 58, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot,
+      units_root: ISO_UNITS_ROOT, units_proof: ISO_UNITS_PROOF,
+      fill: f, fill_proof: merkle.getMerkleProof(tree, 0),
+      right: tree[1], right_proof: merkle.getMerkleProof(tree, 1),
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      pre_wit: WIT_ROOT, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      pre_acct: FILL_TAKER_PRE, pre_acct_proof: genProof(FILL_TAKER_PRE),
+      post_acct: acctLeaf, post_acct_proof: u.leafProof(acctLeaf),
+      post_pos: posLeaf, post_pos_proof: u.leafProof(posLeaf),
+      pre_meta: META1, pre_meta_proof: genProof(META1),
+      pos_absent: true,
+      pleft: META2, pleft_proof: genProof(META2),
+      pright: POS2, pright_proof: genProof(POS2),
+      cp_acct: CP_LEAF, cp_acct_proof: u.leafProof(CP_LEAF),
+      who: "taker",
+    });
+    const liarPos = `pos:${FILL_TAKER}:1:200000000:100000000:0:0`; // double qty
+    const liar = mk("r4-a5-liar", liarPos);
+    await submitAt(58, liar);
+    await triggerVerdict(challenger, fill, payload(liar, liarPos), 20000, "R4-A-5 position leg under the collateral gate");
+    st = await vars(rollup);
+    if (Number(st.frozen_58) !== 2) throw new Error("R4-A-5: position lie under the near-zero collateral gate did not freeze h58");
+    const okPos = `pos:${FILL_TAKER}:1:100000000:100000000:0:0`;
+    const okU = mk("r4-a5-ok", okPos);
+    await submitAt(58, okU);
+    await triggerBounce(challenger, fill, payload(okU, okPos), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_58 || 0) !== 0) throw new Error("R4-A-5: honest near-zero fill froze h58!");
+    console.log("55. R4-A-5: position lie with collateral gated (fill-stage < 6) → frozen; honest → 'no fraud'");
+  }
+
+  // ---- 56. R4-A-6: PERP column within the engine's < 1e14 supply cap -----
+  {
+    const P0 = "99999999999990"; // 14 digits
+    const PP_PRE = [`acct:${DEP_ACCT}:1000000:${P0}:0`, META1].sort();
+    const PP_WIT = merkle.getMerkleRoot(PP_PRE);
+    await submitAt(59, Object.assign(oneUnit("r4-pp-commit", "x:" + sha256Hex("ppc"), [DEP_PRE]), { witRoot: PP_WIT }));
+    const op = `D:${DEP_ACCT}:10:${opA4}:${govUnit}`;
+    const ppPayload = (u, leaf) => Object.assign({ pred: "deposit", height: 60 }, depositPayload(u, leaf), {
+      pre_wit: PP_WIT, pre_leaf: PP_PRE[PP_PRE.indexOf(`acct:${DEP_ACCT}:1000000:${P0}:0`)],
+      pre_leaf_proof: merkle.getMerkleProof(PP_PRE, PP_PRE.indexOf(`acct:${DEP_ACCT}:1000000:${P0}:0`)),
+    });
+    // Liar: lifts the PERP column to 1e14 (past the engine cap; numerically
+    // P0 + 10) — the engine rejects that deposit, so the AA must not accept
+    // the arithmetic.
+    const big = `acct:${DEP_ACCT}:1000000:100000000000000:0`;
+    const liar = oneUnit("r4-pp-liar", op, [big, META1]);
+    await submitAt(60, liar);
+    await triggerVerdict(challenger, dispute, ppPayload(liar, big), 20000, "R4-A-6 PERP past the cap");
+    st = await vars(rollup);
+    if (Number(st.frozen_60) !== 2) throw new Error("R4-A-6: PERP column past the supply cap did not freeze h60");
+    // Honest: the over-cap deposit is REJECTED — column unchanged.
+    const same = `acct:${DEP_ACCT}:1000000:${P0}:0`;
+    const okU = oneUnit("r4-pp-ok", op, [same, META1]);
+    await submitAt(60, okU);
+    await triggerBounce(challenger, dispute, ppPayload(okU, same), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_60 || 0) !== 0) throw new Error("R4-A-6: honest rejected over-cap deposit froze h60!");
+    console.log("56. R4-A-6: PERP column lifted past the < 1e14 cap → frozen; rejected (unchanged) → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
