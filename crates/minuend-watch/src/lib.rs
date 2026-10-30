@@ -779,10 +779,40 @@ pub fn check_committed_roots<H: HubClient>(
 /// link the next batch's parents. `Ok(None)` = no checkpoint (genesis).
 /// The engine stays ephemeral (`store_dir = None`): the watcher never
 /// writes the producer's gov-nonce WAL.
+///
+/// R3-R-7: when `dir` holds checkpoint files but NONE of them can be loaded
+/// (a format-version bump, corruption) this is an error, never a silent
+/// restart from genesis: the watcher would otherwise sit on h=1 (whose DA
+/// is long purged) with only a generic stall alert.
 pub fn load_checkpoint(dir: &std::path::Path) -> std::io::Result<Option<Engine>> {
-    let Some((_, state, anchors)) = minuend_state::persist::load_latest_with_anchors(dir)? else {
-        return Ok(None);
-    };
+    match minuend_state::persist::load_latest_with_anchors(dir)? {
+        Some(loaded) => Ok(Some(engine_from_snapshot(loaded))),
+        None => {
+            let heights = minuend_state::persist::snapshot_heights(dir)?;
+            if heights.is_empty() {
+                Ok(None)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "{} holds {} checkpoint file(s) (newest h={}) but none can be loaded \
+                         (snapshot format v{} expected, or corrupt): refusing to restart from \
+                         genesis silently. Import a trusted chainstate.<h>.snap of the current \
+                         format into the state dir, or move the unreadable files away to \
+                         replay from genesis on purpose",
+                        dir.display(),
+                        heights.len(),
+                        heights[0],
+                        minuend_state::persist::SNAPSHOT_FORMAT_VERSION
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+fn engine_from_snapshot(loaded: minuend_state::persist::LoadedSnapshot) -> Engine {
+    let (_, state, anchors) = loaded;
     let mut engine = Engine::new();
     engine.state = state;
     for a in anchors {
@@ -790,7 +820,12 @@ pub fn load_checkpoint(dir: &std::path::Path) -> std::io::Result<Option<Engine>>
         engine.dag.mark_ancestor_known(id);
         engine.recent_units.push_back(id);
     }
-    Ok(Some(engine))
+    engine
+}
+
+/// R3-R-2: the checkpoint of exactly `height` (`Ok(None)` if absent).
+pub fn load_checkpoint_at(dir: &std::path::Path, height: u64) -> std::io::Result<Option<Engine>> {
+    Ok(minuend_state::persist::load_snapshot_at(dir, height)?.map(engine_from_snapshot))
 }
 
 /// R2-R-9: persist the engine after a height replayed cleanly. Only
@@ -799,8 +834,125 @@ pub fn save_checkpoint(
     dir: &std::path::Path,
     engine: &Engine,
 ) -> std::io::Result<std::path::PathBuf> {
+    save_checkpoint_retaining(dir, engine, u64::MAX)
+}
+
+/// R3-R-2: persist the engine and keep every checkpoint at or above
+/// `retain_from` (the chain's `last_finalized`): an accepted height can
+/// still be judged fraudulent (by another challenger, e.g. P-omit) and be
+/// re-submitted until it finalizes, and the watcher must then rewind to
+/// the height below it.
+pub fn save_checkpoint_retaining(
+    dir: &std::path::Path,
+    engine: &Engine,
+    retain_from: u64,
+) -> std::io::Result<std::path::PathBuf> {
     let anchors: Vec<[u8; 32]> = engine.recent_units.iter().map(|u| u.0).collect();
-    minuend_state::persist::save_snapshot_with_anchors(dir, &engine.state, &anchors)
+    minuend_state::persist::save_snapshot_retaining(dir, &engine.state, &anchors, retain_from)
+}
+
+/// R3-R-2: what the rollup AA says right now about the heights the watcher
+/// already accepted.
+#[derive(Clone, Debug, Default)]
+pub struct ChainView {
+    pub last_submitted: u64,
+    pub last_finalized: u64,
+    /// `frozen_<last_submitted>`; 2 = judged fraudulent, awaiting re-submit.
+    pub frozen_at_last_submitted: u64,
+    /// Current `da_unit_<h>` for the accepted, not yet final heights
+    /// (`None` = no longer set).
+    pub da_units: std::collections::BTreeMap<u64, Option<String>>,
+}
+
+/// R3-R-2: the height the watcher must rewind its engine to, if any. The
+/// replay already accepted heights `..=processed_upto`, recording the
+/// `da_unit` it replayed for each in `accepted`. A height is dead when the
+/// AA rolled `last_submitted` below it (a verdict lands `last_submitted` on
+/// the failed height with `frozen = 2`; everything above is overwritten by
+/// later submits) or when its `da_unit_<h>` now names another unit (it was
+/// re-submitted). Returns `Some(t)` with `t < processed_upto` when heights
+/// `t+1..=processed_upto` must be replayed again from the checkpoint at
+/// `t`.
+pub fn rewind_target(
+    processed_upto: u64,
+    accepted: &std::collections::BTreeMap<u64, String>,
+    view: &ChainView,
+) -> Option<u64> {
+    let live_top = if view.frozen_at_last_submitted == 2 {
+        view.last_submitted.saturating_sub(1)
+    } else {
+        view.last_submitted
+    };
+    let mut target = processed_upto.min(live_top);
+    for (h, cur) in &view.da_units {
+        if *h > target {
+            break;
+        }
+        if let Some(seen) = accepted.get(h) {
+            if cur.as_deref() != Some(seen.as_str()) {
+                target = h.saturating_sub(1);
+                break;
+            }
+        }
+    }
+    (target < processed_upto).then_some(target)
+}
+
+/// R3-R-6: create a fresh directory only the current user can enter, with
+/// an unpredictable name, failing (never reusing) if the path exists. Used
+/// for proofs (and in-run checkpoints) when no `--state-dir` is given, so a
+/// local user cannot pre-create the directory and make every proof write
+/// fail.
+pub fn create_private_temp_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let base = std::env::temp_dir();
+    for attempt in 0u32..16 {
+        let mut seed = Vec::new();
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                let mut buf = [0u8; 32];
+                if f.read_exact(&mut buf).is_ok() {
+                    seed.extend_from_slice(&buf);
+                }
+            }
+        }
+        seed.extend_from_slice(&std::process::id().to_le_bytes());
+        seed.extend_from_slice(&attempt.to_le_bytes());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        seed.extend_from_slice(&nanos.to_le_bytes());
+        let tag = hex::encode(&Sha256::digest(seed.as_slice())[..16]);
+        let path = base.join(format!("{prefix}-{tag}"));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            b.mode(0o700);
+        }
+        match b.create(&path) {
+            Ok(()) => {
+                // mkdir never follows a final symlink and fails on any
+                // existing entry, so this directory is ours; pin the mode
+                // regardless of the umask.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a fresh private temp dir",
+    ))
 }
 
 /// R2-R-9: first height to replay, from the `--from-height` flag and the
@@ -1644,5 +1796,111 @@ mod tests {
         let mut v = vars;
         v.remove(&format!("counts_root_{h}"));
         assert!(check_committed_roots(&hub(v), "R", &du(&header, &joint)).is_err());
+    }
+
+    /// R3-R-7: checkpoint files that all fail to load are an explicit
+    /// error, never a silent restart from genesis.
+    #[test]
+    fn unreadable_checkpoints_refuse_instead_of_genesis() {
+        let dir = std::env::temp_dir().join(format!("minuend-watch-badck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(load_checkpoint(&dir).unwrap().is_none(), "empty dir = genesis");
+        std::fs::write(dir.join("chainstate.7.snap"), b"\x05\0\0\0old-format").unwrap();
+        let err = load_checkpoint(&dir).err().expect("must refuse");
+        assert!(err.to_string().contains("h=7"), "{err}");
+        // One readable checkpoint is enough to resume.
+        let mut eng = setup_engine();
+        eng.state.height = 3;
+        save_checkpoint(&dir, &eng).unwrap();
+        assert_eq!(load_checkpoint(&dir).unwrap().unwrap().state.height, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3-R-2: checkpoints of not-yet-final heights are retained, and an
+    /// exact-height checkpoint loads for a rewind.
+    #[test]
+    fn retained_checkpoints_allow_rewind() {
+        let dir = std::env::temp_dir().join(format!("minuend-watch-rw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut eng = setup_engine();
+        for h in 1..=6u64 {
+            eng.state.height = h;
+            save_checkpoint_retaining(&dir, &eng, 2).unwrap();
+        }
+        let back = load_checkpoint_at(&dir, 2).unwrap().unwrap();
+        assert_eq!(back.state.height, 2);
+        assert_eq!(back.recent_units, eng.recent_units);
+        assert!(load_checkpoint_at(&dir, 1).unwrap().is_none(), "below last_finalized");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3-R-2: rewind decisions. Heights above a fraud verdict (or above a
+    /// lowered `last_submitted`) and re-submitted heights are replayed
+    /// again; an unchanged chain needs no rewind.
+    #[test]
+    fn rewind_target_detects_verdict_and_resubmission() {
+        use std::collections::BTreeMap;
+        let accepted: BTreeMap<u64, String> =
+            (3..=8).map(|h| (h, format!("U{h}"))).collect();
+        let view = |ls: u64, frozen: u64, changed: Option<u64>| ChainView {
+            last_submitted: ls,
+            last_finalized: 2,
+            frozen_at_last_submitted: frozen,
+            da_units: (3..=ls.min(8))
+                .map(|h| {
+                    let v = if Some(h) == changed {
+                        format!("NEW{h}")
+                    } else {
+                        format!("U{h}")
+                    };
+                    (h, Some(v))
+                })
+                .collect(),
+        };
+        // Unchanged chain (and a chain that moved on) needs nothing.
+        assert_eq!(rewind_target(8, &accepted, &view(8, 0, None)), None);
+        assert_eq!(rewind_target(8, &accepted, &view(12, 0, None)), None);
+        // Verdict on h=5: last_submitted lands on 5 with frozen=2, so 5..=8
+        // are dead and the engine goes back to the state after 4.
+        assert_eq!(rewind_target(8, &accepted, &view(5, 2, None)), Some(4));
+        // Verdict on our own tip.
+        assert_eq!(rewind_target(8, &accepted, &view(8, 2, None)), Some(7));
+        // h=5 already re-submitted (frozen cleared, new da_unit), ls=5.
+        assert_eq!(rewind_target(8, &accepted, &view(5, 0, Some(5))), Some(4));
+        // Re-submitted and the chain already moved past our tip again.
+        assert_eq!(rewind_target(8, &accepted, &view(12, 0, Some(5))), Some(4));
+        // A da_unit that disappeared counts as changed.
+        let mut v = view(8, 0, None);
+        v.da_units.insert(6, None);
+        assert_eq!(rewind_target(8, &accepted, &v), Some(5));
+        // Heights the watcher never recorded are not judged.
+        assert_eq!(
+            rewind_target(8, &BTreeMap::new(), &view(8, 0, Some(5))),
+            None
+        );
+    }
+
+    /// R3-R-6: the no-`--state-dir` proof directory is created fresh at an
+    /// unpredictable path with mode 0700, and never reuses an existing one.
+    #[test]
+    fn private_temp_dir_is_fresh_and_unpredictable() {
+        let a = create_private_temp_dir("minuend-watch-test").unwrap();
+        let b = create_private_temp_dir("minuend-watch-test").unwrap();
+        assert_ne!(a, b);
+        let name = a.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name.len(), "minuend-watch-test-".len() + 32, "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(&a).unwrap().permissions().mode() & 0o777;
+            assert_eq!(m, 0o700);
+        }
+        // A pre-created directory is never reused by the proof writer path
+        // (DirBuilder::create fails on an existing entry).
+        assert!(std::fs::DirBuilder::new().create(&a).is_err());
+        write_private_proof(&a, 1, "wpin", &serde_json::json!({})).unwrap();
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
