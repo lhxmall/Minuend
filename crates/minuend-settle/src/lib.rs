@@ -404,7 +404,11 @@ impl Batch {
         // retained until `release_batched` below), so a backlog larger than
         // the window can still be cut.
         for id in applied {
-            let u = engine.dag.batch_body(*id).cloned().ok_or(SettleError::Replay)?;
+            let u = engine
+                .dag
+                .batch_body(*id)
+                .cloned()
+                .ok_or(SettleError::Replay)?;
             units.push(u);
         }
         let applied_set: HashSet<&UnitId> = applied.iter().collect();
@@ -770,7 +774,12 @@ impl Batch {
                     addr,
                     ..
                 } => match u128::try_from(*amount) {
-                    Ok(a) if !replay.state.deposit_backing.contains_key(&(*aa_unit, false)) => {
+                    Ok(a)
+                        if !replay
+                            .state
+                            .deposit_backing
+                            .contains_key(&(*aa_unit, false)) =>
+                    {
                         replay.state.allow_deposit(*aa_unit, false, a, addr);
                     }
                     // A second op on the same anchor keeps the first backing

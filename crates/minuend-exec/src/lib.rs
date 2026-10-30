@@ -1046,7 +1046,10 @@ impl Engine {
         // missed those claws and over-stated the collateral of later fills).
         let sim_taker = if isolated {
             let params = self.state.market_params(market);
-            Some((params.funding_rate.then_some(params.usd_per_unit), params.taker_fee_bps))
+            Some((
+                params.funding_rate.then_some(params.usd_per_unit),
+                params.taker_fee_bps,
+            ))
         } else {
             None
         };
@@ -1374,10 +1377,7 @@ impl Engine {
             let (short, long) = if params.spot_only {
                 (0, 0)
             } else {
-                (
-                    (-i128::from(pos_qty)).max(0),
-                    i128::from(pos_qty).max(0),
-                )
+                ((-i128::from(pos_qty)).max(0), i128::from(pos_qty).max(0))
             };
             for (mode, sides) in acc.iter().enumerate() {
                 // Open-only notional: the reducible slice is priced out, the
@@ -2686,8 +2686,7 @@ impl Engine {
         // `account_matches`; re-checked here so no path executes a foreign
         // account's op. Checked before anything is consumed.
         // R3-E-1: and must not be a Deposit/GovDeposit (top-level only).
-        if !minuend_dag::reveal_inner_kind_ok(inner) || minuend_dag::op_signer(inner) != account
-        {
+        if !minuend_dag::reveal_inner_kind_ok(inner) || minuend_dag::op_signer(inner) != account {
             return Err(RejectReason::BadAccount);
         }
         if entry.revealed
@@ -10272,9 +10271,8 @@ mod tests {
             let (e, _, m) = spot_engine(&[]);
             e.state.markets[&m]
         };
-        let req = |side, at| {
-            minuend_account::spot_order_requirement(side, at, QTY_SCALE, &p).unwrap()
-        };
+        let req =
+            |side, at| minuend_account::spot_order_requirement(side, at, QTY_SCALE, &p).unwrap();
         let extra = 1_000 * USD_SCALE as i128;
         let (mut eng, mut tip, meme) = spot_engine(&[
             (&alice, req(Side::Bid, px) + req(Side::Ask, hi) + extra),
@@ -10309,7 +10307,10 @@ mod tests {
         );
         tip = unit_id(&u);
         assert!(applied_with_fills(&eng.ingest(u).unwrap()));
-        assert_eq!(eng.state.accounts[&a].positions[&meme].qty, QTY_SCALE as i64);
+        assert_eq!(
+            eng.state.accounts[&a].positions[&meme].qty,
+            QTY_SCALE as i64
+        );
         // The old step 2: a zero-escrow GTC "reduce" ask. Refused now.
         let u = place_iso(
             vec![tip],
@@ -10391,7 +10392,7 @@ mod tests {
         );
         assert!(applied_with_fills(&eng.ingest(u).unwrap()));
         let acct = &eng.state.accounts[&a];
-        let pos = acct.positions[&meme];
+        let pos = &acct.positions[&meme];
         assert_eq!(pos.qty, -(QTY_SCALE as i64));
         let need = minuend_account::spot_requirement(pos.qty, pos.entry_price, &p).unwrap();
         assert!(
@@ -10584,7 +10585,9 @@ mod tests {
         let want = im(hi);
         assert_eq!(eng.resting_open_im(a), want);
         let col = eng.state.accounts[&a].collateral;
-        let evs = eng.ingest(withdraw_unit(vec![tip], &alice, col, 1)).unwrap();
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, col, 1))
+            .unwrap();
         assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
         let evs = eng
             .ingest(withdraw_unit(vec![tip], &alice, col - want, 2))
