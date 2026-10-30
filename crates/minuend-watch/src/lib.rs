@@ -1254,7 +1254,7 @@ pub fn vault_keys_needed(batch: &Batch) -> Vec<String> {
         if !batch
             .leaf_trace
             .get(k)
-            .is_some_and(|ls| ls.iter().any(|l| *l == binding))
+            .is_some_and(|ls| ls.contains(&binding))
         {
             continue;
         }
