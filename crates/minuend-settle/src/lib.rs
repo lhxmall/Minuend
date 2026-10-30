@@ -4270,7 +4270,11 @@ mod tests {
             Ok(None) => panic!("a duplicate reserves nothing, so it is never deferred"),
             Err(_) => {}
         }
-        assert_eq!(budget.used(), 2 * each, "duplicate kept the first reservation");
+        assert_eq!(
+            budget.used(),
+            2 * each,
+            "duplicate kept the first reservation"
+        );
     }
 
     /// R5-E-1 test 4 (batch): 0.97 MiB of applied evidence is refused by
