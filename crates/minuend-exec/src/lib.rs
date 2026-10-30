@@ -5266,9 +5266,8 @@ mod tests {
         let close_px = px / 2;
         let carol = sk(4);
         let dave = sk(5);
-        let req = |side| {
-            minuend_account::spot_order_requirement(side, close_px, QTY_SCALE, &p).unwrap()
-        };
+        let req =
+            |side| minuend_account::spot_order_requirement(side, close_px, QTY_SCALE, &p).unwrap();
         let d3 = deposit(vec![tip], &carol, req(Side::Bid), 3);
         tip = unit_id(&d3);
         assert!(applied(&eng.ingest(d3).unwrap()));
