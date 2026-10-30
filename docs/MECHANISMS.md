@@ -1294,7 +1294,7 @@ dispute_bind 1956、dispute_book 1708、dispute_claw 1706（上限 2000）。
 （`x` op、在地址的 `|` 处重切 → bounce）、`r7_fabricated_second_fill_is_fsane_fraud`、
 `r7_one_fill_per_unit`（exec：Gtc 穿两档被拒且簿不变、IOC 只吃一笔、Gtc 吃一笔后余量留簿）、
 `r7_adl_price_is_bound_to_mark_and_band`；`claw_check` 对所有诚实 ADL 断言价格 = clamp。
-devnet e2e 场景 65–67（高度 83–86）。
+devnet e2e 场景 65–67（高度 83–88）。
 
 部署 op 预算（第 7 轮）：vault 364、rollup 996、dispute 1575、dispute_fill 1966、
 dispute_bind 1956、dispute_book 1712、dispute_claw 1780（上限 2000）。

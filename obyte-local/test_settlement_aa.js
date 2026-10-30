@@ -3449,16 +3449,18 @@ async function main() {
     await triggerBounce(challenger, dispute, obPayload(83, obok), 20000, "no fraud");
     const odd = `d:${T}:5:A|B:${"A".repeat(43)}=`;
     const obodd = opUnit("r7-obodd", PRE7, odd, odd);
-    await submitAt(83, obodd);
-    await triggerBounce(challenger, dispute, obPayload(83, obodd), 20000, "no fraud");
+    await submitAt(84, obodd);
+    await triggerBounce(challenger, dispute, obPayload(84, obodd), 20000, "no fraud");
     const cut = odd.indexOf("|") + 1;
-    await triggerBounce(challenger, dispute, Object.assign(obPayload(83, obodd), {
+    await triggerBounce(challenger, dispute, Object.assign(obPayload(84, obodd), {
       u_pre: PRE7 + odd.slice(0, cut), u_op: odd.slice(cut),
     }), 20000, "bad unit text");
     const obxok = opUnit("r7-obxok", PRE7, "x", "x:" + sha256Hex(PRE7 + "x"));
-    await submitAt(83, obxok);
-    await triggerBounce(challenger, dispute, obPayload(83, obxok), 20000, "no fraud");
-    await live(83, "honest ops leaves (descriptor, x:{id}, '|' address)");
+    await submitAt(85, obxok);
+    await triggerBounce(challenger, dispute, obPayload(85, obxok), 20000, "no fraud");
+    await live(83, "honest descriptor");
+    await live(84, "honest odd address");
+    await live(85, "honest ops leaves (descriptor, x:{id}, '|' address)");
     console.log("65. P-opbind: Place as x:, p: margin rewritten, x unit as p: → frozen; honest descriptor / x:{id} / '|' address → 'no fraud', re-split → 'bad unit text'");
 
     // ---- 66. one fill per unit (未修复项 19): a second fill is fraud ------
@@ -3471,13 +3473,13 @@ async function main() {
     // The single-fill Place of 62 with a fabricated second fill (the
     // "make it multi-fill to escape P-claw / P-frame" route).
     const fab = clawUnit(P5, "r7-fab", op1, [f1, f1x], post5(49955000000, 0, 7000000000));
-    await submitAt(84, fab);
-    await triggerVerdict(challenger, book, fsPayload(84, fab, f1x, 1), 20000, "fabricated second fill (fsane idx)");
-    await frozen(84, "fabricated second fill");
+    await submitAt(86, fab);
+    await triggerVerdict(challenger, book, fsPayload(86, fab, f1x, 1), 20000, "fabricated second fill (fsane idx)");
+    await frozen(86, "fabricated second fill");
     const one = clawUnit(P5, "r7-one", op1, [f1], post5(40955000000, 0, 7000000000));
-    await submitAt(84, one);
-    await triggerBounce(challenger, book, fsPayload(84, one, f1, 0), 20000, "no fraud");
-    await live(84, "honest single fill");
+    await submitAt(86, one);
+    await triggerBounce(challenger, book, fsPayload(86, one, f1, 0), 20000, "no fraud");
+    await live(86, "honest single fill");
     console.log("66. one fill per unit: a fabricated idx-1 fill → frozen (P-fsane); honest idx-0 fill → 'no fraud'");
 
     // ---- 67. ADL price bound to clamp(mark, band) (未修复项 28) ----------
@@ -3485,7 +3487,7 @@ async function main() {
     // meta's mark at 86k and the market's band leaf in the pre tree.
     const META8 = `meta:1:1:1000:500:5:100:0:8600000000000:0:0`;
     const BAND8 = `band:1:0:0`;
-    const P8 = await clawSetup(85, "r7-p8", [
+    const P8 = await clawSetup(87, "r7-p8", [
       acct(T, 15000000000), acct(M, 1000000000000), META8, BAND8,
       `pos:${T}:1:100000000:10000000000000:0:0`, `pos:${M}:1:-100000000:10000000000000:0:0`, END,
     ]);
@@ -3495,13 +3497,13 @@ async function main() {
     // ADL printed at 90k (above the 86k mark, no band): T keeps 4k more.
     const f8bad = `f:${isoUnit}:0:${T}:${M}:${LO}:${"0".repeat(64)}:1:9000000000000:100000000:9:1:2:0`;
     const adlBad = clawUnit(P8, "r7-adl-bad", op3, [f8bad], post8(4100000000, 1010900000000));
-    await submitAt(86, adlBad);
-    await triggerVerdict(challenger, claw, clawPayload8(P8, 86, adlBad), 20000, "ADL price off clamp(mark, band)");
-    await frozen(86, "ADL price off the mark");
+    await submitAt(88, adlBad);
+    await triggerVerdict(challenger, claw, clawPayload8(P8, 88, adlBad), 20000, "ADL price off clamp(mark, band)");
+    await frozen(88, "ADL price off the mark");
     const adlOk = clawUnit(P8, "r7-adl-ok", op3, [f3], post8(140000000, 1014860000000));
-    await submitAt(86, adlOk);
-    await triggerBounce(challenger, claw, clawPayload8(P8, 86, adlOk), 20000, "no fraud");
-    await live(86, "honest ADL at the mark");
+    await submitAt(88, adlOk);
+    await triggerBounce(challenger, claw, clawPayload8(P8, 88, adlOk), 20000, "no fraud");
+    await live(88, "honest ADL at the mark");
     console.log("67. ADL at 90k with mark 86k (band leaf proven) → frozen (P-claw); honest ADL at the mark → 'no fraud'");
   }
 
