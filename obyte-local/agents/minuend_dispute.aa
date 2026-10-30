@@ -436,6 +436,89 @@
 				]
 			},
 			{
+				// Round 7 P-opbind (PR #51 未修复项 10): the ops_root leaf at
+				// index k differs from the op of the unit committed at index
+				// k of units_root. Since ASSERTION_VERSION 4 a unit id is
+				// sha256 of the UTF-8 text
+				//   'mnu3|' hex(canonical_bytes) '|' E
+				// (minuend_dag::unit_text) where E is the unit's ops
+				// descriptor, or 'x' for ops that commit 'x:{unit}'. The
+				// challenger sends the text split at its SECOND '|':
+				// u_pre = 'mnu3|' hex '|' and u_op = E. Hex has no '|', so
+				// an u_pre with exactly two '|' that starts 'mnu3|' and ends
+				// '|' is the unique split of the real text (E may itself
+				// contain '|', e.g. an odd deposit address — that is why the
+				// AA never splits the full text). The id fixes the text
+				// (sha256 preimage resistance), so an honest batch, whose
+				// leaf IS E, can never be framed; a leaf that differs is
+				// fraud. Signature validity stays watcher-checked (Oscript
+				// cannot verify ed25519): an id with no valid signed unit in
+				// the DA is the DA residual (未修复项 1), not this predicate.
+				if: "{trigger.data.pred == 'opbind'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					if (trigger.data.ops_root != var[$rollup]['ops_root_' || $h]
+						OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
+						bounce('stale roots');
+					$k = trigger.data.k;
+					if (!is_integer($k) OR $k < 0 OR $k >= $n)
+						bounce('bad k');
+					$op = trigger.data.op;
+					if (typeof($op) == 'boolean' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
+						bounce('bad ops proof');
+					$pre = trigger.data.u_pre;
+					$e = trigger.data.u_op;
+					if (typeof($pre) != 'string' OR typeof($e) != 'string' OR length($e) == 0
+						OR !starts_with($pre, 'mnu3|') OR !ends_with($pre, '|')
+						OR array_length(split($pre, '|')) != 3)
+						bounce('bad unit text');
+					$id = sha256($pre || $e, 'hex');
+					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
+						OR trigger.data.units_proof.root != trigger.data.units_root
+						OR !is_valid_merkle_proof($id, trigger.data.units_proof))
+						bounce('bad unit');
+					$want = $e == 'x' ? 'x:' || $id : $e;
+					if ($op == $want) bounce('no fraud');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
 				// P-omit: a forced unit id (pinned by the rollup inbox before
 				// this height's inbox_upto) is missing from units_set_root.
 				// Non-membership in the sorted units set is proven by adjacent

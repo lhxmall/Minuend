@@ -1109,69 +1109,15 @@ impl Engine {
         if !result.taker_resting && result.taker_margin_left > 0 {
             self.state.account_mut(account).collateral += i128::from(result.taker_margin_left);
         }
-        // Force-sell: any fill party still liquidatable after this fill is
-        // closed in the same unit (book IOC, then ADL inside `liquidate`).
-        // The user fill is already applied, so a nested liquidation Err is
-        // ignored — never fail the place over it. Returned fills join this
-        // unit's fill list; fill_math bounces a multi-fill unit, so they
-        // must not become a second op.
-        let mut fills = result.fills;
+        // Round 7 (PR #51 未修复项 19, consensus): no in-unit force-sell.
+        // It used to liquidate a fill party that was still liquidatable
+        // after this fill in the SAME unit, appending book / ADL fills — a
+        // multi-fill unit no predicate could judge. A unit now carries at
+        // most one fill; a party left liquidatable is closed by a keeper
+        // `Liquidate` in a later unit (with the keeper reward as incentive).
+        let _ = (unit, seq);
         self.state.seen_client_seq.insert(account, client_seq);
-        let extra = self.force_sell_fill_parties(&fills, unit, seq);
-        fills.extend(extra);
-        Ok(fills)
-    }
-
-    /// Force-sell every fill party that is still liquidatable after a user
-    /// fill, in the same unit. The other fill party is the liquidation
-    /// caller; insurance is never a caller or target. `liquidate` does the
-    /// book IOC first, then ADL onto opposite positions — no insurance
-    /// buyer anywhere. Err (e.g. the snapshot flipped after the claw) is
-    /// ignored: the user fill already applied and there is no retry.
-    fn force_sell_fill_parties(&mut self, fills: &[Fill], unit: UnitId, seq: Seq) -> Vec<Fill> {
-        let mut extra = Vec::new();
-        for fill in fills {
-            for (target, caller) in [(fill.taker, fill.maker), (fill.maker, fill.taker)] {
-                if target == caller || target == INSURANCE_ACCOUNT {
-                    continue;
-                }
-                // Same liquidatable fork as `liquidate`: an isolated
-                // position is judged on its bucket risk, everything else
-                // on the pooled account snapshot.
-                let liquidatable = match self
-                    .state
-                    .accounts
-                    .get(&target)
-                    .and_then(|a| a.positions.get(&fill.market))
-                {
-                    Some(p) if p.isolated => self
-                        .state
-                        .accounts
-                        .get(&target)
-                        .map(|a| {
-                            a.isolated_risk(fill.market, &self.state.marks, &self.state.markets)
-                                .liquidatable
-                        })
-                        .unwrap_or(false),
-                    _ => self
-                        .state
-                        .accounts
-                        .get(&target)
-                        .map(|a| {
-                            a.snapshot(&self.state.marks, &self.state.markets)
-                                .liquidatable
-                        })
-                        .unwrap_or(false),
-                };
-                if !liquidatable {
-                    continue;
-                }
-                if let Ok(fs) = self.liquidate(unit, seq, caller, target, fill.market) {
-                    extra.extend(fs);
-                }
-            }
-        }
-        extra
+        Ok(result.fills)
     }
 
     /// First live order of `account` on `books[market]`'s margin mode, if
@@ -1843,7 +1789,10 @@ impl Engine {
             .map(|p| p.qty)
             .unwrap_or(0);
         let mut keeper_paid = Usd::from(0u64);
-        if still && remaining_pos != 0 {
+        // Round 7 (one fill per unit): ADL only when the book IOC filled
+        // nothing; a remainder after a book fill waits for the next
+        // `Liquidate`.
+        if still && remaining_pos != 0 && fills.is_empty() {
             // ADL remainder: the book did not finish the close, so the
             // still-liquidatable remainder is walked onto opposite-sign
             // positions at the current mark — insurance is never the
@@ -1862,7 +1811,7 @@ impl Engine {
             } else {
                 Side::Bid
             };
-            let mut remaining = remaining_pos.unsigned_abs();
+            let remaining = remaining_pos.unsigned_abs();
             // Opposite-sign holders only, excluding the target and
             // insurance. Larger |qty| first, AccountId ascending on ties
             // (explicit tie-break keeps the order deterministic).
@@ -1915,7 +1864,8 @@ impl Engine {
                     .apply_fill_pair_journaled(journal, &fill)
                     .map_err(map_acct)?;
                 fills.push(fill);
-                remaining -= take;
+                // Round 7: one ADL counterparty per unit.
+                break;
             }
         }
         // Keeper reward: bps of filled notional, seized from the
@@ -2178,6 +2128,9 @@ impl Engine {
                 kind: 2,
             });
             remaining -= take;
+            // Round 7 (one fill per unit): one ADL counterparty per
+            // off-book liquidation; the rest waits for the next call.
+            break;
         }
         // R2-A-11 (round 2 of #47): only the qty the ADL loop actually
         // closed counts. With no opposite-sign holders nothing closed: the
@@ -3095,6 +3048,123 @@ mod tests {
         assert_eq!(
             eng.state.accounts.get(&b).unwrap().positions[&BTC_USD].qty,
             -(qty as i64)
+        );
+    }
+
+    /// Round 7 (PR #51 未修复项 19): the engine emits at most one fill per
+    /// unit. A Gtc limit that would take two makers is refused whole (book
+    /// untouched); an IOC takes the first maker only; a Gtc limit whose
+    /// remainder no longer crosses after one maker rests as before.
+    #[test]
+    fn r7_one_fill_per_unit() {
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let g = genesis_id();
+        let alice = sk(1);
+        let bob = sk(2);
+        let d1 = deposit(vec![g], &alice, 10_000 * USD_SCALE as i128, 1);
+        let id1 = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = deposit(vec![id1], &bob, 10_000 * USD_SCALE as i128, 2);
+        let id2 = unit_id(&d2);
+        eng.ingest(d2).unwrap();
+        let px = 100_000 * PRICE_SCALE as i64;
+        let px2 = 100_001 * PRICE_SCALE as i64;
+        let q = QTY_SCALE / 100;
+        let a1 = place(
+            vec![id2],
+            &bob,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+        );
+        let ia1 = unit_id(&a1);
+        eng.ingest(a1).unwrap();
+        let a2 = place(
+            vec![ia1],
+            &bob,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px2,
+            q,
+            2,
+        );
+        let ia2 = unit_id(&a2);
+        eng.ingest(a2).unwrap();
+        let fills_of = |evs: &[ExecEvent]| -> Vec<Fill> {
+            evs.iter()
+                .filter_map(|e| match e {
+                    ExecEvent::Applied { fills, .. } => Some(fills.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        let live = |eng: &Engine| eng.state.books[&BTC_USD].live_orders().count();
+        assert_eq!(live(&eng), 2);
+        // Gtc limit across both asks: refused whole.
+        let col0 = eng.state.accounts[&acct_of(&alice)].collateral;
+        let b1 = place(
+            vec![ia2],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px2,
+            2 * q,
+            1,
+        );
+        let ib1 = unit_id(&b1);
+        let evs = eng.ingest(b1).unwrap();
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            ExecEvent::Rejected {
+                reason: RejectReason::Book(BookError::MultiFill),
+                ..
+            }
+        )));
+        assert!(fills_of(&evs).is_empty());
+        assert_eq!(live(&eng), 2, "book untouched");
+        assert_eq!(eng.state.accounts[&acct_of(&alice)].collateral, col0);
+        // IOC across both asks: one fill (the best ask), no rest.
+        let b2 = place(
+            vec![ib1],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px2,
+            2 * q,
+            2,
+        );
+        let ib2 = unit_id(&b2);
+        let f = fills_of(&eng.ingest(b2).unwrap());
+        assert_eq!(f.len(), 1);
+        assert_eq!((f[0].price, f[0].qty), (px, q));
+        assert_eq!(live(&eng), 1, "second ask untouched, IOC remainder dropped");
+        // Gtc limit: one maker, then the remainder rests (no longer crosses).
+        let b3 = place(
+            vec![ib2],
+            &alice,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px2,
+            2 * q,
+            3,
+        );
+        let f = fills_of(&eng.ingest(b3).unwrap());
+        assert_eq!(f.len(), 1);
+        assert_eq!((f[0].price, f[0].qty), (px2, q));
+        let rest: Vec<_> = eng.state.books[&BTC_USD].live_orders().collect();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(
+            (rest[0].account, rest[0].remaining),
+            (acct_of(&alice), q)
         );
     }
 

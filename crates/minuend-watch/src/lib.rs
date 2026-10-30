@@ -2162,7 +2162,7 @@ mod tests {
 
     /// R2-R-1: golden vector shared with `daBindHash` in
     /// obyte-local/script_helpers.js (computed with node; R6-L1:
-    /// assertion_version 3).
+    /// assertion_version 4).
     #[test]
     fn da_bind_matches_js_golden_vector() {
         let f = serde_json::json!({
@@ -2173,11 +2173,11 @@ mod tests {
             "units_set_root": "S".repeat(44), "ops_root": "O".repeat(44),
             "fills_root": "F".repeat(44), "counts_root": "C".repeat(44),
             "unit_count": 2, "wit_count": 5, "fill_count": 1,
-            "assertion_version": 3, "data_root": "44".repeat(32),
+            "assertion_version": 4, "data_root": "44".repeat(32),
         });
         assert_eq!(
             da_bind_from_header(&f).unwrap(),
-            "df1f6937d84f8c28704f142c9575f30b7dadab0a86af14dfc10d28e7ceec1159"
+            "0ca1909ff9cfaf5a7e2225f5d00e8d8a403e70cf13f0e8d0007bf1670371b4f1"
         );
         let mut missing = f.clone();
         missing.as_object_mut().unwrap().remove("counts_root");

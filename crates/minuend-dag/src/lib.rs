@@ -443,8 +443,164 @@ pub fn reveal_commit_hash(inner: &Op, salt: &[u8; 32]) -> [u8; 32] {
     sha256(&buf)
 }
 
+/// Round 7 (PR #51 未修复项 10): the op-descriptor string committed as a
+/// unit's `ops_root` leaf (`minuend_settle::ops_element`), or `None` for ops
+/// that commit the opaque `x:{unit}`. It is part of the unit id preimage
+/// ([`unit_text`]), so it is fixed by the signed unit.
+pub fn op_descriptor(op: &Op) -> Option<String> {
+    use Op::*;
+    match op {
+        // #47 A2: deposits commit the Obyte address they bind (first
+        // deposit) or must match (later deposits), so the forest dispute AA
+        // can check that a new `adr:{addr}:{acct}` witness leaf appears only
+        // under a deposit op of that account WITH that address.
+        // R2-A-3: a collateral deposit also commits its vault anchor (the
+        // Obyte unit hash, standard base64 — the vault AA's `dep_<unit>`
+        // key), so P-deposit can require the credit to be backed by a
+        // payment the vault actually recorded.
+        Deposit {
+            account,
+            addr,
+            amount,
+            aa_unit,
+        } => {
+            use base64::Engine as _;
+            Some(format!(
+                "d:{}:{}:{}:{}",
+                hex::encode(account.0),
+                amount,
+                addr,
+                base64::engine::general_purpose::STANDARD.encode(aa_unit)
+            ))
+        }
+        // R3-A-7: a PERP deposit commits its vault anchor too (the vault's
+        // `depp_<unit>` key), so P-deposit can require its backing.
+        GovDeposit {
+            account,
+            addr,
+            amount,
+            aa_unit,
+        } => {
+            use base64::Engine as _;
+            Some(format!(
+                "D:{}:{}:{}:{}",
+                hex::encode(account.0),
+                amount,
+                addr,
+                base64::engine::general_purpose::STANDARD.encode(aa_unit)
+            ))
+        }
+        Withdraw {
+            account,
+            amount,
+            nonce,
+        } => {
+            Some(format!("w:{}:{}:{}", hex::encode(account.0), amount, nonce))
+        }
+        GovWithdraw {
+            account,
+            amount,
+            nonce,
+        } => {
+            Some(format!("W:{}:{}:{}", hex::encode(account.0), amount, nonce))
+        }
+        // #47 A3: `typ` (0 Limit / 1 Market) is committed so the fill
+        // dispute AA can tell whether an unfilled remainder rests in the
+        // book (Limit + Gtc) or is refunded in-unit — the escrow identity
+        // derives the taker's resting margin from the op instead of
+        // trusting an operator-chosen order id.
+        Place {
+            account,
+            market,
+            side,
+            typ,
+            price,
+            qty,
+            isolated,
+            margin,
+            tif,
+            ..
+        } => {
+            Some(format!(
+                "p:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                hex::encode(account.0),
+                market.0,
+                side.as_u8(),
+                price,
+                qty,
+                if *isolated { 1 } else { 0 },
+                margin,
+                tif.as_u8(),
+                typ.as_u8()
+            ))
+        }
+        Cancel { account, order_id } => {
+            Some(format!("c:{}:{}", hex::encode(account.0), hex::encode(order_id.0)))
+        }
+        Liquidate {
+            caller,
+            target,
+            market,
+        } => {
+            Some(format!(
+                "L:{}:{}:{}",
+                hex::encode(caller.0),
+                hex::encode(target.0),
+                market.0
+            ))
+        }
+        // R2-E-2: a Reveal executes its inner op (or nothing, when
+        // rejected), so for the ops whose witness columns the dispute AAs
+        // pin (collateral, PERP, W, adr:) the committed descriptor is the
+        // INNER op's — otherwise an honest Reveal{Withdraw} raises W under
+        // an `x:` tag and P-wpin verdicts it. Other inner ops keep `x:`
+        // (no predicate judges them through a Reveal). R3-E-1: a Reveal can
+        // no longer carry Deposit/GovDeposit (refused at ingest and in
+        // `reveal_op`), so only the withdrawal kinds are forwarded.
+        // Round 6 (PR #51 未修复项 30): a revealed Place / Liquidate runs
+        // through the same `dispatch` as a direct one, so its fills are
+        // judged against the INNER `p:` / `L:` descriptor (fill_math's
+        // escrow identity, P-claw's two-leg claw and keeper) instead of an
+        // opaque `x:` that hid the margin, tif and keeper.
+        Reveal { op: inner, .. }
+            if matches!(
+                inner.as_ref(),
+                Withdraw { .. } | GovWithdraw { .. } | Place { .. } | Liquidate { .. }
+            ) =>
+        {
+            op_descriptor(inner)
+        }
+        _ => None,
+    }
+}
+
+/// Round 7: domain prefix of the text a unit id hashes.
+pub const UNIT_TEXT_DOMAIN: &str = "mnu3";
+
+/// Round 7: `"mnu3|" + hex(canonical_bytes) + "|"` — the part of
+/// [`unit_text`] before the descriptor. Hex has no `|`, so this prefix is
+/// exactly the text up to its second `|` (P-opbind checks that shape).
+pub fn unit_text_prefix(unit: &Unit) -> String {
+    format!("{UNIT_TEXT_DOMAIN}|{}|", hex::encode(canonical_bytes(unit)))
+}
+
+/// Round 7 (PR #51 未修复项 10): the UTF-8 text whose sha256 is the unit
+/// id: [`unit_text_prefix`] followed by the committed ops descriptor
+/// ([`op_descriptor`], or `x` for ops without one). The canonical bytes
+/// keep the id injective over the whole unit (parents, op, pubkey); the
+/// descriptor tail is what an Oscript AA can read without decoding
+/// binary: given this text it recomputes the id with `sha256(text, 'hex')`,
+/// matches it to the `units_root` leaf, and compares the tail with the
+/// `ops_root` leaf at the same index.
+pub fn unit_text(unit: &Unit) -> String {
+    let d = op_descriptor(&unit.op).unwrap_or_else(|| "x".to_string());
+    format!("{}{d}", unit_text_prefix(unit))
+}
+
+/// Unit id (round 7, ASSERTION_VERSION 4): `sha256(unit_text(unit))`. The
+/// signature covers this id, so it binds the ops descriptor too.
 pub fn unit_id(unit: &Unit) -> UnitId {
-    UnitId(sha256(&canonical_bytes(unit)))
+    UnitId(sha256(unit_text(unit).as_bytes()))
 }
 
 /// Verify a unit's ed25519 signature against an ALREADY-COMPUTED unit id, so
@@ -1168,6 +1324,55 @@ mod tests {
 
     fn sk(n: u8) -> [u8; 32] {
         [n; 32]
+    }
+
+    /// Round 7 (PR #51 未修复项 10): the unit id is sha256 of a UTF-8 text
+    /// that ends with the committed ops descriptor; the prefix before it
+    /// has exactly two `|` (P-opbind's split rule), even when the
+    /// descriptor itself contains `|`.
+    #[test]
+    fn r7_unit_text_binds_the_ops_descriptor() {
+        use sha2::Digest as _;
+        let d = deposit(vec![genesis_id()], &sk(1), 3);
+        let text = unit_text(&d);
+        let pre = unit_text_prefix(&d);
+        assert!(text.starts_with(&pre) && pre.starts_with("mnu3|") && pre.ends_with('|'));
+        assert_eq!(pre.matches('|').count(), 2);
+        let desc = op_descriptor(&d.op).unwrap();
+        assert!(desc.starts_with("d:"));
+        assert_eq!(&text[pre.len()..], desc);
+        let h: [u8; 32] = sha2::Sha256::digest(text.as_bytes()).into();
+        assert_eq!(unit_id(&d), UnitId(h));
+        // An ops-leaf-relevant change (the deposit amount) changes the id.
+        let mut d2 = d.clone();
+        if let Op::Deposit { amount, .. } = &mut d2.op {
+            *amount += 1;
+        }
+        assert_ne!(unit_id(&d2), unit_id(&d));
+        // A deposit address with '|' (refused at execution, still a unit):
+        // the prefix still splits at its own second '|'.
+        let mut odd = d.clone();
+        if let Op::Deposit { addr, .. } = &mut odd.op {
+            *addr = "A|B|C".into();
+        }
+        let pre = unit_text_prefix(&odd);
+        assert_eq!(pre.matches('|').count(), 2);
+        assert!(unit_text(&odd).ends_with(&op_descriptor(&odd.op).unwrap()));
+        // Ops without a descriptor end in `x`.
+        let r = sign_unit(
+            vec![genesis_id()],
+            Op::StakeOracle {
+                account: account_id_from_pubkey(
+                    &ed25519_dalek::SigningKey::from_bytes(&sk(2))
+                        .verifying_key()
+                        .to_bytes(),
+                ),
+            },
+            &sk(2),
+        );
+        assert!(op_descriptor(&r.op).is_none());
+        assert!(unit_text(&r).ends_with("|x"));
+        assert!(verify_sig_by_id(&r, &unit_id(&r)));
     }
 
     fn deposit(parents: Vec<UnitId>, secret: &[u8; 32], aa: u8) -> Unit {

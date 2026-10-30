@@ -258,130 +258,11 @@ pub fn fills_bytes(fills: &[Fill]) -> Vec<u8> {
 /// Op-descriptor string committed by `ops_root` (dispute predicates parse
 /// these; `unit_hex` covers non-financial ops verbatim).
 pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
-    use minuend_dag::Op::*;
-    match op {
-        // #47 A2: deposits commit the Obyte address they bind (first
-        // deposit) or must match (later deposits), so the forest dispute AA
-        // can check that a new `adr:{addr}:{acct}` witness leaf appears only
-        // under a deposit op of that account WITH that address.
-        // R2-A-3: a collateral deposit also commits its vault anchor (the
-        // Obyte unit hash, standard base64 — the vault AA's `dep_<unit>`
-        // key), so P-deposit can require the credit to be backed by a
-        // payment the vault actually recorded.
-        Deposit {
-            account,
-            addr,
-            amount,
-            aa_unit,
-        } => {
-            use base64::Engine as _;
-            format!(
-                "d:{}:{}:{}:{}",
-                hex::encode(account.0),
-                amount,
-                addr,
-                base64::engine::general_purpose::STANDARD.encode(aa_unit)
-            )
-        }
-        // R3-A-7: a PERP deposit commits its vault anchor too (the vault's
-        // `depp_<unit>` key), so P-deposit can require its backing.
-        GovDeposit {
-            account,
-            addr,
-            amount,
-            aa_unit,
-        } => {
-            use base64::Engine as _;
-            format!(
-                "D:{}:{}:{}:{}",
-                hex::encode(account.0),
-                amount,
-                addr,
-                base64::engine::general_purpose::STANDARD.encode(aa_unit)
-            )
-        }
-        Withdraw {
-            account,
-            amount,
-            nonce,
-        } => {
-            format!("w:{}:{}:{}", hex::encode(account.0), amount, nonce)
-        }
-        GovWithdraw {
-            account,
-            amount,
-            nonce,
-        } => {
-            format!("W:{}:{}:{}", hex::encode(account.0), amount, nonce)
-        }
-        // #47 A3: `typ` (0 Limit / 1 Market) is committed so the fill
-        // dispute AA can tell whether an unfilled remainder rests in the
-        // book (Limit + Gtc) or is refunded in-unit — the escrow identity
-        // derives the taker's resting margin from the op instead of
-        // trusting an operator-chosen order id.
-        Place {
-            account,
-            market,
-            side,
-            typ,
-            price,
-            qty,
-            isolated,
-            margin,
-            tif,
-            ..
-        } => {
-            format!(
-                "p:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                hex::encode(account.0),
-                market.0,
-                side.as_u8(),
-                price,
-                qty,
-                if *isolated { 1 } else { 0 },
-                margin,
-                tif.as_u8(),
-                typ.as_u8()
-            )
-        }
-        Cancel { account, order_id } => {
-            format!("c:{}:{}", hex::encode(account.0), hex::encode(order_id.0))
-        }
-        Liquidate {
-            caller,
-            target,
-            market,
-        } => {
-            format!(
-                "L:{}:{}:{}",
-                hex::encode(caller.0),
-                hex::encode(target.0),
-                market.0
-            )
-        }
-        // R2-E-2: a Reveal executes its inner op (or nothing, when
-        // rejected), so for the ops whose witness columns the dispute AAs
-        // pin (collateral, PERP, W, adr:) the committed descriptor is the
-        // INNER op's — otherwise an honest Reveal{Withdraw} raises W under
-        // an `x:` tag and P-wpin verdicts it. Other inner ops keep `x:`
-        // (no predicate judges them through a Reveal). R3-E-1: a Reveal can
-        // no longer carry Deposit/GovDeposit (refused at ingest and in
-        // `reveal_op`), so only the withdrawal kinds are forwarded.
-        // Round 6 (PR #51 未修复项 30): a revealed Place / Liquidate runs
-        // through the same `dispatch` as a direct one, so its fills are
-        // judged against the INNER `p:` / `L:` descriptor (fill_math's
-        // escrow identity, P-claw's two-leg claw and keeper) instead of an
-        // opaque `x:` that hid the margin, tif and keeper.
-        Reveal { op: inner, .. }
-            if matches!(
-                inner.as_ref(),
-                Withdraw { .. } | GovWithdraw { .. } | Place { .. } | Liquidate { .. }
-            ) =>
-        {
-            ops_element(unit_hex, inner)
-        }
-        _ => format!("x:{unit_hex}"),
-    }
+    // Round 7: the descriptor lives in `minuend_dag::op_descriptor` because
+    // the unit id now hashes it (`minuend_dag::unit_text`), which is what
+    // lets P-opbind prove an ops leaf that differs from its unit. Ops
+    // without a descriptor commit the opaque `x:{unit}`.
+    minuend_dag::op_descriptor(op).unwrap_or_else(|| format!("x:{unit_hex}"))
 }
 
 /// R2-R-1: the binding hash the rollup AA recomputes from `trigger.data`
@@ -3471,7 +3352,7 @@ mod tests {
             perp_burned: None,
         };
         let s = format!(
-            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|3|{}",
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|4|{}",
             hex::encode([1u8; 32]),
             hex::encode([2u8; 32]),
             "a".repeat(64),

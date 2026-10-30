@@ -146,6 +146,8 @@ function targetForPred(pred) {
   // R5-A-2: P-fsane on the book AA.
   if (pred === "ghost" || pred === "skip" || pred === "mbind" || pred === "fsane") return "book";
   if (["wpin", "adr", "tip", "keep", "mirror", "frame"].includes(pred)) return "bind";
+  // Round 7: P-opbind (ops leaf vs unit text) lives on the main dispute AA,
+  // with deposit / withdraw / escrow.
   return "main";
 }
 

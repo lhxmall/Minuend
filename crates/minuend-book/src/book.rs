@@ -174,19 +174,36 @@ impl OrderBook {
         order: Order,
         self_trade: SelfTrade,
     ) -> Result<MatchResult, BookError> {
-        self.submit_journaled(order, self_trade).map(|(r, _)| r)
+        let mut j = BookJournal::default();
+        match self.submit_inner(order, self_trade, false, &mut j) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.rollback(j);
+                Err(e)
+            }
+        }
     }
 
     /// Like [`OrderBook::submit_with`], but also returns the undo journal
     /// so a caller whose LATER step fails (e.g. applying the fills to
     /// accounts) can put the book back with [`OrderBook::rollback`].
+    ///
+    /// Round 7 (PR #51 未修复项 19, consensus): this is the engine's only
+    /// submit path and it emits AT MOST ONE fill per order. A Market / IOC
+    /// order stops after its first fill (the remainder never rests, so it
+    /// is simply not filled); a Limit + Gtc order whose remainder would
+    /// still cross a second maker is refused whole
+    /// ([`BookError::MultiFill`]), because resting a crossing remainder
+    /// would cross the book. Every fill-bearing unit therefore has exactly
+    /// one fill, which the single-fill dispute predicates judge in full,
+    /// and a committed fill with `idx != 0` is fraud by itself (P-fsane).
     pub fn submit_journaled(
         &mut self,
         order: Order,
         self_trade: SelfTrade,
     ) -> Result<(MatchResult, BookJournal), BookError> {
         let mut j = BookJournal::default();
-        match self.submit_inner(order, self_trade, &mut j) {
+        match self.submit_inner(order, self_trade, true, &mut j) {
             Ok(r) => Ok((r, j)),
             Err(e) => {
                 self.rollback(j);
@@ -259,6 +276,7 @@ impl OrderBook {
         &mut self,
         mut order: Order,
         self_trade: SelfTrade,
+        one_fill: bool,
         j: &mut BookJournal,
     ) -> Result<MatchResult, BookError> {
         if order.market != self.market {
@@ -278,7 +296,12 @@ impl OrderBook {
         let mut canceled_maker = Vec::new();
         let mut refunds: Vec<(AccountId, u64)> = Vec::new();
 
+        let rests_type = order.typ == OrderType::Limit && order.tif == TimeInForce::Gtc;
         while order.remaining > 0 {
+            // Round 7: a non-resting order is done after its first fill.
+            if one_fill && !fills.is_empty() && !rests_type {
+                break;
+            }
             let head = match order.side {
                 Side::Bid => self.next_ask_head(j),
                 Side::Ask => self.next_bid_head(j),
@@ -342,6 +365,11 @@ impl OrderBook {
                 continue;
             }
 
+            // Round 7: a resting-type order that would take a SECOND maker
+            // is refused whole (its remainder still crosses the book).
+            if one_fill && !fills.is_empty() {
+                return Err(BookError::MultiFill);
+            }
             let taker_remaining_before = order.remaining;
             let (
                 fill_qty,
@@ -398,8 +426,7 @@ impl OrderBook {
             }
         }
 
-        let rest =
-            order.typ == OrderType::Limit && order.tif == TimeInForce::Gtc && order.remaining > 0;
+        let rest = rests_type && order.remaining > 0;
 
         let taker_remaining = if rest { order.remaining } else { 0 };
         let taker_margin_left = order.margin_left;

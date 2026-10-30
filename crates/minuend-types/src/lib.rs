@@ -37,7 +37,7 @@ pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
 pub const QTY_CAP: u64 = 1_000_000_000_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
-/// Pinned by the rollup AA (`assertion_version != 3` bounces), so it can
+/// Pinned by the rollup AA (`assertion_version != 4` bounces), so it can
 /// only change together with an AA redeploy.
 ///
 /// History (docs/ROLLUP-UPGRADE.md §7):
@@ -52,7 +52,12 @@ pub const CHAIN_ID: &str = "minuend-v2";
 ///   Reveal{Place|Liquidate} commits its INNER `p:` / `L:` descriptor in
 ///   the ops leaf (was `x:{unit}`), and `place` enforces `QTY_CAP`
 ///   (R6-H1) — old and new producers disagree on both.
-pub const ASSERTION_VERSION: u32 = 3;
+/// - 4 (#47 round 7): unit ids are `sha256("mnu3|" hex(canonical) "|" E)`
+///   with E the committed ops descriptor (`minuend_dag::unit_text`), so an
+///   ops leaf that differs from its unit is provable on-chain (P-opbind);
+///   the book emits at most one fill per unit and Place no longer
+///   force-sells in-unit (P-fsane judges any fill with `idx != 0`).
+pub const ASSERTION_VERSION: u32 = 4;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

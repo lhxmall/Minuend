@@ -144,6 +144,14 @@ pub fn build_proof_with_vault(
         let pre_wit = obyte_merkle::root(&pre_leaves);
         let expected_op = ops_element(unit_hex, &batch.units[k].op);
         let op_ok = batch.ops.get(k).map(|o| o == &expected_op).unwrap_or(false);
+        // Round 7 P-opbind (未修复项 10): the committed ops leaf is not the
+        // descriptor of the unit committed at k — provable from the unit
+        // text alone, before any state.
+        if !op_ok {
+            if let Some(p) = opbind_proof(batch, k, &unit_hexes) {
+                return Some(p);
+            }
+        }
         let wit_ok = batch.trace.get(k).map(|t| t == &pre_wit).unwrap_or(false);
         if !op_ok || !wit_ok {
             // Poster committed something unreplayable at k; the pre-state
@@ -747,11 +755,17 @@ fn frame_proof(
 }
 
 /// R5-A-2: the P-fsane shape rule on a fill string (mirrors the book AA's
-/// `$bad`): not 14 fields, qty not a positive integer, price / taker_post
+/// `$bad`): not 14 fields, idx not "0" (round 7), qty not a positive integer, price / taker_post
 /// not integers, taker_post < 0, side not 0/1, kind not 0..3, or kind 2/3
 /// with taker_post != 0; R6-H1: qty >= 1e15.
 fn fsane_shape_bad(parts: &[&str]) -> bool {
     if parts.len() != 14 {
+        return true;
+    }
+    // Round 7 (未修复项 19): one fill per unit, so the raw idx is "0"
+    // (the AA reads `substring(fill, 66, 3) == ':0:'` behind the units
+    // proof of F[1]).
+    if parts[2] != "0" {
         return true;
     }
     let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
@@ -886,6 +900,48 @@ fn fsane_proof(
         }
     }
     None
+}
+
+/// Round 7 P-opbind (mirror of `minuend_dispute.aa`, pred `opbind`): the
+/// ops leaf at `k` differs from the descriptor of the unit whose id is the
+/// `units_root` leaf at `k`. The unit id is `sha256(unit_text)`
+/// (`minuend_dag::unit_text`); the proof carries the text split at its
+/// second `|` (`u_pre` = `"mnu3|" hex "|"`, `u_op` = descriptor or `x`).
+/// `None` when the DA unit does not hash to the committed id (a DA
+/// mismatch, not provable on-chain) or the leaf is honest.
+fn opbind_proof(batch: &Batch, k: usize, unit_hexes: &[String]) -> Option<BuiltProof> {
+    let unit = batch.units.get(k)?;
+    let unit_hex = unit_hexes.get(k)?;
+    if hex::encode(minuend_dag::unit_id(unit).0) != *unit_hex {
+        return None;
+    }
+    let u_pre = minuend_dag::unit_text_prefix(unit);
+    let u_op = minuend_dag::op_descriptor(&unit.op).unwrap_or_else(|| "x".to_string());
+    let want = if u_op == "x" {
+        format!("x:{unit_hex}")
+    } else {
+        u_op.clone()
+    };
+    let op = batch.ops.get(k)?;
+    // Oscript caps a concatenated string at 4096 characters.
+    if *op == want || u_pre.len() + u_op.len() > 4096 {
+        return None;
+    }
+    Some(BuiltProof {
+        pred: "opbind".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data: serde_json::json!({
+            "ops_root": batch.checkpoint.ops_root,
+            "units_root": batch.checkpoint.units_root,
+            "k": k,
+            "op": op,
+            "ops_proof": proof_json(&batch.ops, k),
+            "units_proof": proof_json(unit_hexes, k),
+            "u_pre": u_pre,
+            "u_op": u_op,
+        }),
+    })
 }
 
 /// R2-A-1 P-tip: the committed wit_root is not the trace's last element.
@@ -5676,5 +5732,154 @@ mod tests {
             "{}",
             proof.pred
         );
+    }
+
+    // ---- Round 7: P-opbind (未修复项 10) and one fill per unit (19) -------
+
+    /// Rust mirror of `minuend_dispute.aa` pred `opbind`: `Some(true)` =
+    /// verdict, `Some(false)` = 'no fraud', `None` = any other bounce.
+    fn opbind_aa(d: &serde_json::Value, units: &[String], ops: &[String]) -> Option<bool> {
+        use sha2::Digest as _;
+        let k = d["k"].as_u64()? as usize;
+        let op = d["op"].as_str()?;
+        if ops.get(k).map(String::as_str) != Some(op)
+            || d["ops_proof"]["index"].as_u64()? as usize != k
+            || d["ops_proof"]["root"].as_str()? != obyte_merkle::root(ops)
+        {
+            return None;
+        }
+        let pre = d["u_pre"].as_str()?;
+        let e = d["u_op"].as_str()?;
+        if e.is_empty() || !pre.starts_with("mnu3|") || !pre.ends_with('|') || pre.split('|').count() != 3 {
+            return None;
+        }
+        let id = hex::encode(sha2::Sha256::digest(format!("{pre}{e}").as_bytes()));
+        if units.get(k) != Some(&id) || d["units_proof"]["index"].as_u64()? as usize != k {
+            return None;
+        }
+        let want = if e == "x" { format!("x:{id}") } else { e.to_string() };
+        Some(op != want)
+    }
+
+    fn hexes(batch: &Batch) -> Vec<String> {
+        batch
+            .checkpoint
+            .unit_ids
+            .iter()
+            .map(|id| hex::encode(id.0))
+            .collect()
+    }
+
+    #[test]
+    fn r7_opbind_proves_a_rewritten_ops_leaf() {
+        let (batch, replay, [a, _, _]) = r6b_place_fixture();
+        let units = hexes(&batch);
+        assert!(opbind_proof(&batch, 0, &units).is_none(), "honest leaf");
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        let u = units[0].clone();
+        // (a) the Place committed as `x:{unit}` (10 (a)), (b) its margin /
+        // isolated / tif fields rewritten (R6-M1), (c) another account's p:.
+        let mut o: Vec<String> = batch.ops[0].split(':').map(String::from).collect();
+        o[6] = "1".into();
+        o[7] = (50_000 * minuend_types::USD_SCALE).to_string();
+        let forged_margin = o.join(":");
+        let other = batch.ops[0].replacen(&hex::encode(a.0), &"ab".repeat(32), 1);
+        for fake in [format!("x:{u}"), forged_margin, other] {
+            let mut lie = batch.clone();
+            set_op(&mut lie, 0, &fake);
+            let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+            assert_eq!(p.pred, "opbind", "{fake}");
+            assert_eq!(p.target(), "main");
+            assert_eq!(p.data["u_op"], batch.ops[0]);
+            assert_eq!(opbind_aa(&p.data, &units, &lie.ops), Some(true), "{fake}");
+            // The same payload against the honest leaves is 'no fraud'.
+            let mut honest = p.data.clone();
+            honest["op"] = batch.ops[0].clone().into();
+            honest["ops_proof"] = proof_json(&batch.ops, 0);
+            assert_eq!(opbind_aa(&honest, &units, &batch.ops), Some(false));
+        }
+    }
+
+    /// An `x:` op (no descriptor) is bound too: its leaf must be exactly
+    /// `x:{unit}`; and a descriptor containing `|` cannot be re-split by a
+    /// challenger to frame the honest leaf.
+    #[test]
+    fn r7_opbind_x_ops_and_split_rule() {
+        let s = sk(5);
+        let stake = sign_unit(
+            vec![genesis_id()],
+            Op::StakeOracle {
+                account: acct_of(&s),
+            },
+            &s,
+        );
+        let id = hex::encode(unit_id(&stake).0);
+        let pre = minuend_dag::unit_text_prefix(&stake);
+        let units = vec![id.clone()];
+        let mk = |op: &str, e: &str, pre: &str| {
+            let ops = vec![op.to_string()];
+            let d = serde_json::json!({
+                "k": 0, "op": op, "ops_proof": proof_json(&ops, 0),
+                "units_proof": proof_json(&units, 0), "u_pre": pre, "u_op": e,
+            });
+            (d, ops)
+        };
+        let (d, ops) = mk(&format!("x:{id}"), "x", &pre);
+        assert_eq!(opbind_aa(&d, &units, &ops), Some(false));
+        let fake = format!("p:{}:1:0:1:1:0:0:0:0", hex::encode(acct_of(&s).0));
+        let (d, ops) = mk(&fake, "x", &pre);
+        assert_eq!(opbind_aa(&d, &units, &ops), Some(true));
+        // Deposit with an odd address "A|B": honest leaf = full descriptor.
+        let dep = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&s),
+                addr: "A|B".into(),
+                amount: 5,
+                aa_unit: [7u8; 32],
+            },
+            &s,
+        );
+        let units = vec![hex::encode(unit_id(&dep).0)];
+        let desc = minuend_dag::op_descriptor(&dep.op).unwrap();
+        let pre = minuend_dag::unit_text_prefix(&dep);
+        let ops = vec![desc.clone()];
+        let honest = serde_json::json!({
+            "k": 0, "op": desc, "ops_proof": proof_json(&ops, 0),
+            "units_proof": proof_json(&units, 0), "u_pre": pre, "u_op": desc,
+        });
+        assert_eq!(opbind_aa(&honest, &units, &ops), Some(false));
+        // Re-split at the address's '|': same hash, but the prefix now has
+        // three '|' → bounce, never a verdict.
+        let cut = desc.find('|').unwrap() + 1;
+        let mut evil = honest.clone();
+        evil["u_pre"] = format!("{pre}{}", &desc[..cut]).into();
+        evil["u_op"] = desc[cut..].to_string().into();
+        assert_eq!(opbind_aa(&evil, &units, &ops), None);
+    }
+
+    /// Round 7 (未修复项 19): the engine never emits a second fill in a
+    /// unit, so a fabricated one (here: the real fill copied with idx 1,
+    /// the "turn a single-fill unit into multi-fill" escape) is P-fsane
+    /// fraud from the fill string alone.
+    #[test]
+    fn r7_fabricated_second_fill_is_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let mut lie = batch.clone();
+        let mut p: Vec<String> = lie.fills[0].split(':').map(String::from).collect();
+        p[2] = "1".into();
+        p[9] = "1".into();
+        let f1 = p.join(":");
+        lie.fills.push(f1.clone());
+        refill(&mut lie);
+        assert!(fsane_shape_bad(&f1.split(':').collect::<Vec<_>>()));
+        assert!(!fsane_shape_bad(&lie.fills[0].split(':').collect::<Vec<_>>()));
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&lie.fills);
+        let units = hexes(&lie);
+        let pr = fsane_proof(&lie, 0, &f1, &pre, &tree, &units).expect("fsane proof");
+        assert_eq!(pr.pred, "fsane");
+        assert!(pr.data.get("units_proof").is_some());
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
     }
 }

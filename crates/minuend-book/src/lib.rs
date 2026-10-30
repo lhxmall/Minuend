@@ -87,6 +87,10 @@ pub enum BookError {
     WrongMarket,
     #[error("self trade with escrowed own order")]
     SelfTrade,
+    /// Round 7: a Limit + Gtc order would take a second maker (one fill
+    /// per unit, see `OrderBook::submit_journaled`).
+    #[error("order would take more than one maker")]
+    MultiFill,
 }
 
 /// How `OrderBook::submit` treats a self-trade (the incoming order

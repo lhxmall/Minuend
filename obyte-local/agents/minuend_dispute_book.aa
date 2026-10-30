@@ -287,7 +287,7 @@
 				// P-fsane (R5-A-2 / R5-A-3): a posted fill the engine can
 				// never emit, judged from the fill string and PROVEN pre
 				// values only (any idx, any unit):
-				//   • shape: qty not a positive integer or >= QTY_CAP (1e15,
+				//   • shape: idx not the raw 0 (round 7: one fill per unit), qty not a positive integer or >= QTY_CAP (1e15,
 				//     R6-H1: `place` refuses it), price / taker_post
 				//     not integers, taker_post < 0, side not 0/1, kind not
 				//     0..3, or a kind 2/3 fill with taker_post != 0 (the
@@ -341,7 +341,12 @@
 					}
 					$kd = $shape14 ? $F[12] : 0;
 					$tp = $shape14 ? $F[13] : 0;
-					$bad = !$shape14 OR !is_integer($F[9]) OR $F[9] <= 0 OR $F[9] >= 1000000000000000 OR !is_integer($F[8])
+					// Round 7 (未修复项 19): the engine emits at most ONE fill
+					// per unit (book cap, no in-unit force-sell, one ADL
+					// counterparty), so any fill whose idx is not the raw
+					// '0' is fraud. F[1] is a proven 64-hex units leaf, so
+					// the idx sits at offset 66.
+					$bad = !$shape14 OR substring($fill, 66, 3) != ':0:' OR !is_integer($F[9]) OR $F[9] <= 0 OR $F[9] >= 1000000000000000 OR !is_integer($F[8])
 						OR !is_integer($tp) OR $tp < 0
 						OR !($F[11] == '0' OR $F[11] == '1')
 						OR !($kd == '0' OR $kd == '1' OR $kd == '2' OR $kd == '3')
