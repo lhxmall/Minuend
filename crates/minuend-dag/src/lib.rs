@@ -495,22 +495,49 @@ impl SigVerifier {
 
 fn account_matches(unit: &Unit) -> bool {
     let expected = account_id_from_pubkey(&unit.pubkey);
+    if op_signer(&unit.op) != expected {
+        return false;
+    }
+    // R2-E-1: a Reveal executes its inner op, so the inner op's own signing
+    // field (account/caller/voter/creator/…) must name the SAME account as
+    // the outer Reveal — i.e. the signer. Otherwise anyone could commit and
+    // reveal a Place/Withdraw/Vote "as" another account. Commit/Reveal may
+    // not nest inside a Reveal.
     match &unit.op {
+        Op::Reveal { op, .. } => reveal_inner_ok(&unit.op, op),
+        _ => true,
+    }
+}
+
+/// R2-E-1: whether `inner` may be executed by the Reveal `outer`: it must
+/// not itself be a Commit/Reveal, and its signing account must equal the
+/// outer Reveal's account. Shared by ingest (`account_matches`) and the
+/// executor (`reveal_op`) so both enforce the exact same rule.
+pub fn reveal_inner_ok(outer: &Op, inner: &Op) -> bool {
+    if matches!(inner, Op::Commit { .. } | Op::Reveal { .. }) {
+        return false;
+    }
+    op_signer(inner) == op_signer(outer)
+}
+
+/// The account whose key must sign `op` (the per-variant signing field).
+pub fn op_signer(op: &Op) -> AccountId {
+    match op {
         Op::Place { account, .. }
         | Op::Cancel { account, .. }
         | Op::Deposit { account, .. }
         | Op::Withdraw { account, .. }
         | Op::GovDeposit { account, .. }
-        | Op::GovWithdraw { account, .. } => *account == expected,
-        Op::StakeOracle { account } | Op::UnstakeOracle { account } => *account == expected,
-        Op::SlashOracle { challenger, .. } => *challenger == expected,
-        Op::Commit { account, .. } | Op::Reveal { account, .. } => *account == expected,
-        Op::UpdateExternalPrice { source, .. } => *source == expected,
-        Op::Liquidate { caller, .. } | Op::FinalizeProposal { caller, .. } => *caller == expected,
-        Op::ReportPrice { oracle, .. } => *oracle == expected,
-        Op::CreateMarket { creator, .. } => *creator == expected,
-        Op::CreateProposal { creator, .. } => *creator == expected,
-        Op::Vote { voter, .. } => *voter == expected,
+        | Op::GovWithdraw { account, .. } => *account,
+        Op::StakeOracle { account } | Op::UnstakeOracle { account } => *account,
+        Op::SlashOracle { challenger, .. } => *challenger,
+        Op::Commit { account, .. } | Op::Reveal { account, .. } => *account,
+        Op::UpdateExternalPrice { source, .. } => *source,
+        Op::Liquidate { caller, .. } | Op::FinalizeProposal { caller, .. } => *caller,
+        Op::ReportPrice { oracle, .. } => *oracle,
+        Op::CreateMarket { creator, .. } => *creator,
+        Op::CreateProposal { creator, .. } => *creator,
+        Op::Vote { voter, .. } => *voter,
     }
 }
 

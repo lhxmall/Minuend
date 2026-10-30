@@ -213,8 +213,16 @@ fn duplicate_withdraw_300h_rejected_after_restart() {
     );
 }
 
+/// R2-E-7: the gov-nonce WAL still survives a snapshot-less crash, but it no
+/// longer drives execution. The WAL is written when a batch is CUT, not when
+/// it lands on chain, so letting it reject units made the producer diverge
+/// from every validator after dropping an un-posted batch. Execution reads
+/// committed state only (validators see the same); the WAL is reported via
+/// `gov_wal_ahead` so the node knows to resync posted batches before
+/// producing (a stale producer cannot post anyway: the rollup AA checks
+/// `prev_state_hash`).
 #[test]
-fn gov_nonce_watermark_survives_restart_without_snapshot() {
+fn gov_nonce_wal_survives_restart_without_snapshot_but_does_not_drive_execution() {
     let dir = temp_store("2");
     let mut eng = stored(&dir);
     allow_all(&mut eng);
@@ -227,8 +235,7 @@ fn gov_nonce_watermark_survives_restart_without_snapshot() {
     eng.ingest(d).unwrap();
 
     // GovWithdraw nonce=5: buffered at ingest, persisted to the journal at
-    // BATCH COMMIT (`from_applied`) — an uncommitted batch never burns a
-    // nonce (H2), so the commit must happen before the simulated crash.
+    // BATCH COMMIT (`from_applied`).
     let w = gov_with(vec![tip], &alice, 100, 5);
     let wid = unit_id(&w);
     let prev = eng.state.clone();
@@ -238,45 +245,21 @@ fn gov_nonce_watermark_survives_restart_without_snapshot() {
         "gov_with nonce=5 must apply, got {evs:?}"
     );
     minuend_settle::Batch::from_applied(&prev, &mut eng, &[wid]).unwrap();
+    assert!(!eng.gov_wal_ahead(&acct_of(&alice)));
 
-    // Crash WITHOUT any snapshot: the journal alone must carry the watermark
-    // across the restart (closes the snapshot-cadence gap of up to 63 heights).
+    // Crash WITHOUT any snapshot: the journal survives...
     let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
     allow_all(&mut eng2);
-    // #47 H3: WAL-only nonces live beside committed state, not in it; the
-    // producing watermark reads both.
-    assert_eq!(
-        eng2.gov_nonce_watermark(&acct_of(&alice)),
-        5,
-        "watermark must survive a snapshot-less crash via the journal"
-    );
-
-    // No double-apply across the watermark after restart:
-    // the exact same nonce is still consumed...
-    let evs = eng2.ingest(gov_with(vec![g], &alice, 50, 5)).unwrap();
-    assert_eq!(rejected(&evs), Some(&RejectReason::DuplicateNonce));
-    // ...and so is any lower nonce (strict watermark, gaps allowed).
-    let evs = eng2.ingest(gov_with(vec![g], &alice, 50, 4)).unwrap();
-    assert_eq!(rejected(&evs), Some(&RejectReason::DuplicateNonce));
-    // A strictly higher nonce applies and re-journals... (PERP balances live
-    // in the snapshot, not the journal — with no snapshot they come from
-    // temp_data replay; here a fresh GovDeposit re-funds the account.)
-    let evs = eng2.ingest(gov_dep(vec![g], &alice, 500, 8)).unwrap();
+    assert_eq!(eng2.wal_gov_nonces.get(&acct_of(&alice)).copied(), Some(5));
     assert!(
-        evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
-        "refund must apply, got {evs:?}"
+        eng2.gov_wal_ahead(&acct_of(&alice)),
+        "the restarted node must see that its WAL is ahead of its state"
     );
-    let w6 = gov_with(vec![g], &alice, 50, 6);
-    let prev3 = eng2.state.clone();
-    let evs = eng2.ingest(w6.clone()).unwrap();
-    assert!(
-        evs.iter().any(|e| matches!(e, ExecEvent::Applied { .. })),
-        "higher nonce must apply, got {evs:?}"
-    );
-    minuend_settle::Batch::from_applied(&prev3, &mut eng2, &[unit_id(&w6)]).unwrap();
-    // ...and survives yet another restart.
-    let eng3 = Engine::load_or_genesis(&dir).unwrap();
-    assert_eq!(eng3.gov_nonce_watermark(&acct_of(&alice)), 6);
+    // ...but execution reads committed state only, identically in both
+    // modes (no producer/validator divergence).
+    assert_eq!(eng2.gov_nonce_watermark(&acct_of(&alice)), 0);
+    eng2.validating = true;
+    assert_eq!(eng2.gov_nonce_watermark(&acct_of(&alice)), 0);
 }
 
 #[test]
