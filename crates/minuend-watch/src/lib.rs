@@ -1805,7 +1805,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("minuend-watch-badck-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(load_checkpoint(&dir).unwrap().is_none(), "empty dir = genesis");
+        assert!(
+            load_checkpoint(&dir).unwrap().is_none(),
+            "empty dir = genesis"
+        );
         std::fs::write(dir.join("chainstate.7.snap"), b"\x05\0\0\0old-format").unwrap();
         let Err(err) = load_checkpoint(&dir) else {
             panic!("all-unreadable checkpoints must refuse");
@@ -1833,7 +1836,10 @@ mod tests {
         let back = load_checkpoint_at(&dir, 2).unwrap().unwrap();
         assert_eq!(back.state.height, 2);
         assert_eq!(back.recent_units, eng.recent_units);
-        assert!(load_checkpoint_at(&dir, 1).unwrap().is_none(), "below last_finalized");
+        assert!(
+            load_checkpoint_at(&dir, 1).unwrap().is_none(),
+            "below last_finalized"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1843,8 +1849,7 @@ mod tests {
     #[test]
     fn rewind_target_detects_verdict_and_resubmission() {
         use std::collections::BTreeMap;
-        let accepted: BTreeMap<u64, String> =
-            (3..=8).map(|h| (h, format!("U{h}"))).collect();
+        let accepted: BTreeMap<u64, String> = (3..=8).map(|h| (h, format!("U{h}"))).collect();
         let view = |ls: u64, frozen: u64, changed: Option<u64>| ChainView {
             last_submitted: ls,
             last_finalized: 2,

@@ -2822,7 +2822,9 @@ mod tests {
     fn pack_frames_cuts_on_raw_size() {
         let leaves: Vec<String> = (0..40).map(|i| format!("acct:{i}:100")).collect();
         let l = serde_json::to_string(&leaves).unwrap();
-        let frames: Vec<String> = (0..50).map(|i| format!("{{\"u\":{i},\"l\":{l}}}")).collect();
+        let frames: Vec<String> = (0..50)
+            .map(|i| format!("{{\"u\":{i},\"l\":{l}}}"))
+            .collect();
         let raw_cap = 4096;
         let one = pack_frames(&frames);
         assert_eq!(one.len(), 1, "the source cap alone keeps them together");

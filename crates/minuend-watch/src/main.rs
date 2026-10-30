@@ -17,9 +17,9 @@ use minuend_exec::Engine;
 use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
     batch_from_committed, check_committed_roots, committed_frame_bytes, create_private_temp_dir,
-    fetch_da_unit, load_checkpoint, load_checkpoint_at, prove, resolve_start_height,
-    rewind_target, save_checkpoint_retaining, verify_da_binding, write_private_proof, ChainView,
-    HubClient, WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
+    fetch_da_unit, load_checkpoint, load_checkpoint_at, prove, resolve_start_height, rewind_target,
+    save_checkpoint_retaining, verify_da_binding, write_private_proof, ChainView, HubClient,
+    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -816,12 +816,7 @@ fn check_height(
 /// stripped). Without a proof nothing is spawned. R2-R-11: posters run in
 /// the background (reaped by the poll loop) and a `(height, predicate)`
 /// that is in flight or already broadcast is never posted again.
-fn maybe_post_challenge(
-    h: u64,
-    submission: &str,
-    alert: &str,
-    proof: Option<&prove::BuiltProof>,
-) {
+fn maybe_post_challenge(h: u64, submission: &str, alert: &str, proof: Option<&prove::BuiltProof>) {
     let mode = current_challenge_mode();
     if mode == ChallengeMode::PrintOnly {
         eprintln!("WATCH ALERT (print-only, no MINUEND_WATCH_MNEMONIC): {alert}");
@@ -1227,8 +1222,8 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::{
         challenge_key, challenge_mode, challenge_postable, challenge_window_open,
-        live_challenge_args, post_decision, record_exit, AttemptState, ChallengeCtx,
-        ChallengeMode, ChallengeTracker, PostDecision, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS,
+        live_challenge_args, post_decision, record_exit, AttemptState, ChallengeCtx, ChallengeMode,
+        ChallengeTracker, PostDecision, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS,
         CHALLENGE_WINDOW_SECS, LIVE_EXIT_REFUSED, MAX_POST_FAILURES,
     };
 
@@ -1263,8 +1258,14 @@ mod tests {
         assert_eq!(post_decision(t.states.get(&new)), PostDecision::Post);
         // Same height, same predicate, different submission: distinct keys
         // for every combination.
-        assert_ne!(challenge_key(5, "UNIT_A", "wpin"), challenge_key(5, "UNIT_A", "adr"));
-        assert_ne!(challenge_key(5, "UNIT_A", "wpin"), challenge_key(6, "UNIT_A", "wpin"));
+        assert_ne!(
+            challenge_key(5, "UNIT_A", "wpin"),
+            challenge_key(5, "UNIT_A", "adr")
+        );
+        assert_ne!(
+            challenge_key(5, "UNIT_A", "wpin"),
+            challenge_key(6, "UNIT_A", "wpin")
+        );
     }
 
     /// R3-R-2: after a rewind the cursor resumes right above the rewound
