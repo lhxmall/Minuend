@@ -114,6 +114,9 @@ fn main() {
         .export_frames()
         .expect("frames within the watcher raw-size caps (R3-R-1)");
     header["frames"] = serde_json::to_value(&frames).unwrap();
+    // R4-E-1 / R4-R-5: the deposit units this producer APPLIED — the only
+    // frames post_batch.js builds and stamps evidence for (by index).
+    header["applied_deposits"] = serde_json::Value::Array(batch.applied_deposit_list());
     let out: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../obyte-local/batch.json")
         .canonicalize()

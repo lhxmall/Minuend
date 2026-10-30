@@ -946,6 +946,28 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
   的 `--rollup`，dispute AA 地址取 rollup 自己绑定的变量（R2-R-8）；同一
   `(高度, 谓词)` 不重复付费发帖（R2-R-11）；证明文件私有、不跟随符号链接（R2-R-12）。
 
+### 10.9 第 4 轮（#47 R4）充值 evidence 变更
+
+1. **按 unit 背书**（R4-E-1 / R4-R-1 / R4-E-4）：`Batch::unit_evidences[k]` 是帧 k 的
+   `"e"`。生产者只给**执行成功**的 Deposit/GovDeposit 帧盖章（`Batch::applied_deposits`、
+   `attach_deposit_evidences`；batch.json 导出 `applied_deposits` 列表，`frame_stamp.js`
+   按帧下标盖章）。重放在执行帧 k 之前登记它的锚点，k 未执行成功即恢复原登记；
+   其它引用同一锚点的 unit 一律被拒。不再有 `DepositDuplicateAnchor` 整批失败。
+2. **认定规则 = 金库记账**（R4-E-2 / R4-R-3 / R4-A-2 / R4-A-7）：`vault_deposit_of`
+   复现 ocore `getTrigger` 与金库 case：首条 data 消息；同一资产付给金库的输出求和；
+   `deposit` 为真 → base（即使同时有 `deposit_perp`），否则 `deposit_perp` 为真 → PERP；
+   base 金额 = 求和 − 10000 > 0，PERP = PERP 资产求和 > 0；base 输出 < 10000、
+   `max_aa_responses: 0`、account 不是 64 位小写 hex 字符串（或会被 Oscript 转成数字）
+   都视为没有记账。类别由 joint 决定，不由 op 决定。
+3. **大小**（R4-R-2）：被拒的充值不带 evidence，总量只计执行成功的充值；单份上限
+   `DEPOSIT_EVIDENCE_UNIT_MAX_BYTES = 256 KiB`（超出 = 不可登记，按 unit 拒绝），整批上限
+   1 MiB 由生产者切批保证。
+4. **发帖**（R4-R-5）：`post_batch.js` 只为执行成功的充值取 joint；取不到（不存在或
+   重试后仍出错）、与金库 `dep_`/`depp_` 记录不符、超限 → 抛错、不发帖。
+5. **生产者要求**：金库记录存在且 `deposit_verify::admit_deposit` 通过才 `allow_deposit`。
+   这样无论生产者何时看到记录，重放结果都与它一致。已知限制：形状特殊（例如 > 256 KiB）
+   的付款不会被登记，钱留在金库中，需要另行处理。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**

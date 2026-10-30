@@ -7,7 +7,7 @@ use minuend_types::{
     PERP_ASSET, VAULT_AA_ADDRESS,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub mod deposit_verify;
 pub mod obyte_hash;
@@ -139,8 +139,16 @@ pub struct Batch {
     pub chain_id: String,
     pub checkpoint: Checkpoint,
     pub units: Vec<Unit>,
-    #[allow(dead_code)]
-    pub deposit_evidences: Vec<DepositEvidence>,
+    /// R4-E-1 / R4-E-4 (per-unit deposit evidence): `unit_evidences[k]` is
+    /// the evidence stamped on frame `k` (`"e"`). An honest producer stamps
+    /// it on exactly the Deposit/GovDeposit units it APPLIED, one per
+    /// applied unit ([`Batch::attach_deposit_evidences`]); the replay admits
+    /// that anchor for that unit only. Empty = no evidence at all.
+    pub unit_evidences: Vec<Option<DepositEvidence>>,
+    /// Producer-side marker (not on the wire as such): `applied_deposits[k]`
+    /// is true when unit `k` is a Deposit/GovDeposit the producing engine
+    /// APPLIED. Rebuilt from frames as "frame `k` carries evidence".
+    pub applied_deposits: Vec<bool>,
     /// DA arrays for watchers (AA stores only the roots): per-unit wit roots
     /// in batch order, op descriptors in batch order, fill descriptors in
     /// execution order.
@@ -426,6 +434,23 @@ pub fn fills_root_elements(fills: &[String]) -> Vec<String> {
     v
 }
 
+/// Per-unit deposit admission to undo when the stamped unit is not applied:
+/// `(key, key was allowed before, previous backing)`.
+type AdmissionUndo = (
+    ([u8; 32], bool),
+    bool,
+    Option<minuend_state::DepositBacking>,
+);
+
+/// `(anchor, is_perp)` of a Deposit (`false`) / GovDeposit (`true`) op.
+pub fn deposit_key(op: &minuend_dag::Op) -> Option<([u8; 32], bool)> {
+    match op {
+        minuend_dag::Op::Deposit { aa_unit, .. } => Some((*aa_unit, false)),
+        minuend_dag::Op::GovDeposit { aa_unit, .. } => Some((*aa_unit, true)),
+        _ => None,
+    }
+}
+
 impl Batch {
     pub fn from_applied(
         prev: &minuend_state::ChainState,
@@ -453,6 +478,23 @@ impl Batch {
             units.push(u);
         }
         let applied_set: HashSet<&UnitId> = applied.iter().collect();
+        // R4-E-1: which deposit units the engine actually applied — the
+        // only units that will carry (and may use) deposit evidence.
+        let applied_ok: HashSet<UnitId> = engine
+            .log
+            .iter()
+            .filter_map(|ev| match ev {
+                minuend_exec::ExecEvent::Applied { unit, .. } if applied_set.contains(unit) => {
+                    Some(*unit)
+                }
+                _ => None,
+            })
+            .collect();
+        let applied_deposits: Vec<bool> = units
+            .iter()
+            .zip(applied.iter())
+            .map(|(u, id)| deposit_key(&u.op).is_some() && applied_ok.contains(id))
+            .collect();
         let mut fills_buf = Vec::new();
         let mut fill_count = 0u32;
         let mut per_unit_map: std::collections::HashMap<UnitId, Vec<String>> =
@@ -577,8 +619,9 @@ impl Batch {
                 validity_proof_hash: None,
                 perp_burned: Some(engine.state.perp_burned),
             },
+            unit_evidences: Vec::new(),
+            applied_deposits,
             units,
-            deposit_evidences: Vec::new(),
             trace,
             ops,
             fills: fill_elements,
@@ -603,21 +646,64 @@ impl Batch {
             data,
         }
     }
+    /// R4-E-1 / R4-R-2: attach evidence from `pool` to exactly the deposit
+    /// units this producer APPLIED (`applied_deposits`), matched by
+    /// `(anchor, kind)`; every other unit carries none. Returns how many
+    /// applied deposits got evidence (an applied deposit left without one
+    /// fails every watcher: the producer must not post such a batch).
+    pub fn attach_deposit_evidences(&mut self, pool: &[DepositEvidence]) -> usize {
+        let mut out: Vec<Option<DepositEvidence>> = vec![None; self.units.len()];
+        let mut n = 0;
+        for (k, u) in self.units.iter().enumerate() {
+            if !self.applied_deposits.get(k).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some((anchor, is_perp)) = deposit_key(&u.op) else {
+                continue;
+            };
+            let hexa = hex::encode(anchor);
+            if let Some(ev) = pool
+                .iter()
+                .find(|e| e.aa_unit.to_lowercase() == hexa && e.is_perp == is_perp)
+            {
+                out[k] = Some(ev.clone());
+                n += 1;
+            }
+        }
+        self.unit_evidences = out;
+        n
+    }
+    /// All stamped evidences in frame order (the R3 `deposit_evidences`
+    /// list, now derived from [`Batch::unit_evidences`]).
+    pub fn deposit_evidences(&self) -> Vec<DepositEvidence> {
+        self.unit_evidences.iter().flatten().cloned().collect()
+    }
+    /// R4-R-5: the applied deposit units the poster must build evidence
+    /// for, as `{"index", "aa_unit" (hex), "is_perp"}` (exported in
+    /// batch.json as `applied_deposits`; `post_batch.js` stamps by index).
+    pub fn applied_deposit_list(&self) -> Vec<serde_json::Value> {
+        self.units
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| self.applied_deposits.get(*k).copied().unwrap_or(false))
+            .filter_map(|(k, u)| {
+                deposit_key(&u.op).map(|(a, p)| {
+                    serde_json::json!({"index": k, "aa_unit": hex::encode(a), "is_perp": p})
+                })
+            })
+            .collect()
+    }
     /// One JSON string per applied unit: `{"u":unit,"t":trace,"o":ops,
     /// "c":counts,"f"?:fills,"l"?:leaves,"e"?:evidence}`. Omit `f` when the
-    /// unit has no fills; include `e` iff Deposit/GovDeposit with a matching
-    /// evidence by `aa_unit`; omit `l` iff that unit's leaf-trace entry is
-    /// empty.
+    /// unit has no fills; include `e` iff [`Batch::unit_evidences`] holds one
+    /// for that unit (R4: only APPLIED deposits); omit `l` iff that unit's
+    /// leaf-trace entry is empty.
     ///
     /// R2-R-3: fallible instead of panicking. A unit whose op cannot be
     /// encoded (an out-of-range 128-bit amount) is refused at ingest
     /// (`minuend_exec::op_amounts_encodable`), so on any engine-built batch
     /// this never errs; a hand-built batch gets `FrameEncode`, not a panic.
     pub fn frames(&self) -> Result<Vec<String>, SettleError> {
-        let mut evidence_by_anchor: HashMap<String, &DepositEvidence> = HashMap::new();
-        for ev in &self.deposit_evidences {
-            evidence_by_anchor.insert(ev.aa_unit.to_lowercase(), ev);
-        }
         let mut out = Vec::with_capacity(self.units.len());
         for (k, u) in self.units.iter().enumerate() {
             let unit_json = serde_json::json!({
@@ -653,18 +739,13 @@ impl Batch {
                     );
                 }
             }
-            let anchor: Option<[u8; 32]> = match &u.op {
-                minuend_dag::Op::Deposit { aa_unit, .. } => Some(*aa_unit),
-                minuend_dag::Op::GovDeposit { aa_unit, .. } => Some(*aa_unit),
-                _ => None,
-            };
-            if let Some(a) = anchor {
-                if let Some(ev) = evidence_by_anchor.get(&hex::encode(a).to_lowercase()) {
-                    frame.insert(
-                        "e".to_string(),
-                        serde_json::to_value(ev).map_err(|_| SettleError::FrameEncode)?,
-                    );
-                }
+            // R4-E-1: evidence rides only the frame it was attached to (an
+            // applied deposit), never every frame citing the anchor.
+            if let Some(Some(ev)) = self.unit_evidences.get(k) {
+                frame.insert(
+                    "e".to_string(),
+                    serde_json::to_value(ev).map_err(|_| SettleError::FrameEncode)?,
+                );
             }
             out.push(serde_json::to_string(&frame).map_err(|_| SettleError::FrameEncode)?);
         }
@@ -795,68 +876,99 @@ impl Batch {
         if replay.state.state_root() != prev_root {
             return Err(SettleError::PrevMismatch);
         }
-        // R3-R-4: deposit anchors are endorsed per unit. Only a Deposit/
-        // GovDeposit whose evidence verifies (the joint pays the vault the
-        // claimed amount in the claimed asset) is endorsed for the replay;
-        // one without valid evidence (e.g. a user-signed unit naming a bogus
-        // `aa_unit`, which the producer also rejected) is rejected by the
-        // replay like on the producer instead of failing the whole height.
-        // Every deposit the replay APPLIES must still carry verified
-        // evidence (checked right after the ingest loop), so an operator
-        // cannot credit an unpaid deposit.
-        let mut deposit_units: HashMap<UnitId, ([u8; 32], bool)> = HashMap::new();
-        for u in &self.units {
-            match &u.op {
-                minuend_dag::Op::Deposit { aa_unit, .. } => {
-                    deposit_units.insert(minuend_dag::unit_id(u), (*aa_unit, false));
+        // R4-E-1 / R4-E-4 / R4-R-2 (per-unit deposit endorsement): the
+        // evidence stamped on frame k vouches for unit k ONLY. Its anchor is
+        // admitted (with the verified payment) right before unit k executes
+        // and the admission is withdrawn again if unit k is not applied, so
+        // every other unit citing the same anchor — a front-run, a
+        // duplicate, a cross-kind op, an op signed before the payment
+        // reached the vault — sees no admission and is rejected exactly as
+        // on the producer, which stamps evidence on the deposits it applied
+        // and nothing else. Evidence that fails verification (wrong kind,
+        // not a vault deposit, over the per-evidence cap) endorses nothing:
+        // that unit alone is rejected. Every deposit the replay APPLIES must
+        // be a stamped unit with verified evidence (checked after ingest),
+        // so an operator cannot credit an unpaid deposit.
+        if !self.unit_evidences.is_empty() && self.unit_evidences.len() != self.units.len() {
+            return Err(SettleError::DepositEvidence);
+        }
+        let mut deposit_units: HashSet<UnitId> = HashSet::new();
+        let mut total_ev_bytes: usize = 0;
+        for (k, u) in self.units.iter().enumerate() {
+            let key = deposit_key(&u.op);
+            if key.is_some() {
+                deposit_units.insert(minuend_dag::unit_id(u));
+            }
+            if let Some(Some(ev)) = self.unit_evidences.get(k) {
+                // Only the operator stamps evidence: evidence on a
+                // non-deposit frame is a malformed batch.
+                if key.is_none() {
+                    return Err(SettleError::DepositEvidence);
                 }
-                minuend_dag::Op::GovDeposit { aa_unit, .. } => {
-                    deposit_units.insert(minuend_dag::unit_id(u), (*aa_unit, true));
-                }
-                _ => {}
+                total_ev_bytes = total_ev_bytes.saturating_add(deposit_verify::evidence_len(ev));
             }
         }
-        let mut endorsed: HashMap<([u8; 32], bool), deposit_verify::VerifiedDeposit> =
-            HashMap::new();
-        if !deposit_units.is_empty() {
-            // Pre-deploy (empty expected vault) evidence checks skip when
-            // there are no evidences; evidences against an empty vault
-            // string are rejected.
-            let vault = expected_vault();
-            if vault.is_empty() && !self.deposit_evidences.is_empty() {
-                return Err(SettleError::DepositEvidence);
-            }
-            endorsed = deposit_verify::verify_each(
-                &self.units,
-                &self.deposit_evidences,
-                &vault,
-                &PERP_ASSET,
-            )
-            .map_err(|_| SettleError::DepositEvidence)?;
-            // R3-E-1 / R3-A-5: each endorsed anchor is admitted together
-            // with the payment its evidence proves (amount, payer address,
-            // payer-designated account), so the engine credits exactly that
-            // payment to exactly that account; any other op on the anchor
-            // (front-run, wrong amount/address) is a rejected unit.
-            for ((anchor, is_perp), v) in &endorsed {
-                replay
-                    .state
-                    .allow_deposit(*anchor, *is_perp, v.amount, &v.payer, v.account);
-            }
+        // The batch-wide budget only counts APPLIED deposits' evidence (no
+        // user can add to it with rejected units); the producer cuts the
+        // batch before it is exceeded.
+        if total_ev_bytes > deposit_verify::DEPOSIT_EVIDENCE_BATCH_MAX_BYTES {
+            return Err(SettleError::DepositEvidence);
         }
+        let vault = expected_vault();
+        if vault.is_empty() && self.unit_evidences.iter().any(|e| e.is_some()) {
+            return Err(SettleError::DepositEvidence);
+        }
+        let mut endorsed_units: HashSet<UnitId> = HashSet::new();
         let pre_len = replay.log.len();
-        for u in &self.units {
+        for (k, u) in self.units.iter().enumerate() {
+            let uid = minuend_dag::unit_id(u);
+            let mut restore: Option<AdmissionUndo> = None;
+            if let (Some(Some(ev)), Some((anchor, is_perp))) =
+                (self.unit_evidences.get(k), deposit_key(&u.op))
+            {
+                if let Ok(v) =
+                    deposit_verify::verify_unit_evidence(ev, anchor, is_perp, &vault, &PERP_ASSET)
+                {
+                    let key = (anchor, is_perp);
+                    restore = Some((
+                        key,
+                        replay.state.deposits_allowed.contains(&key),
+                        replay.state.deposit_backing.get(&key).cloned(),
+                    ));
+                    replay
+                        .state
+                        .allow_deposit(anchor, is_perp, v.amount, &v.payer, v.account);
+                    endorsed_units.insert(uid);
+                }
+            }
+            let before = replay.log.len();
             replay.ingest(u.clone()).map_err(|_| SettleError::Replay)?;
+            if let Some((key, had, prev_backing)) = restore {
+                let applied_now = replay.log.iter().skip(before).any(|ev| {
+                    matches!(ev, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == uid)
+                });
+                if !applied_now {
+                    if !had {
+                        replay.state.deposits_allowed.remove(&key);
+                    }
+                    match prev_backing {
+                        Some(b) => {
+                            replay.state.deposit_backing.insert(key, b);
+                        }
+                        None => {
+                            replay.state.deposit_backing.remove(&key);
+                        }
+                    }
+                }
+            }
         }
-        // R3-R-4: an APPLIED deposit needs verified evidence (a rejected one
-        // needs none).
+        // R3-R-4: an APPLIED deposit needs verified evidence of its own (a
+        // rejected one needs none).
         if !deposit_units.is_empty() {
             for ev in replay.log.iter().skip(pre_len) {
                 if let minuend_exec::ExecEvent::Applied { unit, .. } = ev {
-                    if let Some(anchor) = deposit_units.get(unit) {
-                        if !endorsed.contains_key(anchor) {
-                            return Err(SettleError::DepositEvidence);
-                        }
+                    if deposit_units.contains(unit) && !endorsed_units.contains(unit) {
+                        return Err(SettleError::DepositEvidence);
                     }
                 }
             }
@@ -1355,7 +1467,7 @@ pub fn batch_from_frames(
     let mut fills = Vec::new();
     let mut fills_per_unit: Vec<Vec<String>> = Vec::with_capacity(frames.len());
     let mut leaf_trace: Vec<Vec<String>> = Vec::with_capacity(frames.len());
-    let mut deposit_evidences: Vec<DepositEvidence> = Vec::new();
+    let mut unit_evidences: Vec<Option<DepositEvidence>> = Vec::with_capacity(frames.len());
     let mut derived_ids: Vec<UnitId> = Vec::with_capacity(frames.len());
     for f in frames {
         let v: serde_json::Value = serde_json::from_str(f).map_err(|_| SettleError::Replay)?;
@@ -1368,9 +1480,9 @@ pub fn batch_from_frames(
         fills.extend(uf.iter().cloned());
         fills_per_unit.push(uf);
         leaf_trace.push(l);
-        if let Some(ev) = e {
-            deposit_evidences.push(ev);
-        }
+        // R4-E-1: evidence stays bound to its own frame (no anchor-keyed
+        // pooling, so two frames citing one anchor cannot collide).
+        unit_evidences.push(e);
     }
     if unit_count as usize != units.len() {
         return Err(SettleError::RootMismatch);
@@ -1412,8 +1524,9 @@ pub fn batch_from_frames(
             validity_proof_hash,
             perp_burned,
         },
+        applied_deposits: unit_evidences.iter().map(|e| e.is_some()).collect(),
+        unit_evidences,
         units,
-        deposit_evidences,
         trace,
         ops,
         fills,
@@ -1523,14 +1636,19 @@ mod tests {
         payer: &str,
         account: minuend_types::AccountId,
     ) -> serde_json::Value {
-        let outputs = serde_json::json!([{
-            "address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-            "amount": amount,
-        }]);
+        // R4: the vault records base = outputs - 10000 bounce fee; a PERP
+        // trigger must still carry the 10000-byte base bounce fee.
+        let vault = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
         let payload = match asset {
-            None => serde_json::json!({ "outputs": outputs }),
-            Some(a) => serde_json::json!({ "outputs": outputs, "asset": a }),
+            None => {
+                serde_json::json!({ "outputs": [{ "address": vault, "amount": amount + 10_000 }] })
+            }
+            Some(a) => {
+                serde_json::json!({ "outputs": [{ "address": vault, "amount": amount }], "asset": a })
+            }
         };
+        let fee_payload =
+            serde_json::json!({ "outputs": [{ "address": vault, "amount": 10_000 }] });
         // R3-A-5: the vault trigger names the credited account; payload
         // hashes bind both payloads to the unit hash.
         let data = if asset.is_none() {
@@ -1541,14 +1659,19 @@ mod tests {
         let unit_v = serde_json::json!({ "version": "4.0dev" });
         let ph = obyte_hash::get_payload_hash(&payload, &unit_v).unwrap();
         let dh = obyte_hash::get_payload_hash(&data, &unit_v).unwrap();
+        let fh = obyte_hash::get_payload_hash(&fee_payload, &unit_v).unwrap();
+        let mut messages = vec![
+            serde_json::json!({ "app": "data", "payload_location": "inline", "payload_hash": dh, "payload": data }),
+            serde_json::json!({ "app": "payment", "payload_location": "inline", "payload_hash": ph, "payload": payload }),
+        ];
+        if asset.is_some() {
+            messages.push(serde_json::json!({ "app": "payment", "payload_location": "inline", "payload_hash": fh, "payload": fee_payload }));
+        }
         serde_json::json!({
             "version": "4.0dev",
             "alt": "3",
             "authors": [{ "address": payer }],
-            "messages": [
-                { "app": "data", "payload_location": "inline", "payload_hash": dh, "payload": data },
-                { "app": "payment", "payload_location": "inline", "payload_hash": ph, "payload": payload }
-            ],
+            "messages": messages,
             "parent_units": [
                 "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
             ],
@@ -1681,7 +1804,7 @@ mod tests {
     fn replay_batch_same_root() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert_eq!(pre.state.state_root(), eng.state.state_root());
     }
@@ -1699,7 +1822,7 @@ mod tests {
                 a
             })
             .collect();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert_eq!(pre.state.state_root(), eng.state.state_root());
         for (i, a) in anchors.iter().enumerate() {
@@ -1757,7 +1880,7 @@ mod tests {
     fn assertion_roots_committed_and_verified() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         let cp = &batch.checkpoint;
         assert_eq!(cp.assertion_version, minuend_types::ASSERTION_VERSION);
         for r in [
@@ -1801,7 +1924,7 @@ mod tests {
         for field in ["trace", "wit", "count"] {
             let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
             let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-            batch.deposit_evidences = evidences;
+            batch.attach_deposit_evidences(&evidences);
             match field {
                 "trace" => batch.checkpoint.trace_root = batch.checkpoint.ops_root.clone(),
                 "wit" => batch.checkpoint.wit_root = batch.checkpoint.trace_root.clone(),
@@ -1819,7 +1942,7 @@ mod tests {
     fn mutated_fill_price_mismatches() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.checkpoint.state_root[0] ^= 0xff;
         assert_eq!(
             batch.validate_against(prev_root, &mut pre),
@@ -1834,7 +1957,7 @@ mod tests {
         // the sentinel — no submitted integer needed.
         let (mut eng, pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         assert_eq!(batch.fills.len(), 1, "seed_trade fills exactly once");
         let expected = obyte_merkle::root(&[batch.fills[0].clone(), "n:1".to_string()]);
         assert_eq!(batch.checkpoint.fills_root, expected);
@@ -1861,7 +1984,7 @@ mod tests {
     fn zero_fill_batch_hashes_single_sentinel() {
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert!(batch.fills.is_empty());
         assert_eq!(
             batch.checkpoint.fills_root,
@@ -1981,7 +2104,7 @@ mod tests {
             .collect();
         assert_eq!(fills.iter().sum::<usize>(), 1);
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.validate_against(prev_root, &mut pre).unwrap();
     }
 
@@ -2066,7 +2189,7 @@ mod tests {
         applied.push(gid);
         eng.ingest(gov).unwrap();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         // validate_against consumes the replay engine, so prove the intact
         // batch against a copy and the stripped batch against the original.
         let mut intact = pre.clone();
@@ -2101,7 +2224,7 @@ mod tests {
         // flipping one entry of the committed forest fails validation.
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.checkpoint.aa_shard_roots[3] = "0".repeat(64);
         assert_eq!(
             batch.validate_against(prev_root, &mut pre),
@@ -2112,7 +2235,7 @@ mod tests {
     fn tampered_aa_root_is_root_mismatch() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         batch.checkpoint.aa_root.push('0');
         assert_eq!(
             batch.validate_against(prev_root, &mut pre),
@@ -2190,7 +2313,7 @@ mod tests {
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
         let mut batch_with_ev = batch;
-        batch_with_ev.deposit_evidences = vec![ev];
+        batch_with_ev.attach_deposit_evidences(&[ev]);
         let mut rp = pre.clone();
         batch_with_ev
             .validate_against(pre.state.state_root(), &mut rp)
@@ -2206,7 +2329,7 @@ mod tests {
         ev.joint["messages"][1]["payload"]["outputs"][0]["amount"] =
             serde_json::json!(9_000_000_000u64);
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2219,14 +2342,14 @@ mod tests {
         let (mut eng, pre, _, id, mut ev) = one_deposit_fixture();
         ev.account = hex::encode([9u8; 32]);
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev.clone()];
+        batch.attach_deposit_evidences(std::slice::from_ref(&ev));
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
         );
         // Rewriting the data payload too breaks its payload_hash.
         ev.joint["messages"][0]["payload"]["account"] = serde_json::json!(ev.account.clone());
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2299,7 +2422,7 @@ mod tests {
         // Validator replay: evidence installs the designated account, the
         // thief's unit replays as rejected, roots agree.
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[sid, oid]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         let mut rp = pre.clone();
         batch
             .validate_against(pre.state.state_root(), &mut rp)
@@ -2337,7 +2460,7 @@ mod tests {
             "producer must reject the unbacked deposit"
         );
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id, bogus_id]).unwrap();
-        batch.deposit_evidences = vec![ev.clone()];
+        batch.attach_deposit_evidences(std::slice::from_ref(&ev));
         let mut rp = pre.clone();
         batch
             .validate_against(pre.state.state_root(), &mut rp)
@@ -2347,7 +2470,7 @@ mod tests {
         let j = payment_joint(12, 7_000, None, &test_addr(11), acct_of(&secret));
         let mut wrong = evidence_from(&j, 7_000i128.to_string(), false);
         wrong.aa_unit = hex::encode([0xAB; 32]);
-        batch.deposit_evidences = vec![ev, wrong];
+        batch.attach_deposit_evidences(&[ev, wrong]);
         batch
             .validate_against(pre.state.state_root(), &mut pre.clone())
             .unwrap();
@@ -2358,7 +2481,7 @@ mod tests {
         let (mut eng, pre, _, id, mut ev) = one_deposit_fixture();
         ev.amount = "5000000001".to_string();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2369,7 +2492,7 @@ mod tests {
     fn missing_joint_is_rejected() {
         let (mut eng, pre, _, id, _) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![]; // no joint at all
+        batch.attach_deposit_evidences(&[]); // no joint at all
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2381,7 +2504,7 @@ mod tests {
         let (mut eng, pre, _, id, mut ev) = one_deposit_fixture();
         ev.vault_address = "SOMEBODYELSE".to_string(); // != expected vault
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2414,7 +2537,7 @@ mod tests {
         let id = unit_id(&g);
         eng.ingest(g).unwrap();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![evidence_from(&j, 5_000i128.to_string(), true)];
+        batch.attach_deposit_evidences(&[evidence_from(&j, 5_000i128.to_string(), true)]);
         assert_eq!(
             batch.validate_against(pre.state.state_root(), &mut pre.clone()),
             Err(SettleError::DepositEvidence)
@@ -2431,16 +2554,6 @@ mod tests {
         let mut ev = evidence_from(&j, 5_000i128.to_string(), false);
         assert_eq!(ev.payer, test_addr(6));
         ev.payer = "SOMEBODYELSE".to_string(); // != authors[0].address
-        let u = sign_unit(
-            vec![genesis_id()],
-            Op::Deposit {
-                account: acct_of(&secret),
-                addr: test_addr(6),
-                amount: 5_000,
-                aa_unit: a,
-            },
-            &secret,
-        );
         assert_eq!(
             deposit_verify::verify_evidence(
                 &ev,
@@ -2449,16 +2562,16 @@ mod tests {
             ),
             Err(SettleError::DepositContentMismatch)
         );
-        assert!(deposit_verify::verify_each(
-            std::slice::from_ref(&u),
-            &[ev],
+        assert!(deposit_verify::verify_unit_evidence(
+            &ev,
+            a,
+            false,
             crate::TEST_VAULT_ADDRESS,
             &minuend_types::PERP_ASSET
         )
-        .unwrap()
-        .is_empty());
-        // payer == authors[0] but != the sidechain op's addr: the anchor is
-        // endorsed with the REAL payer, and the engine rejects the op
+        .is_err());
+        // payer == authors[0] but != the sidechain op's addr: the evidence
+        // verifies with the REAL payer, and the engine rejects the op
         // (per-unit `UnbackedDeposit`, not a batch-wide evidence failure).
         let ev2 = evidence_from(&j, 5_000i128.to_string(), false);
         let u2 = sign_unit(
@@ -2471,14 +2584,15 @@ mod tests {
             },
             &secret,
         );
-        let got = deposit_verify::verify_each(
-            std::slice::from_ref(&u2),
-            &[ev2],
+        let got = deposit_verify::verify_unit_evidence(
+            &ev2,
+            a,
+            false,
             crate::TEST_VAULT_ADDRESS,
             &minuend_types::PERP_ASSET,
         )
         .unwrap();
-        let v = &got[&(a, false)];
+        let v = &got;
         assert_eq!((v.amount, v.payer.as_str()), (5_000, test_addr(6).as_str()));
         let mut eng = Engine::new();
         eng.state
@@ -2550,7 +2664,7 @@ mod tests {
             5_000_000_000
         );
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[sid, oid]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         let mut rp = pre.clone();
         batch
             .validate_against(pre.state.state_root(), &mut rp)
@@ -2628,7 +2742,7 @@ mod tests {
         // half-replayed — state_root stays exactly the pre-call value.
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         let good_root = batch.checkpoint.state_root;
         batch.checkpoint.state_root = [0xAB; 32]; // corrupt the posted root
         let mut watcher = pre.clone();
@@ -2653,19 +2767,17 @@ mod tests {
     fn evidences_roundtrip_through_payload() {
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         let (header, blobs) = batch.temp_data_packages().unwrap();
         assert_eq!(blobs.len(), 1);
         let raw = decode_package_blob(&blobs[0]).unwrap();
         let text = String::from_utf8(raw).unwrap();
         let frames: Vec<String> = text.lines().map(str::to_string).collect();
         let rebuilt = batch_from_frames(&header, &frames).unwrap();
-        assert_eq!(rebuilt.deposit_evidences.len(), 1);
-        assert_eq!(
-            rebuilt.deposit_evidences[0].aa_unit,
-            batch.deposit_evidences[0].aa_unit
-        );
-        assert_eq!(rebuilt.deposit_evidences[0], batch.deposit_evidences[0]);
+        assert_eq!(rebuilt.unit_evidences.len(), 1);
+        assert!(rebuilt.unit_evidences[0].is_some());
+        assert_eq!(rebuilt.unit_evidences, batch.unit_evidences);
+        assert_eq!(rebuilt.applied_deposits, vec![true]);
         // Absent key → empty vec.
         assert!(evidences_from_payload(&serde_json::json!({}))
             .unwrap()
@@ -2680,7 +2792,7 @@ mod tests {
     fn oversized_header_counts_are_rejected_not_wrapped() {
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         let (header, blobs) = batch.temp_data_packages().unwrap();
         let raw = decode_package_blob(&blobs[0]).unwrap();
         let text = String::from_utf8(raw).unwrap();
@@ -2773,7 +2885,7 @@ mod tests {
         let (mut eng, pre_a, units_a, evidences_a) = build();
         let prev_root_a = pre_a.state.state_root();
         let mut batch_a = Batch::from_applied(&pre_a.state, &mut eng, &units_a).unwrap();
-        batch_a.deposit_evidences = evidences_a;
+        batch_a.attach_deposit_evidences(&evidences_a);
         let mut rp = pre_a.clone();
         batch_a.validate_against(prev_root_a, &mut rp).unwrap();
 
@@ -3018,11 +3130,11 @@ mod tests {
         eng.ingest(r).unwrap();
 
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = vec![evidence_from(
+        batch.attach_deposit_evidences(&[evidence_from(
             &j,
             (10_000 * USD_SCALE as i128).to_string(),
             false,
-        )];
+        )]);
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert_eq!(pre.state.state_root(), eng.state.state_root());
         assert!(eng.state.commits[&hash].revealed);
@@ -3035,7 +3147,7 @@ mod tests {
     fn frames_roundtrip_batch_equality() {
         let (mut eng, pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         let frames = batch.frames().unwrap();
         assert_eq!(frames.len(), batch.units.len());
         let (header, blobs) = batch.temp_data_packages().unwrap();
@@ -3055,7 +3167,7 @@ mod tests {
         assert_eq!(rebuilt.fills, batch.fills);
         assert_eq!(rebuilt.fills_per_unit, batch.fills_per_unit);
         assert_eq!(rebuilt.leaf_trace, batch.leaf_trace);
-        assert_eq!(rebuilt.deposit_evidences, batch.deposit_evidences);
+        assert_eq!(rebuilt.unit_evidences, batch.unit_evidences);
         assert_eq!(rebuilt.checkpoint, batch.checkpoint);
         let mut rp = pre.clone();
         rebuilt.validate_against(prev_root, &mut rp).unwrap();
@@ -3185,7 +3297,7 @@ mod tests {
     fn oversize_da_is_refused_not_stripped() {
         let (mut eng, pre, _, id, ev) = one_deposit_fixture();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
-        batch.deposit_evidences = vec![ev];
+        batch.attach_deposit_evidences(&[ev]);
         assert!(batch.temp_data_packages().is_ok());
         let ok_len = batch.da_raw_len().unwrap();
         assert!(ok_len + DA_EVIDENCE_HEADROOM_BYTES <= MAX_COMMITTED_RAW_BYTES);
@@ -3353,7 +3465,7 @@ mod tests {
     fn validate_against_restores_caller_mode() {
         let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         assert!(!pre.validating);
         batch.validate_against(prev_root, &mut pre).unwrap();
         assert!(!pre.validating, "caller left in validating mode");
@@ -3367,7 +3479,7 @@ mod tests {
     fn frames_out_of_range_amount_errors_instead_of_panicking() {
         let (mut eng, pre, applied, _prev_root, evidences) = seed_trade();
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
-        batch.deposit_evidences = evidences;
+        batch.attach_deposit_evidences(&evidences);
         assert!(batch.frames().is_ok());
         let mut bad = batch.units[0].clone();
         bad.op = minuend_dag::Op::GovWithdraw {
@@ -3382,5 +3494,529 @@ mod tests {
             batch.temp_data_packages(),
             Err(SettleError::FrameEncode)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Round 4: per-unit deposit evidence through the REAL frame path
+    // (frames() → temp_data packages → batch_from_frames → validate_against).
+
+    const R4_VAULT: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    /// Joint with arbitrary (app, payload) messages, payload hashes bound.
+    fn joint_with(n: u8, payer: &str, msgs: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let unit_v = serde_json::json!({ "version": "4.0dev" });
+        let messages: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|(app, p)| {
+                let h = obyte_hash::get_payload_hash(p, &unit_v).unwrap();
+                serde_json::json!({ "app": app, "payload_location": "inline", "payload_hash": h, "payload": p })
+            })
+            .collect();
+        serde_json::json!({
+            "version": "4.0dev",
+            "alt": "3",
+            "authors": [{ "address": payer }],
+            "messages": messages,
+            "parent_units": ["CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"],
+            "last_ball": "abc",
+            "last_ball_unit": "def",
+            "timestamp": 1_300_000_000u64 + u64::from(n)
+        })
+    }
+
+    fn base_pay(amounts: &[u64]) -> serde_json::Value {
+        let outs: Vec<serde_json::Value> = amounts
+            .iter()
+            .map(|a| serde_json::json!({ "address": R4_VAULT, "amount": a }))
+            .collect();
+        serde_json::json!({ "outputs": outs })
+    }
+
+    fn vd(j: &serde_json::Value) -> Option<deposit_verify::VaultDeposit> {
+        deposit_verify::vault_deposit_of(j, R4_VAULT, &minuend_types::PERP_ASSET).unwrap()
+    }
+
+    fn roundtrip(batch: &Batch) -> Batch {
+        let (header, blobs) = batch.temp_data_packages().unwrap();
+        let mut frames = Vec::new();
+        for b in &blobs {
+            let raw = decode_package_blob(b).unwrap();
+            frames.extend(String::from_utf8(raw).unwrap().lines().map(str::to_string));
+        }
+        batch_from_frames(&header, &frames).unwrap()
+    }
+
+    fn stamped_frames(batch: &Batch) -> usize {
+        batch
+            .frames()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                serde_json::from_str::<serde_json::Value>(f)
+                    .unwrap()
+                    .get("e")
+                    .is_some()
+            })
+            .count()
+    }
+
+    fn dep(secret: &[u8; 32], parent: UnitId, addr: &str, amount: i128, a: [u8; 32]) -> Unit {
+        sign_unit(
+            vec![parent],
+            Op::Deposit {
+                account: acct_of(secret),
+                addr: addr.to_string(),
+                amount,
+                aa_unit: a,
+            },
+            secret,
+        )
+    }
+
+    fn fresh_engine() -> Engine {
+        let mut eng = Engine::new();
+        eng.state
+            .markets
+            .insert(BTC_USD, minuend_types::genesis_params());
+        eng
+    }
+
+    fn was_applied(evs: &[minuend_exec::ExecEvent], id: UnitId) -> bool {
+        evs.iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == id))
+    }
+
+    /// R4-E-1 / R4-R-1: front-run + victim cite one anchor. Only the
+    /// applied (victim) frame carries `e`; the frame round trip validates
+    /// (no DepositDuplicateAnchor) and the replay ends in the producer's
+    /// state, deposit admission tables included (snapshot determinism).
+    #[test]
+    fn r4_front_run_same_anchor_through_frames() {
+        let mut eng = fresh_engine();
+        let victim = sk(4);
+        let thief = sk(9);
+        let j = payment_joint(21, 5_000_000_000, None, &test_addr(4), acct_of(&victim));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 5_000_000_000i128.to_string(), false);
+        let pre = eng.clone();
+        eng.state
+            .allow_deposit(a, false, 5_000_000_000, &test_addr(4), acct_of(&victim));
+        // Thief: same anchor, own account; then again with the victim's addr.
+        let s1 = dep(&thief, genesis_id(), &test_addr(9), 5_000_000_000, a);
+        let s1id = unit_id(&s1);
+        assert!(!was_applied(&eng.ingest(s1).unwrap(), s1id));
+        let s2 = dep(&thief, s1id, &test_addr(4), 5_000_000_000, a);
+        let s2id = unit_id(&s2);
+        assert!(!was_applied(&eng.ingest(s2).unwrap(), s2id));
+        let own = dep(&victim, s2id, &test_addr(4), 5_000_000_000, a);
+        let oid = unit_id(&own);
+        assert!(was_applied(&eng.ingest(own).unwrap(), oid));
+        // Victim's wallet retry: DuplicateDeposit on the producer.
+        let retry = dep(&victim, oid, &test_addr(4), 5_000_000_000, a);
+        let rid = unit_id(&retry);
+        assert!(!was_applied(&eng.ingest(retry).unwrap(), rid));
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[s1id, s2id, oid, rid]).unwrap();
+        assert_eq!(batch.applied_deposits, vec![false, false, true, false]);
+        assert_eq!(batch.attach_deposit_evidences(&[ev]), 1);
+        assert_eq!(stamped_frames(&batch), 1);
+        let list = batch.applied_deposit_list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["index"], 2);
+        let rebuilt = roundtrip(&batch);
+        assert_eq!(rebuilt.applied_deposits, vec![false, false, true, false]);
+        let mut rp = pre.clone();
+        rebuilt
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert_eq!(rp.state.deposits_allowed, eng.state.deposits_allowed);
+        assert_eq!(rp.state.deposit_backing, eng.state.deposit_backing);
+        assert!(!rp.state.accounts.contains_key(&acct_of(&thief)));
+    }
+
+    /// R4-E-2 scenario A / R4-A-2: a GovDeposit citing a BASE anchor before
+    /// the real Deposit is a rejected unit; the base evidence (kind from the
+    /// joint, not from the first op) still rides the applied Deposit frame.
+    #[test]
+    fn r4_cross_kind_front_run_through_frames() {
+        let mut eng = fresh_engine();
+        let victim = sk(4);
+        let thief = sk(9);
+        let j = payment_joint(22, 5_000_000_000, None, &test_addr(4), acct_of(&victim));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 5_000_000_000i128.to_string(), false);
+        let pre = eng.clone();
+        eng.state
+            .allow_deposit(a, false, 5_000_000_000, &test_addr(4), acct_of(&victim));
+        let g = sign_unit(
+            vec![genesis_id()],
+            Op::GovDeposit {
+                account: acct_of(&thief),
+                addr: test_addr(9),
+                amount: 5_000_000_000,
+                aa_unit: a,
+            },
+            &thief,
+        );
+        let gid = unit_id(&g);
+        assert!(!was_applied(&eng.ingest(g).unwrap(), gid));
+        let own = dep(&victim, gid, &test_addr(4), 5_000_000_000, a);
+        let oid = unit_id(&own);
+        assert!(was_applied(&eng.ingest(own).unwrap(), oid));
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[gid, oid]).unwrap();
+        // A (wrong) PERP-kind evidence in the pool is never attached to the
+        // base unit, and a base one never to the GovDeposit.
+        let mut perp_ev = ev.clone();
+        perp_ev.is_perp = true;
+        assert_eq!(batch.attach_deposit_evidences(&[perp_ev, ev]), 1);
+        let rebuilt = roundtrip(&batch);
+        let mut rp = pre.clone();
+        rebuilt
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+    }
+
+    /// R4-E-4: the user signs the Deposit before the vault recorded the
+    /// payment (producer rejects it), then re-signs after the producer
+    /// admitted the anchor (applied). Watchers agree because only the
+    /// applied unit is stamped, whatever the producer's admission timing.
+    #[test]
+    fn r4_deposit_before_admission_through_frames() {
+        let mut eng = fresh_engine();
+        let user = sk(5);
+        let j = payment_joint(23, 7_000_000, None, &test_addr(5), acct_of(&user));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 7_000_000i128.to_string(), false);
+        let pre = eng.clone();
+        let early = dep(&user, genesis_id(), &test_addr(5), 7_000_000, a);
+        let eid = unit_id(&early);
+        assert!(!was_applied(&eng.ingest(early).unwrap(), eid));
+        // Batch 1 with only the early unit: no evidence anywhere, the joint
+        // already exists on Obyte — the replay must still reject the unit.
+        let mut b1 = Batch::from_applied(&pre.state, &mut eng, &[eid]).unwrap();
+        assert_eq!(b1.attach_deposit_evidences(std::slice::from_ref(&ev)), 0);
+        let mut rp = pre.clone();
+        roundtrip(&b1)
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        // Producer admits now (vault record seen); the user re-signs.
+        let pre2 = eng.clone();
+        eng.state
+            .allow_deposit(a, false, 7_000_000, &test_addr(5), acct_of(&user));
+        let late = dep(&user, eid, &test_addr(5), 7_000_000, a);
+        let lid = unit_id(&late);
+        assert!(was_applied(&eng.ingest(late).unwrap(), lid));
+        let mut b2 = Batch::from_applied(&pre2.state, &mut eng, &[lid]).unwrap();
+        assert_eq!(b2.attach_deposit_evidences(&[ev]), 1);
+        roundtrip(&b2)
+            .validate_against(pre2.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert_eq!(rp.state.accounts[&acct_of(&user)].collateral, 7_000_000);
+    }
+
+    /// R4-R-2: hundreds of rejected deposits citing real (historical)
+    /// anchors carry no evidence at all — nothing counts against the budget.
+    #[test]
+    fn r4_rejected_deposits_carry_no_evidence() {
+        let mut eng = fresh_engine();
+        let spam = sk(13);
+        let pre = eng.clone();
+        let mut ids = Vec::new();
+        let mut pool = Vec::new();
+        let mut tip = genesis_id();
+        for n in 0..200u8 {
+            let j = payment_joint(n, 20_000, None, &test_addr(13), acct_of(&spam));
+            let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+            pool.push(evidence_from(&j, 20_000i128.to_string(), false));
+            let u = dep(&spam, tip, &test_addr(13), 20_000, a);
+            tip = unit_id(&u);
+            eng.ingest(u).unwrap();
+            ids.push(tip);
+        }
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &ids).unwrap();
+        assert_eq!(batch.attach_deposit_evidences(&pool), 0);
+        assert_eq!(stamped_frames(&batch), 0);
+        let mut rp = pre.clone();
+        roundtrip(&batch)
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+    }
+
+    /// R4-R-1 (operator variant): evidence stamped on TWO frames of one
+    /// anchor is no longer a batch-wide error: the second unit is a
+    /// DuplicateDeposit on the replay as on the producer.
+    #[test]
+    fn r4_double_stamp_is_per_unit() {
+        let mut eng = fresh_engine();
+        let user = sk(6);
+        let j = payment_joint(24, 9_000_000, None, &test_addr(6), acct_of(&user));
+        let a: [u8; 32] = obyte_hash::get_unit_hash(&j).unwrap();
+        let ev = evidence_from(&j, 9_000_000i128.to_string(), false);
+        let pre = eng.clone();
+        eng.state
+            .allow_deposit(a, false, 9_000_000, &test_addr(6), acct_of(&user));
+        let d1 = dep(&user, genesis_id(), &test_addr(6), 9_000_000, a);
+        let d1id = unit_id(&d1);
+        eng.ingest(d1).unwrap();
+        let d2 = dep(&user, d1id, &test_addr(6), 9_000_000, a);
+        let d2id = unit_id(&d2);
+        assert!(!was_applied(&eng.ingest(d2).unwrap(), d2id));
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[d1id, d2id]).unwrap();
+        batch.unit_evidences = vec![Some(ev.clone()), Some(ev)];
+        let rebuilt = roundtrip(&batch);
+        let mut rp = pre.clone();
+        rebuilt
+            .validate_against(pre.state.state_root(), &mut rp)
+            .unwrap();
+        assert_eq!(rp.state.state_root(), eng.state.state_root());
+        assert_eq!(rp.state.deposit_backing, eng.state.deposit_backing);
+    }
+
+    /// An applied deposit whose frame lost its evidence (or carries an
+    /// evidence that does not verify) still fails the height: an operator
+    /// cannot credit an unbacked deposit.
+    #[test]
+    fn r4_applied_without_valid_evidence_fails() {
+        let (mut eng, pre, _, id, ev) = one_deposit_fixture();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &[id]).unwrap();
+        batch.attach_deposit_evidences(std::slice::from_ref(&ev));
+        let mut bad = ev;
+        bad.amount = "1".into();
+        batch.unit_evidences = vec![Some(bad)];
+        assert_eq!(
+            roundtrip(&batch).validate_against(pre.state.state_root(), &mut pre.clone()),
+            Err(SettleError::DepositEvidence)
+        );
+        batch.unit_evidences = vec![None];
+        assert_eq!(
+            roundtrip(&batch).validate_against(pre.state.state_root(), &mut pre.clone()),
+            Err(SettleError::DepositEvidence)
+        );
+    }
+
+    /// Evidence on a non-deposit frame is a malformed (operator) batch.
+    #[test]
+    fn r4_evidence_on_non_deposit_frame_fails() {
+        let (mut eng, mut pre, applied, prev_root, evidences) = seed_trade();
+        let mut batch = Batch::from_applied(&pre.state, &mut eng, &applied).unwrap();
+        batch.attach_deposit_evidences(&evidences);
+        let last = batch.units.len() - 1;
+        batch.unit_evidences[last] = Some(evidences[0].clone());
+        assert_eq!(
+            roundtrip(&batch).validate_against(prev_root, &mut pre),
+            Err(SettleError::DepositEvidence)
+        );
+    }
+
+    /// R4-R-2: a single over-size evidence endorses nothing (per-unit).
+    #[test]
+    fn r4_oversize_evidence_is_not_admissible() {
+        let user = sk(7);
+        let pad = "x".repeat(deposit_verify::DEPOSIT_EVIDENCE_UNIT_MAX_BYTES);
+        let data = serde_json::json!({ "deposit": 1, "account": hex::encode(acct_of(&user).0) });
+        let j = joint_with(
+            1,
+            &test_addr(7),
+            &[
+                ("data", data),
+                ("payment", base_pay(&[30_000])),
+                ("text", serde_json::json!(pad)),
+            ],
+        );
+        let rec = vd(&j).unwrap();
+        assert_eq!(rec.amount, 20_000);
+        let ev = evidence_from(&j, "20000".into(), false);
+        assert_eq!(
+            deposit_verify::verify_evidence(&ev, R4_VAULT, &minuend_types::PERP_ASSET),
+            Err(SettleError::DepositEvidenceTooLarge)
+        );
+    }
+
+    /// R4-E-2 / R4-R-3 / R4-A-7 vectors: evidence = what the vault records.
+    #[test]
+    fn r4_vault_rule_vectors() {
+        let acct = hex::encode(acct_of(&sk(8)).0);
+        let payer = test_addr(8);
+        let d = |v: serde_json::Value| ("data", v);
+        // (a) no `deposit` key → no record (vault takes another case).
+        let j = joint_with(
+            1,
+            &payer,
+            &[
+                d(serde_json::json!({"account": acct})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+        // (a) deposit_perp but only base paid → 'bad deposit'.
+        let j = joint_with(
+            2,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit_perp": 1, "account": acct})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+        // (a) exactly the bounce fee → 'deposit too small'.
+        let j = joint_with(
+            3,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "account": acct})),
+                ("payment", base_pay(&[10_000])),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+        // falsy flags: "0", 0, false, "" → no deposit.
+        for f in [
+            serde_json::json!("0"),
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!(""),
+        ] {
+            let j = joint_with(
+                4,
+                &payer,
+                &[
+                    d(serde_json::json!({"deposit": f, "account": acct})),
+                    ("payment", base_pay(&[50_000])),
+                ],
+            );
+            assert_eq!(vd(&j), None);
+        }
+        // (b) several outputs to the vault are SUMMED (trigger.output).
+        let j = joint_with(
+            5,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "account": acct})),
+                ("payment", base_pay(&[5_000, 1_000_000])),
+            ],
+        );
+        assert_eq!(vd(&j).unwrap().amount, 1_005_000 - 10_000);
+        let ev = evidence_from(&j, "995000".into(), false);
+        assert!(deposit_verify::verify_evidence(&ev, R4_VAULT, &minuend_types::PERP_ASSET).is_ok());
+        let ev_first = evidence_from(&j, "0".into(), false);
+        assert!(
+            deposit_verify::verify_evidence(&ev_first, R4_VAULT, &minuend_types::PERP_ASSET)
+                .is_err()
+        );
+        // (c) two data messages: the FIRST one counts.
+        let j = joint_with(
+            6,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "account": acct})),
+                d(serde_json::json!({"withdraw": 1})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        let r = vd(&j).unwrap();
+        assert_eq!((r.is_perp, r.amount), (false, 40_000));
+        let j = joint_with(
+            7,
+            &payer,
+            &[
+                d(serde_json::json!({"withdraw": 1})),
+                d(serde_json::json!({"deposit": 1, "account": acct})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+        // (d) PERP: a junk-asset payment first, then PERP; base bounce fee.
+        let junk = serde_json::json!({"asset": hex::encode([7u8; 32]), "outputs": [{"address": R4_VAULT, "amount": 999}]});
+        let perp = serde_json::json!({"asset": hex::encode(minuend_types::PERP_ASSET), "outputs": [{"address": R4_VAULT, "amount": 4_000}]});
+        let j = joint_with(
+            8,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit_perp": 1, "account": acct})),
+                ("payment", junk.clone()),
+                ("payment", perp.clone()),
+                ("payment", base_pay(&[10_000])),
+            ],
+        );
+        let r = vd(&j).unwrap();
+        assert_eq!((r.is_perp, r.amount), (true, 4_000));
+        // PERP without the 10000-byte base bounce fee: no trigger effect.
+        let j = joint_with(
+            9,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit_perp": 1, "account": acct})),
+                ("payment", perp.clone()),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+        // Both flags: the base case wins (case order).
+        let j = joint_with(
+            10,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "deposit_perp": 1, "account": acct})),
+                ("payment", perp),
+                ("payment", base_pay(&[30_000])),
+            ],
+        );
+        let r = vd(&j).unwrap();
+        assert_eq!((r.is_perp, r.amount), (false, 20_000));
+        let ev_perp = evidence_from(&j, "4000".into(), true);
+        assert_eq!(
+            deposit_verify::verify_evidence(&ev_perp, R4_VAULT, &minuend_types::PERP_ASSET),
+            Err(SettleError::DepositKindMismatch)
+        );
+        // max_aa_responses: 0 → bounced.
+        let mut j = joint_with(
+            11,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "account": acct})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        j["max_aa_responses"] = serde_json::json!(0);
+        assert_eq!(vd(&j), None);
+        // All-digit account: Oscript reads a number → 'bad account'.
+        let j = joint_with(
+            12,
+            &payer,
+            &[
+                d(serde_json::json!({"deposit": 1, "account": "1".repeat(64)})),
+                ("payment", base_pay(&[50_000])),
+            ],
+        );
+        assert_eq!(vd(&j), None);
+    }
+
+    /// R4-E-4 producer rule: admission needs the evidence AND the vault
+    /// record to agree field by field.
+    #[test]
+    fn r4_admit_deposit_matches_vault_record() {
+        let user = sk(4);
+        let j = payment_joint(25, 5_000_000_000, None, &test_addr(4), acct_of(&user));
+        let ev = evidence_from(&j, 5_000_000_000i128.to_string(), false);
+        let acct = hex::encode(acct_of(&user).0);
+        let ok = format!("{}:5000000000:{}", test_addr(4), acct);
+        assert!(
+            deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &ok).is_ok()
+        );
+        let bad_amt = format!("{}:4999999999:{}", test_addr(4), acct);
+        assert!(
+            deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &bad_amt)
+                .is_err()
+        );
+        let bad_acct = format!("{}:5000000000:{}", test_addr(4), "ab".repeat(32));
+        assert!(deposit_verify::admit_deposit(
+            &ev,
+            R4_VAULT,
+            &minuend_types::PERP_ASSET,
+            &bad_acct
+        )
+        .is_err());
     }
 }

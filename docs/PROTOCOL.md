@@ -198,7 +198,16 @@ docs/MECHANISMS.md「spot_only 的偿付不变量」。提款后既不得落入 
 - `deposits_allowed: HashSet<aa_unit>`：deposit op 引用的 AA 存款事件必须出现在
   本批次窗口的白名单里，否则 `UnbackedDeposit` 拒绝——存款不能凭空铸造。
 生产路径中该集合来自真实 Obyte AA 存款事件（金库 `dep_` / `depp_` 记录）；replay 时由
-`validate_against` 只为 evidence **验过**的锚点登记（第 3 轮 R3-R-4：`verify_each`）。
+`validate_against` **按 unit** 登记（第 4 轮 R4-E-1/E-4）：evidence 只盖在生产者
+**实际执行成功**的那个充值帧上，重放只在执行该 unit 前登记它的锚点，该 unit 未执行成功
+则撤销登记；引用同一锚点的其它 unit（抢跑、重复、跨类别、在金库记账前签的）都看不到
+登记，与生产者一样被拒。evidence 的认定规则与金库记账逐条一致（R4-E-2：第一条 data
+消息、按金库地址**求和**全部输出、`deposit` / `deposit_perp` 的 Oscript 真值与 case 顺序、
+金额 > 0、PERP 资产 id、10000 bounce 费、`max_aa_responses`），见
+`deposit_verify::vault_deposit_of`。**生产者要求**：只有当金库记录存在且
+`deposit_verify::admit_deposit(evidence, vault, PERP, 记录)` 通过时才 `allow_deposit`，
+并为执行成功的充值帧附上该 evidence；单份 evidence ≤ 256 KiB（超出即不可登记），
+一批 evidence 合计 ≤ 1 MiB（生产者提前切批，`post_batch.js` 超出即拒发）。
 每个登记的锚点都带 `deposit_backing = (amount, payer, account)`（`allow_deposit`），
 Deposit / GovDeposit 必须与之完全一致：账户不同 → `BadAccount`，金额或地址不同 →
 `UnbackedDeposit`；被拒 unit 不使批次无效，但任何 Applied 的充值必须有验过的 evidence。
