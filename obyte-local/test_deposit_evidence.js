@@ -109,7 +109,7 @@ const rec = `${PAYER}:40000:${ACCT}`;
   await assert.rejects(d.buildAppliedEvidences(undefined, frames, { vault: VAULT, fetchJoint: async () => goodJoint }), /applied_deposits/);
   // Size caps: a huge joint is refused (per deposit), many applied ones exceed the batch budget.
   const huge = unit([dataMsg({ deposit: 1, account: ACCT }), basePay(50000), { app: "text", payload: "x".repeat(d.DEPOSIT_EVIDENCE_UNIT_MAX_BYTES) }]);
-  await rejectsWith({ fetchJoint: async () => huge }, /per-deposit cap/);
+  await rejectsWith({ fetchJoint: async () => huge }, /posting limit/);
   const bigText = { app: "text", payload: "x".repeat(200000) };
   const manyFrames = [];
   const manyApplied = [];
@@ -121,7 +121,51 @@ const rec = `${PAYER}:40000:${ACCT}`;
   await assert.rejects(d.buildAppliedEvidences(manyApplied, manyFrames, {
     vault: VAULT, perpAsset: PERP_B64, sleep: noSleep,
     fetchJoint: async () => unit([dataMsg({ deposit: 1, account: ACCT }), basePay(50000), bigText]),
-  }), /cut the batch/);
+  }), /posting limit/);
+
+  // --- R5-E-1 / R5-R-1: one shared set of limits --------------------------
+  assert.ok(d.DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES < d.DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES);
+  assert.ok(d.DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES < d.DEPOSIT_EVIDENCE_UNIT_MAX_BYTES);
+  assert.ok(d.DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES < d.DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES);
+  assert.ok(d.DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES < d.DEPOSIT_EVIDENCE_BATCH_MAX_BYTES);
+  // Shared size vector (Rust: r5_evidence_size_vector_matches_js).
+  const vec = require("./test_vectors/evidence_size.json");
+  assert.strictEqual(d.evidenceBytes(vec.evidence), vec.bytes);
+  // A joint whose evidence is exactly `target` bytes (text padding).
+  const sized = async (target) => {
+    const mk = (pad) => unit([dataMsg({ deposit: 1, account: ACCT }), basePay(50000), { app: "text", payload: "x".repeat(pad) }]);
+    const ev0 = (await d.buildAppliedEvidences(applied, frames, { vault: VAULT, perpAsset: PERP_B64, sleep: noSleep, fetchJoint: async () => mk(0) })).get(2);
+    const j = mk(target - d.evidenceBytes(ev0));
+    return j;
+  };
+  const build = (j) => d.buildAppliedEvidences(applied, frames, { vault: VAULT, perpAsset: PERP_B64, sleep: noSleep, fetchJoint: async () => j });
+  // 0.97 x 256 KiB: a watcher would accept it, but the producer does not
+  // admit it (Rust r5_admit_limit_below_post_and_verify_limits) AND the
+  // poster refuses it: both sides agree.
+  await assert.rejects(build(await sized(Math.floor(d.DEPOSIT_EVIDENCE_UNIT_MAX_BYTES * 97 / 100))), /posting limit/);
+  // Anything the producer may admit (<= admit limit) is posted.
+  const okJ = await sized(d.DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES);
+  const okM = await build(okJ);
+  assert.strictEqual(d.evidenceBytes(okM.get(2)), d.DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES);
+  // Batch: 0.97 MiB of applied evidence is refused (Rust:
+  // r5_batch_total_097_mib_refused_by_admission); the admission budget
+  // (960 KiB) is posted.
+  const batchOf = async (count, per) => {
+    const fr = [];
+    const ap = [];
+    const mk = (pad) => unit([dataMsg({ deposit: 1, account: ACCT }), basePay(50000), { app: "text", payload: "x".repeat(pad) }]);
+    for (let i = 0; i < count; i++) {
+      const aa = (i + 32).toString(16).padStart(2, "0").repeat(32);
+      fr.push(depFrame(aa, 40000));
+      ap.push({ index: i, aa_unit: aa, is_perp: false });
+    }
+    const probe = await d.buildAppliedEvidences([ap[0]], fr, { vault: VAULT, perpAsset: PERP_B64, sleep: noSleep, fetchJoint: async () => mk(0) });
+    const pad = per - d.evidenceBytes(probe.get(0));
+    return d.buildAppliedEvidences(ap, fr, { vault: VAULT, perpAsset: PERP_B64, sleep: noSleep, fetchJoint: async () => mk(pad) });
+  };
+  await assert.rejects(batchOf(5, Math.floor(d.DEPOSIT_EVIDENCE_BATCH_MAX_BYTES * 97 / 100 / 5)), /posting limit/);
+  const fit = await batchOf(4, d.DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES / 4);
+  assert.strictEqual([...fit.values()].reduce((t, e) => t + d.evidenceBytes(e), 0), d.DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES);
   // Big amounts (> 2^53) are compared exactly from the frame bytes.
   const bigAmt = "9007199254740993"; // 2^53 + 1
   const bf = [depFrame(A, bigAmt)];

@@ -227,6 +227,10 @@ pub enum SettleError {
     DepositDuplicateAnchor,
     #[error("deposit evidence too large")]
     DepositEvidenceTooLarge,
+    /// R5-E-1: applying this deposit would push the batch's evidence over
+    /// the producer's admission budget (defer it to the next batch).
+    #[error("deposit evidence batch budget exhausted")]
+    DepositEvidenceBudget,
     #[error("gov wal flush failed")]
     WalFlush,
     /// R3-R-1: the batch's committed frame bytes exceed the raw-size caps a
@@ -678,6 +682,33 @@ impl Batch {
     pub fn deposit_evidences(&self) -> Vec<DepositEvidence> {
         self.unit_evidences.iter().flatten().cloned().collect()
     }
+    /// R5-E-1: total serialized size of the stamped evidence (the measure
+    /// the watcher's batch cap uses).
+    pub fn deposit_evidence_bytes(&self) -> usize {
+        self.unit_evidences
+            .iter()
+            .flatten()
+            .fold(0usize, |t, e| t.saturating_add(deposit_verify::evidence_len(e)))
+    }
+    /// R5-E-1: producer self-check after [`Batch::attach_deposit_evidences`]:
+    /// every stamped evidence and the batch total are within the producer's
+    /// ADMISSION limits (which are below what `post_batch.js` posts and
+    /// what watchers accept). A producer that admits through
+    /// [`deposit_verify::DepositEvidenceBudget`] always passes.
+    pub fn check_evidence_admission_limits(&self) -> Result<(), SettleError> {
+        if self
+            .unit_evidences
+            .iter()
+            .flatten()
+            .any(|e| deposit_verify::evidence_len(e) > deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES)
+        {
+            return Err(SettleError::DepositEvidenceTooLarge);
+        }
+        if self.deposit_evidence_bytes() > deposit_verify::DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES {
+            return Err(SettleError::DepositEvidenceBudget);
+        }
+        Ok(())
+    }
     /// R4-R-5: the applied deposit units the poster must build evidence
     /// for, as `{"index", "aa_unit" (hex), "is_perp"}` (exported in
     /// batch.json as `applied_deposits`; `post_batch.js` stamps by index).
@@ -909,8 +940,10 @@ impl Batch {
             }
         }
         // The batch-wide budget only counts APPLIED deposits' evidence (no
-        // user can add to it with rejected units); the producer cuts the
-        // batch before it is exceeded.
+        // user can add to it with rejected units). R5-E-1: this is the
+        // VERIFY limit; the producer admits only up to the smaller
+        // DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES before applying a deposit
+        // (deposit_verify::DepositEvidenceBudget).
         if total_ev_bytes > deposit_verify::DEPOSIT_EVIDENCE_BATCH_MAX_BYTES {
             return Err(SettleError::DepositEvidence);
         }
@@ -4018,5 +4051,226 @@ mod tests {
             &bad_acct
         )
         .is_err());
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Round 5 (R5-E-1 / R5-R-1): one shared set of evidence size limits.
+
+    /// A base deposit joint of user `sk(u)` whose evidence serializes to
+    /// exactly `target` bytes (a `text` message pads it).
+    fn r5_sized_evidence(n: u8, u: u8, target: usize) -> (DepositEvidence, String) {
+        let user = sk(u);
+        let acct = hex::encode(acct_of(&user).0);
+        let mk = |pad: usize| {
+            let data = serde_json::json!({ "deposit": 1, "account": acct });
+            let j = joint_with(
+                n,
+                &test_addr(u),
+                &[
+                    ("data", data),
+                    ("payment", base_pay(&[30_000])),
+                    ("text", serde_json::json!("x".repeat(pad))),
+                ],
+            );
+            evidence_from(&j, "20000".into(), false)
+        };
+        let base = deposit_verify::evidence_len(&mk(0));
+        assert!(target > base);
+        let ev = mk(target - base);
+        assert_eq!(deposit_verify::evidence_len(&ev), target);
+        let rec = format!("{}:20000:{}", test_addr(u), acct);
+        (ev, rec)
+    }
+
+    #[test]
+    fn r5_limits_are_strictly_ordered_and_mirrored_in_js() {
+        // (The strict ordering itself is a compile-time assertion in
+        // deposit_verify.)
+        use deposit_verify::*;
+        // deposit_evidence.js must carry exactly these numbers (and no
+        // extra margin factor of its own).
+        let js = include_str!("../../../obyte-local/deposit_evidence.js");
+        let num = |name: &str| -> usize {
+            let line = js
+                .lines()
+                .find(|l| l.starts_with(&format!("const {name} = ")))
+                .unwrap_or_else(|| panic!("{name} missing in deposit_evidence.js"));
+            let v = line.split('=').nth(1).unwrap().trim().trim_end_matches(';');
+            v.split('*')
+                .map(|f| f.trim().parse::<usize>().unwrap())
+                .product()
+        };
+        assert_eq!(num("DEPOSIT_EVIDENCE_UNIT_MAX_BYTES"), DEPOSIT_EVIDENCE_UNIT_MAX_BYTES);
+        assert_eq!(num("DEPOSIT_EVIDENCE_BATCH_MAX_BYTES"), DEPOSIT_EVIDENCE_BATCH_MAX_BYTES);
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES
+        );
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES
+        );
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES
+        );
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES
+        );
+        assert!(!js.contains("SIZE_MARGIN"), "no second, JS-only margin");
+    }
+
+    /// Shared size vector: serde_json and JSON.stringify measure the same
+    /// evidence identically (test_deposit_evidence.js pins the same number).
+    #[test]
+    fn r5_evidence_size_vector_matches_js() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../obyte-local/test_vectors/evidence_size.json"
+        ))
+        .unwrap();
+        let ev: DepositEvidence = serde_json::from_value(v["evidence"].clone()).unwrap();
+        assert_eq!(
+            deposit_verify::evidence_len(&ev) as u64,
+            v["bytes"].as_u64().unwrap()
+        );
+    }
+
+    /// R5-E-1 test 4: an evidence of 0.97 x 256 KiB verifies (watchers
+    /// would accept it) but the producer does NOT admit it, and the poster
+    /// (deposit_evidence.js, same vector in test_deposit_evidence.js)
+    /// refuses it too: both sides agree. Just under the admit limit, both
+    /// accept.
+    #[test]
+    fn r5_admit_limit_below_post_and_verify_limits() {
+        let target = deposit_verify::DEPOSIT_EVIDENCE_UNIT_MAX_BYTES * 97 / 100;
+        let (ev, rec) = r5_sized_evidence(1, 7, target);
+        assert!(deposit_verify::verify_evidence(&ev, R4_VAULT, &minuend_types::PERP_ASSET).is_ok());
+        assert_eq!(
+            deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec),
+            Err(SettleError::DepositEvidenceTooLarge)
+        );
+        assert!(target > deposit_verify::DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES);
+        let (ev, rec) = r5_sized_evidence(
+            2,
+            7,
+            deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES,
+        );
+        assert!(deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec).is_ok());
+        let (ev, rec) = r5_sized_evidence(
+            3,
+            7,
+            deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES + 1,
+        );
+        assert_eq!(
+            deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec),
+            Err(SettleError::DepositEvidenceTooLarge)
+        );
+    }
+
+    fn r5_deposit_unit(ev: &DepositEvidence, u: u8) -> minuend_dag::Unit {
+        let user = sk(u);
+        let a: [u8; 32] = hex::decode(&ev.aa_unit).unwrap().try_into().unwrap();
+        sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&user),
+                addr: test_addr(u),
+                amount: ev.amount.parse().unwrap(),
+                aa_unit: a,
+            },
+            &user,
+        )
+    }
+
+    /// R5-E-1: the running batch budget is enforced BEFORE a deposit is
+    /// applied: the deposit that would push the batch over the admission
+    /// budget is not ingested (deferred), the engine is untouched, and it
+    /// goes in after the cut. Rejected deposits give their bytes back.
+    #[test]
+    fn r5_running_batch_budget_defers_deposit_before_apply() {
+        let mut eng = Engine::new();
+        let mut budget = deposit_verify::DepositEvidenceBudget::new();
+        let each = 230 * 1024;
+        let mut units = Vec::new();
+        for i in 0..5u8 {
+            let (ev, rec) = r5_sized_evidence(10 + i, 7, each);
+            let (a, p, v) = budget
+                .admit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec)
+                .unwrap();
+            eng.state.allow_deposit(a, p, v.amount, &v.payer, v.account);
+            units.push(r5_deposit_unit(&ev, 7));
+        }
+        // A rejected deposit (amount != backing) reserves nothing in the end.
+        let (ev_bad, rec_bad) = r5_sized_evidence(30, 7, each);
+        let (a, p, v) = budget
+            .admit(&ev_bad, R4_VAULT, &minuend_types::PERP_ASSET, &rec_bad)
+            .unwrap();
+        eng.state.allow_deposit(a, p, v.amount, &v.payer, v.account);
+        let mut bad = r5_deposit_unit(&ev_bad, 7);
+        if let Op::Deposit { amount, .. } = &mut bad.op {
+            *amount += 1;
+        }
+        let bad = sign_unit(bad.parents.clone(), bad.op.clone(), &sk(7));
+        let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, bad)
+            .unwrap()
+            .expect("ingested");
+        assert!(!evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+        assert_eq!(budget.used(), 0, "rejected deposit released its bytes");
+        for u in &units[..4] {
+            let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, u.clone())
+                .unwrap()
+                .expect("fits");
+            assert!(evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+        }
+        assert_eq!(budget.used(), 4 * each);
+        assert!(budget.used() <= deposit_verify::DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES);
+        let log_len = eng.log.len();
+        let root = eng.state.state_root();
+        assert!(
+            deposit_verify::ingest_within_budget(&mut eng, &mut budget, units[4].clone())
+                .unwrap()
+                .is_none(),
+            "5th deposit would exceed the batch budget: deferred, not applied"
+        );
+        assert_eq!(eng.log.len(), log_len);
+        assert_eq!(eng.state.state_root(), root);
+        budget.on_batch_cut();
+        assert_eq!(budget.used(), 0);
+        let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, units[4].clone())
+            .unwrap()
+            .expect("fits after the cut");
+        assert!(evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+        assert_eq!(budget.used(), each);
+    }
+
+    /// R5-E-1 test 4 (batch): 0.97 MiB of applied evidence is refused by
+    /// the producer's admission budget (the poster refuses it too, same
+    /// vector in test_deposit_evidence.js) although a watcher would still
+    /// accept it.
+    #[test]
+    fn r5_batch_total_097_mib_refused_by_admission() {
+        let mut budget = deposit_verify::DepositEvidenceBudget::new();
+        let per = deposit_verify::DEPOSIT_EVIDENCE_BATCH_MAX_BYTES * 97 / 100 / 5;
+        let mut refused = 0;
+        let mut evs = Vec::new();
+        for i in 0..5u8 {
+            let (ev, rec) = r5_sized_evidence(40 + i, 7, per);
+            budget
+                .admit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec)
+                .unwrap();
+            let u = r5_deposit_unit(&ev, 7);
+            if budget.try_reserve(&u.op).is_err() {
+                refused += 1;
+            } else {
+                evs.push(ev);
+            }
+        }
+        assert_eq!(refused, 1);
+        let total: usize = evs.iter().map(deposit_verify::evidence_len).sum();
+        assert!(total <= deposit_verify::DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES);
+        assert!(5 * per > deposit_verify::DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES);
+        assert!(5 * per <= deposit_verify::DEPOSIT_EVIDENCE_BATCH_MAX_BYTES);
     }
 }

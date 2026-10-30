@@ -1,0 +1,69 @@
+{
+  "comment": "R5-E-1: shared size vector. serde_json::to_vec(DepositEvidence) and Buffer.byteLength(JSON.stringify(ev)) must both give `bytes` (minuend-settle r5_evidence_size_vector_matches_js, test_deposit_evidence.js).",
+  "bytes": 1034,
+  "evidence": {
+    "aa_unit": "abababababababababababababababababababababababababababababababab",
+    "is_perp": false,
+    "amount": "20000",
+    "vault_address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    "payer": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "account": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "joint": {
+      "version": "4.0dev",
+      "alt": "3",
+      "authors": [
+        {
+          "address": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      ],
+      "messages": [
+        {
+          "app": "data",
+          "payload_location": "inline",
+          "payload_hash": "h",
+          "payload": {
+            "deposit": 1,
+            "account": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "note": "é€ ✓ \u0001\t\"quoted\" back\\slash /slash"
+          }
+        },
+        {
+          "app": "payment",
+          "payload_location": "inline",
+          "payload_hash": "p",
+          "payload": {
+            "outputs": [
+              {
+                "address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "amount": 30000
+              },
+              {
+                "address": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+                "amount": 9007199254740991
+              }
+            ]
+          }
+        }
+      ],
+      "parent_units": [
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+      ],
+      "last_ball": "abc",
+      "last_ball_unit": "def",
+      "timestamp": 1300000001,
+      "max_aa_responses": 1,
+      "nested": {
+        "arr": [
+          1,
+          -2,
+          0,
+          true,
+          false,
+          null,
+          [],
+          {}
+        ]
+      }
+    }
+  }
+}

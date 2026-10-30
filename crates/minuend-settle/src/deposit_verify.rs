@@ -34,14 +34,43 @@ use std::collections::BTreeMap;
 
 use crate::obyte_hash::{get_payload_hash, get_unit_hash};
 
-/// R4-R-2: largest admissible single evidence (serde-serialized JSON). A
-/// deposit whose evidence is larger is not admissible: the producer must
-/// not apply it and the replay does not endorse it (per-unit rejection).
+/// R4-R-2 / R5-E-1: largest single evidence a WATCHER accepts
+/// (serde-serialized JSON). A larger stamped evidence endorses nothing
+/// (per-unit rejection). This is the verify limit, not the producer's:
+/// the producer admits only up to [`DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES`].
 pub const DEPOSIT_EVIDENCE_UNIT_MAX_BYTES: usize = 256 * 1024;
-/// Total evidence of one batch (all stamped frames). Only APPLIED deposits
-/// carry evidence, so this is under the producer's control: it cuts the
-/// batch before the budget is exceeded (`post_batch.js` refuses to post).
+/// Total evidence of one batch (all stamped frames) a WATCHER accepts.
+/// Only APPLIED deposits carry evidence, so this is under the producer's
+/// control (R5-E-1: it enforces the smaller
+/// [`DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES`] BEFORE applying a deposit,
+/// see [`DepositEvidenceBudget`]).
 pub const DEPOSIT_EVIDENCE_BATCH_MAX_BYTES: usize = DEPOSIT_EVIDENCE_MAX_BYTES;
+/// R5-E-1 / R5-R-1: the producer's admission limit for ONE evidence
+/// ([`admit_deposit`] refuses anything larger). Three tiers, strictly
+/// ordered so that whatever the producer admits the poster can post and
+/// every watcher accepts, even if `JSON.stringify` and `serde_json` measure
+/// a joint a few bytes apart:
+/// admit (240 KiB) < post (`post_batch.js`, 248 KiB) < verify (256 KiB).
+pub const DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES: usize = 240 * 1024;
+/// R5-E-1: the limit `obyte-local/deposit_evidence.js` posts up to (one
+/// evidence). Mirrored there as `DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES`.
+pub const DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES: usize = 248 * 1024;
+/// R5-E-1: the producer's running per-batch admission limit: the evidence
+/// of all deposits APPLIED since the last cut. Enforced before a deposit
+/// is applied ([`DepositEvidenceBudget::try_reserve`]), never after the cut.
+pub const DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES: usize = 960 * 1024;
+/// R5-E-1: the batch total `deposit_evidence.js` posts up to. Mirrored
+/// there as `DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES`.
+pub const DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES: usize = 992 * 1024;
+
+const _: () = {
+    assert!(DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES < DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES);
+    assert!(DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES < DEPOSIT_EVIDENCE_UNIT_MAX_BYTES);
+    assert!(DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES < DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES);
+    assert!(DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES < DEPOSIT_EVIDENCE_BATCH_MAX_BYTES);
+    // An empty batch always has room for one admissible deposit.
+    assert!(DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES <= DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES);
+};
 /// The vault's `bounce_fees.base` (ocore `MIN_BYTES_BOUNCE_FEE`).
 pub const VAULT_BOUNCE_FEE: u128 = 10_000;
 /// ocore `constants.MAX_AA_STRING_LENGTH`.
@@ -424,12 +453,21 @@ pub fn verify_unit_evidence(
 /// `ev.is_perp`). A producer following this rule and stamping the evidence
 /// on exactly the deposit units it applied is replayed identically by every
 /// watcher, whenever it learned of the vault record.
+///
+/// R5-E-1 / R5-R-1: the evidence must also be at most
+/// [`DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES`] (below the poster's and the
+/// watchers' limits), else [`SettleError::DepositEvidenceTooLarge`]: an
+/// anchor the producer admits is always postable. Use
+/// [`DepositEvidenceBudget`] to also keep the batch total within budget.
 pub fn admit_deposit(
     ev: &DepositEvidence,
     expected_vault: &str,
     perp_asset: &[u8; 32],
     vault_record: &str,
 ) -> Result<([u8; 32], bool, VerifiedDeposit), SettleError> {
+    if evidence_len(ev) > DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES {
+        return Err(SettleError::DepositEvidenceTooLarge);
+    }
     let out = verify_evidence(ev, expected_vault, perp_asset)?;
     let parts: Vec<&str> = vault_record.split(':').collect();
     if parts.len() != 3
@@ -440,6 +478,135 @@ pub fn admit_deposit(
         return Err(SettleError::DepositContentMismatch);
     }
     Ok(out)
+}
+
+/// R5-E-1 / R5-R-1: the producer's running deposit-evidence budget for the
+/// batch being built. The evidence size is known at admission
+/// ([`DepositEvidenceBudget::admit`] = [`admit_deposit`] + remember the
+/// size); the batch total is checked BEFORE a deposit unit is ingested
+/// ([`DepositEvidenceBudget::try_reserve`] /
+/// [`ingest_within_budget`]), so a batch can never be cut with more
+/// evidence than [`DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES`] (the old rule —
+/// "cut the batch earlier" once `post_batch.js` refused — came after the
+/// irreversible cut). A deposit that does not fit is not ingested in this
+/// batch: the producer keeps the unit and ingests it after the next cut
+/// (its anchor stays admitted).
+///
+/// Producer loop: `admit` each vault record (then `allow_deposit` with the
+/// returned backing), `ingest_within_budget` each unit (`Ok(None)` =
+/// deferred to the next batch), and `on_batch_cut` right after
+/// `Batch::from_applied`. Not part of any root; producer-local.
+#[derive(Clone, Debug, Default)]
+pub struct DepositEvidenceBudget {
+    /// Evidence size of every admitted, not yet consumed anchor.
+    admitted: BTreeMap<([u8; 32], bool), usize>,
+    /// Evidence bytes of the deposits applied (reserved) since the last cut.
+    used: usize,
+    /// Anchors reserved in the current batch.
+    reserved: BTreeMap<([u8; 32], bool), usize>,
+}
+
+impl DepositEvidenceBudget {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// [`admit_deposit`], remembering the evidence size of the anchor.
+    pub fn admit(
+        &mut self,
+        ev: &DepositEvidence,
+        expected_vault: &str,
+        perp_asset: &[u8; 32],
+        vault_record: &str,
+    ) -> Result<([u8; 32], bool, VerifiedDeposit), SettleError> {
+        let out = admit_deposit(ev, expected_vault, perp_asset, vault_record)?;
+        self.admitted.insert((out.0, out.1), evidence_len(ev));
+        Ok(out)
+    }
+    /// Evidence bytes reserved by the deposits applied since the last cut.
+    pub fn used(&self) -> usize {
+        self.used
+    }
+    /// Bytes still available in the current batch.
+    pub fn remaining(&self) -> usize {
+        DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES.saturating_sub(self.used)
+    }
+    /// Evidence size of the anchor an op consumes, if admitted here.
+    pub fn evidence_len_of(&self, op: &minuend_dag::Op) -> Option<usize> {
+        crate::deposit_key(op).and_then(|k| self.admitted.get(&k).copied())
+    }
+    /// Reserve the evidence of a deposit op before ingesting it. Ops that
+    /// are not deposits, or whose anchor was not admitted through this
+    /// budget (they cannot be applied with evidence anyway), reserve
+    /// nothing. `Err(DepositEvidenceBudget)` = it would push the batch
+    /// over [`DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES`]: defer the unit.
+    pub fn try_reserve(&mut self, op: &minuend_dag::Op) -> Result<(), SettleError> {
+        let Some(key) = crate::deposit_key(op) else {
+            return Ok(());
+        };
+        let Some(len) = self.admitted.get(&key).copied() else {
+            return Ok(());
+        };
+        if self.reserved.contains_key(&key) {
+            // A second unit citing the same anchor in this batch is a
+            // duplicate the engine rejects: nothing more to reserve.
+            return Ok(());
+        }
+        let total = self.used.saturating_add(len);
+        if total > DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES {
+            return Err(SettleError::DepositEvidenceBudget);
+        }
+        self.used = total;
+        self.reserved.insert(key, len);
+        Ok(())
+    }
+    /// Give back a reservation whose unit was not applied.
+    pub fn release(&mut self, op: &minuend_dag::Op) {
+        if let Some(key) = crate::deposit_key(op) {
+            if let Some(len) = self.reserved.remove(&key) {
+                self.used = self.used.saturating_sub(len);
+            }
+        }
+    }
+    /// Call right after `Batch::from_applied`: consumed anchors leave the
+    /// budget and the running total restarts at 0.
+    pub fn on_batch_cut(&mut self) {
+        for k in std::mem::take(&mut self.reserved).into_keys() {
+            self.admitted.remove(&k);
+        }
+        self.used = 0;
+    }
+}
+
+/// R5-E-1: ingest one unit under the producer's evidence budget.
+/// `Ok(None)` = a deposit whose evidence does not fit the current batch:
+/// NOT ingested (engine untouched); re-submit it after the next cut.
+/// `Ok(Some(events))` = ingested; a deposit that was not applied gives its
+/// reservation back.
+pub fn ingest_within_budget(
+    engine: &mut minuend_exec::Engine,
+    budget: &mut DepositEvidenceBudget,
+    unit: minuend_dag::Unit,
+) -> Result<Option<Vec<minuend_exec::ExecEvent>>, minuend_exec::ExecError> {
+    if budget.try_reserve(&unit.op).is_err() {
+        return Ok(None);
+    }
+    let op = unit.op.clone();
+    let uid = minuend_dag::unit_id(&unit);
+    match engine.ingest(unit) {
+        Ok(events) => {
+            let applied = events.iter().any(|e| {
+                matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == uid)
+            });
+            if !applied {
+                budget.release(&op);
+            }
+            Ok(Some(events))
+        }
+        Err(e) => {
+            budget.release(&op);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

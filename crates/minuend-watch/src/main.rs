@@ -17,17 +17,21 @@ use minuend_exec::Engine;
 use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
     batch_from_committed, check_committed_roots, clear_temp_checkpoints, committed_frame_bytes,
-    create_private_temp_dir, fetch_da_unit, load_checkpoint, load_checkpoint_at,
-    pick_root_verified_checkpoint, prove, resolve_start_height, rewind_target, root_diverged,
-    sane_chain_readings, save_checkpoint_retaining, sweep_stale_temp_dirs,
-    tip_awaiting_resubmission, verify_da_binding, write_private_proof, ChainView, HubClient,
-    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, TEMP_DIR_OWNER_FILE,
+    create_private_temp_dir, fetch_da_unit, load_checkpoint, load_checkpoint_at, lock_temp_dir,
+    pick_root_verified_checkpoint, prove, read_vault_ledger_bounded, regressed_tip_contradictory,
+    resolve_start_height, rewind_target, root_diverged, sane_chain_readings,
+    save_checkpoint_retaining, sweep_stale_temp_dirs, tip_awaiting_resubmission,
+    vault_keys_needed, verify_da_binding, write_private_proof, ChainView, HubClient,
+    VaultReadCache, WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
+    MAX_VAULT_READS_PER_HEIGHT, TEMP_DIR_OWNER_FILE, VAULT_READ_BUDGET_SECS,
+    VAULT_READ_DEADLINE_RESERVE_SECS,
 };
 use std::collections::BTreeMap;
 use std::env;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -68,8 +72,8 @@ impl HttpHubClient {
         })
         .to_string();
 
-        let addr = format!("{}:{}", self.host, self.port);
-        let mut stream = std::net::TcpStream::connect(&addr).map_err(|e| e.to_string())?;
+        // R5-R-2: bounded connect (the OS default is ~2 min per attempt).
+        let mut stream = self.connect()?;
         stream
             .set_read_timeout(Some(Duration::from_secs(15)))
             .map_err(|e| e.to_string())?;
@@ -126,6 +130,26 @@ impl HttpHubClient {
         Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null))
     }
 }
+
+impl HttpHubClient {
+    fn connect(&self) -> Result<std::net::TcpStream, String> {
+        use std::net::ToSocketAddrs;
+        let addrs = (self.host.as_str(), self.port)
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?;
+        let mut last = String::from("hub host resolved to no address");
+        for a in addrs {
+            match std::net::TcpStream::connect_timeout(&a, HUB_CONNECT_TIMEOUT) {
+                Ok(s) => return Ok(s),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// R5-R-2: TCP connect timeout per hub address.
+const HUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl HubClient for HttpHubClient {
     fn get_aa_state_var(
@@ -729,31 +753,47 @@ fn check_height_without_replay(
     Ok(None)
 }
 
-/// R4-A-4: the vault's `dep_`/`depp_<anchor>` records for every
-/// `d:`/`D:` op of a batch, read from the hub. `Ok(None)` (var absent) is
-/// recorded as known-absent; a transport error or a non-string value
-/// leaves the key out (unknown — the proof builder then stays silent on
-/// the backing condition instead of risking a bounced challenge).
-fn read_vault_ledger<H: HubClient>(hub: &H, vault: &str, ops: &[String]) -> prove::VaultLedger {
-    let mut ledger = prove::VaultLedger::new();
-    if vault.is_empty() {
-        return ledger;
+/// R4-A-4 / R5-R-2: the vault's `dep_`/`depp_<anchor>` records a P-adr
+/// proof of `batch` could need ([`vault_keys_needed`]: derived from the
+/// units' real ops, only for posted new bindings not covered by verified
+/// evidence), read with hard bounds — at most
+/// [`MAX_VAULT_READS_PER_HEIGHT`] reads, within
+/// [`VAULT_READ_BUDGET_SECS`] and never later than
+/// [`VAULT_READ_DEADLINE_RESERVE_SECS`] before the challenge-posting
+/// deadline, every outcome cached for the round (`cache`). Unread keys stay
+/// unknown: the proof builder then stays silent on the backing condition.
+fn read_vault_ledger<H: HubClient>(
+    hub: &H,
+    vault: &str,
+    batch: &minuend_settle::Batch,
+    submitted_at: u64,
+    cache: &mut VaultReadCache,
+) -> prove::VaultLedger {
+    let keys = vault_keys_needed(batch);
+    if keys.is_empty() {
+        return prove::VaultLedger::new();
     }
-    for key in ops.iter().filter_map(|op| prove::vault_key_of_op(op)) {
-        if ledger.contains_key(&key) {
-            continue;
-        }
-        match hub.get_aa_state_var(vault, &key) {
-            Ok(None) => {
-                ledger.insert(key, None);
-            }
-            Ok(Some(v)) => {
-                if let Some(r) = v.as_str() {
-                    ledger.insert(key, Some(r.to_string()));
-                }
-            }
-            Err(_) => {}
-        }
+    let post_deadline = submitted_at
+        .saturating_add(CHALLENGE_WINDOW_SECS)
+        .saturating_sub(CHALLENGE_SAFETY_MARGIN_SECS)
+        .saturating_sub(VAULT_READ_DEADLINE_RESERVE_SECS);
+    let deadline = post_deadline.min(now_secs().saturating_add(VAULT_READ_BUDGET_SECS));
+    let ledger = read_vault_ledger_bounded(
+        hub,
+        vault,
+        &keys,
+        cache,
+        MAX_VAULT_READS_PER_HEIGHT,
+        deadline,
+        &mut now_secs,
+    );
+    if ledger.len() < keys.len() {
+        eprintln!(
+            "WATCH: vault records known for {}/{} deposit anchors of this batch (read budget, \
+             deadline or hub errors); proofs resting on the others are not built",
+            ledger.len(),
+            keys.len()
+        );
     }
     ledger
 }
@@ -769,6 +809,7 @@ fn check_height(
     engine: &mut Engine,
     h: u64,
     advanced: &mut Option<String>,
+    vault_cache: &mut VaultReadCache,
 ) -> anyhow::Result<Option<String>> {
     let win = read_window(hub, config, h)?;
     let (da, raw) = match fetch_committed(hub, config, h, win) {
@@ -828,7 +869,13 @@ fn check_height(
         // for this batch's deposit anchors, so a P-adr proof is built only
         // when the AA would actually judge it (a hub error leaves the key
         // unknown, never "absent").
-        let vault_ledger = read_vault_ledger(hub, &config.vault_address, &batch.ops);
+        let vault_ledger = read_vault_ledger(
+            hub,
+            &config.vault_address,
+            &batch,
+            win.submitted_at,
+            vault_cache,
+        );
         prove::build_proof_with_vault(
             &batch,
             &mut scratch,
@@ -1009,10 +1056,15 @@ fn chain_view(
 /// early heights expired). Genesis is only used for `target == 0`, or when
 /// `genesis_fallback` is set (a temp-dir run, which started from genesis
 /// anyway and keeps only a capped number of checkpoints, R4-R-7).
+///
+/// R5-R-3: before falling back to genesis, `genesis_ok()` must confirm the
+/// DA of h=1 can still be fetched; otherwise nothing is changed and a
+/// CRITICAL alert says why (a genesis replay would sit on h=1 forever).
 fn rewind_engine(
     dir: &std::path::Path,
     target: u64,
     genesis_fallback: bool,
+    genesis_ok: &mut dyn FnMut() -> bool,
 ) -> anyhow::Result<(Engine, u64)> {
     let mut heights = minuend_state::persist::snapshot_heights(dir)?;
     heights.retain(|h| *h <= target);
@@ -1027,8 +1079,30 @@ fn rewind_engine(
             "no readable checkpoint at or below h={target}; nothing was changed"
         ));
     }
+    if target > 0 && !genesis_ok() {
+        return Err(genesis_unreachable(target));
+    }
     minuend_state::persist::retire_snapshots_above(dir, 0)?;
     Ok((Engine::new(), 0))
+}
+
+/// R5-R-3: the loud refusal when a temp-dir rewind would have to replay
+/// from genesis but h=1's DA is gone.
+fn genesis_unreachable(target: u64) -> anyhow::Error {
+    let msg = format!(
+        "a rewind to h={target} would have to replay from GENESIS, but the DA of h=1 can no \
+         longer be fetched (temp_data purged after ~24 h): nothing was changed. This watcher \
+         cannot verify heights above h={target} any more — restart it with --state-dir and a \
+         trusted checkpoint"
+    );
+    eprintln!("WATCH CRITICAL: {msg}");
+    anyhow::anyhow!(msg)
+}
+
+/// R5-R-3: can a genesis replay still start, i.e. is the DA of h=1
+/// (`da_unit_1` and its temp_data) still on the hub?
+fn genesis_da_available(hub: &HttpHubClient, config: &WatchConfig) -> bool {
+    matches!(fetch_da_unit(hub, &config.rollup_address, 1), Ok(Some(_)))
 }
 
 /// R4-R-6: the engine's root at `processed_upto` no longer matches the
@@ -1047,23 +1121,21 @@ fn rewind_to_chain_root(
     genesis_fallback: bool,
 ) -> anyhow::Result<(Engine, u64)> {
     let heights = minuend_state::persist::snapshot_heights(dir)?;
-    let mut loaded: BTreeMap<u64, Engine> = BTreeMap::new();
+    // R5-R-5: one checkpoint in memory at a time: each candidate is loaded,
+    // its root computed and the engine dropped; only the chosen height is
+    // loaded again below.
     let pick = pick_root_verified_checkpoint(
         &heights,
         below,
-        |h| match load_checkpoint_at(dir, h) {
-            Ok(Some(e)) => {
-                let root = hex::encode(e.state.state_root());
-                loaded.insert(h, e);
-                Some(root)
-            }
-            _ => None,
-        },
+        |h| checkpoint_root(dir, h),
         |h| hub.get_aa_state_var(&config.rollup_address, &format!("state_root_{h}")),
     )
     .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
     let Some(h) = pick else {
         if genesis_fallback {
+            if !genesis_da_available(hub, config) {
+                return Err(genesis_unreachable(below.saturating_sub(1)));
+            }
             minuend_state::persist::retire_snapshots_above(dir, 0)?;
             return Ok((Engine::new(), 0));
         }
@@ -1071,29 +1143,120 @@ fn rewind_to_chain_root(
             "no checkpoint below h={below} matches the chain's state_root; nothing was changed"
         ));
     };
-    let engine = loaded
-        .remove(&h)
-        .ok_or_else(|| anyhow::anyhow!("checkpoint h={h} vanished"))?;
+    let engine =
+        load_checkpoint_at(dir, h)?.ok_or_else(|| anyhow::anyhow!("checkpoint h={h} vanished"))?;
     minuend_state::persist::retire_snapshots_above(dir, h)?;
     Ok((engine, h))
 }
 
-/// R4-R-7: a checkpoint store in a throw-away temp dir (no `--state-dir`)
-/// is capped and cleaned up: at most this many checkpoints …
-const TEMP_MAX_CHECKPOINTS: usize = 8;
-/// … and at most this many bytes of them (the newest is always kept).
-const TEMP_MAX_CHECKPOINT_BYTES: u64 = 512 * 1024 * 1024;
+/// R5-R-5: the state root of the checkpoint at `h` (`None` = unreadable);
+/// the loaded engine is dropped before returning.
+fn checkpoint_root(dir: &std::path::Path, h: u64) -> Option<String> {
+    match load_checkpoint_at(dir, h) {
+        Ok(Some(e)) => Some(hex::encode(e.state.state_root())),
+        _ => None,
+    }
+}
+
+/// R4-R-7 / R5-R-3: byte budget of a throw-away temp-dir checkpoint store
+/// (no `--state-dir`), `dead/` included. Checkpoints are kept back to
+/// `last_finalized` within it; the newest and the floor checkpoint (newest
+/// at or below `last_finalized`) are always kept
+/// (`persist::cap_snapshots_keep_floor`), so a rewind never has to fall
+/// back to genesis.
+const TEMP_MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024 * 1024;
+/// R5-R-6: a temp-dir run keeps at most this many dead-branch checkpoints
+/// (within [`TEMP_MAX_CHECKPOINT_BYTES`] together with the live ones).
+const TEMP_MAX_DEAD_CHECKPOINTS: usize = 2;
+/// R5-R-6: `--state-dir` runs keep at most this many dead-branch
+/// checkpoints in `dead/` …
+const DEAD_MAX_CHECKPOINTS: usize = 16;
+/// … and at most this many bytes of them.
+const DEAD_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// R5-R-6: cap `dead/` after a retirement (both modes) and, in temp mode,
+/// the whole store to its byte budget.
+fn cap_store(dir: &std::path::Path, temp_mode: bool, last_finalized: u64) {
+    let (n, bytes) = if temp_mode {
+        (TEMP_MAX_DEAD_CHECKPOINTS, TEMP_MAX_CHECKPOINT_BYTES / 4)
+    } else {
+        (DEAD_MAX_CHECKPOINTS, DEAD_MAX_BYTES)
+    };
+    if let Err(e) = minuend_state::persist::cap_dead_snapshots(dir, n, bytes) {
+        println!("WATCH ERROR: capping {}/dead failed: {e}", dir.display());
+    }
+    if temp_mode {
+        let dead = minuend_state::persist::snapshot_store_bytes(&dir.join("dead")).unwrap_or(0);
+        if let Err(e) = minuend_state::persist::cap_snapshots_keep_floor(
+            dir,
+            last_finalized,
+            TEMP_MAX_CHECKPOINT_BYTES.saturating_sub(dead),
+        ) {
+            println!("WATCH ERROR: capping temp checkpoints failed: {e}");
+        }
+    }
+}
 
 /// R4-R-7: clears this run's temp checkpoints when `main` returns or
-/// unwinds (proofs are kept). A run killed by a signal is cleaned up by the
-/// next run's `sweep_stale_temp_dirs`.
-struct TempCheckpointGuard(Option<PathBuf>);
+/// unwinds (proofs are kept). R5-R-6: SIGINT/SIGTERM make the poll loop
+/// return, so this runs on a normal stop too; a run killed hard (SIGKILL)
+/// is cleaned up by the next run's `sweep_stale_temp_dirs` (R5-R-7: its
+/// `flock` on the lock file is gone with the process).
+struct TempCheckpointGuard(Option<PathBuf>, Option<minuend_watch::TempDirLock>);
 
 impl Drop for TempCheckpointGuard {
     fn drop(&mut self) {
         if let Some(dir) = &self.0 {
             clear_temp_checkpoints(dir);
         }
+        self.1.take();
+    }
+}
+
+/// R5-R-6: set by SIGINT / SIGTERM; the poll loop returns at its next check.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+mod sig {
+    use std::os::raw::c_int;
+    pub const SIGINT: c_int = 2;
+    pub const SIGTERM: c_int = 15;
+    extern "C" {
+        pub fn signal(signum: c_int, handler: usize) -> usize;
+    }
+    pub extern "C" fn on_stop(_: c_int) {
+        // Async-signal-safe: one atomic store.
+        super::STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// R5-R-6: route SIGINT / SIGTERM to [`STOP`] (no new dependency).
+fn install_stop_handlers() {
+    #[cfg(unix)]
+    {
+        let h = sig::on_stop as extern "C" fn(std::os::raw::c_int) as usize;
+        // SAFETY: installs an async-signal-safe handler (a single atomic
+        // store) for two standard signals.
+        unsafe {
+            sig::signal(sig::SIGINT, h);
+            sig::signal(sig::SIGTERM, h);
+        }
+    }
+}
+
+fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// R5-R-6: sleep `secs`, waking early when a stop is requested.
+fn sleep_unless_stopped(secs: u64) {
+    let until = std::time::Instant::now() + Duration::from_secs(secs);
+    while !stop_requested() {
+        let now = std::time::Instant::now();
+        if now >= until {
+            break;
+        }
+        std::thread::sleep((until - now).min(Duration::from_millis(200)));
     }
 }
 
@@ -1183,7 +1346,17 @@ fn main() -> anyhow::Result<()> {
     // checkpoints left behind by earlier killed runs, and clears its own on
     // exit; its checkpoint count/size is capped below.
     let temp_mode = args.state_dir.is_none();
-    let _temp_guard = TempCheckpointGuard(temp_mode.then(|| state_dir.clone()));
+    // R5-R-7: a temp-dir run holds an exclusive flock on its own lock file
+    // for its whole life; sweeps of other runs (any PID namespace) skip it.
+    let temp_lock = if temp_mode {
+        Some(lock_temp_dir(&state_dir).map_err(|e| {
+            anyhow::anyhow!("cannot lock the private temp dir {}: {e}", state_dir.display())
+        })?)
+    } else {
+        None
+    };
+    let _temp_guard = TempCheckpointGuard(temp_mode.then(|| state_dir.clone()), temp_lock);
+    install_stop_handlers();
     if temp_mode {
         let _ = std::fs::write(
             state_dir.join(TEMP_DIR_OWNER_FILE),
@@ -1199,7 +1372,12 @@ fn main() -> anyhow::Result<()> {
     let mut engine = match &args.state_dir {
         // R3-R-2 / R3-R-7: resume only from a checkpoint that matches the
         // chain (fail hard otherwise; never a warning, never silent genesis).
-        Some(dir) => resume_engine(&hub, &config, dir)?.unwrap_or_else(Engine::new),
+        Some(dir) => {
+            let e = resume_engine(&hub, &config, dir)?.unwrap_or_else(Engine::new);
+            // R5-R-6: resume may have retired a dead branch into dead/.
+            cap_store(dir, false, 0);
+            e
+        }
         None => Engine::new(),
     };
     let checkpoint_h = (engine.state.height > 0).then_some(engine.state.height);
@@ -1255,6 +1433,12 @@ fn main() -> anyhow::Result<()> {
     let mut announced_frozen: Option<u64> = None;
 
     loop {
+        if stop_requested() {
+            println!("minuend-watch: stop signal received; exiting (temp checkpoints cleared)");
+            return Ok(());
+        }
+        // R5-R-2: vault reads (failures included) are cached for one round.
+        let mut vault_cache = VaultReadCache::new();
         // R2-R-11: report background challenge posters that finished.
         for line in with_tracker(|t| t.poll()) {
             eprintln!("{line}");
@@ -1268,7 +1452,7 @@ fn main() -> anyhow::Result<()> {
             (Ok(a), Ok(b)) => (a, b),
             (Err(e), _) | (_, Err(e)) => {
                 println!("WATCH ERROR: hub last_submitted/last_finalized: {e}");
-                std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+                sleep_unless_stopped(config.poll_interval_secs);
                 continue;
             }
         };
@@ -1281,11 +1465,52 @@ fn main() -> anyhow::Result<()> {
             Ok(r) => r,
             Err(why) => {
                 println!("WATCH ERROR: {why}; skipping this round");
-                std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+                sleep_unless_stopped(config.poll_interval_secs);
                 continue;
             }
         };
         known_lf = known_lf.max(lf);
+
+        // R5-R-4: last_submitted below the last verified height without the
+        // verdict marker frozen_<ls>=2 and without a re-submitted
+        // da_unit_<ls> is a contradictory (stale / lagging hub) reading:
+        // skip the round instead of rewinding, retiring checkpoints and
+        // re-replaying.
+        if ll < cursor.processed_upto {
+            let frozen = hub.get_aa_state_var(&config.rollup_address, &format!("frozen_{ll}"));
+            let da = hub.get_aa_state_var(&config.rollup_address, &format!("da_unit_{ll}"));
+            let skip = match (frozen, da) {
+                (Ok(f), Ok(d)) => {
+                    let f = f.and_then(|v| v.as_u64()).unwrap_or(0);
+                    let d = d.and_then(|v| v.as_str().map(str::to_string));
+                    regressed_tip_contradictory(
+                        ll,
+                        lf,
+                        cursor.processed_upto,
+                        f,
+                        d.as_deref(),
+                        accepted.get(&ll).map(String::as_str),
+                    )
+                    .then(|| {
+                        format!(
+                            "hub reports last_submitted={ll} below the verified h={} without \
+                             frozen_{ll}=2 or a re-submitted da_unit_{ll} (contradictory reading)",
+                            cursor.processed_upto
+                        )
+                    })
+                }
+                (Err(e), _) | (_, Err(e)) => Some(format!(
+                    "hub frozen_{ll}/da_unit_{ll} unreadable while last_submitted={ll} is below \
+                     the verified h={}: {e}",
+                    cursor.processed_upto
+                )),
+            };
+            if let Some(why) = skip {
+                println!("WATCH ERROR: {why}; skipping this round");
+                sleep_unless_stopped(config.poll_interval_secs);
+                continue;
+            }
+        }
 
         // R3-R-2: an accepted height may have been judged fraudulent (by
         // another challenger) and re-submitted since we replayed it. Detect
@@ -1303,8 +1528,10 @@ fn main() -> anyhow::Result<()> {
                             cursor.processed_upto,
                             view.frozen_at_last_submitted
                         );
-                        match rewind_engine(&state_dir, t, temp_mode) {
+                        let mut genesis_ok = || genesis_da_available(&hub, &config);
+                        match rewind_engine(&state_dir, t, temp_mode, &mut genesis_ok) {
                             Ok((eng, at)) => {
+                                cap_store(&state_dir, temp_mode, lf);
                                 engine = eng;
                                 cursor.rewind_to(at);
                                 accepted.retain(|h, _| *h <= at);
@@ -1355,6 +1582,7 @@ fn main() -> anyhow::Result<()> {
                         );
                         match rewind_to_chain_root(&hub, &config, &state_dir, h, temp_mode) {
                             Ok((eng, at)) => {
+                                cap_store(&state_dir, temp_mode, lf);
                                 engine = eng;
                                 cursor.rewind_to(at);
                                 accepted.retain(|k, _| *k <= at);
@@ -1396,7 +1624,10 @@ fn main() -> anyhow::Result<()> {
                 break;
             }
             let mut advanced: Option<String> = None;
-            match check_height(&hub, &config, &mut engine, h, &mut advanced) {
+            if stop_requested() {
+                break;
+            }
+            match check_height(&hub, &config, &mut engine, h, &mut advanced, &mut vault_cache) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
                 Err(e) => println!("WATCH ERROR at h={h}: {e}"),
@@ -1409,15 +1640,11 @@ fn main() -> anyhow::Result<()> {
                 if let Err(e) = save_checkpoint_retaining(&state_dir, &engine, lf) {
                     println!("WATCH ERROR: checkpoint at h={h} failed: {e}");
                 }
-                // R4-R-7: a temp-dir store is capped (count and bytes).
+                // R4-R-7 / R5-R-3: a temp-dir store is capped by bytes but
+                // keeps its checkpoints back to last_finalized (floor and
+                // newest always).
                 if temp_mode {
-                    if let Err(e) = minuend_state::persist::cap_snapshots(
-                        &state_dir,
-                        TEMP_MAX_CHECKPOINTS,
-                        TEMP_MAX_CHECKPOINT_BYTES,
-                    ) {
-                        println!("WATCH ERROR: capping temp checkpoints failed: {e}");
-                    }
+                    cap_store(&state_dir, true, lf);
                 }
             } else {
                 // No DA yet, or a mismatch this round: the replay retries
@@ -1444,7 +1671,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+        sleep_unless_stopped(config.poll_interval_secs);
     }
 }
 

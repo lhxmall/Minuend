@@ -235,7 +235,13 @@ pub fn retire_snapshots_above(dir: &Path, height: Height) -> io::Result<Vec<Heig
     for (h, path) in snapshot_candidates(dir)? {
         if h > height {
             fs::create_dir_all(&dead)?;
-            fs::rename(&path, dead.join(snapshot_name(h)))?;
+            let to = dead.join(snapshot_name(h));
+            fs::rename(&path, &to)?;
+            // R5-R-6: stamp the retirement time, so `cap_dead_snapshots`
+            // keeps the most recently retired files (rename keeps mtime).
+            if let Ok(f) = fs::OpenOptions::new().write(true).open(&to) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
             moved.push(h);
         }
     }
@@ -265,6 +271,98 @@ pub fn cap_snapshots(dir: &Path, max_count: usize, max_bytes: u64) -> io::Result
         fsync_dir(dir);
     }
     Ok(removed)
+}
+
+/// R5-R-3: byte-budgeted cap for a throw-away (temp-dir) store that still
+/// keeps the rewind floor. Kept unconditionally: the newest snapshot and
+/// the FLOOR — the newest snapshot at or below `floor` (the chain's
+/// `last_finalized`; no rewind ever goes below it). Everything below the
+/// floor snapshot is deleted (never needed). The snapshots between the
+/// floor and the newest are kept while the total stays within
+/// `max_bytes`; over budget the oldest of them go first. A rewind to any
+/// not-yet-final height therefore lands at or above the floor instead of
+/// at genesis (the old fixed count of 8 deleted the floor first). Returns
+/// the heights deleted.
+pub fn cap_snapshots_keep_floor(
+    dir: &Path,
+    floor: Height,
+    max_bytes: u64,
+) -> io::Result<Vec<Height>> {
+    let all = snapshot_candidates(dir)?; // newest first
+    let mut removed = Vec::new();
+    if all.is_empty() {
+        return Ok(removed);
+    }
+    let floor_idx = all.iter().position(|(h, _)| *h <= floor);
+    let size = |p: &PathBuf| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    // Below the floor snapshot: delete.
+    let keep_end = floor_idx.map(|i| i + 1).unwrap_or(all.len());
+    for (h, path) in &all[keep_end..] {
+        fs::remove_file(path)?;
+        removed.push(*h);
+    }
+    let kept = &all[..keep_end];
+    let mut total: u64 = kept.iter().map(|(_, p)| size(p)).sum();
+    // Middle (strictly between newest and floor), oldest first.
+    let last = kept.len().saturating_sub(1);
+    let middle_hi = if floor_idx.is_some() { last } else { kept.len() };
+    for i in (1..middle_hi).rev() {
+        if total <= max_bytes {
+            break;
+        }
+        let (h, path) = &kept[i];
+        total = total.saturating_sub(size(path));
+        fs::remove_file(path)?;
+        removed.push(*h);
+    }
+    if !removed.is_empty() {
+        fsync_dir(dir);
+    }
+    Ok(removed)
+}
+
+/// R5-R-6: cap `dir/`[`DEAD_SNAPSHOT_DIR`]: keep at most `max_count`
+/// files and `max_bytes` of them, the most recently retired first (by
+/// mtime, which [`retire_snapshots_above`] stamps; ties by height). Returns
+/// how many files were deleted.
+pub fn cap_dead_snapshots(dir: &Path, max_count: usize, max_bytes: u64) -> io::Result<usize> {
+    let dead = dir.join(DEAD_SNAPSHOT_DIR);
+    let mut files: Vec<(std::time::SystemTime, Height, PathBuf, u64)> = snapshot_candidates(&dead)?
+        .into_iter()
+        .map(|(h, p)| {
+            let m = fs::metadata(&p).ok();
+            let t = m
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (t, h, p, m.map(|m| m.len()).unwrap_or(0))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let mut total: u64 = 0;
+    let mut n = 0;
+    for (i, (_, _, path, len)) in files.iter().enumerate() {
+        total = total.saturating_add(*len);
+        if i >= max_count || total > max_bytes {
+            fs::remove_file(path)?;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        fsync_dir(&dead);
+    }
+    Ok(n)
+}
+
+/// R5-R-6: total bytes of the top-level snapshots and `dead/` of `dir`.
+pub fn snapshot_store_bytes(dir: &Path) -> io::Result<u64> {
+    let mut t = 0u64;
+    for d in [dir.to_path_buf(), dir.join(DEAD_SNAPSHOT_DIR)] {
+        for (_, p) in snapshot_candidates(&d)? {
+            t = t.saturating_add(fs::metadata(&p).map(|m| m.len()).unwrap_or(0));
+        }
+    }
+    Ok(t)
 }
 
 /// All snapshots in `dir` as (height, path), descending by height.
@@ -375,6 +473,62 @@ mod tests {
         // A byte budget smaller than one file still keeps the newest.
         cap_snapshots(&dir, 100, 1).unwrap();
         assert_eq!(snapshot_heights(&dir).unwrap(), vec![6]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R5-R-3: the temp-dir cap keeps the rewind floor (newest snapshot
+    /// <= last_finalized) and the newest one whatever the budget; more than
+    /// 8 unfinalized heights are all kept while they fit the byte budget.
+    #[test]
+    fn r5r3_cap_keeps_floor_and_newest_within_budget() {
+        let dir = std::env::temp_dir().join(format!("minuend-capfloor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::default();
+        for h in 1..=20 {
+            st.height = h;
+            save_snapshot_retaining(&dir, &st, &[], 0).unwrap();
+        }
+        let one = fs::metadata(dir.join(snapshot_name(1))).unwrap().len();
+        // lf = 5: 1..=4 go (below the floor), 5..=20 (16 > 8) all fit.
+        let removed = cap_snapshots_keep_floor(&dir, 5, u64::MAX).unwrap();
+        assert_eq!(removed, vec![4, 3, 2, 1]);
+        assert_eq!(snapshot_heights(&dir).unwrap(), (5..=20).rev().collect::<Vec<_>>());
+        // Budget of 4 files: newest (20) + floor (5) + the 2 newest middles.
+        cap_snapshots_keep_floor(&dir, 5, 4 * one).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![20, 19, 18, 5]);
+        // A budget below one file still keeps newest AND floor.
+        cap_snapshots_keep_floor(&dir, 5, 1).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![20, 5]);
+        // Floor between snapshots: the newest at or below it is the floor.
+        cap_snapshots_keep_floor(&dir, 7, 1).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![20, 5]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R5-R-6: `dead/` is capped by count and bytes, most recently retired
+    /// first; the store size helper counts both.
+    #[test]
+    fn r5r6_dead_dir_is_capped() {
+        let dir = std::env::temp_dir().join(format!("minuend-capdead-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::default();
+        for round in 0..3u64 {
+            for h in 1..=4 {
+                st.height = h + round * 10;
+                save_snapshot_retaining(&dir, &st, &[], 0).unwrap();
+            }
+            retire_snapshots_above(&dir, 0).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let dead = dir.join(DEAD_SNAPSHOT_DIR);
+        assert_eq!(snapshot_heights(&dead).unwrap().len(), 12);
+        let one = fs::metadata(dead.join(snapshot_name(1))).unwrap().len();
+        assert_eq!(snapshot_store_bytes(&dir).unwrap(), 12 * one);
+        assert_eq!(cap_dead_snapshots(&dir, 4, u64::MAX).unwrap(), 8);
+        // The last retirement (heights 21..=24) survives.
+        assert_eq!(snapshot_heights(&dead).unwrap(), vec![24, 23, 22, 21]);
+        assert_eq!(cap_dead_snapshots(&dir, 100, 2 * one).unwrap(), 2);
+        assert_eq!(snapshot_heights(&dead).unwrap().len(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 
