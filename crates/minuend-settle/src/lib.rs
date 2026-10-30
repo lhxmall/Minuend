@@ -2675,6 +2675,87 @@ mod tests {
         );
     }
 
+    /// R2-E-2: a Reveal wrapping a Withdraw/Deposit commits the INNER op's
+    /// descriptor (the binding AA pins W/adr: by op tag); other inner ops
+    /// keep the opaque `x:` tag.
+    #[test]
+    fn reveal_commits_inner_financial_descriptor() {
+        let account = minuend_types::AccountId([4u8; 32]);
+        let inner = minuend_dag::Op::Withdraw {
+            account,
+            amount: 5,
+            nonce: 9,
+        };
+        let rev = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(inner.clone()),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev), ops_element("uu", &inner));
+        assert!(ops_element("uu", &rev).starts_with("w:"));
+        let cancel = minuend_dag::Op::Cancel {
+            account,
+            order_id: minuend_types::OrderId([7; 32]),
+        };
+        let rev2 = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(cancel),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev2), "x:uu");
+    }
+
+    /// R2-R-1: the DA binding hash format is pinned (JS daBindHash and the
+    /// rollup AA recompute exactly this string).
+    #[test]
+    fn da_bind_hash_format_is_pinned() {
+        let c = Checkpoint {
+            height: 7,
+            prev_state_hash: [1; 32],
+            state_root: [2; 32],
+            aa_root: "a".repeat(64),
+            wit_root: "W".repeat(44),
+            trace_root: "T".repeat(44),
+            units_root: "U".repeat(44),
+            units_set_root: "S".repeat(44),
+            ops_root: "O".repeat(44),
+            fills_root: "F".repeat(44),
+            counts_root: "C".repeat(44),
+            unit_count: 3,
+            wit_count: 11,
+            fill_count: 2,
+            assertion_version: 2,
+            aa_shard_roots: std::array::from_fn(|_| String::new()),
+            last_unit: UnitId([0; 32]),
+            seq: 0,
+            unit_ids: Vec::new(),
+            fills_hash: [0; 32],
+            validity_proof_hash: None,
+            perp_burned: None,
+        };
+        let s = format!(
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|2|{}",
+            hex::encode([1u8; 32]),
+            hex::encode([2u8; 32]),
+            "a".repeat(64),
+            "W".repeat(44),
+            "T".repeat(44),
+            "U".repeat(44),
+            "S".repeat(44),
+            "O".repeat(44),
+            "F".repeat(44),
+            "C".repeat(44),
+            "d".repeat(64)
+        );
+        use sha2::Digest as _;
+        assert_eq!(
+            da_bind_hash(&c, "minuend-v2", &"d".repeat(64)),
+            hex::encode(sha2::Sha256::digest(s.as_bytes()))
+        );
+    }
+
     /// #47 A2: deposit ops commit the bound address (the forest dispute AA
     /// checks every new `adr:` witness leaf against it).
     #[test]
@@ -2686,9 +2767,15 @@ mod tests {
             amount: 7,
             aa_unit: [0; 32],
         };
+        // R2-A-3: + the vault anchor (standard base64 of the unit hash).
         assert_eq!(
             ops_element("u", &op),
-            format!("d:{}:7:{}", hex::encode([3u8; 32]), "B".repeat(32))
+            format!(
+                "d:{}:7:{}:{}",
+                hex::encode([3u8; 32]),
+                "B".repeat(32),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            )
         );
         let gop = minuend_dag::Op::GovDeposit {
             account,

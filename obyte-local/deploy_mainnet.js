@@ -98,7 +98,13 @@ async function main() {
 
   // 1. Dispute AAs FIRST (#13): their definitions carry no rollup address,
   // the rollup hardcodes THEM — mutual hardcoding would be a chash cycle.
-  const disputeSrc = readAa("minuend_dispute.aa");
+  // Round 2 (R2-A-3): vault BASE first (names no address); dispute.aa
+  // hardcodes the base and derives the rollup's vault instance.
+  const vaultBaseSrc = substitute(readAa("minuend_vault.aa"), { PERP_ASSET_ID_HERE: PERP_ASSET_ID });
+  const vaultBaseDef = ["autonomous agent", await parseAa(vaultBaseSrc, "minuend_vault.aa")];
+  const vaultBase = await postDefinition(vaultBaseDef, "vault base");
+  await waitBeat(vaultBase.unit, "vault base");
+  const disputeSrc = substitute(readAa("minuend_dispute.aa"), { VAULT_BASE_HERE: vaultBase.address });
   const fillSrc = readAa("minuend_dispute_fill.aa");
   const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "minuend_dispute.aa")];
   const fillDef = ["autonomous agent", await parseAa(fillSrc, "minuend_dispute_fill.aa")];
@@ -108,6 +114,10 @@ async function main() {
   const dispute = await postDefinition(disputeDef, "dispute");
   const fill = await postDefinition(fillDef, "fill");
   const bindAa = await postDefinition(bindDef, "bind");
+  // Round 2: P-ghost / P-skip live in the book dispute AA (ops budget).
+  const bookSrc = readAa("minuend_dispute_book.aa");
+  const bookDef = ["autonomous agent", await parseAa(bookSrc, "minuend_dispute_book.aa")];
+  const bookAa = await postDefinition(bookDef, "book");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
@@ -115,16 +125,13 @@ async function main() {
     DISPUTE_AA_HERE: dispute.address,
     DISPUTE_FILL_AA_HERE: fill.address,
     DISPUTE_BIND_AA_HERE: bindAa.address,
+    DISPUTE_BOOK_AA_HERE: bookAa.address,
   });
   const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
   await waitBeat(rollup.unit, "rollup");
 
-  const vaultSrc = substitute(readAa("minuend_vault.aa"), {
-    ROLLUP_AA_HERE: rollup.address,
-    PERP_ASSET_ID_HERE: PERP_ASSET_ID,
-  });
-  const vaultDef = ["autonomous agent", await parseAa(vaultSrc, "minuend_vault.aa")];
+  const vaultDef = ["autonomous agent", { base_aa: vaultBase.address, params: { rollup: rollup.address } }];
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 
@@ -142,6 +149,10 @@ async function main() {
     { to: bindAa.address, amount: 20000, data: { bind_bind: 1, rollup: rollup.address } },
     "binding-dispute bind"
   );
+  await triggerAa(
+    { to: bookAa.address, amount: 20000, data: { bind_book: 1, rollup: rollup.address } },
+    "book-dispute bind"
+  );
   await waitBeat("binds", "bind");
   const state = await readAaState(rollup.address);
   if (String(state.dispute_aa) !== String(dispute.address))
@@ -150,6 +161,8 @@ async function main() {
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(state.dispute_fill_aa));
   if (String(state.dispute_bind_aa) !== String(bindAa.address))
     throw new Error("dispute_bind_aa not bound: " + JSON.stringify(state.dispute_bind_aa));
+  if (String(state.dispute_book_aa) !== String(bookAa.address))
+    throw new Error("dispute_book_aa not bound: " + JSON.stringify(state.dispute_book_aa));
   console.log("all three dispute AAs bound");
 
   // 4. Write deployment.json.
@@ -159,7 +172,9 @@ async function main() {
     dispute_aa_address: dispute.address,
     dispute_fill_aa_address: fill.address,
     dispute_bind_aa_address: bindAa.address,
+    dispute_book_aa_address: bookAa.address,
     vault_aa_address: vault.address,
+    vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
     assertion_version: 2,

@@ -8,6 +8,8 @@ const {
   disputeTarget,
   buildChallengeData,
   hubFor,
+  daBindHash,
+  targetForPred,
   CHALLENGE_SAFETY_MARGIN_SECS,
 } = require("./script_helpers");
 
@@ -71,6 +73,32 @@ assert.strictEqual(finalizeReached("NaN", 5), false);
   assert.strictEqual(hubFor("testnet"), "obyte.org/bb-test");
   assert.strictEqual(hubFor("testnet", "my.hub/bb"), "my.hub/bb");
   assert.throws(() => hubFor("devnet"));
+}
+
+// R2-R-1: DA binding hash — pinned to the same vector as the Rust test
+// minuend_settle::tests::da_bind_hash_format_is_pinned.
+{
+  const crypto = require("crypto");
+  const f = {
+    chain_id: "minuend-v2", height: 7,
+    prev_state_hash: "01".repeat(32), state_root: "02".repeat(32), aa_root: "a".repeat(64),
+    wit_root: "W".repeat(44), trace_root: "T".repeat(44), units_root: "U".repeat(44),
+    units_set_root: "S".repeat(44), ops_root: "O".repeat(44), fills_root: "F".repeat(44),
+    counts_root: "C".repeat(44), unit_count: 3, wit_count: 11, fill_count: 2,
+    assertion_version: 2, data_root: "d".repeat(64),
+  };
+  const s = ["minuend-da-v1", "minuend-v2", "7", "01".repeat(32), "02".repeat(32), "a".repeat(64),
+    "W".repeat(44), "T".repeat(44), "U".repeat(44), "S".repeat(44), "O".repeat(44), "F".repeat(44),
+    "C".repeat(44), "3", "11", "2", "2", "d".repeat(64)].join("|");
+  assert.strictEqual(daBindHash(f), crypto.createHash("sha256").update(s).digest("hex"));
+  assert.throws(() => daBindHash(Object.assign({}, f, { data_root: undefined })), /missing data_root/);
+  // Round 2 routing: ghost/skip -> book AA, binding preds -> bind AA.
+  assert.strictEqual(targetForPred("ghost"), "book");
+  assert.strictEqual(targetForPred("skip"), "book");
+  assert.strictEqual(targetForPred("fill_math"), "fill");
+  for (const p of ["wpin", "adr", "tip", "keep", "mirror"]) assert.strictEqual(targetForPred(p), "bind");
+  assert.strictEqual(targetForPred("deposit"), "main");
+  assert.strictEqual(disputeTarget("book", { dispute_book_aa_address: "B".repeat(32) }).address, "B".repeat(32));
 }
 
 console.log("script helper checks passed");

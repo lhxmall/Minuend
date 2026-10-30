@@ -197,8 +197,17 @@ async function main() {
   console.log("batch:", batchData.chain_id, "height", batchData.height,
     "units", (batchData.unit_ids || []).length);
 
+  // Round 2: the vault is a parameterized instance of the base AA.
+  const vaultBasePath = resolveVaultAa();
+  let vaultBaseDef = null;
+  require("ocore/formula/parse_ojson").parse(fs.readFileSync(vaultBasePath, "utf8"), (err, res) => {
+    if (err) throw err;
+    vaultBaseDef = res[1];
+  });
+  const vaultBaseAddr = require("ocore/object_hash.js").getChash160(["autonomous agent", vaultBaseDef]);
   network = await Network.create()
-    .with.agent({ vault: resolveVaultAa() })
+    .with.agent({ vaultBase: vaultBasePath })
+    .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ poster: 1e13 })
     .run();
   const poster = network.wallet.poster;

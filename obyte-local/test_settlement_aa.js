@@ -635,6 +635,7 @@ async function main() {
   sd3.ops_root = OPS3_ROOT;
   sd3.units_root = UNITS3_ROOT;
   sd3.fill_count = 1;
+  rebind(sd3);
   {
     const h3data = { chain_id: "minuend-v2", height: 3 };
     const r = await operator.sendMulti({
@@ -899,6 +900,8 @@ async function main() {
     await network.witnessUntilStable(pr2.unit);
     delete h4pkg.frames_blob;
     h4pkg.packages = [pr1.unit, pr2.unit];
+    rebind(sd4pkg);
+    h4pkg.da_bind = sd4pkg.da_bind;
     const r3p = await operator.sendMulti({
       messages: [
         tempDataMsg(h4pkg),
@@ -2058,7 +2061,7 @@ async function main() {
 
   // ---- 39. R2-A-2: P-wpin judges W jointly with collateral ---------------
   {
-    const FRESH = "9".repeat(64);
+    const FRESH = "1f".repeat(32); // not all-digit: Oscript reads an all-digit field as a number
     const mintOp = `w:${FRESH}:1000000000:1`;
     const mintLeaf = `acct:${FRESH}:0:0:1000000000`;
     const mint = oneUnit("r2w-mint", mintOp, [mintLeaf]);
