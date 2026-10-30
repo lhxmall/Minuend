@@ -841,6 +841,21 @@ impl Engine {
         } else {
             signed
         };
+        // R3-E-2: on a spot_only market an order that can REST (limit GTC)
+        // is gated on its full qty, as if it opened all of it. Whether a
+        // resting order reduces is only known at placement: the position can
+        // be closed by another order afterwards, and the maker leg of a fill
+        // is never re-checked — a zero-reserve "reduce" would then open an
+        // unbacked spot position. IOC/market orders fill now against the
+        // current position, so their netted open qty is exact.
+        let open_qty = if self.state.market_params(market).spot_only
+            && typ == OrderType::Limit
+            && tif == TimeInForce::Gtc
+        {
+            signed
+        } else {
+            open_qty
+        };
         // Margin-field rules (before the open block: they apply to pure
         // reduces too). Cross orders carry no margin; an isolated pure
         // reduce has no opening exposure to back, so escrow there is
@@ -1024,55 +1039,27 @@ impl Engine {
         // the order (rolled back) when a fee takes non-negative collateral
         // below zero. Pure isolated closes are unaffected whenever the
         // released bucket covers the fee.
-        if isolated {
+        // R3-E-4: the simulation runs on the taker's REAL account right
+        // before each fill is applied, so every earlier fill of this order
+        // — including the claws `apply_fill_pair` runs between the two
+        // parties — is already reflected (a separately simulated account
+        // missed those claws and over-stated the collateral of later fills).
+        let sim_taker = if isolated {
             let params = self.state.market_params(market);
-            let funding_usd = params.funding_rate.then_some(params.usd_per_unit);
-            let mut sim = self
-                .state
-                .accounts
-                .get(&account)
-                .cloned()
-                .unwrap_or_else(|| minuend_account::Account::new(account));
-            for f in result.fills.iter().filter(|f| f.taker == account) {
-                if sim
-                    .apply_fill(
-                        f.taker_side,
-                        true,
-                        f.price,
-                        f.qty,
-                        f.market,
-                        funding_usd,
-                        f.taker_post,
-                        f.taker_isolated,
-                    )
-                    .is_err()
+            Some((params.funding_rate.then_some(params.usd_per_unit), params.taker_fee_bps))
+        } else {
+            None
+        };
+        for fill in &result.fills {
+            if let Some((funding_usd, fee_bps)) = sim_taker {
+                if fill.taker == account
+                    && fill.kind != 2
+                    && !self.taker_fee_keeps_cash(fill, funding_usd, fee_bps)
                 {
-                    // The real apply below fails the same way and rolls back.
-                    break;
-                }
-                if f.kind == 2 {
-                    continue;
-                }
-                let notional = match funding_usd {
-                    Some(usd) => funding_notional_usd(f.qty, usd),
-                    None => notional_usd(f.qty, f.price),
-                };
-                let fee = bps(notional, params.taker_fee_bps);
-                if fee <= 0 {
-                    continue;
-                }
-                // Cross equity too: the fee must not dip into a cross spot
-                // reserve (R2-E-8) any more than into negative cash.
-                let pre = sim.collateral;
-                let pre_eq = sim.snapshot(&self.state.marks, &self.state.markets).equity;
-                sim.collateral = sim.collateral.saturating_sub(fee);
-                if (pre >= 0 && sim.collateral < 0) || (pre_eq >= 0 && pre_eq < fee) {
                     self.state.rollback(journal);
                     return Err(RejectReason::Risk);
                 }
             }
-        }
-        for fill in &result.fills {
             if let Err(e) = self.state.apply_fill_pair_journaled(&mut journal, fill) {
                 self.state.rollback(journal);
                 return Err(map_acct(e));
@@ -1266,6 +1253,49 @@ impl Engine {
         oi.min(i64::MAX as u128) as Qty
     }
 
+    /// R2-E-6 / R3-E-4: whether the taker leg of `fill`, applied to the
+    /// taker's current account and followed by its taker fee, leaves
+    /// non-negative collateral non-negative and does not dip into a cross
+    /// reserve. A fill that would itself fail returns `true` (the real
+    /// apply fails the same way and rolls back).
+    fn taker_fee_keeps_cash(&self, fill: &Fill, funding_usd: Option<u64>, fee_bps: Bps) -> bool {
+        let mut sim = self
+            .state
+            .accounts
+            .get(&fill.taker)
+            .cloned()
+            .unwrap_or_else(|| minuend_account::Account::new(fill.taker));
+        if sim
+            .apply_fill(
+                fill.taker_side,
+                true,
+                fill.price,
+                fill.qty,
+                fill.market,
+                funding_usd,
+                fill.taker_post,
+                fill.taker_isolated,
+            )
+            .is_err()
+        {
+            return true;
+        }
+        let notional = match funding_usd {
+            Some(usd) => funding_notional_usd(fill.qty, usd),
+            None => notional_usd(fill.qty, fill.price),
+        };
+        let fee = bps(notional, fee_bps);
+        if fee <= 0 {
+            return true;
+        }
+        // Cross equity too: the fee must not dip into a cross spot reserve
+        // (R2-E-8) any more than into negative cash.
+        let pre = sim.collateral;
+        let pre_eq = sim.snapshot(&self.state.marks, &self.state.markets).equity;
+        let post = sim.collateral.saturating_sub(fee);
+        !((pre >= 0 && post < 0) || (pre_eq >= 0 && pre_eq < fee))
+    }
+
     /// IM that the account's currently resting orders will demand once they
     /// fill and open (or add to) positions. `snapshot` cannot see these —
     /// booked positions only materialize at fill time — so `place` reserves
@@ -1280,24 +1310,28 @@ impl Engine {
     /// was over-reserving IM and rejecting legitimate reduce-only style
     /// resting orders. Per-order notional still uses each order's own price,
     /// so the per-qty rate is a weighted average across the side.
+    ///
+    /// R3-E-2: two holes closed. (1) On a `spot_only` market every resting
+    /// order is reserved on its FULL remaining qty, never netted against
+    /// the position: `place` charged it that way (a GTC "reduce" can turn
+    /// into an open once the position is closed by another order, and the
+    /// maker leg of a fill is never re-checked). (2) Isolated resting
+    /// orders are no longer skipped: their open part's requirement is
+    /// counted net of the escrow they still carry (`margin_left`), so a
+    /// placement-time reduce (escrow 0) that later opens is reserved here
+    /// and blocks withdrawing the cash it would need.
     fn resting_open_im(&self, account: AccountId) -> Usd {
         let mut total: Usd = 0;
         for (market, book) in &self.state.books {
+            let params = self.state.market_params(*market);
+            // [cross, isolated] × [bid, ask]: (qty, notional, escrow left).
             // R2-E-9: i128 accumulators — up to 64 orders of qty ≤ i64::MAX
             // each overflow an i64 sum (debug panic / release wrap to a
             // zero reserve).
-            let mut bid_qty: i128 = 0;
-            let mut ask_qty: i128 = 0;
-            let mut bid_notional: Usd = 0;
-            let mut ask_notional: Usd = 0;
-            for o in book
-                .live_orders()
-                .filter(|o| o.account == account && !o.isolated)
-            {
+            let mut acc = [[(0i128, 0 as Usd, 0 as Usd); 2]; 2];
+            for o in book.live_orders().filter(|o| o.account == account) {
                 // Funding-rate books rest at encoded rates: their margin is
-                // the multiplier notional, not a dollar price. Isolated
-                // orders are skipped: their margin already left collateral
-                // at place time — counting it here would double-reserve.
+                // the multiplier notional, not a dollar price.
                 let n = match self.state.markets.get(market) {
                     Some(p) if p.funding_rate => funding_notional_usd(o.remaining, p.usd_per_unit),
                     // #47 C2: a resting spot_only order reserves the same
@@ -1316,18 +1350,15 @@ impl Engine {
                         notional_usd(o.remaining, px)
                     }
                 };
-                match o.side {
-                    Side::Bid => {
-                        bid_qty += i128::from(o.remaining);
-                        bid_notional = bid_notional.saturating_add(n);
-                    }
-                    Side::Ask => {
-                        ask_qty += i128::from(o.remaining);
-                        ask_notional = ask_notional.saturating_add(n);
-                    }
-                }
+                let slot = &mut acc[usize::from(o.isolated)][match o.side {
+                    Side::Bid => 0,
+                    Side::Ask => 1,
+                }];
+                slot.0 += i128::from(o.remaining);
+                slot.1 = slot.1.saturating_add(n);
+                slot.2 = slot.2.saturating_add(i128::from(o.margin_left));
             }
-            if bid_qty == 0 && ask_qty == 0 {
+            if acc.iter().flatten().all(|s| s.0 == 0) {
                 continue;
             }
             let pos_qty = self
@@ -1338,29 +1369,40 @@ impl Engine {
                 .map(|p| p.qty)
                 .unwrap_or(0);
             // Bids reduce only a short, asks reduce only a long: only the qty
-            // beyond what the position absorbs actually opens.
-            let short = (-i128::from(pos_qty)).max(0);
-            let long = i128::from(pos_qty).max(0);
-            let im_bps = self.state.market_params(*market).im_bps;
-            // Open-only notional: the reducible slice is priced out, the rest
-            // keeps the side's per-qty rate. A side with nothing to reduce
-            // prices the whole side; one that only reduces prices zero.
-            let bid_open_qty = bid_qty - short;
-            let ask_open_qty = ask_qty - long;
-            // #47 H1: multiply BEFORE dividing. `notional / qty` alone is the
-            // per-qty-UNIT notional (1.0 qty = 1e8 units), which truncates
-            // to 0 below $100 and badly rounds down above it.
-            let bid_im = if bid_qty > 0 && bid_open_qty > 0 {
-                bps(open_share(bid_notional, bid_open_qty, bid_qty), im_bps)
+            // beyond what the position absorbs actually opens. R3-E-2: on a
+            // spot_only market nothing is netted (see above).
+            let (short, long) = if params.spot_only {
+                (0, 0)
             } else {
-                0
+                (
+                    (-i128::from(pos_qty)).max(0),
+                    i128::from(pos_qty).max(0),
+                )
             };
-            let ask_im = if ask_qty > 0 && ask_open_qty > 0 {
-                bps(open_share(ask_notional, ask_open_qty, ask_qty), im_bps)
-            } else {
-                0
-            };
-            total = total.saturating_add(bid_im.max(ask_im));
+            for (mode, sides) in acc.iter().enumerate() {
+                // Open-only notional: the reducible slice is priced out, the
+                // rest keeps the side's per-qty rate. A side with nothing to
+                // reduce prices the whole side; one that only reduces prices
+                // zero. #47 H1: multiply BEFORE dividing.
+                let side_im = |(qty, notional, escrow): (i128, Usd, Usd), reducible: i128| {
+                    let open = qty - reducible;
+                    let im = if qty > 0 && open > 0 {
+                        bps(open_share(notional, open, qty), params.im_bps)
+                    } else {
+                        0
+                    };
+                    // Isolated orders: what their escrow already covers is
+                    // not reserved twice.
+                    if mode == 1 {
+                        (im - escrow).max(0)
+                    } else {
+                        im
+                    }
+                };
+                let bid_im = side_im(sides[0], short);
+                let ask_im = side_im(sides[1], long);
+                total = total.saturating_add(bid_im.max(ask_im));
+            }
         }
         total
     }
@@ -1402,6 +1444,14 @@ impl Engine {
         // Deposit must reference a real AA deposit event in this batch window;
         // the bool kind binds the endorsement to collateral, not PERP.
         if !self.state.deposits_allowed.contains(&(aa_unit, false)) {
+            return Err(RejectReason::UnbackedDeposit);
+        }
+        // R3-E-1 (defense in depth): the op must credit EXACTLY the verified
+        // payment — same amount, same payer address.
+        if !self
+            .state
+            .deposit_backing_matches(aa_unit, false, u128::try_from(amount).ok(), addr)
+        {
             return Err(RejectReason::UnbackedDeposit);
         }
         // The withdrawal address must be a well-formed Obyte address: it is
@@ -2184,6 +2234,13 @@ impl Engine {
         if !self.state.deposits_allowed.contains(&(aa_unit, true)) {
             return Err(RejectReason::UnbackedDeposit);
         }
+        // R3-E-1: exact amount/payer match against the verified payment.
+        if !self
+            .state
+            .deposit_backing_matches(aa_unit, true, Some(amount), addr)
+        {
+            return Err(RejectReason::UnbackedDeposit);
+        }
         // Same address rule as a collateral deposit: the account's AA leaf is
         // keyed by this address regardless of asset kind.
         if !valid_obyte_addr(addr) {
@@ -2397,6 +2454,10 @@ impl Engine {
         // Bps updates must produce a still-legal parameter set; an illegal
         // one would be silently dropped at finalize anyway.
         if key != ParamKey::Delist {
+            // R3-E-6: a spot_only market's taker fee may only go down.
+            if spot_fee_raise(&self.state.markets[&market], key, value) {
+                return Err(RejectReason::Risk);
+            }
             let mut params = self.state.markets[&market];
             apply_param(&mut params, key, value);
             if !risk_params_ok(
@@ -2510,16 +2571,18 @@ impl Engine {
                 apply_param(&mut updated, key, value);
                 // A passed-but-illegal proposal is a no-op: never write an
                 // out-of-policy field, but still consume the proposal.
+                // R3-E-6: judged against the fee in force at finalize.
                 let legal = key == ParamKey::Delist
-                    || risk_params_ok(
-                        updated.im_bps,
-                        updated.mm_bps,
-                        updated.taker_fee_bps,
-                        updated.keeper_reward_bps,
-                        updated.funding_rate,
-                        updated.funding_cap_bps,
-                        updated.spot_only,
-                    );
+                    || (!spot_fee_raise(params, key, value)
+                        && risk_params_ok(
+                            updated.im_bps,
+                            updated.mm_bps,
+                            updated.taker_fee_bps,
+                            updated.keeper_reward_bps,
+                            updated.funding_rate,
+                            updated.funding_cap_bps,
+                            updated.spot_only,
+                        ));
                 if legal {
                     self.state.markets.insert(market, updated);
                 }
@@ -2622,8 +2685,8 @@ impl Engine {
         // (and must not nest Commit/Reveal) — same rule ingest enforces in
         // `account_matches`; re-checked here so no path executes a foreign
         // account's op. Checked before anything is consumed.
-        if matches!(inner, Op::Commit { .. } | Op::Reveal { .. })
-            || minuend_dag::op_signer(inner) != account
+        // R3-E-1: and must not be a Deposit/GovDeposit (top-level only).
+        if !minuend_dag::reveal_inner_kind_ok(inner) || minuend_dag::op_signer(inner) != account
         {
             return Err(RejectReason::BadAccount);
         }
@@ -2715,6 +2778,16 @@ impl Engine {
         }
         Ok(Vec::new())
     }
+}
+
+/// R3-E-6: raising `taker_fee_bps` on a `spot_only` market is refused (at
+/// proposal and again at finalize). Existing spot positions were reserved
+/// with the close fee at the rate in force when they opened; spot positions
+/// are never liquidated, so a higher rate would leave them under-reserved
+/// and push their closing fee onto the counterparty through the claw.
+/// Lowering (or keeping) the fee only ever loosens nothing.
+fn spot_fee_raise(params: &MarketParams, key: ParamKey, value: u64) -> bool {
+    params.spot_only && key == ParamKey::TakerFeeBps && value > params.taker_fee_bps
 }
 
 /// Apply a governance parameter key to a copy of `MarketParams`. Shared by
@@ -10049,5 +10122,640 @@ mod tests {
             &alice,
         );
         assert!(eng.ingest(edge).is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // Round 3 (exec)
+
+    /// R3-E-1: a Reveal may not carry a Deposit/GovDeposit (refused at
+    /// ingest and by `reveal_op`), and a top-level deposit must credit
+    /// exactly the verified payment (amount AND payer) recorded for its
+    /// anchor — the PoC (Reveal{Deposit 10^14} + top-level Deposit{1} on
+    /// one anchor) credits only the 1.
+    #[test]
+    fn r3e1_reveal_cannot_wrap_deposit_and_amount_must_match() {
+        let mut eng = activated_engine();
+        eng.state.deposits_allowed.clear();
+        let m = sk(6);
+        let ma = acct_of(&m);
+        let anchor = [42u8; 32];
+        let gov_anchor = [43u8; 32];
+        eng.state.allow_deposit(anchor, false, 1, &test_addr(6));
+        eng.state.allow_deposit(gov_anchor, true, 7, &test_addr(6));
+        let g = genesis_id();
+        for inner in [
+            Op::Deposit {
+                account: ma,
+                addr: test_addr(6),
+                amount: 100_000_000_000_000,
+                aa_unit: anchor,
+            },
+            Op::GovDeposit {
+                account: ma,
+                addr: test_addr(6),
+                amount: 1u128 << 60,
+                aa_unit: gov_anchor,
+            },
+        ] {
+            assert!(!minuend_dag::reveal_inner_kind_ok(&inner));
+            let salt = [5u8; 32];
+            let h = minuend_dag::reveal_commit_hash(&inner, &salt);
+            let c = commit_unit(
+                vec![g],
+                &m,
+                h,
+                eng.state.height + minuend_types::COMMIT_TTL_HEIGHTS,
+            );
+            let ctip = unit_id(&c);
+            assert!(applied(&eng.ingest(c).unwrap()));
+            let r = sign_unit(
+                vec![ctip],
+                Op::Reveal {
+                    account: ma,
+                    commit_ref: h,
+                    op: Box::new(inner.clone()),
+                    salt,
+                },
+                &m,
+            );
+            // Ingest refuses it (shared `reveal_inner_ok`) ...
+            assert!(matches!(eng.ingest(r.clone()), Err(ExecError::BadSig)));
+            // ... and so does the executor on any other path.
+            let before = r2_root(&eng);
+            eng.dag.insert(r).unwrap();
+            let evs = eng.apply_ready();
+            assert!(rejected_with(&evs, RejectReason::BadAccount), "{evs:?}");
+            assert_eq!(r2_root(&eng), before, "rejected = unchanged");
+            assert!(!eng.state.commits[&h].revealed);
+        }
+        assert!(!eng.state.accounts.contains_key(&ma));
+        assert!(!eng.state.perp_balances.contains_key(&ma));
+
+        // Top-level: wrong amount or wrong payer is unbacked ...
+        let big = deposit_to(vec![g], &m, 2, anchor, 6);
+        assert!(rejected_with(
+            &eng.ingest(big).unwrap(),
+            RejectReason::UnbackedDeposit
+        ));
+        let other_payer = deposit_to(vec![g], &m, 1, anchor, 7);
+        assert!(rejected_with(
+            &eng.ingest(other_payer).unwrap(),
+            RejectReason::UnbackedDeposit
+        ));
+        let gov_big = sign_unit(
+            vec![g],
+            Op::GovDeposit {
+                account: ma,
+                addr: test_addr(6),
+                amount: 8,
+                aa_unit: gov_anchor,
+            },
+            &m,
+        );
+        assert!(rejected_with(
+            &eng.ingest(gov_big).unwrap(),
+            RejectReason::UnbackedDeposit
+        ));
+        // ... and the exact payment is credited exactly once.
+        let ok = deposit_to(vec![g], &m, 1, anchor, 6);
+        assert!(applied(&eng.ingest(ok).unwrap()));
+        assert_eq!(eng.state.accounts[&ma].collateral, 1);
+        let gov_ok = sign_unit(
+            vec![g],
+            Op::GovDeposit {
+                account: ma,
+                addr: test_addr(6),
+                amount: 7,
+                aa_unit: gov_anchor,
+            },
+            &m,
+        );
+        assert!(applied(&eng.ingest(gov_ok).unwrap()));
+        assert_eq!(eng.state.perp_balances[&ma], 7);
+        // Pruning drops the backing together with the allow-list entry.
+        eng.state.deposits_allowed.clear();
+        eng.state.prune_deposits_allowed(eng.state.height);
+        assert!(eng.state.deposit_backing.is_empty());
+    }
+
+    fn deposit_to(
+        parents: Vec<UnitId>,
+        secret: &[u8; 32],
+        amount: Usd,
+        anchor: [u8; 32],
+        addr_n: u8,
+    ) -> Unit {
+        sign_unit(
+            parents,
+            Op::Deposit {
+                account: acct_of(secret),
+                addr: test_addr(addr_n),
+                amount,
+                aa_unit: anchor,
+            },
+            secret,
+        )
+    }
+
+    /// R3-E-2 (isolated spot PoC): a GTC "reduce" on a spot market must
+    /// escrow its full worst case — a zero-margin reduce is refused. With
+    /// the escrow, closing the long by another order and withdrawing all
+    /// free cash still leaves the later short fully backed by its bucket.
+    #[test]
+    fn r3e2_spot_resting_reduce_must_reserve_full_qty() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let carol = sk(3);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let hi = 150_000 * PRICE_SCALE as i64;
+        let p = {
+            let (e, _, m) = spot_engine(&[]);
+            e.state.markets[&m]
+        };
+        let req = |side, at| {
+            minuend_account::spot_order_requirement(side, at, QTY_SCALE, &p).unwrap()
+        };
+        let extra = 1_000 * USD_SCALE as i128;
+        let (mut eng, mut tip, meme) = spot_engine(&[
+            (&alice, req(Side::Bid, px) + req(Side::Ask, hi) + extra),
+            (&bob, req(Side::Ask, px) + extra),
+            (&carol, req(Side::Bid, px) + req(Side::Bid, hi) + extra),
+        ]);
+        let a = acct_of(&alice);
+        let u = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+            req(Side::Bid, px) as u64,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert_eq!(eng.state.accounts[&a].positions[&meme].qty, QTY_SCALE as i64);
+        // The old step 2: a zero-escrow GTC "reduce" ask. Refused now.
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            hi,
+            QTY_SCALE,
+            2,
+            0,
+        );
+        let evs = eng.ingest(u).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // With its full worst case escrowed it rests.
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            hi,
+            QTY_SCALE,
+            2,
+            req(Side::Ask, hi) as u64,
+        );
+        tip = unit_id(&u);
+        let evs = eng.ingest(u).unwrap();
+        assert!(applied(&evs) && !applied_with_fills(&evs), "{evs:?}");
+        // Close the long with another order (IOC reduce, exact netting).
+        let u = place_on(
+            vec![tip],
+            &carol,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            3,
+            0,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert!(!eng.state.accounts[&a].positions.contains_key(&meme));
+        // Escrow covers the resting ask: no further reserve, and every free
+        // unit of cash may leave.
+        assert_eq!(eng.resting_open_im(a), 0);
+        let free = eng.state.accounts[&a].collateral;
+        let u = withdraw_unit(vec![tip], &alice, free, 1);
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        // A buyer lifts the resting ask: the short is backed by its bucket.
+        let u = place_on(
+            vec![tip],
+            &carol,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            hi,
+            QTY_SCALE,
+            2,
+        );
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        let acct = &eng.state.accounts[&a];
+        let pos = acct.positions[&meme];
+        assert_eq!(pos.qty, -(QTY_SCALE as i64));
+        let need = minuend_account::spot_requirement(pos.qty, pos.entry_price, &p).unwrap();
+        assert!(
+            acct.isolated_margin[&meme] >= need,
+            "bucket {} < requirement {need}",
+            acct.isolated_margin[&meme]
+        );
+        assert!(acct.collateral >= 0);
+    }
+
+    /// R3-E-2 (cross spot variant): a cross GTC "reduce" on a spot market
+    /// is reserved on its full qty, so an account that cannot back the
+    /// short it may become is refused (an IOC close stays allowed), and
+    /// the reserve stays counted after the position is gone.
+    #[test]
+    fn r3e2_cross_spot_resting_reduce_needs_reserve() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let p = {
+            let (e, _, m) = spot_engine(&[]);
+            e.state.markets[&m]
+        };
+        let req = |side| minuend_account::spot_order_requirement(side, px, QTY_SCALE, &p).unwrap();
+        let extra = 10 * USD_SCALE as i128;
+        let (mut eng, mut tip, meme) = spot_engine(&[
+            (&alice, req(Side::Bid) + extra),
+            (&bob, req(Side::Ask) + req(Side::Bid) + extra),
+        ]);
+        let a = acct_of(&alice);
+        let u = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        let u = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            2,
+        );
+        let evs = eng.ingest(u).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // Bob's bid lets an IOC close go through (netted exactly).
+        let u = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            2,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            2,
+        );
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert!(!eng.state.accounts[&a].positions.contains_key(&meme));
+    }
+
+    /// R3-E-2 (isolated perp): a zero-escrow isolated reduce that turns into
+    /// an open once the position is closed by another order is counted by
+    /// `resting_open_im`, so the cash it would need cannot be withdrawn.
+    #[test]
+    fn r3e2_isolated_reduce_turned_open_blocks_withdraw() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let bob = sk(2);
+        let carol = sk(3);
+        let a = acct_of(&alice);
+        let g = genesis_id();
+        let mut tip = g;
+        for (i, who) in [&alice, &bob, &carol].into_iter().enumerate() {
+            let u = deposit(vec![tip], who, 100_000 * USD_SCALE as i128, 1 + i as u8);
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+        }
+        let px = 100_000 * PRICE_SCALE as i64;
+        let hi = 110_000 * PRICE_SCALE as i64;
+        let im = |at| bps(notional_usd(QTY_SCALE, at), minuend_types::IM_RATE_BPS);
+        let u = place(
+            vec![tip],
+            &bob,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            BTC_USD,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+            im(px) as u64,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        // Placement-time reduce: no escrow, nothing reserved yet.
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            BTC_USD,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            hi,
+            QTY_SCALE,
+            2,
+            0,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        assert_eq!(eng.resting_open_im(a), 0);
+        // Close the long with an IOC against carol's bid.
+        let u = place(
+            vec![tip],
+            &carol,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_iso(
+            vec![tip],
+            &alice,
+            BTC_USD,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            3,
+            0,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert!(!eng.state.accounts[&a].positions.contains_key(&BTC_USD));
+        // The resting ask now opens in full: its IM is reserved.
+        let want = im(hi);
+        assert_eq!(eng.resting_open_im(a), want);
+        let col = eng.state.accounts[&a].collateral;
+        let evs = eng.ingest(withdraw_unit(vec![tip], &alice, col, 1)).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, col - want, 2))
+            .unwrap();
+        assert!(applied(&evs), "{evs:?}");
+    }
+
+    /// R3-E-4: the R2-E-6 fee check must see the claws of earlier fills in
+    /// the same order. Fill 1 lifts a maker that goes bankrupt on it and
+    /// claws the isolated taker's cross cash to zero; fill 2's taker fee
+    /// would then be clawed from the honest second maker. The order is
+    /// refused (all-or-nothing). Control: a solvent first maker → applied.
+    #[test]
+    fn r3e4_fee_check_sees_earlier_claws() {
+        for bankrupt in [true, false] {
+            let mut eng = activated_engine();
+            let m = sk(1);
+            let s = sk(2);
+            let h = sk(3);
+            let t = sk(4);
+            let usd = |n: i128| n * USD_SCALE as i128;
+            let g = genesis_id();
+            let mut tip = g;
+            for (i, (who, amt)) in [
+                (&m, if bankrupt { usd(11_000) } else { usd(60_000) }),
+                (&s, usd(20_000)),
+                (&h, usd(20_000)),
+                (&t, usd(50_000)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let u = deposit(vec![tip], who, amt, 1 + i as u8);
+                tip = unit_id(&u);
+                assert!(applied(&eng.ingest(u).unwrap()));
+            }
+            let px = 100_000 * PRICE_SCALE as i64;
+            let low = 50_000 * PRICE_SCALE as i64;
+            // M goes long 1 @ px as the maker.
+            let u = place(
+                vec![tip],
+                &m,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                QTY_SCALE,
+                1,
+            );
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+            let u = place(
+                vec![tip],
+                &s,
+                Side::Ask,
+                OrderType::Limit,
+                TimeInForce::Ioc,
+                px,
+                QTY_SCALE,
+                1,
+            );
+            tip = unit_id(&u);
+            assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+            // M rests a reducing ask far below; H an honest ask at px.
+            let u = place(
+                vec![tip],
+                &m,
+                Side::Ask,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                low,
+                QTY_SCALE,
+                2,
+            );
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+            let u = place(
+                vec![tip],
+                &h,
+                Side::Ask,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                QTY_SCALE,
+                1,
+            );
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+            let h_before = eng.state.accounts[&acct_of(&h)].collateral;
+            let before = r2_root(&eng);
+            // T: isolated taker sweeping both levels; 30k cross cash left.
+            let u = place_iso(
+                vec![tip],
+                &t,
+                BTC_USD,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Ioc,
+                px,
+                2 * QTY_SCALE,
+                1,
+                usd(20_000) as u64,
+            );
+            let evs = eng.ingest(u).unwrap();
+            if bankrupt {
+                assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+                assert_eq!(r2_root(&eng), before, "rejected = unchanged");
+            } else {
+                assert!(applied_with_fills(&evs), "{evs:?}");
+            }
+            // The honest maker never pays the taker's fee.
+            assert!(eng.state.accounts[&acct_of(&h)].collateral >= h_before);
+        }
+    }
+
+    /// R3-E-5: `funding_rate_bps` cannot overflow on attacker prices; such a
+    /// price decodes out of band (refused by every caller) in every build.
+    #[test]
+    fn r3e5_funding_rate_bps_saturates() {
+        for px in [i64::MIN, i64::MIN + 1, i64::MIN + 999_999_999_999] {
+            assert!(minuend_types::funding_rate_bps(px).abs() > 10_000);
+        }
+        assert!(minuend_types::funding_rate_bps(i64::MAX).abs() > 10_000);
+        for r in [-10_000i64, -1, 0, 1, 10_000] {
+            assert_eq!(
+                minuend_types::funding_rate_bps(minuend_types::encode_funding_price(r)),
+                r
+            );
+        }
+    }
+
+    /// R3-E-6: governance may lower but never raise a spot market's taker
+    /// fee (refused at proposal; the finalize guard uses the same rule).
+    #[test]
+    fn r3e6_spot_taker_fee_cannot_be_raised() {
+        let (mut eng, mut tip, meme) = spot_engine(&[]);
+        // sk(9) is bound to test_addr(99) by `spot_engine`'s PERP deposit.
+        let d = sign_unit(
+            vec![tip],
+            Op::GovDeposit {
+                account: acct_of(&sk(9)),
+                addr: test_addr(99),
+                amount: PROPOSAL_MIN_STAKE_PERP,
+                aa_unit: [200u8; 32],
+            },
+            &sk(9),
+        );
+        tip = unit_id(&d);
+        assert!(applied(&eng.ingest(d).unwrap()));
+        let fee = eng.state.markets[&meme].taker_fee_bps;
+        let prop = |value: u64| {
+            sign_unit(
+                vec![tip],
+                Op::CreateProposal {
+                    creator: acct_of(&sk(9)),
+                    market: meme,
+                    key: ParamKey::TakerFeeBps.as_u8(),
+                    value,
+                },
+                &sk(9),
+            )
+        };
+        let evs = eng.ingest(prop(fee + 1)).unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        assert!(applied(&eng.ingest(prop(fee - 1)).unwrap()));
+        let p = eng.state.markets[&meme];
+        assert!(spot_fee_raise(&p, ParamKey::TakerFeeBps, fee + 1));
+        assert!(!spot_fee_raise(&p, ParamKey::TakerFeeBps, fee));
+        assert!(!spot_fee_raise(&p, ParamKey::ImBps, 20_000));
+        // Perp markets keep the old (bounded) rule.
+        let perp = minuend_types::genesis_params();
+        assert!(!spot_fee_raise(&perp, ParamKey::TakerFeeBps, 100));
     }
 }
