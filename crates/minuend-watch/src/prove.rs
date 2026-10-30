@@ -39,10 +39,7 @@ impl BuiltProof {
             "fill"
         } else if self.pred == "claw" {
             "claw"
-        } else if matches!(
-            self.pred.as_str(),
-            "xframe" | "mframe" | "noband" | "tsize"
-        ) {
+        } else if matches!(self.pred.as_str(), "xframe" | "mframe" | "noband" | "tsize") {
             // Round 7b: minuend_dispute_xframe.aa.
             "xframe"
         } else if self.pred == "ghost"
@@ -1073,12 +1070,13 @@ fn fsane_dup_proof(
 /// (64 bytes further: account + commit_ref).
 pub fn xframe_tag(u_pre: &str) -> Option<(String, String)> {
     let np = u_pre.get(13..15)?;
-    let tp = 15 + match np {
-        "00" => 0,
-        "01" => 64,
-        "02" => 128,
-        _ => return None,
-    };
+    let tp = 15
+        + match np {
+            "00" => 0,
+            "01" => 64,
+            "02" => 128,
+            _ => return None,
+        };
     let t0 = u_pre.get(tp..tp + 2)?;
     let tag = if t0 == "13" {
         u_pre.get(tp + 130..tp + 132)?
@@ -1161,7 +1159,12 @@ fn xframe_unit_fields(
     ))
 }
 
-fn xframe_base(batch: &Batch, k: usize, op: &str, pre_leaves: &[String]) -> Option<serde_json::Value> {
+fn xframe_base(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+) -> Option<serde_json::Value> {
     let mut data = serde_json::json!({
         "trace_root": batch.checkpoint.trace_root,
         "ops_root": batch.checkpoint.ops_root,
@@ -1424,7 +1427,9 @@ fn noband_proof(batch: &Batch, k: usize, op: &str, post_leaves: &[String]) -> Op
             continue;
         }
         let key = format!("band:{}:", q[1]);
-        if posted.iter().any(|l| l.starts_with(&key)) || !post_leaves.iter().any(|l| l.starts_with(&key)) {
+        if posted.iter().any(|l| l.starts_with(&key))
+            || !post_leaves.iter().any(|l| l.starts_with(&key))
+        {
             continue;
         }
         let mut d = serde_json::json!({
@@ -4884,6 +4889,8 @@ mod tests {
             minuend_types::QTY_SCALE / 1000,
             3
         ));
+        // Round 7b: the liar commits a matching fill_count (else P-tsize).
+        batch.checkpoint.fill_count += 1;
         refill(&mut batch);
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
         assert_eq!(proof.pred, "skip");
@@ -6528,7 +6535,11 @@ mod tests {
             let t: Vec<String> = (0..c).map(|i| format!("l:{i}")).collect();
             for i in [0, c / 2, c - 1] {
                 let p = proof_json(&t, i);
-                assert_eq!(p["siblings"].as_array().unwrap().len(), tree_depth(c), "c={c} i={i}");
+                assert_eq!(
+                    p["siblings"].as_array().unwrap().len(),
+                    tree_depth(c),
+                    "c={c} i={i}"
+                );
                 assert!(depth_ok(tree_depth(c), c));
                 assert!(ocore_verify(&t[i], &p));
             }
@@ -6558,7 +6569,11 @@ mod tests {
         });
         assert_eq!(opbind_aa(&honest, &units, &ops), Some(false));
         let full = proof_json(&ops, 0);
-        let node = format!("{}{}", obyte_merkle::hash(&ops[0]), obyte_merkle::hash(&ops[1]));
+        let node = format!(
+            "{}{}",
+            obyte_merkle::hash(&ops[0]),
+            obyte_merkle::hash(&ops[1])
+        );
         assert_eq!(node.len(), 88);
         assert!(!node.contains(':'));
         let short = serde_json::json!({
@@ -6574,7 +6589,11 @@ mod tests {
         });
         let mut claimed = ops.clone();
         claimed[0] = node.clone();
-        assert_eq!(opbind_aa(&attack, &units, &claimed), None, "depth gate bounces");
+        assert_eq!(
+            opbind_aa(&attack, &units, &claimed),
+            None,
+            "depth gate bounces"
+        );
         // P-tsize: an honest tree is never "the wrong size"; the node is
         // not leaf-shaped anyway.
         assert!(tree_depth(ops.len()) == full["siblings"].as_array().unwrap().len());
@@ -6631,7 +6650,15 @@ mod tests {
         assert_eq!(p.pred, "fsane");
         assert_eq!(p.data["prev"], f0);
         assert_eq!(p.data["fill_proof"]["index"], 1);
-        assert!(fsane_dup_proof(&batch, 0, &u, &pre, &minuend_settle::fills_root_elements(&batch.fills), &hexes(&batch)).is_none());
+        assert!(fsane_dup_proof(
+            &batch,
+            0,
+            &u,
+            &pre,
+            &minuend_settle::fills_root_elements(&batch.fills),
+            &hexes(&batch)
+        )
+        .is_none());
     }
 
     /// The x-frame AA reads the op tag and account from the unit text.
@@ -6672,7 +6699,10 @@ mod tests {
             },
             &s,
         );
-        assert_eq!(xframe_tag(&minuend_dag::unit_text_prefix(&vote)).unwrap().0, "0c");
+        assert_eq!(
+            xframe_tag(&minuend_dag::unit_text_prefix(&vote)).unwrap().0,
+            "0c"
+        );
         // A revealed Cancel now commits `c:` (ASSERTION_VERSION 5).
         let rc = Op::Reveal {
             account: a,
@@ -6693,22 +6723,60 @@ mod tests {
         let l = |a: &str, c: &str, p: &str, w: &str| format!("acct:{a}:{c}:{p}:{w}");
         let pre = l(&x, "100", "5", "0");
         // Bystander credit / W / PERP: fraud.
-        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "101", "5", "0"), false), Some(true));
-        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "5", "1"), false), Some(true));
-        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "6", "0"), false), Some(true));
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "101", "5", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "5", "1"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "6", "0"), false),
+            Some(true)
+        );
         // Unchanged, or the op account's own PERP: honest.
-        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &pre, false), Some(false));
-        assert_eq!(xframe_acct_bad("0e", &x, 3, Some(&pre), &l(&x, "100", "1", "0"), false), Some(false));
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &pre, false),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &x, 3, Some(&pre), &l(&x, "100", "1", "0"), false),
+            Some(false)
+        );
         // Bond release at the batch boundary (k == 0, +ORACLE_BOND_PERP).
-        let rel = l(&x, "100", &(5 + minuend_types::ORACLE_BOND_PERP).to_string(), "0");
-        assert_eq!(xframe_acct_bad("12", &oa, 0, Some(&pre), &rel, false), Some(false));
-        assert_eq!(xframe_acct_bad("12", &oa, 1, Some(&pre), &rel, false), Some(true));
+        let rel = l(
+            &x,
+            "100",
+            &(5 + minuend_types::ORACLE_BOND_PERP).to_string(),
+            "0",
+        );
+        assert_eq!(
+            xframe_acct_bad("12", &oa, 0, Some(&pre), &rel, false),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("12", &oa, 1, Some(&pre), &rel, false),
+            Some(true)
+        );
         // Funding (06 / 11): only position holders' collateral may move.
-        assert_eq!(xframe_acct_bad("06", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), true), Some(false));
-        assert_eq!(xframe_acct_bad("11", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), false), Some(true));
+        assert_eq!(
+            xframe_acct_bad("06", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), true),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("11", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), false),
+            Some(true)
+        );
         // A new account with cash in an x: unit.
-        assert_eq!(xframe_acct_bad("0c", &oa, 3, None, &l(&x, "7", "0", "0"), false), Some(true));
-        assert_eq!(xframe_acct_bad("0c", &oa, 3, None, &l(&x, "0", "0", "0"), false), Some(false));
+        assert_eq!(
+            xframe_acct_bad("0c", &oa, 3, None, &l(&x, "7", "0", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0c", &oa, 3, None, &l(&x, "0", "0", "0"), false),
+            Some(false)
+        );
     }
 
     #[test]
@@ -6749,14 +6817,28 @@ mod tests {
         );
         let (batch, replay) = claw_batch(&mut eng, commit);
         assert!(batch.ops[0].starts_with("x:"));
-        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none(), "honest");
+        assert!(
+            build_proof(&batch, &mut replay.clone(), &[], 0).is_none(),
+            "honest"
+        );
         // (a) bob credited 1e6 USD inside alice's Commit.
         let mut lie = batch.clone();
-        bump_col(&mut lie, 0, &hex::encode(b.0), 1_000_000 * minuend_types::USD_SCALE as i128);
+        bump_col(
+            &mut lie,
+            0,
+            &hex::encode(b.0),
+            1_000_000 * minuend_types::USD_SCALE as i128,
+        );
         let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("xframe");
         assert_eq!((p.pred.as_str(), p.target()), ("xframe", "xframe"));
-        assert_eq!(p.data["u_pre"], minuend_dag::unit_text_prefix(&batch.units[0]));
-        assert!(p.data["post_acct"].as_str().unwrap().contains(&hex::encode(b.0)));
+        assert_eq!(
+            p.data["u_pre"],
+            minuend_dag::unit_text_prefix(&batch.units[0])
+        );
+        assert!(p.data["post_acct"]
+            .as_str()
+            .unwrap()
+            .contains(&hex::encode(b.0)));
         // (b) the band rewritten.
         let mut lie = batch.clone();
         for l in lie.leaf_trace[0].iter_mut() {
@@ -6816,7 +6898,16 @@ mod tests {
         claw_set_pos(&mut eng, ta, QTY_SCALE as i64, px);
         claw_set_pos(&mut eng, ma, -(QTY_SCALE as i64), px);
         // The dust bid: 1 lot at the best price.
-        let dust = claw_place(vec![genesis_id()], &d, Side::Bid, TimeInForce::Gtc, px, 1, 1, None);
+        let dust = claw_place(
+            vec![genesis_id()],
+            &d,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            1,
+            1,
+            None,
+        );
         let i0 = unit_id(&dust);
         eng.ingest(dust).unwrap();
         // Mark falls 10%: T (600 USD on 1 BTC long) is liquidatable.
@@ -6843,6 +6934,8 @@ mod tests {
         assert_eq!(fills[0].kind, 2, "ADL, not the dust book fill");
         assert_eq!(fills[0].qty, QTY_SCALE);
         // The dust bid is untouched.
-        assert!(eng.state.books[&minuend_types::BTC_USD].best_bid().is_some());
+        assert!(eng.state.books[&minuend_types::BTC_USD]
+            .best_bid()
+            .is_some());
     }
 }

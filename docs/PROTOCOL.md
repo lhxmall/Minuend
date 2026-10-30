@@ -233,8 +233,8 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
-`assertion_version` 当前为 **4**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4，见 ROLLUP-UPGRADE §7），
-rollup AA 只接受等于 3 的提交。
+`assertion_version` 当前为 **5**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5，见 ROLLUP-UPGRADE §7），
+rollup AA 只接受等于 5 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
 
@@ -431,6 +431,22 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
 - **ADL 价格（项 28）**：witness 新增 `band:{market}:{min}:{max}` 叶；普通市场 kind 2 成交价
   ≠ clamp(pre mark, band) 时 P-claw 判欺诈（给出 band 证明时）。
 
+第 7b 轮规则（MECHANISMS §10.15，x-frame AA = `minuend_dispute_xframe.aa`）：
+- **精确证明深度**：对 ops / units / trace（`unit_count` 片叶）与 fills（`fill_count + 1`）的证明，
+  siblings 数必须恰好是 `ceil(log2(c))`（`c == 1` 跳过），内部节点因此不能冒充叶（node-as-leaf）。
+  **P-tsize**：叶形状元素（ops / fills 含 `:`、units 64 字符、trace 44 字符）对已提交的根有效、
+  深度却不等于计数的深度 → 欺诈（树大小与计数不符）。
+- **P-fsane**：fills 的 `n:{fill_count}` 哨兵不是成交（bounce）；同一 unit 的第二笔 idx 0 成交
+  （左邻也是 `f:{U}:0:`）是欺诈；F[1] 必须 64 字符。
+- **P-xframe**：`x:` 单元里任何 `pos:` / `ord:` 叶变化、W 变化、非 op 账户的 PERP 变化（k = 0 的
+  `+ORACLE_BOND_PERP` 例外）、collateral 变化（资金费 op 0x06 / 0x11 下仅限无仓位账户）是欺诈；
+  op tag 与 op 账户从 `u_pre`（unit 文本前缀）读出。`Reveal{Cancel}` 提交内层 `c:`。
+- **P-mframe / P-noband**：`band:` 只在 CreateMarket 出现、永不删除 / 改写；`meta:` 参数只在
+  FinalizeProposal 变化、mark 只在 `p:` / `L:` / 价格 op 变化、meta 永不删除、只在 CreateMarket
+  新建；每个 `meta:{m}` 都必须有 `band:{m}`。
+- **灰尘清算（执行规则）**：第一个会被吃的 maker 剩余量 × 10 < 目标仓位时，清算跳过簿、
+  本 unit 直接 ADL（一个对手方）。
+
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
 “不变”也不是“正确变化”的值才判 fraud（#47 跨 PR 一致性修复）。
@@ -514,6 +530,13 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 （R3-E-2，取舍）；`resting_open_im` 逐仓挂单扣除 `margin_left`、现货挂单不与仓位轧差；
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
+
+第 7b 轮部署变化：新增 dispute_xframe（rollup 新占位 `DISPUTE_XFRAME_AA_HERE`、新 case
+`set_dispute_xframe`、verdict 白名单）；dispute（P-opbind 深度门）、dispute_book（P-fsane 哨兵 /
+深度 / 重复 idx 0）、dispute_claw（深度门）、dispute_bind / dispute_fill（op 形状门）、rollup
+（版本门 5）定义变化；`Reveal{Cancel}` 的 ops 叶与灰尘清算是共识变化；快照格式 v9。op 预算：
+vault 364、rollup 1016、dispute 1601、dispute_fill 1974、dispute_bind 1960、dispute_book 1801、
+dispute_claw 1827、dispute_xframe 1598；rollup 只接受 `assertion_version == 5`。
 
 第 7 轮部署变化：unit id 改为文本哈希、每个 unit 一笔成交、witness 新增 `band:` 叶（共识级，
 出块方与 watcher 同时升级）；dispute（P-opbind）、dispute_book（P-fsane idx）、dispute_claw

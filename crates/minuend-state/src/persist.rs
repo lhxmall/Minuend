@@ -445,8 +445,10 @@ mod tests {
     fn r7b_v8_snapshot_is_refused() {
         let dir = std::env::temp_dir().join(format!("minuend-v8-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let mut st = ChainState::default();
-        st.height = 7;
+        let st = ChainState {
+            height: 7,
+            ..Default::default()
+        };
         let path = save_snapshot_retaining(&dir, &st, &[[1u8; 32]], 0).unwrap();
         assert!(load_latest(&dir).unwrap().is_some());
         let mut bytes = fs::read(&path).unwrap();

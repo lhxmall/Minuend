@@ -122,7 +122,9 @@ would take a second maker is rejected, and a fill no longer force-sells a
 party in the same unit). Keeper liquidation first sends a market IOC (one
 fill); if the book filled nothing and the target remains liquidatable, the
 position is ADL'd at the band-clamped mark onto one opposite-sign holder.
-Whatever is left waits for the next `Liquidate`. The market's
+Since round 7b the book is skipped (ADL in the same unit) when the first maker
+would close less than a tenth of the position, so dust orders cannot stall a
+liquidation. Whatever is left waits for the next `Liquidate`. The market's
 `keeper_reward_bps` is paid only from the target's positive collateral
 (genesis market: 100 bps); if there is not enough, the keeper receives only
 what is available. For a non-insurance fill that leaves a party with negative

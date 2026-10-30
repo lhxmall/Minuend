@@ -3364,7 +3364,7 @@ mod tests {
             perp_burned: None,
         };
         let s = format!(
-            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|4|{}",
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|5|{}",
             hex::encode([1u8; 32]),
             hex::encode([2u8; 32]),
             "a".repeat(64),

@@ -1004,7 +1004,8 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
    → 欺诈，例外是 `c:` 撤的订单（Q[1] == O[2] 且 Q[7] == O[1]，即订单属于该 c: 的账户）；
    `ins=true`：某叶在 post 中、在 pre 中精确不存在（或 pre 为空哨兵）→ 欺诈。被改写的叶
    （entry / qty / price / owner 变化）同时满足两者。Place / Liquidate / 价格（`x:`）单元
-   不在覆盖范围（这些单元里仓位与订单会合法变化，仍属多成交 / 非交易排除项）。
+   不在覆盖范围（这些单元里仓位与订单会合法变化，仍属多成交 / 非交易排除项）。第 6b 轮起
+   Place / Liquidate 单元也被 P-frame 覆盖（§10.13），第 7b 轮起 `x:` 单元由 P-xframe 覆盖（§10.15）。
 3. **P-adr 金库支撑（R4-A-4）**：新绑定 `adr:{A}:{X}` 额外要求
    `var[vault][(D ? 'depp_' : 'dep_') || anchor] = 'payer:amount:account'` 且 payer == A、
    account == X。金库地址与 P-deposit 相同的推导：
@@ -1299,6 +1300,97 @@ devnet e2e 场景 65–67（高度 83–88）。
 部署 op 预算（第 7 轮）：vault 364、rollup 996、dispute 1575、dispute_fill 1966、
 dispute_bind 1956、dispute_book 1712、dispute_claw 1780（上限 2000）。
 
+### 10.15 第 7b 轮（#47 R7b）：Merkle 深度、`x:` 单元帧、band / meta 帧、灰尘清算
+
+第 7 轮审查（`findings/round-7-review.md`）的 3 个 Critical、2 个 High、1 个 Medium、3 个 Low。
+`ASSERTION_VERSION = 5`；新增第六个 dispute AA `minuend_dispute_xframe.aa`（rollup 变量
+`dispute_xframe_aa`，占位 `DISPUTE_XFRAME_AA_HERE`，绑定 `{bind_xframe:1}`）。
+
+1. **精确证明深度 + P-tsize（R7-C1 / R7-C2）**。Obyte 的 `is_valid_merkle_proof` 不区分叶与
+   内部节点：第 1 层节点 `H(a)‖H(b)`（88 字符 base64）配上少一层的 siblings 也能验过
+   （node-as-leaf）。P-opbind 的 `$op` 与 P-claw 的 `$op` 没有形状约束，于是任何人都能判
+   诚实批次欺诈。**修法**：
+   - 对提交了叶数的树（ops / units / trace：`unit_count`；fills：`fill_count + 1`，含 `n:` 哨兵），
+     谓词要求证明的 siblings 数**恰好**是 `ceil(log2(c))`（奇数层复制末位，所以每片叶的深度
+     相同）：`2^s >= c AND 2^s < 2c`。在这个深度上被证明的元素只能是该位置的叶本身，不可能是
+     内部节点，于是任何提交的叶（包括运营方写的垃圾叶）仍可判，而节点永远进不来。`c == 1` 时
+     跳过（单叶树没有内部节点；空 siblings 数组在 ocore 规范 JSON 里也发不出去）。
+     已加在 P-opbind（ops + units）、P-claw（ops + units + fills）、P-fsane（fills + units）、
+     x-frame AA 的三个谓词（ops + trace + units）。
+   - 树的实际大小与提交的计数不符时，上面的门会挡住所有诚实证明——因此 **P-tsize**
+     （x-frame AA，`pred: 'tsize'`，`{tree, el, el_proof}`）把它本身定为欺诈：叶形状的元素
+     （ops / fills：含 `:`；units：64 字符；trace：44 字符；内部节点是 88 字符、不含 `:`）
+     对已提交的根有效、siblings 数却不是该计数的深度 → 欺诈。诚实树上不存在这样的证明：
+     更短的证明需要一个节点冒充元素（不是叶形状），更长的需要某片叶本身就是 88 字符的节点拼接。
+   - 没有深度门、但"op 形状不符 → 判 fraud"的谓词（dispute_bind P-wpin / P-adr、dispute_fill）
+     加了 `contains($op, ':')` 形状门（运营方写的无 `:` 垃圾 op 叶仍由 P-opbind 判）。
+   - 审计全部 AA 的 `is_valid_merkle_proof`：P-deposit / P-escrow（前缀门）、P-frame（段数门）、
+     P-keep / P-mirror / P-wpin 的 pre/post 叶（段数 / 前缀门）、所有相邻夹逼（`contains(':')`）、
+     trace 元素（节点 88 字符，做不了任何叶证明的根）、vault（`adr:` / `acct:` 由 AA 自己拼）
+     都已有形状约束。
+   - **新发现（R7b-N1，Critical，已修）**：P-fsane 的"不足 14 段 → 欺诈"会判 fills 树里诚实的
+     `n:{fill_count}` 长度哨兵——任何带成交的诚实批次都能被判。现在 `fill == 'n:' || fill_count`
+     时 bounce，其余叶在精确深度下照旧判。
+   watcher：`tsize_proof`（DA 树深度与计数深度不符时出证明）、`opbind_aa` 镜像加深度门、
+   `fsane_proof` 跳过哨兵；`tree_depth` / `depth_ok` 与 Obyte 证明长度一致（测试覆盖 1..33 片叶）。
+
+2. **P-xframe（R7-C3，x-frame AA，`pred: 'xframe'`）**。`x:` 单元（Commit、Vote、Stake、
+   ReportPrice、CreateMarket……以及所有没有描述串的被拒 op）以前没有任何帧：运营方可以在任何
+   `x:` 单元里给任意账户加钱。挑战者额外提交 `unit` + `units_proof` + `u_pre`（`sha256(u_pre‖'x')
+   == unit`，P-opbind 已把 ops 叶 `x:{unit}` 绑到这段文本）；AA 从 canonical 字节的 hex 里读出
+   op tag（parents 之后的字节）与 op 账户（其后 32 字节；Reveal（0x13）读内层 tag，内层签名者
+   相同）。规则：
+   - `pos:` / `ord:` 叶：任何 `x:` op 都不写仓位或订单——src 树里的叶在另一棵树里精确不存在即欺诈。
+   - `acct:` 叶（给 post 叶与 pre 叶，或 pre 中 `[acct:X:, acct:X;)` 的夹逼）：W 变化；PERP
+     变化而 X 不是 op 账户（k == 0 时允许 `+ORACLE_BOND_PERP`：解押完成的预言机保证金在批次
+     边界由 `prune_oracle_unbonding` 退回）；collateral 变化——ReportPrice / UpdateExternalPrice
+     （0x06 / 0x11）的资金费会移动持仓者的 collateral，这两种 op 下挑战者还要证明 X 在 pre 中
+     没有任何 `pos:` 叶（`[pos:X:, pos:X;)` 夹逼）。
+   - 为此 `Reveal{Cancel}` 改为提交内层 `c:` 描述串（以前是 `x:`，会被 P-xframe 判"订单消失"）；
+     由 P-escrow / P-frame 按普通 Cancel 判。
+   残留：资金费 op 里**持仓账户**的 collateral 变化仍不判（资金费金额需要所有持仓，同未修复项 8）。
+
+3. **P-mframe / P-noband（R7-H2，x-frame AA）**。`band:` 只在 CreateMarket（0x0a）出现：pre 中的
+   band 在 post 中精确不存在 → 欺诈；post 中新出现的 band 不是 CreateMarket → 欺诈。`meta:`
+   给同一市场的 pre / post 叶：参数（除 mark 外的全部字段）只在 FinalizeProposal（0x0d）变化，
+   mark 只在 Place / Liquidate（`p:` / `L:`）与价格 op（0x06 / 0x11）变化；只给 pre 叶 + post 中
+   `[meta:m:, meta:m;)` 夹逼 → 删除，欺诈；只给 post 叶 + pre 中夹逼 → 不是 CreateMarket 就欺诈。
+   **P-noband**：post 树里有 `meta:{m}` 而 `[band:m:, band:m;)` 为空 → 欺诈，所以 P-claw 的
+   ADL 价格总能拿到 band 叶来判（项 28 对恶意运营方也成立）。
+
+4. **灰尘挂单不再挡住清算（R7-H1，执行规则，需 owner 确认）**。簿内清算前先看会第一个被吃的
+   maker（跳过幽灵头与目标自己的挂单，与撮合的 cancel-maker 一致，`OrderBook::first_maker_qty`）：
+   它的剩余量 × `LIQ_MIN_BOOK_FILL_DIV`（10）< 目标仓位时，本 unit 跳过簿、直接走 ADL（仍是
+   一个对手方、一笔成交）。没有交叉 maker、或第一个 maker 足够大时与第 7 轮相同。P-claw 的
+   ADL 价格规则不变（本 unit 簿内无成交，mark 仍是 pre 的）。
+   **R7-M1（Gtc 穿两档被整单拒绝）未改**：剩余量留簿会与第二个 maker 交叉（簿交叉），而改成
+   "吃一档后截断为 IOC"会让 fill_math 的 `$rest`（Limit + Gtc 且有剩余 ⇒ 留簿）误判诚实批次，
+   dispute_fill 只剩 26 ops。需要 owner 在"市场最小下单量（改 `meta:` 格式）"与"截断语义
+   （改 fill_math，挪 AA）"之间选择。
+
+5. **Low**：R7-L1 P-fsane 新增一臂（左邻也是 `f:{U}:0:` → 欺诈；watcher `fsane_dup_proof`）；
+   R7-L2 P-fsane 要求 `length(F[1]) == 64`；R7-L3 快照格式升到 v9，v8 快照加载时被拒，回落 genesis。
+
+**已知但未修（R7b-N2，新发现）**：`prune_oracle_unbonding` 在批次提交后把解押完成的保证金退回
+预言机的 PERP 余额，这个变化落在下一批次 k = 0 的 post 树里。若 k = 0 是 `c:` / `d:` / `w:` /
+`p:` / `L:` 单元，P-frame 会把该预言机的 `acct:` 叶当作被改写的第三方叶判欺诈（诚实批次可被判，
+条件：同一批次边界上恰好有保证金退回）。P-xframe 已对 `x:` 单元放行这一变化；P-frame 在
+dispute_bind 里只剩约 40 ops，修法（同样的 `+ORACLE_BOND_PERP` 例外，或把退回改为显式 op）
+留给下一轮。
+
+**测试**：Rust `r7b_tree_depth_matches_obyte_proofs`、`r7b_node_as_leaf_no_longer_frames_opbind`
+（第 7 轮审查 PoC：ocore 验过、镜像 bounce）、`r7b_tsize_proves_a_tree_larger_than_its_count`、
+`r7b_fills_sentinel_is_not_fsane_fraud`、`r7b_duplicate_idx0_fill_is_fsane_fraud`、
+`r7b_xframe_tag_reads_the_unit_text`、`r7b_xframe_acct_rule`、`r7b_mframe_meta_rule`、
+`r7b_xframe_mframe_noband_from_a_batch`、`r7b_dust_maker_does_not_stall_liquidation`、
+`r7b_v8_snapshot_is_refused`。devnet e2e 场景 68–71（高度 89–95）：node-as-leaf 对 P-opbind /
+P-claw / P-tsize bounce、5 片 ops 叶配 unit_count 4 → P-tsize 冻结、哨兵 `n:1` 对 P-fsane bounce、
+Stake 单元给第三方加钱 / 改仓位、ReportPrice 给无仓位账户加钱、band 改写 / 删除、Stake 改 mark
+→ 冻结；诚实 Stake / 资金费 / ReportPrice 改 mark → no fraud。
+
+部署 op 预算（第 7b 轮）：vault 364、rollup 1016、dispute 1601、dispute_fill 1974、
+dispute_bind 1960、dispute_book 1801、dispute_claw 1827、dispute_xframe 1598（上限 2000）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
@@ -1550,7 +1642,9 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 - 第 5 轮的 CRITICAL（两条腿的 claw 金额没有互相绑定）由第 6 轮 P-claw 处理（§10.12），
   第 6b 轮补上成交 ↔ op 绑定与第三方账户（§10.13）；第 7 轮（§10.14）把 ops 叶绑定到签名的
   unit（P-opbind）、让引擎每个 unit 至多产生一笔成交（多成交即欺诈，P-fsane），并把 ADL
-  价格绑定到 clamp(mark, band)。仍不判：资金费率市场的现金腿、逐仓清算目标；unit 签名
+  价格绑定到 clamp(mark, band)；第 7b 轮（§10.15）补上精确证明深度（node-as-leaf）、`x:` 单元的
+  第三方帧、band / meta 帧与灰尘清算。仍不判：资金费率市场的现金腿与资金费 op 中持仓账户的
+  collateral、逐仓清算目标、k = 0 的预言机保证金退回与 P-frame 的冲突（R7b-N2）；unit 签名
   有效性只由 watcher 检查（Oscript 无 ed25519，DA 残留）。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry
   比较。带成交的 unit 的 op 是 `x:` 时 P-claw 直接判欺诈（第 6b 轮）。数量与仓位低于
   `QTY_CAP = 1e15`（引擎强制），pre 仓位 ≥ 1e15 时 P-claw / fill_math bounce。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
