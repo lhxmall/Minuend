@@ -32,12 +32,19 @@ impl BuiltProof {
     /// and P-skip moved to `minuend_dispute_book.aa`), `fill`, `bind` or
     /// `claw` (round 6: `minuend_dispute_claw.aa`).
     pub fn target(&self) -> &'static str {
+        // `xframe` (round 7b): P-xframe / P-mframe / P-noband / P-tsize.
         if self.bind_aa {
             "bind"
         } else if self.fill_aa {
             "fill"
         } else if self.pred == "claw" {
             "claw"
+        } else if matches!(
+            self.pred.as_str(),
+            "xframe" | "mframe" | "noband" | "tsize"
+        ) {
+            // Round 7b: minuend_dispute_xframe.aa.
+            "xframe"
         } else if self.pred == "ghost"
             || self.pred == "skip"
             || self.pred == "mbind"
@@ -104,6 +111,11 @@ pub fn build_proof_with_vault(
     submit_ts: u64,
     vault: &VaultLedger,
 ) -> Option<BuiltProof> {
+    // Round 7b P-tsize: a committed tree whose size breaks the exact proof
+    // depth every dispute AA now requires (provable before anything else).
+    if let Some(p) = tsize_proof(batch) {
+        return Some(p);
+    }
     let n = batch.units.len();
     if n == 0 || batch.checkpoint.unit_ids.len() != n || batch.ops.len() != n {
         return None;
@@ -225,6 +237,17 @@ pub fn build_proof_with_vault(
         }
         // R4-A-3: positions and orders frozen across c:/d:/w:/D:/W: units.
         if let Some(p) = frame_proof(batch, k, &op, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        // Round 7b (R7-C3 / R7-H2): bystanders of `x:` units, the band: /
+        // meta: frame of every unit, and the band leaf of every market.
+        if let Some(p) = xframe_proof(batch, k, &op, &unit_hexes, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        if let Some(p) = mframe_proof(batch, k, &op, &unit_hexes, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        if let Some(p) = noband_proof(batch, k, &op, &post_leaves) {
             return Some(p);
         }
     }
@@ -798,6 +821,10 @@ fn fsane_proof(
     fills_tree: &[String],
     unit_hexes: &[String],
 ) -> Option<BuiltProof> {
+    // Round 7b: the honest length sentinel is never judged (the AA bounces).
+    if *f == format!("n:{}", batch.checkpoint.fill_count) {
+        return None;
+    }
     let parts: Vec<&str> = f.split(':').collect();
     let idx = index_of(&batch.fills, f)?;
     let mut data = serde_json::json!({
@@ -942,6 +969,479 @@ fn opbind_proof(batch: &Batch, k: usize, unit_hexes: &[String]) -> Option<BuiltP
             "u_op": u_op,
         }),
     })
+}
+
+/// Exact Obyte-merkle proof depth of a `c`-leaf tree: `ceil(log2(c))`
+/// (odd levels duplicate their last node). Every dispute AA requires it
+/// since round 7b (R7-C1: an internal node posing as a leaf has fewer
+/// siblings).
+pub fn tree_depth(c: usize) -> usize {
+    if c <= 1 {
+        0
+    } else {
+        (usize::BITS - (c - 1).leading_zeros()) as usize
+    }
+}
+
+/// Mirror of the AA depth gate `2^s >= c AND 2^s < 2c` (`c == 1` skips:
+/// a one-leaf tree has no internal node and its proof is unsendable).
+pub fn depth_ok(siblings: usize, c: usize) -> bool {
+    c <= 1 || siblings == tree_depth(c)
+}
+
+/// Round 7b P-tsize (x-frame AA): a committed ops / units / trace / fills
+/// tree whose exact proof depth differs from the depth of its committed
+/// count (`unit_count`, `fill_count + 1`). Proven with a leaf-shaped
+/// element (ops / fills: holds ':'; units: 64 chars; trace: 44 chars).
+fn tsize_proof(batch: &Batch) -> Option<BuiltProof> {
+    let c = &batch.checkpoint;
+    let units: Vec<String> = c.unit_ids.iter().map(|id| hex::encode(id.0)).collect();
+    let fills_tree = minuend_settle::fills_root_elements(&batch.fills);
+    let n = c.unit_count as usize;
+    let nf = c.fill_count as usize + 1;
+    let trees: [(&str, &[String], usize, &str); 4] = [
+        ("ops", &batch.ops, n, &c.ops_root),
+        ("units", &units, n, &c.units_root),
+        ("trace", &batch.trace, n, &c.trace_root),
+        ("fills", &fills_tree, nf, &c.fills_root),
+    ];
+    for (name, tree, count, root) in trees {
+        if tree.len() < 2 || tree_depth(tree.len()) == tree_depth(count) {
+            continue;
+        }
+        if obyte_merkle::root(tree) != *root {
+            continue;
+        }
+        let leafy = |e: &str| match name {
+            "ops" | "fills" => e.contains(':'),
+            "units" => e.len() == 64 && !e.contains(':'),
+            _ => e.len() == 44,
+        };
+        let i = tree.iter().position(|e| leafy(e))?;
+        return Some(BuiltProof {
+            pred: "tsize".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data: serde_json::json!({"tree": name, "el": tree[i], "el_proof": proof_json(tree, i)}),
+        });
+    }
+    None
+}
+
+/// R7-L1 P-fsane: two adjacent idx-0 fills of unit `k` in the fills tree.
+fn fsane_dup_proof(
+    batch: &Batch,
+    k: usize,
+    unit_hex: &str,
+    pre_leaves: &[String],
+    fills_tree: &[String],
+    unit_hexes: &[String],
+) -> Option<BuiltProof> {
+    let pfx = format!("f:{unit_hex}:0:");
+    let i = (1..batch.fills.len())
+        .find(|&i| batch.fills[i].starts_with(&pfx) && batch.fills[i - 1].starts_with(&pfx))?;
+    let f = &batch.fills[i];
+    if f.split(':').count() != 14 || unit_hexes.get(k).map(String::as_str) != Some(unit_hex) {
+        return None;
+    }
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(fills_tree, i),
+        "units_proof": proof_json(unit_hexes, k),
+        "prev": batch.fills[i - 1],
+        "prev_proof": proof_json(fills_tree, i - 1),
+    });
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    Some(BuiltProof {
+        pred: "fsane".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    })
+}
+
+/// Op tag and op account of an `x:` unit, read from its unit-text prefix
+/// exactly as `minuend_dispute_xframe.aa` does: `'mnu3|'` + 8 hex domain
+/// chars + the parent count byte + 64 hex per parent, then the tag byte
+/// and the first 32-byte account; a Reveal (`13`) yields its inner tag
+/// (64 bytes further: account + commit_ref).
+pub fn xframe_tag(u_pre: &str) -> Option<(String, String)> {
+    let np = u_pre.get(13..15)?;
+    let tp = 15 + match np {
+        "00" => 0,
+        "01" => 64,
+        "02" => 128,
+        _ => return None,
+    };
+    let t0 = u_pre.get(tp..tp + 2)?;
+    let tag = if t0 == "13" {
+        u_pre.get(tp + 130..tp + 132)?
+    } else {
+        t0
+    };
+    Some((tag.to_string(), u_pre.get(tp + 2..tp + 66)?.to_string()))
+}
+
+/// Columns (collateral, PERP, W) of an `acct:{X}:{col}:{perp}:{W}` leaf as
+/// the AA reads them (raw substrings after offset 70).
+fn acct_cols(leaf: &str) -> Option<(String, String, String)> {
+    let t = leaf.get(70..)?;
+    let mut it = t.splitn(3, ':');
+    Some((
+        it.next()?.to_string(),
+        it.next()?.to_string(),
+        it.next()?.to_string(),
+    ))
+}
+
+/// Mirror of the P-xframe acct arm: `pre` = the account's pre leaf
+/// (`None` = absent: 0:0:0), `has_pos` = the account holds a position in
+/// the pre tree. `Some(true)` = fraud.
+pub fn xframe_acct_bad(
+    tag: &str,
+    oa: &str,
+    k: usize,
+    pre: Option<&str>,
+    post: &str,
+    has_pos: bool,
+) -> Option<bool> {
+    let x = post.get(5..69)?;
+    let (c1, p1, w1) = acct_cols(post)?;
+    let (c0, p0, w0) = match pre {
+        Some(l) => acct_cols(l)?,
+        None => ("0".into(), "0".into(), "0".into()),
+    };
+    let fund = tag == "06" || tag == "11";
+    let cb = c0 != c1 && !(fund && has_pos);
+    let wb = w0 != w1;
+    let bond = minuend_types::ORACLE_BOND_PERP as i128;
+    let release = k == 0
+        && p0.len() <= 14
+        && p1.len() <= 14
+        && matches!((p0.parse::<i128>(), p1.parse::<i128>()), (Ok(a), Ok(b)) if b - a == bond);
+    let pb = p0 != p1 && x != oa && !release;
+    Some(cb || wb || pb)
+}
+
+/// The x: unit's text fields for the x-frame AA, when the DA unit hashes
+/// to the committed id and its ops leaf is `x:{id}`.
+fn xframe_unit_fields(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+) -> Option<(serde_json::Value, String, String)> {
+    let unit = batch.units.get(k)?;
+    let uh = unit_hexes.get(k)?;
+    if hex::encode(minuend_dag::unit_id(unit).0) != *uh
+        || op != format!("x:{uh}")
+        || minuend_dag::op_descriptor(&unit.op).is_some()
+    {
+        return None;
+    }
+    let u_pre = minuend_dag::unit_text_prefix(unit);
+    if u_pre.len() + 1 > 4096 {
+        return None;
+    }
+    let (tag, oa) = xframe_tag(&u_pre)?;
+    Some((
+        serde_json::json!({
+            "unit": uh,
+            "units_proof": proof_json(unit_hexes, k),
+            "u_pre": u_pre,
+        }),
+        tag,
+        oa,
+    ))
+}
+
+fn xframe_base(batch: &Batch, k: usize, op: &str, pre_leaves: &[String]) -> Option<serde_json::Value> {
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+        "post_wit": batch.trace.get(k)?.clone(),
+        "post_proof": proof_json(&batch.trace, k),
+    });
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    Some(data)
+}
+
+fn xf_built(pred: &str, data: serde_json::Value) -> BuiltProof {
+    BuiltProof {
+        pred: pred.into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    }
+}
+
+fn merge(data: &mut serde_json::Value, more: serde_json::Value) -> Option<()> {
+    data.as_object_mut()?.extend(more.as_object()?.clone());
+    Some(())
+}
+
+/// Round 7b P-xframe (R7-C3): an `x:` unit changed a bystander's position /
+/// order (any change) or account (W, collateral outside funding, PERP of
+/// anyone but the op account) in the POSTED post tree, where the honest
+/// replay did not.
+fn xframe_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    if !op.starts_with("x:") {
+        return None;
+    }
+    let posted = batch.leaf_trace.get(k)?;
+    let (ufields, tag, oa) = xframe_unit_fields(batch, k, op, unit_hexes)?;
+    let mut base = xframe_base(batch, k, op, pre_leaves)?;
+    merge(&mut base, ufields)?;
+    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
+    let framed = |l: &str| {
+        let n = l.split(':').count();
+        (l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10)
+    };
+    for l in pre_leaves.iter() {
+        if framed(l) && !posted.contains(l) && post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": false, "leaf_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?;
+            merge(&mut d, exact_absence(posted, l, "left", "right")?)?;
+            return Some(xf_built("xframe", d));
+        }
+    }
+    for l in posted.iter() {
+        if framed(l) && !pre_leaves.contains(l) && !post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
+            )?;
+            if !empty_pre {
+                merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
+            }
+            return Some(xf_built("xframe", d));
+        }
+    }
+    for a1 in posted.iter() {
+        let is_acct = a1.starts_with("acct:")
+            && a1.split(':').count() == 5
+            && a1.as_bytes().get(69) == Some(&b':');
+        if !is_acct || post_leaves.contains(a1) {
+            continue;
+        }
+        let x = a1.get(5..69)?;
+        let key = format!("acct:{x}:");
+        let a0 = pre_leaves.iter().find(|l| l.starts_with(&key));
+        let ppre = format!("pos:{x}:");
+        let has_pos = pre_leaves.iter().any(|l| l.starts_with(&ppre));
+        if xframe_acct_bad(&tag, &oa, k, a0.map(String::as_str), a1, has_pos) != Some(true) {
+            continue;
+        }
+        let mut d = base.clone();
+        merge(
+            &mut d,
+            serde_json::json!({"post_acct": a1, "post_acct_proof": proof_json(posted, index_of(posted, a1)?)}),
+        )?;
+        match a0 {
+            Some(l) => merge(
+                &mut d,
+                serde_json::json!({"pre_acct": l, "pre_acct_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?,
+            None if !empty_pre => merge(&mut d, prefix_absence(pre_leaves, &key)?)?,
+            None => {}
+        }
+        // Funding ops: a collateral change needs X's "no position" proof.
+        let (c0, _, _) = match a0 {
+            Some(l) => acct_cols(l)?,
+            None => ("0".into(), String::new(), String::new()),
+        };
+        let (c1, _, _) = acct_cols(a1)?;
+        if (tag == "06" || tag == "11") && c0 != c1 && !empty_pre {
+            if let Some(abs) = prefix_absence(pre_leaves, &ppre) {
+                let o = abs.as_object()?;
+                merge(
+                    &mut d,
+                    serde_json::json!({
+                        "pleft": o.get("left")?, "pleft_proof": o.get("left_proof")?,
+                        "pright": o.get("right")?, "pright_proof": o.get("right_proof")?,
+                    }),
+                )?;
+            }
+        }
+        return Some(xf_built("xframe", d));
+    }
+    None
+}
+
+/// Mirror of the P-mframe meta pair rule: `Some(true)` = fraud.
+pub fn mframe_meta_bad(op: &str, tag: &str, m0: &str, m1: &str) -> Option<bool> {
+    let a: Vec<&str> = m0.split(':').collect();
+    let b: Vec<&str> = m1.split(':').collect();
+    if a.len() != 11 || b.len() != 11 || a[0] != "meta" || b[0] != "meta" || a[1] != b[1] {
+        return None;
+    }
+    if m0 == m1 {
+        return Some(false);
+    }
+    let num = |s: &str| oscript_num(s);
+    let pc = [2, 3, 4, 5, 6, 7, 9, 10]
+        .iter()
+        .any(|&i| num(a[i]) != num(b[i]) || num(a[i]).is_none());
+    let markok = op.starts_with("p:") || op.starts_with("L:") || tag == "06" || tag == "11";
+    Some(!((pc && tag == "0d") || (!pc && markok)))
+}
+
+/// Round 7b P-mframe (R7-H2): a band: leaf deleted / rewritten / created
+/// outside CreateMarket, or a meta: leaf changed outside its allowed ops,
+/// in the POSTED post tree where the honest replay did not.
+fn mframe_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    let mut base = xframe_base(batch, k, op, pre_leaves)?;
+    let mut tag = String::new();
+    if op.starts_with("x:") {
+        if let Some((uf, t, _)) = xframe_unit_fields(batch, k, op, unit_hexes) {
+            merge(&mut base, uf)?;
+            tag = t;
+        }
+    }
+    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
+    let is_band = |l: &str| l.starts_with("band:") && l.split(':').count() == 4;
+    for l in pre_leaves.iter() {
+        if is_band(l) && !posted.contains(l) && post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": false, "leaf_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?;
+            merge(&mut d, exact_absence(posted, l, "left", "right")?)?;
+            return Some(xf_built("mframe", d));
+        }
+    }
+    if tag != "0a" {
+        for l in posted.iter() {
+            if is_band(l) && !pre_leaves.contains(l) && !post_leaves.contains(l) {
+                let mut d = base.clone();
+                merge(
+                    &mut d,
+                    serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
+                )?;
+                if !empty_pre {
+                    merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
+                }
+                return Some(xf_built("mframe", d));
+            }
+        }
+    }
+    let meta_of = |tree: &[String], m: &str| {
+        let key = format!("meta:{m}:");
+        tree.iter().find(|l| l.starts_with(&key)).cloned()
+    };
+    let markets: std::collections::BTreeSet<String> = pre_leaves
+        .iter()
+        .chain(posted.iter())
+        .filter(|l| l.starts_with("meta:") && l.split(':').count() == 11)
+        .filter_map(|l| l.split(':').nth(1).map(String::from))
+        .collect();
+    for m in markets {
+        let m0 = meta_of(pre_leaves, &m);
+        let m1 = meta_of(posted, &m);
+        let honest = meta_of(post_leaves, &m);
+        if m1 == honest {
+            continue;
+        }
+        let key = format!("meta:{m}:");
+        let mut d = base.clone();
+        match (&m0, &m1) {
+            (Some(a), Some(b)) => {
+                if mframe_meta_bad(op, &tag, a, b) != Some(true) {
+                    continue;
+                }
+                merge(
+                    &mut d,
+                    serde_json::json!({
+                        "pre_meta": a, "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, a)?),
+                        "post_meta": b, "post_meta_proof": proof_json(posted, index_of(posted, b)?),
+                    }),
+                )?;
+            }
+            (Some(a), None) => {
+                merge(
+                    &mut d,
+                    serde_json::json!({"pre_meta": a, "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, a)?)}),
+                )?;
+                merge(&mut d, prefix_absence(posted, &key)?)?;
+            }
+            (None, Some(b)) => {
+                if tag == "0a" {
+                    continue;
+                }
+                merge(
+                    &mut d,
+                    serde_json::json!({"post_meta": b, "post_meta_proof": proof_json(posted, index_of(posted, b)?)}),
+                )?;
+                if !empty_pre {
+                    merge(&mut d, prefix_absence(pre_leaves, &key)?)?;
+                }
+            }
+            (None, None) => continue,
+        }
+        return Some(xf_built("mframe", d));
+    }
+    None
+}
+
+/// Round 7b P-noband (R7-H2): a market's meta: leaf in the POSTED post tree
+/// without its band: leaf (the honest replay always has both).
+fn noband_proof(batch: &Batch, k: usize, op: &str, post_leaves: &[String]) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    for meta in posted.iter() {
+        let q: Vec<&str> = meta.split(':').collect();
+        if q.len() != 11 || q[0] != "meta" {
+            continue;
+        }
+        let key = format!("band:{}:", q[1]);
+        if posted.iter().any(|l| l.starts_with(&key)) || !post_leaves.iter().any(|l| l.starts_with(&key)) {
+            continue;
+        }
+        let mut d = serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "ops_root": batch.checkpoint.ops_root,
+            "units_root": batch.checkpoint.units_root,
+            "k": k,
+            "op": op,
+            "post_wit": batch.trace.get(k)?.clone(),
+            "post_proof": proof_json(&batch.trace, k),
+            "meta": meta,
+            "meta_proof": proof_json(posted, index_of(posted, meta)?),
+        });
+        merge(&mut d, prefix_absence(posted, &key)?)?;
+        return Some(xf_built("noband", d));
+    }
+    None
 }
 
 /// R2-A-1 P-tip: the committed wit_root is not the trace's last element.
@@ -1883,6 +2383,11 @@ fn fill_proof(
         if let Some(p) = fsane_proof(batch, k, f, pre_leaves, &fills_tree, &unit_hexes) {
             return Some(p);
         }
+    }
+    // R7-L1: two adjacent idx-0 fills of this unit (even copies of the
+    // honest one) — P-fsane with the left neighbour.
+    if let Some(p) = fsane_dup_proof(batch, k, unit_hex, pre_leaves, &fills_tree, &unit_hexes) {
+        return Some(p);
     }
     // Skip: another live order strictly better than the filled maker.
     // #37-9 / #47 B3: only the unit's FIRST fill (idx 0) — pre_wit is the
@@ -5822,6 +6327,12 @@ mod tests {
         if units.get(k) != Some(&id) || d["units_proof"]["index"].as_u64()? as usize != k {
             return None;
         }
+        // Round 7b (R7-C1): exact proof depth of both unit_count-leaf trees.
+        let so = d["ops_proof"]["siblings"].as_array()?.len();
+        let su = d["units_proof"]["siblings"].as_array()?.len();
+        if units.len() > 1 && (!depth_ok(so, units.len()) || su != so) {
+            return None;
+        }
         let want = if e == "x" {
             format!("x:{id}")
         } else {
@@ -5989,5 +6500,349 @@ mod tests {
         // The genesis market carries its band leaf.
         let leaves = minuend_state::wit_leaves(&Engine::new().state);
         assert!(leaves.iter().any(|l| l.starts_with("band:1:")));
+    }
+
+    // ===================== Round 7b =====================================
+
+    /// Ocore-exact proof check (merkle.js verifyMerkleProof): it walks
+    /// `siblings` by index parity and never checks the depth — the
+    /// node-as-leaf gap of R7-C1 / R7-C2.
+    fn ocore_verify(el: &str, d: &serde_json::Value) -> bool {
+        let mut idx = d["index"].as_u64().unwrap();
+        let mut h = obyte_merkle::hash(el);
+        for s in d["siblings"].as_array().unwrap() {
+            let s = s.as_str().unwrap();
+            h = if idx % 2 == 0 {
+                obyte_merkle::hash(&format!("{h}{s}"))
+            } else {
+                obyte_merkle::hash(&format!("{s}{h}"))
+            };
+            idx /= 2;
+        }
+        h == d["root"].as_str().unwrap()
+    }
+
+    #[test]
+    fn r7b_tree_depth_matches_obyte_proofs() {
+        for c in 1..=33usize {
+            let t: Vec<String> = (0..c).map(|i| format!("l:{i}")).collect();
+            for i in [0, c / 2, c - 1] {
+                let p = proof_json(&t, i);
+                assert_eq!(p["siblings"].as_array().unwrap().len(), tree_depth(c), "c={c} i={i}");
+                assert!(depth_ok(tree_depth(c), c));
+                assert!(ocore_verify(&t[i], &p));
+            }
+        }
+        assert_eq!(tree_depth(4), 2);
+        assert_eq!(tree_depth(5), 3);
+        assert!(!depth_ok(1, 4));
+    }
+
+    /// R7-C1 PoC (work/r7-review-oscr): the level-1 node H(ops[0])||H(ops[1])
+    /// passes ocore with one sibling fewer and used to verdict an honest
+    /// batch in P-opbind; the exact-depth rule bounces it.
+    #[test]
+    fn r7b_node_as_leaf_no_longer_frames_opbind() {
+        use sha2::Digest as _;
+        let pres: Vec<String> = (0..4)
+            .map(|i| format!("mnu3|{}|", hex::encode([i as u8 + 1; 40])))
+            .collect();
+        let units: Vec<String> = pres
+            .iter()
+            .map(|p| hex::encode(sha2::Sha256::digest(format!("{p}x").as_bytes())))
+            .collect();
+        let ops: Vec<String> = units.iter().map(|u| format!("x:{u}")).collect();
+        let honest = serde_json::json!({
+            "k": 1, "op": ops[1], "ops_proof": proof_json(&ops, 1),
+            "units_proof": proof_json(&units, 1), "u_pre": pres[1], "u_op": "x",
+        });
+        assert_eq!(opbind_aa(&honest, &units, &ops), Some(false));
+        let full = proof_json(&ops, 0);
+        let node = format!("{}{}", obyte_merkle::hash(&ops[0]), obyte_merkle::hash(&ops[1]));
+        assert_eq!(node.len(), 88);
+        assert!(!node.contains(':'));
+        let short = serde_json::json!({
+            "root": full["root"], "index": 0,
+            "siblings": full["siblings"].as_array().unwrap()[1..].to_vec(),
+        });
+        assert!(ocore_verify(&node, &short), "the PoC proof passes ocore");
+        // The mirror's ops-leaf membership is checked by index only, so
+        // feed it the node tree the attacker would claim.
+        let attack = serde_json::json!({
+            "k": 0, "op": node, "ops_proof": short,
+            "units_proof": proof_json(&units, 0), "u_pre": pres[0], "u_op": "x",
+        });
+        let mut claimed = ops.clone();
+        claimed[0] = node.clone();
+        assert_eq!(opbind_aa(&attack, &units, &claimed), None, "depth gate bounces");
+        // P-tsize: an honest tree is never "the wrong size"; the node is
+        // not leaf-shaped anyway.
+        assert!(tree_depth(ops.len()) == full["siblings"].as_array().unwrap().len());
+    }
+
+    /// P-tsize: a committed tree larger than its count is provable; an
+    /// honest batch never yields it.
+    #[test]
+    fn r7b_tsize_proves_a_tree_larger_than_its_count() {
+        let (batch, replay, _) = r6b_place_fixture();
+        assert!(tsize_proof(&batch).is_none());
+        let mut lie = batch.clone();
+        lie.ops.push("x:".to_string() + &"ee".repeat(32));
+        lie.checkpoint.ops_root = obyte_merkle::root(&lie.ops);
+        let p = tsize_proof(&lie).expect("tsize");
+        assert_eq!(p.pred, "tsize");
+        assert_eq!(p.target(), "xframe");
+        assert_eq!(p.data["tree"], "ops");
+        assert!(p.data["el"].as_str().unwrap().contains(':'));
+        assert_ne!(
+            p.data["el_proof"]["siblings"].as_array().unwrap().len(),
+            tree_depth(lie.checkpoint.unit_count as usize)
+        );
+        let b = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(b.pred, "tsize");
+    }
+
+    /// The fills sentinel `n:{fill_count}` is never a P-fsane fill.
+    #[test]
+    fn r7b_fills_sentinel_is_not_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&batch.fills);
+        let units = hexes(&batch);
+        let sentinel = tree.last().unwrap().clone();
+        assert_eq!(sentinel, format!("n:{}", batch.checkpoint.fill_count));
+        assert!(fsane_proof(&batch, 0, &sentinel, &pre, &tree, &units).is_none());
+    }
+
+    /// R7-L1: a duplicated idx-0 fill is P-fsane fraud via its neighbour.
+    #[test]
+    fn r7b_duplicate_idx0_fill_is_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let mut lie = batch.clone();
+        let f0 = lie.fills[0].clone();
+        lie.fills.insert(1, f0.clone());
+        lie.checkpoint.fill_count += 1;
+        refill(&mut lie);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&lie.fills);
+        let units = hexes(&lie);
+        let u = units[0].clone();
+        let p = fsane_dup_proof(&lie, 0, &u, &pre, &tree, &units).expect("dup proof");
+        assert_eq!(p.pred, "fsane");
+        assert_eq!(p.data["prev"], f0);
+        assert_eq!(p.data["fill_proof"]["index"], 1);
+        assert!(fsane_dup_proof(&batch, 0, &u, &pre, &minuend_settle::fills_root_elements(&batch.fills), &hexes(&batch)).is_none());
+    }
+
+    /// The x-frame AA reads the op tag and account from the unit text.
+    #[test]
+    fn r7b_xframe_tag_reads_the_unit_text() {
+        let s = sk(5);
+        let a = acct_of(&s);
+        let stake = sign_unit(vec![genesis_id()], Op::StakeOracle { account: a }, &s);
+        let (t, oa) = xframe_tag(&minuend_dag::unit_text_prefix(&stake)).unwrap();
+        assert_eq!((t.as_str(), oa.as_str()), ("0e", hex::encode(a.0).as_str()));
+        let rev = sign_unit(
+            vec![genesis_id()],
+            Op::Reveal {
+                account: a,
+                commit_ref: [3; 32],
+                op: Box::new(Op::ReportPrice {
+                    oracle: a,
+                    market: minuend_types::BTC_USD,
+                    price: 5,
+                }),
+                salt: [4; 32],
+            },
+            &s,
+        );
+        assert_eq!(minuend_dag::op_descriptor(&rev.op), None);
+        let (t, oa) = xframe_tag(&minuend_dag::unit_text_prefix(&rev)).unwrap();
+        assert_eq!((t.as_str(), oa.as_str()), ("06", hex::encode(a.0).as_str()));
+        // Two parents shift the tag by 64 bytes.
+        let p2 = vec![genesis_id(), minuend_types::UnitId([9; 32])];
+        let mut p2s = p2.clone();
+        p2s.sort();
+        let vote = sign_unit(
+            p2s,
+            Op::Vote {
+                voter: a,
+                proposal_id: 1,
+                approve: true,
+            },
+            &s,
+        );
+        assert_eq!(xframe_tag(&minuend_dag::unit_text_prefix(&vote)).unwrap().0, "0c");
+        // A revealed Cancel now commits `c:` (ASSERTION_VERSION 5).
+        let rc = Op::Reveal {
+            account: a,
+            commit_ref: [3; 32],
+            op: Box::new(Op::Cancel {
+                account: a,
+                order_id: minuend_types::OrderId([1; 32]),
+            }),
+            salt: [4; 32],
+        };
+        assert!(minuend_dag::op_descriptor(&rc).unwrap().starts_with("c:"));
+    }
+
+    #[test]
+    fn r7b_xframe_acct_rule() {
+        let x = "11".repeat(32);
+        let oa = "22".repeat(32);
+        let l = |a: &str, c: &str, p: &str, w: &str| format!("acct:{a}:{c}:{p}:{w}");
+        let pre = l(&x, "100", "5", "0");
+        // Bystander credit / W / PERP: fraud.
+        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "101", "5", "0"), false), Some(true));
+        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "5", "1"), false), Some(true));
+        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "6", "0"), false), Some(true));
+        // Unchanged, or the op account's own PERP: honest.
+        assert_eq!(xframe_acct_bad("0e", &oa, 3, Some(&pre), &pre, false), Some(false));
+        assert_eq!(xframe_acct_bad("0e", &x, 3, Some(&pre), &l(&x, "100", "1", "0"), false), Some(false));
+        // Bond release at the batch boundary (k == 0, +ORACLE_BOND_PERP).
+        let rel = l(&x, "100", &(5 + minuend_types::ORACLE_BOND_PERP).to_string(), "0");
+        assert_eq!(xframe_acct_bad("12", &oa, 0, Some(&pre), &rel, false), Some(false));
+        assert_eq!(xframe_acct_bad("12", &oa, 1, Some(&pre), &rel, false), Some(true));
+        // Funding (06 / 11): only position holders' collateral may move.
+        assert_eq!(xframe_acct_bad("06", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), true), Some(false));
+        assert_eq!(xframe_acct_bad("11", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), false), Some(true));
+        // A new account with cash in an x: unit.
+        assert_eq!(xframe_acct_bad("0c", &oa, 3, None, &l(&x, "7", "0", "0"), false), Some(true));
+        assert_eq!(xframe_acct_bad("0c", &oa, 3, None, &l(&x, "0", "0", "0"), false), Some(false));
+    }
+
+    #[test]
+    fn r7b_mframe_meta_rule() {
+        let m0 = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        let mark = "meta:1:1:1000:500:5:100:0:8700:0:0";
+        let parm = "meta:1:1:1000:600:5:100:0:8600:0:0";
+        assert_eq!(mframe_meta_bad("c:x:y", "", m0, m0), Some(false));
+        assert_eq!(mframe_meta_bad("c:x:y", "", m0, mark), Some(true));
+        assert_eq!(mframe_meta_bad("p:a", "", m0, mark), Some(false));
+        assert_eq!(mframe_meta_bad("L:a", "", m0, mark), Some(false));
+        assert_eq!(mframe_meta_bad("x:u", "06", m0, mark), Some(false));
+        assert_eq!(mframe_meta_bad("x:u", "0e", m0, mark), Some(true));
+        assert_eq!(mframe_meta_bad("x:u", "0d", m0, parm), Some(false));
+        assert_eq!(mframe_meta_bad("p:a", "", m0, parm), Some(true));
+        assert_eq!(mframe_meta_bad("x:u", "06", m0, parm), Some(true));
+    }
+
+    /// Commit (x:) unit batch: a bystander credited in the posted post tree
+    /// is P-xframe fraud; band / meta / band-less markets are P-mframe /
+    /// P-noband fraud; the honest batch builds nothing.
+    #[test]
+    fn r7b_xframe_mframe_noband_from_a_batch() {
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 1_000);
+        claw_set_col(&mut eng, b, 2_000);
+        let ttl = eng.state.height + 1;
+        let commit = sign_unit(
+            vec![genesis_id()],
+            Op::Commit {
+                account: a,
+                commit: [7; 32],
+                ttl_height: ttl,
+            },
+            &alice,
+        );
+        let (batch, replay) = claw_batch(&mut eng, commit);
+        assert!(batch.ops[0].starts_with("x:"));
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none(), "honest");
+        // (a) bob credited 1e6 USD inside alice's Commit.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &hex::encode(b.0), 1_000_000 * minuend_types::USD_SCALE as i128);
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("xframe");
+        assert_eq!((p.pred.as_str(), p.target()), ("xframe", "xframe"));
+        assert_eq!(p.data["u_pre"], minuend_dag::unit_text_prefix(&batch.units[0]));
+        assert!(p.data["post_acct"].as_str().unwrap().contains(&hex::encode(b.0)));
+        // (b) the band rewritten.
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with("band:1:") {
+                *l = "band:1:0:5".into();
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("mframe band");
+        assert_eq!(p.pred, "mframe");
+        assert_eq!(p.data["ins"], false);
+        // (c) the band deleted (noband needs the meta still there).
+        let mut lie = batch.clone();
+        lie.leaf_trace[0].retain(|l| !l.starts_with("band:1:"));
+        retrace(&mut lie, 0);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let mut r = replay.clone();
+        r.ingest(batch.units[0].clone()).unwrap();
+        let post = minuend_state::wit_leaves(&r.state);
+        let p = noband_proof(&lie, 0, &lie.ops[0], &post).expect("noband");
+        assert_eq!(p.pred, "noband");
+        assert!(p.data["meta"].as_str().unwrap().starts_with("meta:1:"));
+        // (d) the mark moved by a Commit.
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with("meta:1:") {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[8] = "12345".into();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = mframe_proof(&lie, 0, &lie.ops[0], &hexes(&lie), &pre, &post).expect("meta");
+        assert_eq!(p.pred, "mframe");
+        assert!(p.data.get("pre_meta").is_some() && p.data.get("post_meta").is_some());
+        // Honest: nothing from any of the three builders.
+        let u = hexes(&batch);
+        assert!(xframe_proof(&batch, 0, &batch.ops[0], &u, &pre, &post).is_none());
+        assert!(mframe_proof(&batch, 0, &batch.ops[0], &u, &pre, &post).is_none());
+        assert!(noband_proof(&batch, 0, &batch.ops[0], &post).is_none());
+    }
+
+    /// R7-H1: a dust order at the top of the book no longer absorbs a
+    /// liquidation — the ADL path runs in the same unit.
+    #[test]
+    fn r7b_dust_maker_does_not_stall_liquidation() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (t, m, d, k) = (sk(1), sk(2), sk(3), sk(4));
+        let (ta, ma, da, ka) = (acct_of(&t), acct_of(&m), acct_of(&d), acct_of(&k));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, ta, 600);
+        claw_set_col(&mut eng, ma, 1_000_000);
+        claw_set_col(&mut eng, da, 1_000_000);
+        claw_set_col(&mut eng, ka, 10);
+        let px = 100_000 * PRICE_SCALE as i64;
+        eng.state.marks.insert(minuend_types::BTC_USD, px);
+        claw_set_pos(&mut eng, ta, QTY_SCALE as i64, px);
+        claw_set_pos(&mut eng, ma, -(QTY_SCALE as i64), px);
+        // The dust bid: 1 lot at the best price.
+        let dust = claw_place(vec![genesis_id()], &d, Side::Bid, TimeInForce::Gtc, px, 1, 1, None);
+        let i0 = unit_id(&dust);
+        eng.ingest(dust).unwrap();
+        // Mark falls 10%: T (600 USD on 1 BTC long) is liquidatable.
+        eng.state.marks.insert(minuend_types::BTC_USD, px / 10 * 9);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: ka,
+                target: ta,
+                market: minuend_types::BTC_USD,
+            },
+            &k,
+        );
+        let evs = eng.ingest(liq).unwrap();
+        let fills: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                minuend_exec::ExecEvent::Applied { fills, .. } => Some(fills.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(fills.len(), 1, "{evs:?}");
+        assert_eq!(fills[0].kind, 2, "ADL, not the dust book fill");
+        assert_eq!(fills[0].qty, QTY_SCALE);
+        // The dust bid is untouched.
+        assert!(eng.state.books[&minuend_types::BTC_USD].best_bid().is_some());
     }
 }

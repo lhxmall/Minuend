@@ -132,6 +132,25 @@ impl OrderBook {
         self.ask_qty.iter().next().map(|(price, q)| (*price, *q))
     }
 
+    /// Round 7b (R7-H1): remaining qty of the maker a crossing market order
+    /// on `taker_side` would fill FIRST, skipping ghost heads and (the
+    /// cancel-maker self-trade policy) the taker account's own orders.
+    /// Read-only mirror of the head walk in `submit_inner`.
+    pub fn first_maker_qty(&self, taker_side: Side, taker: AccountId) -> Option<Qty> {
+        let first = |ids: &VecDeque<OrderId>| {
+            ids.iter().find_map(|id| {
+                self.orders
+                    .get(id)
+                    .filter(|o| o.remaining > 0 && o.account != taker)
+                    .map(|o| o.remaining)
+            })
+        };
+        match taker_side {
+            Side::Bid => self.asks.values().find_map(first),
+            Side::Ask => self.bids.values().find_map(first),
+        }
+    }
+
     fn level_add(&mut self, side: Side, price: Price, delta: i64) {
         // R2-E-9: two resting orders of qty ≤ i64::MAX at one price used to
         // overflow `*e as i64 + delta` (debug panic on every node ingesting

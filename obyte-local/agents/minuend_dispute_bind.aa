@@ -162,7 +162,10 @@
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
 					$op = trigger.data.op;
-					if (typeof($op) == 'boolean' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+					// R7-C1 audit: a node-as-leaf op (no ':') would read as
+					// "not this account's w: / d:" and verdict an honest W or
+					// binding change — honest ops leaves always hold a ':'.
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
 						OR trigger.data.ops_proof.root != trigger.data.ops_root
 						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
 						bounce('bad ops proof');

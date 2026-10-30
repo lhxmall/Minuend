@@ -45,10 +45,15 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// `ChainState.aa_address_owners` (#47 A2, added after the v5 bump without
 /// one — R2-R-14); v7 = `ChainState.deposit_backing` (R3-E-1); v8 = its value became
 /// `DepositBacking { amount, payer, account }` (R3-A-5: the payer-designated
-/// account is persisted instead of a transient `serde(skip)` map).
+/// account is persisted instead of a transient `serde(skip)` map); v9 =
+/// same layout, but unit ids changed algorithm (round 7, `mnu3` unit text)
+/// and the ops descriptor of a Reveal{Cancel} changed (round 7b,
+/// ASSERTION_VERSION 5): the `anchors` / executed ids of a v8 snapshot can
+/// never match new parents, so v8 is refused and the node replays from
+/// genesis (R7-L3).
 /// `layout_fingerprint_is_pinned_to_format_version` pins
 /// the layout so the next change cannot land without a bump.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 9;
 /// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
 /// restored engine cannot rebuild the DAG, so these ids are treated as
 /// already-executed ancestors when replaying post-snapshot batches.
@@ -434,6 +439,24 @@ fn prune_snapshots_from(dir: &Path, keep: usize, retain_from: Height) -> io::Res
 mod tests {
     use super::*;
 
+    /// R7-L3: a v8 snapshot (round-6 unit ids) is refused at load, so the
+    /// node falls back to genesis instead of resuming with stale anchors.
+    #[test]
+    fn r7b_v8_snapshot_is_refused() {
+        let dir = std::env::temp_dir().join(format!("minuend-v8-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::default();
+        st.height = 7;
+        let path = save_snapshot_retaining(&dir, &st, &[[1u8; 32]], 0).unwrap();
+        assert!(load_latest(&dir).unwrap().is_some());
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[..4].copy_from_slice(&8u32.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(load_latest(&dir).unwrap().is_none());
+        assert!(load_latest_with_anchors(&dir).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// R4-R-4 / I-4: retiring moves dead-branch snapshots to `dead/`
     /// (no longer resume candidates) without deleting anything.
     #[test]
@@ -732,7 +755,7 @@ mod tests {
         let body = bincode::serialize(&(&st, vec![[1u8; 32]])).unwrap();
         let fp = hex::encode(minuend_types::sha256(&body));
         const PINNED: (u32, &str) = (
-            8,
+            9,
             "ea0934c60774c7747d3f0b4325d6bfc20ecf85f18eef9e37f517226215499407",
         );
         assert_eq!(

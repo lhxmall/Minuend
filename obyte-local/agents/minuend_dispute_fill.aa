@@ -295,7 +295,8 @@
 					// (ops_root membership); a kind 0/1 maker leg reads only
 					// the Place's margin mode from it (claw guard below).
 					$op = trigger.data.op;
-					if (!trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+					// R7-C1 audit: honest ops leaves hold a ':' (node-as-leaf).
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
 						OR trigger.data.ops_proof.root != trigger.data.ops_root
 						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
 						bounce('bad ops proof');

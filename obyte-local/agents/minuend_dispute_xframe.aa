@@ -1,0 +1,440 @@
+{
+	// MINUEND x-frame dispute AA (minuend-v2) — round 7b, sixth dispute AA.
+	//
+	// P-frame (minuend_dispute_bind.aa) freezes the acct:/pos:/ord: leaves
+	// of every bystander across a c:/d:/w:/D:/W:/p:/L: unit, but an `x:`
+	// unit (Commit, Vote, Stake, ReportPrice, CreateMarket, ... and every
+	// rejected op without a descriptor) had NO frame at all: the operator
+	// could credit any account inside any `x:` unit (PR #51 R7-C3). The
+	// `band:` and `meta:` leaves were not pinned by any predicate either,
+	// so the round-7 ADL price rule only held for an honest operator
+	// (R7-H2). This AA closes both.
+	//
+	// Bind: {bind_xframe:1, rollup:<addr>} payment 20000 -> forwards 10000
+	// to the rollup with {set_dispute_xframe:1} (the rollup hardcodes THIS
+	// address: placeholder DISPUTE_XFRAME_AA_HERE, var dispute_xframe_aa).
+	//
+	// Every challenge: {pred, height, rollup, k, trace_root, ops_root,
+	//   units_root, op, ops_proof, post_wit, post_proof, pre_wit
+	//   (+pre_proof k>0)} and, for an `x:{unit}` op whose tag is needed,
+	//   {unit, units_proof, u_pre}: the unit text is u_pre || 'x'
+	//   (minuend_dag::unit_text; P-opbind binds the leaf to it), so
+	//   sha256(u_pre || 'x') == unit and the canonical-bytes hex inside
+	//   u_pre ('mnu3|' 'ODX1'/'ODX2' np parents tag account ...) gives the
+	//   op tag (byte after the parents) and the op account (the next 32
+	//   bytes; for a Reveal (tag 0x13) the inner tag sits 64 bytes later —
+	//   its inner account is the same signer). Tags (hex): 06 ReportPrice,
+	//   0a CreateMarket, 0b CreateProposal, 0c Vote, 0d FinalizeProposal,
+	//   0e StakeOracle, 0f UnstakeOracle, 10 SlashOracle, 11
+	//   UpdateExternalPrice, 12 Commit, 13 Reveal. Since ASSERTION_VERSION 5
+	//   a Reveal{Cancel} commits `c:` (minuend_dag::op_descriptor), so an
+	//   `x:` unit never cancels an order.
+	//
+	// pred 'xframe' (op must be `x:{unit}`):
+	//   * `leaf` pos:/ord: (+leaf_proof, ins, left/right): the leaf is a
+	//     member of the src tree (ins ? post : pre) and exactly absent from
+	//     the other one — no `x:` op writes a position or an order.
+	//   * `post_acct` (+proof) of account X and `pre_acct` (+proof) or the
+	//     [acct:X:, acct:X;) straddle left/right in pre (absent: 0:0:0):
+	//     fraud when W changed, when PERP changed for an X that is not the
+	//     op account (k == 0 also allows +ORACLE_BOND_PERP: an unbonded
+	//     oracle's bond is returned at the batch boundary,
+	//     prune_oracle_unbonding), or when collateral changed — except under
+	//     ReportPrice / UpdateExternalPrice (06 / 11), whose funding moves
+	//     the collateral of position holders: there the challenger must
+	//     also prove X holds no position at all (pleft/pright straddle of
+	//     [pos:X:, pos:X;) in pre).
+	// pred 'mframe' (any op):
+	//   * `leaf` band: (+leaf_proof, ins, left/right): a band is fixed at
+	//     CreateMarket; a pre band missing from post is fraud, a post band
+	//     missing from pre is fraud unless the op is CreateMarket (0a).
+	//   * `pre_meta` / `post_meta` (+proofs) of one market: both given and
+	//     different -> fraud when a parameter (everything but the mark)
+	//     changed outside FinalizeProposal (0d), or the mark changed outside
+	//     a Place / Liquidate (p: / L:) or a price op (06 / 11); pre only +
+	//     the [meta:m:, meta:m;) straddle in post -> deleted (fraud); post
+	//     only + the straddle in pre (or the empty pre tree) -> created
+	//     outside CreateMarket (fraud).
+	// pred 'tsize': a committed ops / units / trace / fills tree whose size
+	//   is not its committed count (see the case below).
+	// pred 'noband': `meta` (+meta_proof) in post_wit and the
+	//   [band:m:, band:m;) straddle left/right in post_wit: a market without
+	//   its band leaf (the ADL price of P-claw needs it) is fraud.
+	// Witness layout (minuend-state wit_leaves): acct:{X}:{col}:{perp}:{W},
+	// pos: 7 fields, ord: 10, band:{m}:{min}:{max}, meta: 11 fields
+	// (meta:{m}:{tick}:{im}:{mm}:{fee}:{keeper}:{delisted}:{mark}:{usd}:{cap}).
+	bounce_fees: { base: 10000 },
+	messages: {
+		cases: [
+			{
+				if: "{trigger.data.bind_xframe}",
+				init: "{
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							set_dispute_xframe: 1
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['bound_xframe'] = 1;
+						}"
+					}
+				]
+			},
+			{
+				// P-tsize (R7-C1): every dispute AA requires a proof of the
+				// EXACT depth ceil(log2(c)) of its tree (c = unit_count for
+				// ops / units / trace, fill_count + 1 for fills with the
+				// `n:` sentinel) so an internal node can never pose as a
+				// leaf. A committed tree whose size is not the committed
+				// count would then reject every honest proof, so it is
+				// fraud on its own: a LEAF-shaped element (ops / fills: holds
+				// a ':'; units: 64 chars; trace: 44 chars — an internal
+				// node is 88 chars of base64 with no ':') proven against the
+				// committed root with a sibling count other than that
+				// depth. On an honest tree no such proof exists: a shorter
+				// one needs a node posing as the element (not leaf-shaped),
+				// a longer one a leaf that is itself an 88-char node
+				// concatenation.
+				// {pred:'tsize', height, rollup, tree, el, el_proof}.
+				if: "{trigger.data.pred == 'tsize'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					$t = trigger.data.tree;
+					if ($t != 'ops' AND $t != 'units' AND $t != 'trace' AND $t != 'fills') bounce('bad tree');
+					$el = trigger.data.el;
+					if (typeof($el) != 'string') bounce('bad element');
+					$c = ($t == 'fills') ? (var[$rollup]['fill_count_' || $h] otherwise 0) + 1 : $n;
+					$leafy = (($t == 'ops' OR $t == 'fills') AND contains($el, ':'))
+						OR ($t == 'units' AND length($el) == 64 AND !contains($el, ':'))
+						OR ($t == 'trace' AND length($el) == 44);
+					if (!$leafy OR !trigger.data.el_proof
+						OR trigger.data.el_proof.root != var[$rollup][$t || '_root_' || $h]
+						OR !is_valid_merkle_proof($el, trigger.data.el_proof))
+						bounce('bad element proof');
+					$d = 2 ^ array_length(trigger.data.el_proof.siblings);
+					if ($d >= $c AND $d < 2 * $c) bounce('no fraud');
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
+				if: "{trigger.data.pred == 'xframe' OR trigger.data.pred == 'mframe' OR trigger.data.pred == 'noband'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					if (trigger.data.trace_root != var[$rollup]['trace_root_' || $h]
+						OR trigger.data.ops_root != var[$rollup]['ops_root_' || $h]
+						OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
+						bounce('stale roots');
+					$pred = trigger.data.pred;
+					$k = trigger.data.k;
+					if (!is_integer($k) OR $k < 0 OR $k >= $n)
+						bounce('bad k');
+					$E = 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=';
+					// Exact proof depth for the unit_count-leaf trees (ops,
+					// units, trace): ceil(log2(n)) siblings (R7-C1).
+					$post_wit = trigger.data.post_wit;
+					if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !trigger.data.post_proof OR trigger.data.post_proof.index != $k
+						OR trigger.data.post_proof.root != trigger.data.trace_root
+						OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof)
+						OR ($n > 1 AND (2 ^ array_length(trigger.data.post_proof.siblings) < $n OR 2 ^ array_length(trigger.data.post_proof.siblings) >= 2 * $n)))
+						bounce('bad post proof');
+					$S = trigger.data;
+					if ($pred == 'noband') {
+						$pm = $S.meta;
+						if (typeof($pm) != 'string') bounce('bad meta');
+						$M = split($pm, ':');
+						if (array_length($M) != 11 OR $M[0] != 'meta'
+							OR !is_valid_merkle_proof($pm, $S.meta_proof) OR $S.meta_proof.root != $post_wit)
+							bounce('bad meta');
+						$blo = 'band:' || $M[1] || ':';
+						$bhi = 'band:' || $M[1] || ';';
+						$nb1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+							AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+							AND $S.left_proof.index + 1 == $S.right_proof.index
+							AND $S.left_proof.root == $post_wit AND $S.right_proof.root == $post_wit
+							AND $S.left < $blo AND $bhi <= $S.right
+							AND is_valid_merkle_proof($S.left, $S.left_proof)
+							AND is_valid_merkle_proof($S.right, $S.right_proof);
+						$nb2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+							AND $S.left_proof.root == $post_wit AND $bhi <= $S.left
+							AND is_valid_merkle_proof($S.left, $S.left_proof);
+						if (!$nb1 AND !$nb2) bounce('no fraud');
+					} else {
+						$op = $S.op;
+						if (typeof($op) != 'string' OR !contains($op, ':') OR !$S.ops_proof OR $S.ops_proof.index != $k
+							OR $S.ops_proof.root != trigger.data.ops_root
+							OR !is_valid_merkle_proof($op, $S.ops_proof)
+							OR ($n > 1 AND (2 ^ array_length($S.ops_proof.siblings) < $n OR 2 ^ array_length($S.ops_proof.siblings) >= 2 * $n)))
+							bounce('bad ops proof');
+						$pre_wit = $S.pre_wit;
+						if ($k == 0){
+							if ($h == 1){
+								if ($pre_wit != $E) bounce('bad pre wit');
+							} else {
+								if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
+							}
+						} else {
+							if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !$S.pre_proof OR $S.pre_proof.index != $k - 1 OR $S.pre_proof.root != trigger.data.trace_root
+								OR !is_valid_merkle_proof($pre_wit, $S.pre_proof))
+								bounce('bad pre proof');
+						}
+						// Op tag of an `x:{unit}` op from the unit text.
+						$isx = starts_with($op, 'x:');
+						if ($pred == 'xframe' AND !$isx) bounce('no fraud');
+						if ($isx AND typeof($S.u_pre) == 'string') {
+							$u = $S.unit;
+							$pre = $S.u_pre;
+							if (typeof($u) != 'string' OR length($u) != 64 OR $op != ('x:' || $u) OR !$S.units_proof
+								OR $S.units_proof.index != $k OR $S.units_proof.root != trigger.data.units_root
+								OR !is_valid_merkle_proof($u, $S.units_proof)
+								OR ($n > 1 AND array_length($S.units_proof.siblings) != array_length($S.ops_proof.siblings)))
+								bounce('bad unit');
+							if (!starts_with($pre, 'mnu3|') OR !ends_with($pre, '|') OR array_length(split($pre, '|')) != 3
+								OR sha256($pre || 'x', 'hex') != $u)
+								bounce('bad unit text');
+							$np = substring($pre, 13, 2);
+							if ($np != '00' AND $np != '01' AND $np != '02') bounce('bad unit text');
+							$tp = 15 + (($np == '02') ? 128 : (($np == '01') ? 64 : 0));
+							$t0 = substring($pre, $tp, 2);
+							$tag = ($t0 == '13') ? substring($pre, $tp + 130, 2) : $t0;
+							$oa = substring($pre, $tp + 2, 64);
+						} else {
+							// No unit text: the tag is unknown, so no
+							// tag-dependent allowance applies.
+							$tag = '';
+							$oa = '';
+						}
+						if ($pred == 'xframe' AND $tag == '') bounce('bad unit text');
+						$L = $S.leaf;
+						if (typeof($L) == 'string') {
+							// Leaf frame: member of src, exactly absent from dst.
+							$Q = split($L, ':');
+							$ins = $S.ins ? true : false;
+							if ($pred == 'xframe') {
+								if (!(($Q[0] == 'pos' AND array_length($Q) == 7) OR ($Q[0] == 'ord' AND array_length($Q) == 10)))
+									bounce('bad leaf');
+							} else {
+								if (!($Q[0] == 'band' AND array_length($Q) == 4)) bounce('bad leaf');
+								// A band appears only with its CreateMarket.
+								if ($ins AND $tag == '0a') bounce('no fraud');
+							}
+							$src = $ins ? $post_wit : $pre_wit;
+							$dst = $ins ? $pre_wit : $post_wit;
+							if (!is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $src)
+								bounce('bad leaf proof');
+							$m1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+								AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+								AND $S.left_proof.index + 1 == $S.right_proof.index
+								AND $S.left_proof.root == $dst AND $S.right_proof.root == $dst
+								AND $S.left < $L AND $L < $S.right
+								AND is_valid_merkle_proof($S.left, $S.left_proof)
+								AND is_valid_merkle_proof($S.right, $S.right_proof);
+							$m2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+								AND $S.left_proof.root == $dst AND $L < $S.left
+								AND is_valid_merkle_proof($S.left, $S.left_proof);
+							if (!$m1 AND !$m2 AND !($ins AND $dst == $E)) bounce('no fraud');
+						} else {
+						if ($pred == 'xframe') {
+							// acct pair of account X across the x: unit.
+							$a1 = $S.post_acct;
+							if (typeof($a1) != 'string' OR !starts_with($a1, 'acct:') OR substring($a1, 69, 1) != ':'
+								OR array_length(split($a1, ':')) != 5
+								OR !is_valid_merkle_proof($a1, $S.post_acct_proof) OR $S.post_acct_proof.root != $post_wit)
+								bounce('bad post acct');
+							$X = substring($a1, 5, 64);
+							$lo = 'acct:' || $X || ':';
+							$hi = 'acct:' || $X || ';';
+							$a0 = $S.pre_acct;
+							if (typeof($a0) == 'string') {
+								if (!starts_with($a0, $lo) OR array_length(split($a0, ':')) != 5
+									OR !is_valid_merkle_proof($a0, $S.pre_acct_proof) OR $S.pre_acct_proof.root != $pre_wit)
+									bounce('bad pre acct');
+								$t0s = substring($a0, 70, length($a0));
+								$c0 = substring($t0s, 0, index_of($t0s, ':'));
+								$r0 = substring($t0s, length($c0) + 1, length($t0s));
+								$p0 = substring($r0, 0, index_of($r0, ':'));
+								$w0 = substring($r0, length($p0) + 1, length($r0));
+							} else {
+								$s1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+									AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+									AND $S.left_proof.index + 1 == $S.right_proof.index
+									AND $S.left_proof.root == $pre_wit AND $S.right_proof.root == $pre_wit
+									AND $S.left < $lo AND $hi <= $S.right
+									AND is_valid_merkle_proof($S.left, $S.left_proof)
+									AND is_valid_merkle_proof($S.right, $S.right_proof);
+								$s2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+									AND $S.left_proof.root == $pre_wit AND $hi <= $S.left
+									AND is_valid_merkle_proof($S.left, $S.left_proof);
+								if (!$s1 AND !$s2 AND $pre_wit != $E) bounce('bad pre acct');
+								$c0 = '0';
+								$p0 = '0';
+								$w0 = '0';
+							}
+							$t1s = substring($a1, 70, length($a1));
+							$c1 = substring($t1s, 0, index_of($t1s, ':'));
+							$r1 = substring($t1s, length($c1) + 1, length($t1s));
+							$p1 = substring($r1, 0, index_of($r1, ':'));
+							$w1 = substring($r1, length($p1) + 1, length($r1));
+							$fund = $tag == '06' OR $tag == '11';
+							if ($fund AND $c0 != $c1) {
+								// Funding pays position holders only: X must
+								// hold no position at all in the pre tree.
+								$plo = 'pos:' || $X || ':';
+								$phi = 'pos:' || $X || ';';
+								$nopos = ($S.pleft AND $S.pright AND contains($S.pleft, ':') AND contains($S.pright, ':')
+									AND is_integer($S.pleft_proof.index) AND $S.pleft_proof.index >= 0
+									AND $S.pleft_proof.index + 1 == $S.pright_proof.index
+									AND $S.pleft_proof.root == $pre_wit AND $S.pright_proof.root == $pre_wit
+									AND $S.pleft < $plo AND $phi <= $S.pright
+									AND is_valid_merkle_proof($S.pleft, $S.pleft_proof)
+									AND is_valid_merkle_proof($S.pright, $S.pright_proof))
+									OR $pre_wit == $E;
+							} else {
+								$nopos = true;
+							}
+							$cb = $c0 != $c1 AND $nopos;
+							$wb = $w0 != $w1;
+							$pb = $p0 != $p1 AND $X != $oa
+								AND !($k == 0 AND length($p0) <= 14 AND length($p1) <= 14 AND $p1 - $p0 == 50000);
+							if (!$cb AND !$wb AND !$pb) bounce('no fraud');
+						} else {
+							// mframe meta arms.
+							$m0 = $S.pre_meta;
+							$m1x = $S.post_meta;
+							$g0 = typeof($m0) == 'string';
+							$g1 = typeof($m1x) == 'string';
+							if (!$g0 AND !$g1) bounce('bad meta');
+							$M0 = split($g0 ? $m0 : '-', ':');
+							$M1 = split($g1 ? $m1x : '-', ':');
+							if ($g0 AND (array_length($M0) != 11 OR $M0[0] != 'meta'
+								OR !is_valid_merkle_proof($m0, $S.pre_meta_proof) OR $S.pre_meta_proof.root != $pre_wit))
+								bounce('bad pre meta');
+							if ($g1 AND (array_length($M1) != 11 OR $M1[0] != 'meta'
+								OR !is_valid_merkle_proof($m1x, $S.post_meta_proof) OR $S.post_meta_proof.root != $post_wit))
+								bounce('bad post meta');
+							if ($g0 AND $g1) {
+								if ($M0[1] != $M1[1]) bounce('bad meta');
+								if ($m0 == $m1x) bounce('no fraud');
+								$pc = $M0[2] != $M1[2] OR $M0[3] != $M1[3] OR $M0[4] != $M1[4] OR $M0[5] != $M1[5]
+									OR $M0[6] != $M1[6] OR $M0[7] != $M1[7] OR $M0[9] != $M1[9] OR $M0[10] != $M1[10];
+								$markok = starts_with($op, 'p:') OR starts_with($op, 'L:') OR $tag == '06' OR $tag == '11';
+								if (($pc AND $tag == '0d') OR (!$pc AND $markok)) bounce('no fraud');
+							} else {
+								// One side only: the market's whole prefix is
+								// absent from the other tree.
+								$mk = $g0 ? $M0[1] : $M1[1];
+								$T = $g0 ? $post_wit : $pre_wit;
+								$lo = 'meta:' || $mk || ':';
+								$hi = 'meta:' || $mk || ';';
+								$q1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+									AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+									AND $S.left_proof.index + 1 == $S.right_proof.index
+									AND $S.left_proof.root == $T AND $S.right_proof.root == $T
+									AND $S.left < $lo AND $hi <= $S.right
+									AND is_valid_merkle_proof($S.left, $S.left_proof)
+									AND is_valid_merkle_proof($S.right, $S.right_proof);
+								$q2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+									AND $S.left_proof.root == $T AND $hi <= $S.left
+									AND is_valid_merkle_proof($S.left, $S.left_proof);
+								if (!$q1 AND !$q2 AND !(!$g0 AND $pre_wit == $E)) bounce('no fraud');
+								// A market is created only by CreateMarket.
+								if (!$g0 AND $tag == '0a') bounce('no fraud');
+							}
+						}
+						}
+					}
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			}
+		]
+	}
+}

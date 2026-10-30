@@ -37,7 +37,7 @@ pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
 pub const QTY_CAP: u64 = 1_000_000_000_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
-/// Pinned by the rollup AA (`assertion_version != 4` bounces), so it can
+/// Pinned by the rollup AA (`assertion_version != 5` bounces), so it can
 /// only change together with an AA redeploy.
 ///
 /// History (docs/ROLLUP-UPGRADE.md §7):
@@ -57,7 +57,13 @@ pub const CHAIN_ID: &str = "minuend-v2";
 ///   ops leaf that differs from its unit is provable on-chain (P-opbind);
 ///   the book emits at most one fill per unit and Place no longer
 ///   force-sells in-unit (P-fsane judges any fill with `idx != 0`).
-pub const ASSERTION_VERSION: u32 = 4;
+/// - 5 (#47 round 7b, with the x-frame rollup redeploy): a Reveal{Cancel}
+///   commits its inner `c:` descriptor (was `x:{unit}`, which the new
+///   P-xframe would judge as an order vanishing in an `x:` unit), and a
+///   liquidation whose best book level covers less than
+///   1/`LIQ_MIN_BOOK_FILL_DIV` of the remaining position takes the ADL
+///   path in the same unit instead of a dust book fill (R7-H1).
+pub const ASSERTION_VERSION: u32 = 5;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;
@@ -69,6 +75,12 @@ pub const MIN_OPEN_EQUITY: Usd = USD_SCALE as Usd;
 /// resting-order IM reservation loop and book bloat per account.
 pub const MAX_LIVE_ORDERS_PER_ACCOUNT: usize = 64;
 pub const LIQ_RATIO_BPS: u64 = 10_500;
+/// Round 7b (R7-H1, ASSERTION_VERSION 5): a liquidation whose first book
+/// fill would close less than 1/`LIQ_MIN_BOOK_FILL_DIV` of the target's
+/// position skips the book and takes the ADL path in the same unit (one
+/// counterparty, still one fill per unit), so dust resting orders cannot
+/// stall a liquidation one minimum lot per `Liquidate`.
+pub const LIQ_MIN_BOOK_FILL_DIV: u64 = 10;
 pub const REDUCE_ONLY_RATIO_BPS: u64 = 12_000;
 /// Taker fee (bps of notional), routed to the insurance fund so it has
 /// income to offset bad-debt absorption and keeper payouts.

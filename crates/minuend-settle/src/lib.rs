@@ -3259,7 +3259,8 @@ mod tests {
     }
 
     /// R2-E-2: a Reveal wrapping a Withdraw/Deposit commits the INNER op's
-    /// descriptor (the binding AA pins W/adr: by op tag); other inner ops
+    /// descriptor (the binding AA pins W/adr: by op tag); so do a revealed
+    /// Place / Liquidate (round 6) and Cancel (round 7b); other inner ops
     /// keep the opaque `x:` tag.
     #[test]
     fn reveal_commits_inner_financial_descriptor() {
@@ -3281,13 +3282,24 @@ mod tests {
             account,
             order_id: minuend_types::OrderId([7; 32]),
         };
+        let cancel_op = cancel.clone();
         let rev2 = minuend_dag::Op::Reveal {
             account,
             commit_ref: [1; 32],
             op: Box::new(cancel),
             salt: [2; 32],
         };
-        assert_eq!(ops_element("uu", &rev2), "x:uu");
+        // Round 7b (ASSERTION_VERSION 5): a revealed Cancel commits `c:`.
+        assert_eq!(ops_element("uu", &rev2), ops_element("uu", &cancel_op));
+        assert!(ops_element("uu", &rev2).starts_with("c:"));
+        let stake = minuend_dag::Op::StakeOracle { account };
+        let rev3 = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(stake),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev3), "x:uu");
         // Round 6: a revealed Place / Liquidate commits the inner descriptor.
         let place = minuend_dag::Op::Place {
             account,

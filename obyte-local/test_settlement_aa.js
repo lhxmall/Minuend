@@ -103,6 +103,8 @@ const FILL_SRC = writeResolved("minuend_dispute_fill.aa", {}, ".e2e_fill.aa");
 // Round 6: P-claw (both legs of one fill) on the claw dispute AA.
 const CLAW_SRC = writeResolved("minuend_dispute_claw.aa", {}, ".e2e_claw.aa");
 const CLAW_ADDR = chashOf(fs.readFileSync(CLAW_SRC, "utf8"));
+const XF_SRC = writeResolved("minuend_dispute_xframe.aa", {}, ".e2e_xframe.aa");
+const XF_ADDR = chashOf(fs.readFileSync(XF_SRC, "utf8"));
 // R4-A-4: P-adr derives the vault from the base (deposit ledger backing).
 const BIND_SRC = writeResolved("minuend_dispute_bind.aa", { VAULT_BASE_HERE: VAULT_BASE_ADDR }, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
@@ -114,6 +116,7 @@ const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_BIND_AA_HERE: BIND_ADDR,
   DISPUTE_BOOK_AA_HERE: BOOK_ADDR,
   DISPUTE_CLAW_AA_HERE: CLAW_ADDR,
+  DISPUTE_XFRAME_AA_HERE: XF_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
 const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
@@ -223,7 +226,7 @@ function submitDataBase(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 4,
+    assertion_version: 5,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -270,7 +273,7 @@ function headerFromSubmit(sd, frameOp) {
     seq: sd.height,
     fill_count: sd.fill_count || 0,
     fills_hash: sha256Hex("fills"),
-    assertion_version: sd.assertion_version || 4,
+    assertion_version: sd.assertion_version || 5,
     wit_root: sd.wit_root,
     trace_root: sd.trace_root,
     units_root: sd.units_root,
@@ -336,6 +339,7 @@ async function main() {
     .with.agent({ fill: FILL_SRC })
     .with.agent({ bind: BIND_SRC })
     .with.agent({ claw: CLAW_SRC })
+    .with.agent({ xframe: XF_SRC })
     .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
@@ -348,6 +352,8 @@ async function main() {
   const vault = network.agent.vault;
   const book = network.agent.book;
   const claw = network.agent.claw;
+  const xframe = network.agent.xframe;
+  if (xframe !== XF_ADDR) throw new Error(`xframe address mismatch: ${xframe} != ${XF_ADDR}`);
   if (claw !== CLAW_ADDR) throw new Error(`claw address mismatch: ${claw} != ${CLAW_ADDR}`);
   if (vault !== VAULT_ADDR) throw new Error(`vault address mismatch: ${vault} != ${VAULT_ADDR}`);
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
@@ -359,7 +365,9 @@ async function main() {
   await trigger(operator, bindAa, { bind_bind: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, book, { bind_book: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, claw, { bind_claw: 1, rollup: ROLLUP_ADDR }, 20000);
+  await trigger(operator, xframe, { bind_xframe: 1, rollup: ROLLUP_ADDR }, 20000);
   let st = await vars(rollup);
+  if (String(st.dispute_xframe_aa) !== xframe) throw new Error("dispute_xframe_aa not set: " + JSON.stringify(st.dispute_xframe_aa));
   if (String(st.dispute_claw_aa) !== claw) throw new Error("dispute_claw_aa not set: " + JSON.stringify(st.dispute_claw_aa));
   if (String(st.dispute_book_aa) !== book) throw new Error("dispute_book_aa not set: " + JSON.stringify(st.dispute_book_aa));
   if (String(st.dispute_bind_aa) !== bindAa) throw new Error("dispute_bind_aa not set: " + JSON.stringify(st.dispute_bind_aa));
@@ -373,6 +381,7 @@ async function main() {
   await triggerBounce(operator, rollup, { set_dispute_bind: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_book: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_claw: 1 }, 20000, "not authorized");
+  await triggerBounce(operator, rollup, { set_dispute_xframe: 1 }, 20000, "not authorized");
   // A second bind succeeds on the dispute AA (it just re-forwards), but the
   // rollup bounces the secondary 'not authorized' verdict — dispute_aa var
   // must be unchanged afterwards.
@@ -1892,6 +1901,7 @@ async function main() {
     sd.units_set_root = SET_ROOT1;
     sd.fills_root = o.fillsRoot || FILLS_ROOT;
     sd.fill_count = o.fillCount || 0;
+    sd.unit_count = o.unitCount || 1; // round 7b: multi-unit trees (exact proof depth)
     sd.wit_root = o.witRoot || WIT_ROOT; // k=0 drills anchor on the genesis tree unless a drill commits its own pre tree
     sd.wit_count = GEN_WIT_COUNT;
     const header = headerFromSubmit(sd);
@@ -3507,6 +3517,178 @@ async function main() {
     await triggerBounce(challenger, claw, clawPayload8(P8, 88, adlOk), 20000, "no fraud");
     await live(88, "honest ADL at the mark");
     console.log("67. ADL at 90k with mark 86k (band leaf proven) → frozen (P-claw); honest ADL at the mark → 'no fraud'");
+
+    // ===================== ROUND 7b (fix/47-r7b) ===========================
+    // Pool occupancy (ls - lf < 50): finalize the live drill heights first.
+    {
+      await network.timetravel({ shift: "3600s" });
+      let s0 = await vars(rollup);
+      for (let fh = Number(s0.last_finalized) + 1; fh <= 88; fh++) {
+        await trigger(operator, rollup, { finalize: 1, height: fh }, 20000);
+        s0 = await vars(rollup);
+        if (Number(s0.last_finalized) !== fh) break;
+      }
+      console.log(`7b prep: ls=${s0.last_submitted} lf=${s0.last_finalized}`);
+      if (Number(s0.last_finalized) < 45) throw new Error("7b prep: finalize stalled at " + s0.last_finalized);
+    }
+    const b64h = (x) => crypto.createHash("sha256").update(x, "utf8").digest("base64");
+    // Internal Merkle node of a proof's first level, posed as a leaf
+    // (R7-C1 / R7-C2 PoC, work/r7-review-oscr/mk_opbind_poc.js).
+    const nodeAsLeaf = (tree, j) => {
+      const full = merkle.getMerkleProof(tree, 2 * j);
+      return { el: b64h(tree[2 * j]) + b64h(tree[2 * j + 1]), proof: { root: full.root, index: j, siblings: full.siblings.slice(1) } };
+    };
+    if (!merkle.verifyMerkleProof(nodeAsLeaf(["a:1", "b:2", "c:3", "d:4"], 0).el, nodeAsLeaf(["a:1", "b:2", "c:3", "d:4"], 0).proof))
+      throw new Error("fixture: node-as-leaf must pass ocore verifyMerkleProof");
+    const tsPayload = (h, tree, el, proof) => ({ pred: "tsize", height: h, rollup: ROLLUP_ADDR, tree, el, el_proof: proof });
+
+    // ---- 68. R7-C1: node-as-leaf can no longer frame an honest batch ------
+    // A 4-unit honest batch of x units (ops leaf x:{id}, id = sha256(text)).
+    const texts4 = [0, 1, 2, 3].map((i) => "mnu3|" + "4f44583101" + "ab".repeat(32) + "12" + "cd".repeat(40 + i) + "|");
+    const ids4 = texts4.map((t) => sha256Hex(t + "x"));
+    const ops4 = ids4.map((id) => "x:" + id);
+    const b4 = {
+      opsRoot: merkle.getMerkleRoot(ops4), unitsRoot: merkle.getMerkleRoot(ids4),
+      traceRoot: merkle.getMerkleRoot([0, 1, 2, 3].map((i) => b64h("r7b-trace-" + i))), unitCount: 4,
+    };
+    const ob4 = (h, k, op, opsProof) => ({
+      pred: "opbind", height: h, rollup: ROLLUP_ADDR, k, ops_root: b4.opsRoot, units_root: b4.unitsRoot,
+      op, ops_proof: opsProof, units_proof: merkle.getMerkleProof(ids4, k), u_pre: texts4[k], u_op: "x",
+    });
+    await submitAt(89, b4);
+    await triggerBounce(challenger, dispute, ob4(89, 1, ops4[1], merkle.getMerkleProof(ops4, 1)), 20000, "no fraud");
+    const nal = nodeAsLeaf(ops4, 0);
+    // Before round 7b this exact payload verdicted (op != x:{id}).
+    await triggerBounce(challenger, dispute, ob4(89, 0, nal.el, nal.proof), 20000, "bad proof depth");
+    await triggerBounce(challenger, xframe, tsPayload(89, "ops", ops4[2], merkle.getMerkleProof(ops4, 2)), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, tsPayload(89, "ops", nal.el, nal.proof), 20000, "bad element proof");
+    await triggerBounce(challenger, xframe, tsPayload(89, "units", ids4[3], merkle.getMerkleProof(ids4, 3)), 20000, "no fraud");
+    await live(89, "honest 4-unit batch vs node-as-leaf");
+    // A tree larger than the committed unit_count (honest-depth proofs would
+    // all bounce) is P-tsize fraud.
+    const ops5 = ops4.concat(["x:" + sha256Hex("r7b-extra")]);
+    await submitAt(90, Object.assign({}, b4, { opsRoot: merkle.getMerkleRoot(ops5) }));
+    await triggerBounce(challenger, dispute, Object.assign(ob4(90, 1, ops5[1], merkle.getMerkleProof(ops5, 1)), { ops_root: merkle.getMerkleRoot(ops5) }), 20000, "bad proof depth");
+    await triggerVerdict(challenger, xframe, tsPayload(90, "ops", ops5[1], merkle.getMerkleProof(ops5, 1)), 20000, "P-tsize: 5 ops leaves under unit_count 4");
+    await frozen(90, "ops tree larger than unit_count");
+    await submitAt(90, Object.assign({}, b4, { witRoot: P5.wit }));
+    await live(90, "honest resubmit");
+    console.log("68. R7-C1: node-as-leaf op (P-opbind) / element (P-tsize) → 'bad proof depth' / 'bad element proof'; honest 4-unit batch → 'no fraud'; 5 ops leaves under unit_count 4 → frozen (P-tsize)");
+
+    // ---- 69. R7-C2 + fsane sentinel: node-as-leaf vs P-claw, n: vs P-fsane --
+    // The honest single-fill Place of 62 (ok5) as unit 0 of a 4-unit batch.
+    const ops4c = [op1].concat(ops4.slice(1));
+    const ids4c = [isoUnit].concat(ids4.slice(1));
+    const trace4c = [ok5.wit].concat([1, 2, 3].map((i) => b64h("r7b-ctrace-" + i)));
+    const c4 = Object.assign({}, ok5, {
+      ops: ops4c, opsRoot: merkle.getMerkleRoot(ops4c), unitsRoot: merkle.getMerkleRoot(ids4c),
+      trace: trace4c, traceRoot: merkle.getMerkleRoot(trace4c), unitCount: 4,
+    });
+    const claw4 = () => Object.assign(clawPayload(P5, 91, c4, MORD), { units_root: c4.unitsRoot, units_proof: merkle.getMerkleProof(ids4c, 0) });
+    await submitAt(91, c4);
+    await triggerBounce(challenger, claw, claw4(), 20000, "no fraud");
+    const naop = nodeAsLeaf(ops4c, 0);
+    // Before round 7b: `$op` is neither p: nor L: → immediate verdict.
+    await triggerBounce(challenger, claw, Object.assign(claw4(), { op: naop.el, ops_proof: naop.proof }), 20000, "bad proof depth");
+    // The honest `n:1` length sentinel is not a fill (the old shape rule
+    // verdicted every batch with a fill).
+    await triggerBounce(challenger, book, {
+      pred: "fsane", height: 91, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: c4.traceRoot, fills_root: c4.fillsRoot, ops_root: c4.opsRoot, units_root: c4.unitsRoot,
+      fill: c4.tree[1], fill_proof: merkle.getMerkleProof(c4.tree, 1), pre_wit: P5.wit,
+    }, 20000, "bad fill proof");
+    await live(91, "honest claw unit vs node-as-leaf / sentinel");
+    console.log("69. R7-C2: node-as-leaf op (P-claw) → 'bad proof depth', honest claw → 'no fraud'; fills sentinel n:1 (P-fsane) → 'bad fill proof'");
+
+    // ---- 70. R7-C3: bystander frame of x: units (P-xframe) ---------------
+    const BAND1 = "band:1:0:0";
+    const posM9 = `pos:${M}:1:100000000:10000000000000:0:0`;
+    const tA = (c, p) => `acct:${T}:${c}:${p}:0`;
+    const mA = (c) => `acct:${M}:${c}:0:0`;
+    const P9 = await clawSetup(92, "r7b-p9", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, END]);
+    const xText = (tag) => "mnu3|" + "4f44583101" + "ab".repeat(32) + tag + T + "00".repeat(8) + "|";
+    const xUnit = (tag, name, post) => {
+      const uPre = xText(tag);
+      const id = sha256Hex(uPre + "x");
+      const units = pad2([id], name + "-units");
+      return Object.assign(oneUnit(name, "x:" + id, post), { id, uPre, units, unitsRoot: merkle.getMerkleRoot(units), witRoot: P9.wit });
+    };
+    const xfBase = (pred, h, u) => ({
+      pred, height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot, ops_root: u.opsRoot, units_root: u.unitsRoot,
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0), pre_wit: P9.wit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      unit: u.id, units_proof: merkle.getMerkleProof(u.units, 0), u_pre: u.uPre,
+    });
+    const xfAcct = (h, u, a) => {
+      const post = u.post.find((l) => l.startsWith(`acct:${a}:`));
+      const pre = P9.pre.find((l) => l.startsWith(`acct:${a}:`));
+      return Object.assign(xfBase("xframe", h, u), { post_acct: post, post_acct_proof: u.leafProof(post), pre_acct: pre, pre_acct_proof: P9.proof(pre) });
+    };
+    const noPos = (a) => {
+      const i = P9.pre.findIndex((l) => l > `pos:${a}:`);
+      return { pleft: P9.pre[i - 1], pleft_proof: P9.proof(P9.pre[i - 1]), pright: P9.pre[i], pright_proof: P9.proof(P9.pre[i]) };
+    };
+    const xfLeaf = (pred, h, u, leaf, ins) => Object.assign(xfBase(pred, h, u), {
+      leaf, ins, leaf_proof: ins ? u.leafProof(leaf) : P9.proof(leaf),
+    }, absentIn(ins ? P9.pre : u.post, leaf));
+    // (a) StakeOracle (0e) by T credits bystander M 1e6 USD.
+    const mint = xUnit("0e", "r7b-mint", [tA(1000000000, 10000), mA(1002000000000), META1, BAND1, posM9, END]);
+    await submitAt(93, mint);
+    await triggerVerdict(challenger, xframe, xfAcct(93, mint, M), 20000, "P-xframe: bystander credit in a Stake unit");
+    await frozen(93, "bystander credit in an x: unit");
+    // (b) a position rewritten in an x: unit.
+    const posLie = xUnit("0e", "r7b-poslie", [tA(1000000000, 10000), mA(2000000000), META1, BAND1, `pos:${M}:1:200000000:10000000000000:0:0`, END]);
+    await submitAt(93, posLie);
+    await triggerVerdict(challenger, xframe, xfLeaf("xframe", 93, posLie, posM9, false), 20000, "P-xframe: position rewritten in a Stake unit");
+    await frozen(93, "position rewritten in an x: unit");
+    // (c) ReportPrice (06): collateral of an account with NO position moved.
+    const fundLie = xUnit("06", "r7b-fundlie", [tA(1500000000, 60000), mA(2000000000), META1, BAND1, posM9, END]);
+    await submitAt(93, fundLie);
+    await triggerBounce(challenger, xframe, xfAcct(93, fundLie, T), 20000, "no fraud");
+    await triggerVerdict(challenger, xframe, Object.assign(xfAcct(93, fundLie, T), noPos(T)), 20000, "P-xframe: funding paid to an account without a position");
+    await frozen(93, "funding to an account without a position");
+    // Honest: the Stake moves only T's own PERP (60000 -> 10000).
+    const stakeOk = xUnit("0e", "r7b-stake", [tA(1000000000, 10000), mA(2000000000), META1, BAND1, posM9, END]);
+    await submitAt(93, stakeOk);
+    await triggerBounce(challenger, xframe, xfAcct(93, stakeOk, T), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, xfAcct(93, stakeOk, M), 20000, "no fraud");
+    await live(93, "honest Stake unit");
+    // Honest ReportPrice: funding moves the position holder M's collateral
+    // (every x: unit here commits P9's root as wit_root, so h94's pre tree
+    // is P9 again).
+    const fundOk = xUnit("06", "r7b-fundok", [tA(1000000000, 60000), mA(1999000000), META1, BAND1, posM9, END]);
+    await submitAt(94, fundOk);
+    await triggerBounce(challenger, xframe, xfAcct(94, fundOk, M), 20000, "no fraud");
+    await live(94, "honest funding to a position holder");
+    console.log("70. R7-C3: bystander credit / position rewrite in a Stake unit, funding to a position-less account in a ReportPrice unit → frozen (P-xframe); honest Stake (own PERP), funding to a position holder → 'no fraud'");
+
+    // ---- 71. R7-H2: band: / meta: frame (P-mframe) and P-noband ----------
+    const P9b = P9;
+    const bandLie = xUnit("0e", "r7b-bandlie", [tA(1000000000, 10000), mA(2000000000), META1, "band:1:0:5", posM9, END]);
+    await submitAt(95, bandLie);
+    await triggerVerdict(challenger, xframe, xfLeaf("mframe", 95, bandLie, BAND1, false), 20000, "P-mframe: band rewritten");
+    await frozen(95, "band rewritten");
+    const noBand = xUnit("0e", "r7b-noband", [tA(1000000000, 10000), mA(2000000000), META1, posM9, END]);
+    await submitAt(95, noBand);
+    const nbi = noBand.post.findIndex((l) => l > "band:1:");
+    await triggerVerdict(challenger, xframe, Object.assign(xfBase("noband", 95, noBand), {
+      meta: META1, meta_proof: noBand.leafProof(META1),
+      left: noBand.post[nbi - 1], left_proof: noBand.leafProof(noBand.post[nbi - 1]),
+      right: noBand.post[nbi], right_proof: noBand.leafProof(noBand.post[nbi]),
+    }), 20000, "P-noband: market without its band");
+    await frozen(95, "band deleted");
+    const META1m = "meta:1:1:1000:500:5:100:0:777:0:0";
+    const markLie = xUnit("0e", "r7b-marklie", [tA(1000000000, 10000), mA(2000000000), META1m, BAND1, posM9, END]);
+    const metaPair = (h, u) => Object.assign(xfBase("mframe", h, u), {
+      pre_meta: META1, pre_meta_proof: P9b.proof(META1), post_meta: META1m, post_meta_proof: u.leafProof(META1m),
+    });
+    await submitAt(95, markLie);
+    await triggerVerdict(challenger, xframe, metaPair(95, markLie), 20000, "P-mframe: mark moved by a Stake");
+    await frozen(95, "mark moved outside a price op");
+    const markOk = xUnit("06", "r7b-markok", [tA(1000000000, 60000), mA(2000000000), META1m, BAND1, posM9, END]);
+    await submitAt(95, markOk);
+    await triggerBounce(challenger, xframe, metaPair(95, markOk), 20000, "no fraud");
+    await live(95, "honest mark update by ReportPrice");
+    console.log("71. R7-H2: band rewritten / band deleted / mark moved by a Stake → frozen (P-mframe / P-noband); mark moved by ReportPrice → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

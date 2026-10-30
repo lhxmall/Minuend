@@ -140,10 +140,23 @@
 						OR !is_valid_merkle_proof($u, trigger.data.units_proof))
 						bounce('bad unit');
 					$op = trigger.data.op;
-					if (typeof($op) == 'boolean' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+					// R7-C2: the ops / units / fills proofs must have the
+					// exact depth of their committed leaf counts (unit_count,
+					// unit_count, fill_count + 1 with the `n:` sentinel): at
+					// that depth an element is the committed leaf itself,
+					// never an internal node (node-as-leaf would otherwise
+					// reach the "op not p:/L:" fraud below). A tree of
+					// another size is P-tsize fraud (xframe AA).
+					if (typeof($op) != 'string' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
 						OR trigger.data.ops_proof.root != trigger.data.ops_root
 						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
 						bounce('bad ops proof');
+					$d1 = 2 ^ array_length(trigger.data.ops_proof.siblings);
+					$nfl = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+					$d3 = 2 ^ array_length(trigger.data.fill_proof.siblings);
+					if (($n > 1 AND ($d1 < $n OR $d1 >= 2 * $n OR array_length(trigger.data.units_proof.siblings) != array_length(trigger.data.ops_proof.siblings)))
+						OR $d3 < $nfl OR $d3 >= 2 * $nfl)
+						bounce('bad proof depth');
 					$market = $F[7];
 					$qty = $F[9];
 					if (!is_integer($qty) OR $qty <= 0) bounce('no fraud');

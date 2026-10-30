@@ -471,7 +471,18 @@
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
 					$op = trigger.data.op;
-					if (typeof($op) == 'boolean' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+					// R7-C1: Obyte proofs do not tell a leaf from an internal
+					// node (H(a)||H(b), 88 chars of base64): a node passes
+					// with fewer siblings and is never the descriptor. An
+					// honest proof has exactly ceil(log2(n)) siblings (odd
+					// levels duplicate the last node), and at that depth the
+					// element can only be the leaf itself, so the depth gate
+					// below rules node-as-leaf out while ANY committed leaf
+					// (garbage included) stays judgeable. A tree whose size
+					// is not the committed count is fraud of its own
+					// (P-tsize, minuend_dispute_xframe.aa); one leaf (n = 1)
+					// has no internal node.
+					if (typeof($op) != 'string' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
 						OR trigger.data.ops_proof.root != trigger.data.ops_root
 						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
 						bounce('bad ops proof');
@@ -486,6 +497,10 @@
 						OR trigger.data.units_proof.root != trigger.data.units_root
 						OR !is_valid_merkle_proof($id, trigger.data.units_proof))
 						bounce('bad unit');
+					// R7-C1: both trees hold unit_count leaves (exact depth).
+					$d1 = 2 ^ array_length(trigger.data.ops_proof.siblings);
+					if ($n > 1 AND ($d1 < $n OR $d1 >= 2 * $n OR array_length(trigger.data.units_proof.siblings) != array_length(trigger.data.ops_proof.siblings)))
+						bounce('bad proof depth');
 					$want = $e == 'x' ? 'x:' || $id : $e;
 					if ($op == $want) bounce('no fraud');
 				}",

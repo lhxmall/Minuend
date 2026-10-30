@@ -1730,10 +1730,32 @@ impl Engine {
             isolated: false,
             margin_left: 0,
         };
-        let result = self
+        // Round 7b (R7-H1): one fill per unit lets a dust order at the top
+        // of the book absorb each `Liquidate` (1 lot closed, no ADL because
+        // the book "filled"). When the first maker would close less than
+        // 1/LIQ_MIN_BOOK_FILL_DIV of the position, skip the book: the ADL
+        // path below runs in this same unit (a book of no crossing maker
+        // behaves exactly as before).
+        let dust = self
             .state
-            .submit_journaled(journal, order, minuend_book::SelfTrade::CancelMaker)
-            .map_err(RejectReason::Book)?;
+            .books
+            .get(&market)
+            .and_then(|b| b.first_maker_qty(side, target))
+            .is_some_and(|q| q.saturating_mul(minuend_types::LIQ_MIN_BOOK_FILL_DIV) < qty);
+        let result = if dust {
+            minuend_book::MatchResult {
+                fills: Vec::new(),
+                taker_remaining: qty,
+                taker_resting: false,
+                canceled_maker: Vec::new(),
+                taker_margin_left: 0,
+                refunds: Vec::new(),
+            }
+        } else {
+            self.state
+                .submit_journaled(journal, order, minuend_book::SelfTrade::CancelMaker)
+                .map_err(RejectReason::Book)?
+        };
         // Default self-trade policy: cancel-maker-continue (the target's
         // book must clear for the close to execute; kind 3's identity is
         // unchanged by this PR).

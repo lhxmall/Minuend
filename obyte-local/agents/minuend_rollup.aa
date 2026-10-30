@@ -29,6 +29,7 @@
 	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa,
 	//   dispute_bind_aa (#47 A2), dispute_book_aa (round 2: ghost/skip),
 	//   dispute_claw_aa (round 6: P-claw)
+	//   dispute_xframe_aa (round 7b: P-xframe / P-mframe / P-noband)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
@@ -168,6 +169,24 @@
 				]
 			},
 			{
+				// Round 7b: P-xframe / P-mframe / P-noband (bystander frame of
+				// `x:` units, band: / meta: frame) live in a sixth dispute
+				// AA (ops budget).
+				if: "{trigger.data.set_dispute_xframe}",
+				init: "{
+					if (trigger.address != 'DISPUTE_XFRAME_AA_HERE' OR var['dispute_xframe_aa'])
+						bounce('not authorized');
+				}",
+				messages: [
+					{
+						app: "state",
+						state: "{
+							var['dispute_xframe_aa'] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
 				if: "{trigger.data.submit}",
 				init: "{
 					$h = trigger.data.height;
@@ -187,7 +206,7 @@
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
 						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
-						OR trigger.data.assertion_version != 4
+						OR trigger.data.assertion_version != 5
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
 						// #47 A2: the vault no longer pays from the forest —
@@ -368,8 +387,9 @@
 					$db = (var['dispute_bind_aa'] otherwise 0);
 					$dk = (var['dispute_book_aa'] otherwise 0);
 					$dc = (var['dispute_claw_aa'] otherwise 0);
+					$dx = (var['dispute_xframe_aa'] otherwise 0);
 					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk
-						AND trigger.address != $dc)
+						AND trigger.address != $dc AND trigger.address != $dx)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');

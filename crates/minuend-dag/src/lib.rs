@@ -556,10 +556,18 @@ pub fn op_descriptor(op: &Op) -> Option<String> {
         // judged against the INNER `p:` / `L:` descriptor (fill_math's
         // escrow identity, P-claw's two-leg claw and keeper) instead of an
         // opaque `x:` that hid the margin, tif and keeper.
+        // Round 7b (R7-C3, ASSERTION_VERSION 5): a revealed Cancel commits
+        // its inner `c:` too — every `x:` unit is now framed by P-xframe
+        // (no `x:` op writes an order or collateral), and a Cancel removes
+        // an order and refunds its escrow (judged by P-escrow / P-frame).
         Reveal { op: inner, .. }
             if matches!(
                 inner.as_ref(),
-                Withdraw { .. } | GovWithdraw { .. } | Place { .. } | Liquidate { .. }
+                Withdraw { .. }
+                    | GovWithdraw { .. }
+                    | Place { .. }
+                    | Liquidate { .. }
+                    | Cancel { .. }
             ) =>
         {
             op_descriptor(inner)

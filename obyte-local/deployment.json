@@ -1,9 +1,9 @@
 {
   "status": "not-deployed",
-  "note": "#47 B5: no deployment of the current minuend-v2 / assertion_version 4 AAs exists yet. Run deploy_testnet.js or deploy_mainnet.js; both rewrite this file. Every address below stays null until then, and the operator scripts fall back to the MINUEND_*_AA environment variables.",
+  "note": "#47 B5: no deployment of the current minuend-v2 / assertion_version 5 AAs exists yet. Run deploy_testnet.js or deploy_mainnet.js; both rewrite this file. Every address below stays null until then, and the operator scripts fall back to the MINUEND_*_AA environment variables.",
   "network": null,
   "chain_id": "minuend-v2",
-  "assertion_version": 4,
+  "assertion_version": 5,
   "rollup_aa_address": null,
   "dispute_aa_address": null,
   "dispute_fill_aa_address": null,

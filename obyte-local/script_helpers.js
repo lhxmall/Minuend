@@ -71,10 +71,12 @@ const TARGETS = {
   bind: { deployKey: "dispute_bind_aa_address", env: "MINUEND_DISPUTE_BIND_AA", bind: { bind_bind: 1 }, rollupVar: "dispute_bind_aa" },
   // Round 6: P-claw (both legs of one fill) on the claw dispute AA.
   claw: { deployKey: "dispute_claw_aa_address", env: "MINUEND_DISPUTE_CLAW_AA", bind: { bind_claw: 1 }, rollupVar: "dispute_claw_aa" },
+  // Round 7b: P-xframe / P-mframe / P-noband / P-tsize on the x-frame AA.
+  xframe: { deployKey: "dispute_xframe_aa_address", env: "MINUEND_DISPUTE_XFRAME_AA", bind: { bind_xframe: 1 }, rollupVar: "dispute_xframe_aa" },
 };
 function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
   const t = TARGETS[target];
-  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind|claw)`);
+  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind|claw|xframe)`);
   const address = (deploy && deploy[t.deployKey]) || envCompat(t.env, env, warn);
   return Object.assign({ address: address || null }, t);
 }
@@ -142,6 +144,9 @@ function targetForPred(pred) {
   if (pred === "fill_math") return "fill";
   // Round 6: P-claw on the claw AA.
   if (pred === "claw") return "claw";
+  // Round 7b: bystander frame of `x:` units, band:/meta: frame, missing
+  // band leaf, committed tree size on the x-frame AA.
+  if (["xframe", "mframe", "noband", "tsize"].includes(pred)) return "xframe";
   // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA;
   // R5-A-2: P-fsane on the book AA.
   if (pred === "ghost" || pred === "skip" || pred === "mbind" || pred === "fsane") return "book";

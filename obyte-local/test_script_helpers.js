@@ -110,11 +110,11 @@ require("./test_frame_stamp");
     wit_root: "W".repeat(44), trace_root: "T".repeat(44), units_root: "U".repeat(44),
     units_set_root: "S".repeat(44), ops_root: "O".repeat(44), fills_root: "F".repeat(44),
     counts_root: "C".repeat(44), unit_count: 3, wit_count: 11, fill_count: 2,
-    assertion_version: 4, data_root: "d".repeat(64),
+    assertion_version: 5, data_root: "d".repeat(64),
   };
   const s = ["minuend-da-v1", "minuend-v2", "7", "01".repeat(32), "02".repeat(32), "a".repeat(64),
     "W".repeat(44), "T".repeat(44), "U".repeat(44), "S".repeat(44), "O".repeat(44), "F".repeat(44),
-    "C".repeat(44), "3", "11", "2", "4", "d".repeat(64)].join("|");
+    "C".repeat(44), "3", "11", "2", "5", "d".repeat(64)].join("|");
   assert.strictEqual(daBindHash(f), crypto.createHash("sha256").update(s).digest("hex"));
   assert.throws(() => daBindHash(Object.assign({}, f, { data_root: undefined })), /missing data_root/);
   // Round 2 routing: ghost/skip -> book AA, binding preds -> bind AA.
@@ -123,6 +123,7 @@ require("./test_frame_stamp");
   assert.strictEqual(targetForPred("mbind"), "book"); // R4-A-1
   assert.strictEqual(targetForPred("fsane"), "book"); // R5-A-2
   assert.strictEqual(targetForPred("claw"), "claw"); // round 6 P-claw
+  for (const p of ["xframe", "mframe", "noband", "tsize"]) assert.strictEqual(targetForPred(p), "xframe"); // round 7b
   assert.strictEqual(targetForPred("fill_math"), "fill");
   for (const p of ["wpin", "adr", "tip", "keep", "mirror", "frame"]) assert.strictEqual(targetForPred(p), "bind");
   assert.strictEqual(targetForPred("deposit"), "main");
@@ -132,6 +133,10 @@ require("./test_frame_stamp");
   assert.strictEqual(claw.address, "C".repeat(32));
   assert.strictEqual(claw.rollupVar, "dispute_claw_aa");
   assert.deepStrictEqual(claw.bind, { bind_claw: 1 });
+  const xf = disputeTarget("xframe", { dispute_xframe_aa_address: "X".repeat(32) });
+  assert.strictEqual(xf.address, "X".repeat(32));
+  assert.strictEqual(xf.rollupVar, "dispute_xframe_aa");
+  assert.deepStrictEqual(xf.bind, { bind_xframe: 1 });
 }
 
 console.log("script helper checks passed");
