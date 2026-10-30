@@ -221,9 +221,19 @@
 						// R3-A-1: an ACCEPTED withdrawal is paid from cash the
 						// account holds (engine debit needs balance >= amount),
 						// so the post column is never negative.
-						$match = $gov ? (($perp0 == $perp1 OR ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1 AND !starts_with($perp1, '-')))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
+						// R4-A-6: PERP is a capless asset, but the engine caps
+						// the sidechain PERP supply (hence every balance) at
+						// PERP_SUPPLY_MAX < 1e14, so an honest PERP column and
+						// an accepted amount have <= 14 digits and the
+						// arithmetic below is exact (Oscript keeps 15). A pre
+						// column past that (only an earlier, already-final
+						// lie) is not judged; a longer post column or amount
+						// can only be a rejected op's unchanged column.
+						if ($gov AND length($perp0) > 14) bounce('no fraud');
+						$pnum = length($perp1) <= 14 AND length($amount) <= 14;
+						$match = $gov ? (($perp0 == $perp1 OR ($pnum AND ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1 AND !starts_with($perp1, '-'))))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
 						// R3-A-7: a credited PERP deposit (D:) is backed like d:.
-						$cred = $deposit AND ($gov ? ($perp0 != $perp1 AND $perp0 + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));
+						$cred = $deposit AND ($gov ? ($pnum AND $perp0 != $perp1 AND $perp0 + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));
 					}
 					// R2-A-3: a credited collateral (d:) or PERP (D:, R3-A-7)
 					// deposit must be BACKED by the rollup's genuine vault
