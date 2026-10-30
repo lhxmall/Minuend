@@ -114,7 +114,7 @@ require("./test_frame_stamp");
   };
   const s = ["minuend-da-v1", "minuend-v2", "7", "01".repeat(32), "02".repeat(32), "a".repeat(64),
     "W".repeat(44), "T".repeat(44), "U".repeat(44), "S".repeat(44), "O".repeat(44), "F".repeat(44),
-    "C".repeat(44), "3", "11", "2", "8", "d".repeat(64)].join("|");
+    "C".repeat(44), "3", "11", "2", "9", "d".repeat(64)].join("|");
   assert.strictEqual(daBindHash(f), crypto.createHash("sha256").update(s).digest("hex"));
   assert.throws(() => daBindHash(Object.assign({}, f, { data_root: undefined })), /missing data_root/);
   // Round 2 routing: ghost/skip -> book AA, binding preds -> bind AA.

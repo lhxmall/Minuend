@@ -559,6 +559,17 @@ dispute（P-deposit pre-absent gov）、dispute_bind（下标边界）、rollup�
 witness 叶格式变化（`obond:`、PERP-only `acct:`）是共识变化。op 预算见 MECHANISMS §10.16；
 当时 rollup 只接受 `assertion_version == 6`。
 
+第 11 轮部署变化（`ASSERTION_VERSION` = 9）：不新增 AA。dispute_wf 增加开放元素挑战（open / answer /
+expire）、P-wf 只判新写入的叶、`h` / 地址 / `dep` 字段类收紧；所有 dispute AA 改为按原始子串读 id、
+x-frame / m-frame / P-wf / claw(noband) 去掉 `$S = trigger.data`；dispute_book 增加 MARK_CAP 被拒限价单
+判定；vault / rollup(force) 接受 `'Z' || hex` 形式的账户 / unit id；rollup 版本门 9。执行规则变化：
+unit 文本超过 `MAX_UNIT_TEXT_LEN` = 2048 字符或 ops 描述超过 `MAX_ELEMENT_LEN` = 1024 字符的 unit 在
+ingest 处被拒（`ExecError::TooLong`），批次不承诺任何超过 1024 字符的元素（`SettleError::ElementTooLong`）。
+输入约定：挑战数据里 p: / L: unit 的 `unit` 字段、开放挑战的 `element` 字段一律写成 `'Z' || 原文`
+（全数字的 hex 经 `trigger.data` 会变成 Decimal）；vault 的 `account`、rollup force 的 `unit_id` 可以
+写 `'Z' || hex`（全数字账户 / unit 必须这样写）。详见 MECHANISMS §10.19。
+真实 ocore 的 complexity / ops 见 MECHANISMS §10.19；rollup 只接受 `assertion_version == 9`。
+
 第 10 轮部署变化：新增 dispute_wf（rollup 新占位 `DISPUTE_WF_AA_HERE`、变量 `dispute_wf_aa`、
 verdict 白名单；rollup 的 8 个 bind case 合并成一个，complexity 91）；dispute_mframe / dispute_xframe /
 dispute / dispute_fill / dispute_claw（不再 `json_parse` 运营方字段、畸形 post 字段判 fraud、

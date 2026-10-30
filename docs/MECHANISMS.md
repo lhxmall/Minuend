@@ -1585,6 +1585,71 @@ dispute_fill 36 / 1991、dispute_bind 67 / 1982、dispute_book 71 / 1836、dispu
 dispute_xframe 61 / 1929、dispute_mframe 48 / 1891、dispute_wf 18 / 1177（complexity / ops，
 上限 100 / 2000）。
 
+### 10.19 第 11 轮（#47 R11）：原始 id、无对象上限的证明、元素长度上限与开放元素挑战、P-wf 只判新叶
+
+第 11 轮复核（`findings/round-11-review.md`，对 `36b7ece`）发现 4 个 Critical、1 个 Medium、3 个 Low。
+`ASSERTION_VERSION` = 9。设计原则不变：诚实批次永远不能被判；拿不准时 bounce。
+
+1. **R11-C3 / C4：id 一律按原始文本读取**。ocore 从 `trigger.data` 或 `split()` 结果里取出一个只含
+   十进制数字的字符串时会转成 15 位有效数字的 Decimal（拼接后是 `1.23456789012346e+63`）。全数字的 64 位
+   hex id（order id 约 10 分钟 GPU 可磨出，unit id 约 1 小时）以前会让 P-ghost / P-fsane / fill_math 判
+   诚实批次（拼出的区间前缀在诚实树里永远为空），或让 unit 绑定的谓词全部 bounce（`is_valid_merkle_proof`
+   和 `length == 64` 永远失败）。现在：
+   - 成交串的 id 按固定偏移读取（unit 2、taker 69、maker 134、taker order 199、maker order 264；诚实成交的
+     idx 只能是 `0`，其他 idx 由 P-fsane 判）；叶里的 id 用 `substring`（`acct:` 5、`pos:` / `ord:` 4、
+     `obond:` 6）、`':'→':Z'` 拆分（字段都带 `Z` 前缀，永远不是数字），或在 id 已被前缀证明后用
+     `contains(leaf, ':' || id || ':')` 判断另一个 64 hex 字段（两个 64 hex 字段相等需要 sha256 碰撞）。
+   - `x:` op 的 unit 直接取 `substring(op, 2, 64)`（op 已被证明是 ops 叶，`length(op) == 66`）；p: / L: 的
+     unit 由挑战者以 `'Z' || hex` 提交（`trigger.data.unit`）。vault 的 `account`、rollup force 的
+     `unit_id` 也接受 `'Z' || hex`。
+   - 覆盖：book（ghost / mbind / fsane / skip）、fill（fill_math，`$tk` 合并 14 处 `$who == 'taker'` 腾出
+     ops）、bind（wpin / adr / keep / mirror / frame）、dispute（deposit 的 vault 记录用 `ends_with`、escrow 的
+     订单所有者）、x-frame、m-frame（obond 叶）、vault、rollup(force)。claw 原本就按偏移读取。
+   - 仍以 Decimal 比较的只剩市场 id（u32，本来就是数字）和 Obyte 地址（base32 含字母，全数字需要
+     约 2^77 次 chash 尝试）。
+2. **R11-C1：不再把 `trigger.data` 赋给局部变量**。ocore（pemCurvesFix 之后）对局部变量里的对象限制
+   4096 字符；x-frame / m-frame / P-wf / claw(noband) 的 `$S = trigger.data` 让 1024 unit、约 4096 片叶
+   以上的证明全部 bounce。现在逐字段读取，单个证明对象最多 50 个兄弟节点（约 2200 字符），整个
+   trigger.data 没有总长度限制。协议上限：每批 `BATCH_MAX_UNITS` = 200 000（trace / ops / units 深度 18），
+   见证树深度不受 ocore 限制（50 个兄弟节点 = 2^50 片叶）。e2e 90 在 200 000 unit、见证深度 24、2000 字符
+   unit 文本下跑 x-frame（证明 JSON 约 8900 字符）和 P-wf（约 5700 字符），都是 frozen。
+3. **R11-C2：元素长度上限 + 开放元素挑战**。链上无法证明"一个哈希背后的字符串很长"：任何承诺方案
+   最终都要把原像交给 AA，而 ocore 读不了超过 4096 字符的字符串（分块哈希也不行：最后一块本身可以超长）。
+   所以采用数据可用性式的交互挑战：
+   - 引擎：unit 文本 ≤ `MAX_UNIT_TEXT_LEN` = 2048、ops 描述 ≤ `MAX_ELEMENT_LEN` = 1024，否则 ingest 拒绝
+     （`ExecError::TooLong`；以前 3000 字符地址的 Deposit 会被接受进 DAG，ops 叶就是超长元素）；
+     `Batch::from_applied` 拒绝承诺任何超过 1024 字符的 ops / 成交 / 见证叶（`SettleError::ElementTooLong`）。
+     诚实元素的实际长度：见证叶 < 300、ops < 400、成交 < 450。
+   - wf AA 新增 `open` / `answer` / `expire`：任何人在高度提交后的前 1800 秒内（窗口 3600 秒）押至少
+     100 000 bytes，指定 (tree, k, index)：`ops` / `units` / `trace`（index < unit_count）、`fills`
+     （index < fill_count + 1）、`wit`（unit k 的 post 见证树：post_wit 的 trace 证明 + counts_root 里的
+     叶数，index < 叶数）。任何人可以在 1200 秒内用 `'Z' || 元素`（≤ 1024 字符；units 64 字符、trace 44
+     字符、其余必须含 `:`，所以内部节点原像不能冒充元素）加精确深度的证明回答，押金归回答者。到期未回答
+     时 `expire` 发出 fraud verdict（押金退给挑战者）；如果高度已冻结、已过窗口或被重新提交
+     （`submitted_at` 变了），只退押金。
+   - 取舍：诚实运营方必须在线（20 分钟内回答）；押金让骚扰有成本（回答者拿走押金）。超长元素和"不公开的
+     元素"都变成运营方的损失。开放只能在窗口前半段发起，保证到期后还有至少 600 秒发出 verdict。
+   - watcher（`prove::open_proof`）发现超长 / 形状不对的元素就发起 open（金额 110 000，`challengeAmount`）；
+     `prove::open_answer` 给诚实运营方生成回答。到期后的 `expire` 需要再触发一次（`post_challenge*.js
+     --pred expire`）。
+4. **R11-M1：P-wf 只判新写入的叶**。见证模式要求证明这片叶不在 unit k 的 pre 树里（相邻夹逼、
+   before-min，或 after-max：pre 树最后一片叶，下标由 pre 叶数钉住——k = 0 用 rollup 的
+   `wit_count_{h-1}`，h = 1 用 genesis 叶数 4，k > 0 用 counts_root 第 k − 1 项）。恢复路径：一片畸形叶
+   如果错过窗口被敲定，就成为已敲定状态，之后的批次原样携带它，P-wf 不会再判它（其他谓词把不变的叶当作
+   不变）。
+5. **Low**：L1——P-wf 的 `h` 字段必须是 64 个小写 hex；`adr` / `adrx` 的地址必须 `is_valid_address`
+   （引擎只为 vault 记录的付款地址写绑定，付款地址都是真实地址）；`dep` 必须 44 字符并以 `=` 结尾。
+   L2——fill_math 剩余挂单臂去掉对 post 字段的 `+ 0`（`is_integer` 守卫、`==` 比较）。L3——P-fsane 的
+   "被拒 Place"增加：限价单（typ 0）且 |price| ≥ `MARK_CAP`（1e15）时这个 unit 的任何成交都是 fraud。
+
+ops / complexity（真实 ocore `aa_validation`）：rollup 91/1065、dispute 72/1821、fill 36/1983、
+bind 67/1989、book 71/1861、claw 43/1992、xframe 61/1916、mframe 48/1882、wf 72/1983、vault 14/394。
+watcher 镜像：`wf_malformed`（L1）、`wf_proof`（M1 的 pleft / pright / pre_count）、`open_proof` /
+`open_answer`、p: / L: 证明的 `unit` 改为 `'Z' || hex`。e2e 89–92：全数字 unit / 账户 / 订单 id 的诚实成交
+在 P-ghost / P-fsane / P-mbind 都 `no fraud`，同一 unit 的价格谎言 frozen；协议上限深度的 x-frame / P-wf
+frozen；4200 字符 ops 元素 open → expire → frozen，诚实元素 open → answer → live；MARK_CAP 限价单的成交
+frozen（P-fsane）。e2e 85–87 的 P-wf 载荷带上 pre 树的不存在证明（被携带的叶 bounce `not new`）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
