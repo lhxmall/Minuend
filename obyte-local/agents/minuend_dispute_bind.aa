@@ -436,6 +436,9 @@
 				//   ins = true: `leaf` (pos:/ord:) is a POST member and is
 				//     exactly absent from the pre tree — always fraud.
 				// A rewritten leaf (changed entry/qty/price/owner) is both.
+				// R5-A-1: the same holds for `acct:` leaves of accounts other
+				// than the op's (collateral / PERP / W columns, insertion and
+				// deletion alike).
 				if: "{trigger.data.pred == 'frame'}",
 				init: "{
 					$h = trigger.data.height;
@@ -482,8 +485,19 @@
 					$L = trigger.data.leaf;
 					if (typeof($L) == 'boolean') bounce('bad leaf');
 					$Q = split($L, ':');
-					if (!(($Q[0] == 'pos' AND array_length($Q) == 7) OR ($Q[0] == 'ord' AND array_length($Q) == 10)))
+					// R5-A-1: acct leaves of every account OTHER than the
+					// op's are frozen too (the engine's cancel / deposit /
+					// withdraw / gov ops write only the op account's
+					// collateral, PERP and W). Accounts are compared as
+					// substrings (an all-digit hex would read as a number
+					// out of split()); the op account is op[2..66] for all
+					// five shapes, and the op account's own leaf is judged
+					// by P-deposit / P-withdraw / P-escrow / P-wpin.
+					$isacct = array_length($Q) == 5 AND starts_with($L, 'acct:') AND substring($L, 69, 1) == ':';
+					if (!(($Q[0] == 'pos' AND array_length($Q) == 7) OR ($Q[0] == 'ord' AND array_length($Q) == 10) OR $isacct))
 						bounce('bad leaf');
+					if ($isacct AND substring($L, 5, 64) == substring($op, 2, 64))
+						bounce('no fraud');
 					$ins = trigger.data.ins ? true : false;
 					$src = $ins ? $post_wit : $pre_wit;
 					$dst = $ins ? $pre_wit : $post_wit;
