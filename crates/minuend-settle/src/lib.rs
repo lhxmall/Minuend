@@ -441,8 +441,9 @@ impl Batch {
         let mut units = Vec::with_capacity(applied.len());
         // R3-R-5: `batch_body` also serves units that already left the
         // parent window but were never exported in a batch (their bodies are
-        // retained until `release_batched` below), so a backlog larger than
-        // the window can still be cut.
+        // retained until `release_batched` below, i.e. until they are cut
+        // into a batch), so a backlog larger than the window can still be
+        // cut.
         for id in applied {
             let u = engine
                 .dag
@@ -540,8 +541,15 @@ impl Batch {
         let _ = engine.compact_journal_if_needed();
         let last_unit = *applied.last().unwrap();
         let aa_shard_roots = minuend_state::aa_sharded_roots_of_state(&engine.state);
-        // R3-R-5: these units are now exported; their bodies may go once
-        // they are out of the parent window (or right away if already out).
+        // R3-R-5: these units are now cut into this batch; their bodies may
+        // go once they are out of the parent window (or right away if
+        // already out). I-2: this release happens HERE, at batch cut —
+        // before the batch is exported, posted or finalized — not "after a
+        // successful export". The DAG therefore cannot serve these bodies
+        // again: a producer that may have to re-export the same height
+        // (e.g. after a fraud verdict, re-submitting the same units) must
+        // keep the `Batch` (or its frames) itself until that height
+        // finalizes.
         engine.dag.release_batched(applied);
         Ok(Self {
             chain_id: CHAIN_ID.to_string(),

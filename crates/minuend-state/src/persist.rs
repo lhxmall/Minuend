@@ -220,6 +220,53 @@ pub fn remove_snapshots_above(dir: &Path, height: Height) -> io::Result<()> {
     Ok(())
 }
 
+/// R4-R-4 / I-4: sub-directory dead-branch checkpoints are moved to.
+pub const DEAD_SNAPSHOT_DIR: &str = "dead";
+
+/// R4-R-4 / I-4: move every snapshot above `height` into
+/// `dir/`[`DEAD_SNAPSHOT_DIR`] instead of deleting it. They are no longer
+/// candidates for [`snapshot_heights`] / resume (only top-level files are),
+/// but stay on disk for forensics, and a rewind decided on a bad hub read
+/// destroys nothing. A same-named file already in `dead/` is replaced.
+/// Returns the heights moved.
+pub fn retire_snapshots_above(dir: &Path, height: Height) -> io::Result<Vec<Height>> {
+    let mut moved = Vec::new();
+    let dead = dir.join(DEAD_SNAPSHOT_DIR);
+    for (h, path) in snapshot_candidates(dir)? {
+        if h > height {
+            fs::create_dir_all(&dead)?;
+            fs::rename(&path, dead.join(snapshot_name(h)))?;
+            moved.push(h);
+        }
+    }
+    if !moved.is_empty() {
+        fsync_dir(&dead);
+        fsync_dir(dir);
+    }
+    Ok(moved)
+}
+
+/// R4-R-7: keep at most `max_count` snapshots and at most `max_bytes` of
+/// them in `dir` (top level only), deleting the OLDEST first; the newest
+/// snapshot is always kept. For throw-away (temp-dir) checkpoint stores.
+/// Returns the heights deleted.
+pub fn cap_snapshots(dir: &Path, max_count: usize, max_bytes: u64) -> io::Result<Vec<Height>> {
+    let mut removed = Vec::new();
+    let mut total: u64 = 0;
+    for (i, (h, path)) in snapshot_candidates(dir)?.into_iter().enumerate() {
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        total = total.saturating_add(len);
+        if i > 0 && (i >= max_count || total > max_bytes) {
+            fs::remove_file(&path)?;
+            removed.push(h);
+        }
+    }
+    if !removed.is_empty() {
+        fsync_dir(dir);
+    }
+    Ok(removed)
+}
+
 /// All snapshots in `dir` as (height, path), descending by height.
 fn snapshot_candidates(dir: &Path) -> io::Result<Vec<(Height, PathBuf)>> {
     let entries = match fs::read_dir(dir) {
@@ -284,6 +331,52 @@ fn prune_snapshots_from(dir: &Path, keep: usize, retain_from: Height) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R4-R-4 / I-4: retiring moves dead-branch snapshots to `dead/`
+    /// (no longer resume candidates) without deleting anything.
+    #[test]
+    fn retire_moves_snapshots_above_into_dead_dir() {
+        let dir = std::env::temp_dir().join(format!("minuend-retire-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::default();
+        for h in 1..=5 {
+            st.height = h;
+            save_snapshot_retaining(&dir, &st, &[], 0).unwrap();
+        }
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![5, 4, 3, 2, 1]);
+        let moved = retire_snapshots_above(&dir, 2).unwrap();
+        assert_eq!(moved.len(), 3);
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![2, 1]);
+        let dead = dir.join(DEAD_SNAPSHOT_DIR);
+        assert_eq!(snapshot_heights(&dead).unwrap(), vec![5, 4, 3]);
+        // Retiring again (same heights re-saved on the new branch) replaces.
+        st.height = 3;
+        save_snapshot_retaining(&dir, &st, &[], 0).unwrap();
+        retire_snapshots_above(&dir, 2).unwrap();
+        assert_eq!(snapshot_heights(&dead).unwrap(), vec![5, 4, 3]);
+        assert!(retire_snapshots_above(&dir, 2).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R4-R-7: the temp-dir store is capped by count and bytes, oldest
+    /// first, never dropping the newest snapshot.
+    #[test]
+    fn cap_snapshots_drops_oldest_and_keeps_newest() {
+        let dir = std::env::temp_dir().join(format!("minuend-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::default();
+        for h in 1..=6 {
+            st.height = h;
+            save_snapshot_retaining(&dir, &st, &[], 0).unwrap();
+        }
+        let removed = cap_snapshots(&dir, 4, u64::MAX).unwrap();
+        assert_eq!(removed, vec![2, 1]);
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![6, 5, 4, 3]);
+        // A byte budget smaller than one file still keeps the newest.
+        cap_snapshots(&dir, 100, 1).unwrap();
+        assert_eq!(snapshot_heights(&dir).unwrap(), vec![6]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn snapshot_roundtrip_keeps_newest() {

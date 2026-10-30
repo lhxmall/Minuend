@@ -888,14 +888,201 @@ pub fn rewind_target(
         if *h > target {
             break;
         }
+        // R4-R-4: an empty / missing `da_unit_<h>` is "unknown" (a hub
+        // hiccup), never "re-submitted": a verdict does not clear it and a
+        // re-submission overwrites it with the new unit.
+        let Some(cur) = cur.as_deref().filter(|c| !c.is_empty()) else {
+            continue;
+        };
         if let Some(seen) = accepted.get(h) {
-            if cur.as_deref() != Some(seen.as_str()) {
+            if cur != seen.as_str() {
                 target = h.saturating_sub(1);
                 break;
             }
         }
     }
+    // R4-R-4: the AA can never invalidate a finalized height, so a view
+    // that points below `last_finalized` is wrong; never rewind below it
+    // on these readings. (A finalized height replaced before we looked is
+    // caught by the root comparison, R4-R-6, which verifies the target
+    // checkpoint against the chain first.)
+    let target = target.max(view.last_finalized);
     (target < processed_upto).then_some(target)
+}
+
+/// R4-R-4: sanity-check one round's `last_submitted` / `last_finalized`
+/// readings before anything acts on them. `None` = the var was missing,
+/// empty or not a number. `known_lf` is the highest `last_finalized` seen
+/// so far (finalization never goes backwards); `processed_upto` the last
+/// replay-verified height. Returns the readings to use, or `Err(reason)`
+/// when the round must be skipped (no rewind, no deletion).
+pub fn sane_chain_readings(
+    last_submitted: Option<u64>,
+    last_finalized: Option<u64>,
+    known_lf: u64,
+    processed_upto: u64,
+) -> Result<(u64, u64), String> {
+    let ls = match last_submitted {
+        Some(v) => v,
+        None if processed_upto == 0 && known_lf == 0 => 0,
+        None => {
+            return Err(format!(
+                "hub returned no last_submitted although h={processed_upto} was already \
+                 verified: treating the reading as unknown"
+            ))
+        }
+    };
+    // `last_finalized` is legitimately absent before the first finalization.
+    let lf = match last_finalized {
+        Some(v) => v,
+        None if known_lf == 0 => 0,
+        None => {
+            return Err(format!(
+                "hub returned no last_finalized although h={known_lf} already finalized"
+            ))
+        }
+    };
+    if ls == 0 && (processed_upto > 0 || known_lf > 0) {
+        return Err(format!(
+            "hub reports last_submitted=0 although h={} was already verified/finalized",
+            processed_upto.max(known_lf)
+        ));
+    }
+    if lf < known_lf {
+        return Err(format!(
+            "hub reports last_finalized={lf} below the already seen {known_lf}"
+        ));
+    }
+    if ls < lf {
+        return Err(format!(
+            "hub reports last_submitted={ls} below last_finalized={lf}"
+        ));
+    }
+    Ok((ls, lf))
+}
+
+/// R4-R-6: whether the chain's `state_root_<h>` contradicts the engine's
+/// root at `h`. Only a present, non-empty string root counts; a missing
+/// value or a non-string (a verdict writes `0`) is "unknown", not a
+/// divergence.
+pub fn root_diverged(engine_root_hex: &str, chain_root: Option<&serde_json::Value>) -> bool {
+    match chain_root.and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c != engine_root_hex,
+        _ => false,
+    }
+}
+
+/// R4-R-6: the newest checkpoint height below `below` whose own state
+/// root (`mine(h)`, `None` = unreadable) equals the chain's
+/// `state_root_<h>` (`chain(h)`). A hub error aborts the search (the
+/// caller changes nothing). `Ok(None)` = no checkpoint matches.
+pub fn pick_root_verified_checkpoint<M, C>(
+    heights_newest_first: &[u64],
+    below: u64,
+    mut mine: M,
+    mut chain: C,
+) -> Result<Option<u64>, String>
+where
+    M: FnMut(u64) -> Option<String>,
+    C: FnMut(u64) -> Result<Option<serde_json::Value>, String>,
+{
+    for &h in heights_newest_first.iter().filter(|h| **h < below) {
+        let Some(root) = mine(h) else {
+            continue;
+        };
+        let onchain = chain(h)?;
+        if onchain.as_ref().and_then(|v| v.as_str()) == Some(root.as_str()) {
+            return Ok(Some(h));
+        }
+    }
+    Ok(None)
+}
+
+/// R4-R-8: the replay must not re-check `h` when it is the chain tip
+/// `last_submitted` and that tip was judged fraudulent (`frozen = 2`): it
+/// is awaiting re-submission, its `state_root` is zeroed while `da_unit`
+/// still names the judged unit, so checking it only yields a false
+/// BINDING MISMATCH and a false stall.
+pub fn tip_awaiting_resubmission(h: u64, last_submitted: u64, frozen_at_tip: u64) -> bool {
+    h == last_submitted && frozen_at_tip == 2
+}
+
+/// R4-R-7: name of the owner marker written into a temp checkpoint dir.
+pub const TEMP_DIR_OWNER_FILE: &str = "owner.pid";
+
+/// R4-R-7: remove the checkpoints (live, dead-branch and half-written ones)
+/// from a throw-away checkpoint dir; proofs and other files are kept (a
+/// background challenge poster may still read them). The dir itself is
+/// removed when nothing else is left in it.
+pub fn clear_temp_checkpoints(dir: &std::path::Path) {
+    use minuend_state::persist::{DEAD_SNAPSHOT_DIR, SNAPSHOT_PREFIX};
+    let _ = std::fs::remove_dir_all(dir.join(DEAD_SNAPSHOT_DIR));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let is_file = e.file_type().map(|t| t.is_file()).unwrap_or(false);
+            if is_file && (name.starts_with(SNAPSHOT_PREFIX) || name == TEMP_DIR_OWNER_FILE) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    // Fails (and keeps the dir) when proofs are still in it.
+    let _ = std::fs::remove_dir(dir.join("proofs"));
+    let _ = std::fs::remove_dir(dir);
+}
+
+/// R4-R-7: clear the checkpoints left in OUR earlier temp dirs (same
+/// `prefix-…` name in the temp dir, a real directory owned by the same
+/// user as `own`, whose `owner.pid` names a process that no longer runs).
+/// Covers runs killed by a signal, where no cleanup ran. Linux only (needs
+/// `/proc`); a no-op elsewhere. Returns the dirs cleared.
+pub fn sweep_stale_temp_dirs(prefix: &str, own: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut cleared = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !std::path::Path::new("/proc/self").exists() {
+            return cleared;
+        }
+        let Ok(own_meta) = std::fs::metadata(own) else {
+            return cleared;
+        };
+        let base = own
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return cleared;
+        };
+        let want = format!("{prefix}-");
+        for e in entries.flatten() {
+            let path = e.path();
+            if path == own || !e.file_name().to_string_lossy().starts_with(&want) {
+                continue;
+            }
+            // symlink_metadata: never follow a planted symlink.
+            let Ok(m) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !m.is_dir() || m.uid() != own_meta.uid() {
+                continue;
+            }
+            let Ok(pid) = std::fs::read_to_string(path.join(TEMP_DIR_OWNER_FILE)) else {
+                continue;
+            };
+            let Ok(pid) = pid.trim().parse::<u32>() else {
+                continue;
+            };
+            if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                continue;
+            }
+            clear_temp_checkpoints(&path);
+            cleared.push(path);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (prefix, own);
+    cleared
 }
 
 /// R3-R-6: create a fresh directory only the current user can enter, with
@@ -1877,15 +2064,165 @@ mod tests {
         assert_eq!(rewind_target(8, &accepted, &view(5, 0, Some(5))), Some(4));
         // Re-submitted and the chain already moved past our tip again.
         assert_eq!(rewind_target(8, &accepted, &view(12, 0, Some(5))), Some(4));
-        // A da_unit that disappeared counts as changed.
+        // R4-R-4: a da_unit that disappeared (or reads empty) is unknown,
+        // not changed: no rewind.
         let mut v = view(8, 0, None);
         v.da_units.insert(6, None);
-        assert_eq!(rewind_target(8, &accepted, &v), Some(5));
+        assert_eq!(rewind_target(8, &accepted, &v), None);
+        v.da_units.insert(6, Some(String::new()));
+        assert_eq!(rewind_target(8, &accepted, &v), None);
         // Heights the watcher never recorded are not judged.
         assert_eq!(
             rewind_target(8, &BTreeMap::new(), &view(8, 0, Some(5))),
             None
         );
+    }
+
+    /// R4-R-4: an empty `last_submitted` (or a view whose live tip falls to
+    /// 0) never rewinds below `last_finalized`; with lf known the rewind is
+    /// clamped, and the round's readings are rejected outright.
+    #[test]
+    fn r4r4_empty_last_submitted_never_rewinds_below_finalized() {
+        use std::collections::BTreeMap;
+        let accepted: BTreeMap<u64, String> = (6..=8).map(|h| (h, format!("U{h}"))).collect();
+        // The old loop read a missing last_submitted as 0 → target 0.
+        let bad = ChainView {
+            last_submitted: 0,
+            last_finalized: 5,
+            ..Default::default()
+        };
+        assert_eq!(rewind_target(8, &accepted, &bad), Some(5));
+        // Nothing to rewind when we are at lf already.
+        assert_eq!(rewind_target(5, &accepted, &bad), None);
+        // And the readings themselves are refused before any rewind.
+        assert!(sane_chain_readings(None, Some(5), 5, 8).is_err());
+        assert!(sane_chain_readings(Some(0), Some(5), 5, 8).is_err());
+        assert!(sane_chain_readings(Some(0), Some(0), 0, 3).is_err());
+        assert!(sane_chain_readings(Some(9), None, 5, 8).is_err());
+        assert!(
+            sane_chain_readings(Some(9), Some(4), 5, 8).is_err(),
+            "lf went back"
+        );
+        assert!(
+            sane_chain_readings(Some(4), Some(5), 5, 8).is_err(),
+            "ls < lf"
+        );
+        // Legit readings pass, including a fresh chain with nothing yet.
+        assert_eq!(sane_chain_readings(Some(9), Some(5), 5, 8), Ok((9, 5)));
+        assert_eq!(sane_chain_readings(Some(5), Some(5), 4, 8), Ok((5, 5)));
+        assert_eq!(sane_chain_readings(None, None, 0, 0), Ok((0, 0)));
+        assert_eq!(sane_chain_readings(Some(2), None, 0, 0), Ok((2, 0)));
+        // A real verdict below lf+1 is still honoured down to lf.
+        let verdict = ChainView {
+            last_submitted: 6,
+            last_finalized: 5,
+            frozen_at_last_submitted: 2,
+            ..Default::default()
+        };
+        assert_eq!(rewind_target(8, &accepted, &verdict), Some(5));
+    }
+
+    /// R4-R-6: a re-submitted height that already finalized is detected by
+    /// the root comparison and the rewind lands on the newest checkpoint
+    /// whose root the chain still has — even below `last_finalized`.
+    #[test]
+    fn r4r6_finalized_resubmission_is_detected_by_root() {
+        use serde_json::json;
+        let chain: std::collections::BTreeMap<u64, &str> =
+            [(3, "R3"), (4, "R4"), (5, "NEW5"), (6, "NEW6")].into();
+        let mine: std::collections::BTreeMap<u64, &str> =
+            [(3, "R3"), (4, "R4"), (5, "R5"), (6, "R6")].into();
+        // Engine at h=6 with root R6; chain has NEW6 → diverged.
+        assert!(root_diverged("R6", Some(&json!("NEW6"))));
+        assert!(!root_diverged("R6", Some(&json!("R6"))));
+        // Unknown readings are not divergence (verdict writes 0, or empty).
+        assert!(!root_diverged("R6", None));
+        assert!(!root_diverged("R6", Some(&json!(0))));
+        assert!(!root_diverged("R6", Some(&json!(""))));
+        let pick = pick_root_verified_checkpoint(
+            &[6, 5, 4, 3],
+            6,
+            |h| mine.get(&h).map(|s| s.to_string()),
+            |h| Ok(chain.get(&h).map(|s| json!(s))),
+        );
+        assert_eq!(pick, Ok(Some(4)));
+        // An unreadable checkpoint is skipped.
+        let pick = pick_root_verified_checkpoint(
+            &[6, 5, 4, 3],
+            6,
+            |h| (h != 4).then(|| mine[&h].to_string()),
+            |h| Ok(chain.get(&h).map(|s| json!(s))),
+        );
+        assert_eq!(pick, Ok(Some(3)));
+        // A hub error aborts (caller changes nothing).
+        let pick = pick_root_verified_checkpoint(
+            &[6, 5, 4, 3],
+            6,
+            |h| mine.get(&h).map(|s| s.to_string()),
+            |_| Err("down".to_string()),
+        );
+        assert!(pick.is_err());
+        // Nothing matches.
+        let pick = pick_root_verified_checkpoint(&[5], 6, |_| Some("X".into()), |_| Ok(None));
+        assert_eq!(pick, Ok(None));
+    }
+
+    /// R4-R-8: only the frozen chain tip is skipped.
+    #[test]
+    fn r4r8_frozen_tip_is_skipped_not_rechecked() {
+        assert!(tip_awaiting_resubmission(7, 7, 2));
+        assert!(!tip_awaiting_resubmission(7, 7, 0));
+        assert!(!tip_awaiting_resubmission(7, 7, 1));
+        assert!(!tip_awaiting_resubmission(6, 7, 2));
+    }
+
+    /// R4-R-7: clearing a temp checkpoint dir removes checkpoints and the
+    /// dead branch but keeps proofs; a stale dir of a dead process is swept,
+    /// a live one (and our own) is not.
+    #[test]
+    fn r4r7_temp_checkpoints_are_cleared_and_stale_dirs_swept() {
+        use minuend_state::persist::{DEAD_SNAPSHOT_DIR, SNAPSHOT_PREFIX};
+        let prefix = format!("minuend-watch-r4r7-{}", std::process::id());
+        let own = create_private_temp_dir(&prefix).unwrap();
+        let stale = create_private_temp_dir(&prefix).unwrap();
+        let live = create_private_temp_dir(&prefix).unwrap();
+        for d in [&own, &stale, &live] {
+            std::fs::write(d.join(format!("{SNAPSHOT_PREFIX}1.snap")), b"x").unwrap();
+            std::fs::create_dir_all(d.join(DEAD_SNAPSHOT_DIR)).unwrap();
+            std::fs::write(
+                d.join(DEAD_SNAPSHOT_DIR)
+                    .join(format!("{SNAPSHOT_PREFIX}2.snap")),
+                b"x",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(stale.join("proofs")).unwrap();
+        std::fs::write(stale.join("proofs").join("p.json"), b"{}").unwrap();
+        // pid 0x7fff_fff0 is above Linux's pid_max: never running.
+        std::fs::write(stale.join(TEMP_DIR_OWNER_FILE), "2147483632").unwrap();
+        std::fs::write(
+            live.join(TEMP_DIR_OWNER_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let swept = sweep_stale_temp_dirs(&prefix, &own);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(swept, vec![stale.clone()]);
+            assert!(!stale.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
+            assert!(!stale.join(DEAD_SNAPSHOT_DIR).exists());
+            assert!(stale.join("proofs").join("p.json").exists(), "proofs kept");
+            assert!(live.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert!(swept.is_empty());
+        assert!(own.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
+        // Our own cleanup at exit: no proofs → the whole dir goes.
+        clear_temp_checkpoints(&own);
+        assert!(!own.exists());
+        for d in [&stale, &live] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// R3-R-6: the no-`--state-dir` proof directory is created fresh at an

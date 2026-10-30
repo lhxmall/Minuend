@@ -16,10 +16,12 @@
 use minuend_exec::Engine;
 use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
-    batch_from_committed, check_committed_roots, committed_frame_bytes, create_private_temp_dir,
-    fetch_da_unit, load_checkpoint, load_checkpoint_at, prove, resolve_start_height, rewind_target,
-    save_checkpoint_retaining, verify_da_binding, write_private_proof, ChainView, HubClient,
-    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
+    batch_from_committed, check_committed_roots, clear_temp_checkpoints, committed_frame_bytes,
+    create_private_temp_dir, fetch_da_unit, load_checkpoint, load_checkpoint_at,
+    pick_root_verified_checkpoint, prove, resolve_start_height, rewind_target, root_diverged,
+    sane_chain_readings, save_checkpoint_retaining, sweep_stale_temp_dirs,
+    tip_awaiting_resubmission, verify_da_binding, write_private_proof, ChainView, HubClient,
+    WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, TEMP_DIR_OWNER_FILE,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -957,19 +959,102 @@ fn chain_view(
 }
 
 /// R3-R-2: load the checkpoint at `target` (or the newest one below it) and
-/// delete every checkpoint above it (the dead branch). Returns the engine
+/// retire every checkpoint above it (the dead branch). Returns the engine
 /// and the height it sits at (0 = genesis).
-fn rewind_engine(dir: &std::path::Path, target: u64) -> anyhow::Result<(Engine, u64)> {
+///
+/// R4-R-4 / I-4: dead-branch checkpoints are MOVED to `dead/`, never
+/// deleted, and when no checkpoint at or below a non-zero `target` loads,
+/// nothing is touched and the rewind fails (the old code wiped every
+/// checkpoint and restarted from genesis, unrecoverable once the DA of the
+/// early heights expired). Genesis is only used for `target == 0`, or when
+/// `genesis_fallback` is set (a temp-dir run, which started from genesis
+/// anyway and keeps only a capped number of checkpoints, R4-R-7).
+fn rewind_engine(
+    dir: &std::path::Path,
+    target: u64,
+    genesis_fallback: bool,
+) -> anyhow::Result<(Engine, u64)> {
     let mut heights = minuend_state::persist::snapshot_heights(dir)?;
     heights.retain(|h| *h <= target);
     for h in heights {
         if let Ok(Some(e)) = load_checkpoint_at(dir, h) {
-            minuend_state::persist::remove_snapshots_above(dir, h)?;
+            minuend_state::persist::retire_snapshots_above(dir, h)?;
             return Ok((e, h));
         }
     }
-    minuend_state::persist::remove_snapshots_above(dir, 0)?;
+    if target > 0 && !genesis_fallback {
+        return Err(anyhow::anyhow!(
+            "no readable checkpoint at or below h={target}; nothing was changed"
+        ));
+    }
+    minuend_state::persist::retire_snapshots_above(dir, 0)?;
     Ok((Engine::new(), 0))
+}
+
+/// R4-R-6: the engine's root at `processed_upto` no longer matches the
+/// chain's `state_root_<processed_upto>` (a height we accepted was judged
+/// and re-submitted, and possibly finalized, before we looked). Rewind to
+/// the newest checkpoint whose root the chain still has; checkpoints above
+/// it are retired to `dead/`. Errors (hub, no matching checkpoint) leave
+/// everything untouched, except that a temp-dir run (`genesis_fallback`,
+/// which started from genesis and keeps few checkpoints) replays from
+/// genesis when no checkpoint matches.
+fn rewind_to_chain_root(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    dir: &std::path::Path,
+    below: u64,
+    genesis_fallback: bool,
+) -> anyhow::Result<(Engine, u64)> {
+    let heights = minuend_state::persist::snapshot_heights(dir)?;
+    let mut loaded: BTreeMap<u64, Engine> = BTreeMap::new();
+    let pick = pick_root_verified_checkpoint(
+        &heights,
+        below,
+        |h| match load_checkpoint_at(dir, h) {
+            Ok(Some(e)) => {
+                let root = hex::encode(e.state.state_root());
+                loaded.insert(h, e);
+                Some(root)
+            }
+            _ => None,
+        },
+        |h| hub.get_aa_state_var(&config.rollup_address, &format!("state_root_{h}")),
+    )
+    .map_err(|e| anyhow::anyhow!("hub: {e}"))?;
+    let Some(h) = pick else {
+        if genesis_fallback {
+            minuend_state::persist::retire_snapshots_above(dir, 0)?;
+            return Ok((Engine::new(), 0));
+        }
+        return Err(anyhow::anyhow!(
+            "no checkpoint below h={below} matches the chain's state_root; nothing was changed"
+        ));
+    };
+    let engine = loaded
+        .remove(&h)
+        .ok_or_else(|| anyhow::anyhow!("checkpoint h={h} vanished"))?;
+    minuend_state::persist::retire_snapshots_above(dir, h)?;
+    Ok((engine, h))
+}
+
+/// R4-R-7: a checkpoint store in a throw-away temp dir (no `--state-dir`)
+/// is capped and cleaned up: at most this many checkpoints …
+const TEMP_MAX_CHECKPOINTS: usize = 8;
+/// … and at most this many bytes of them (the newest is always kept).
+const TEMP_MAX_CHECKPOINT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// R4-R-7: clears this run's temp checkpoints when `main` returns or
+/// unwinds (proofs are kept). A run killed by a signal is cleaned up by the
+/// next run's `sweep_stale_temp_dirs`.
+struct TempCheckpointGuard(Option<PathBuf>);
+
+impl Drop for TempCheckpointGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            clear_temp_checkpoints(dir);
+        }
+    }
 }
 
 /// R3-R-2 / R3-R-7: pick the checkpoint to resume from. The newest
@@ -1009,7 +1094,8 @@ fn resume_engine(
             .unwrap_or_default();
         let mine = hex::encode(engine.state.state_root());
         if onchain == mine {
-            minuend_state::persist::remove_snapshots_above(dir, h)?;
+            // I-4: the dead branch is moved aside, not deleted.
+            minuend_state::persist::retire_snapshots_above(dir, h)?;
             return Ok(Some(engine));
         }
         println!(
@@ -1053,6 +1139,23 @@ fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("cannot create a private temp dir for proofs/checkpoints: {e}")
         })?,
     };
+    // R4-R-7: a temp-dir run marks the dir as its own, clears the
+    // checkpoints left behind by earlier killed runs, and clears its own on
+    // exit; its checkpoint count/size is capped below.
+    let temp_mode = args.state_dir.is_none();
+    let _temp_guard = TempCheckpointGuard(temp_mode.then(|| state_dir.clone()));
+    if temp_mode {
+        let _ = std::fs::write(
+            state_dir.join(TEMP_DIR_OWNER_FILE),
+            std::process::id().to_string(),
+        );
+        for d in sweep_stale_temp_dirs("minuend-watch", &state_dir) {
+            println!(
+                "minuend-watch: cleared checkpoints left by a stopped run in {}",
+                d.display()
+            );
+        }
+    }
     let mut engine = match &args.state_dir {
         // R3-R-2 / R3-R-7: resume only from a checkpoint that matches the
         // chain (fail hard otherwise; never a warning, never silent genesis).
@@ -1106,29 +1209,48 @@ fn main() -> anyhow::Result<()> {
     // R3-R-2: the submission (`da_unit_<h>`) each accepted, not yet final
     // height was replayed from.
     let mut accepted: BTreeMap<u64, String> = BTreeMap::new();
+    // R4-R-4: highest last_finalized seen (finalization never goes back).
+    let mut known_lf: u64 = 0;
+    // R4-R-8: the frozen tip already announced as awaiting re-submission.
+    let mut announced_frozen: Option<u64> = None;
 
     loop {
         // R2-R-11: report background challenge posters that finished.
         for line in with_tracker(|t| t.poll()) {
             eprintln!("{line}");
         }
-        let ll = hub
-            .get_aa_state_var(&config.rollup_address, "last_submitted")
-            .map_err(|e| anyhow::anyhow!("hub last_submitted: {e}"))?
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let lf = match read_u64_var(&hub, &config, "last_finalized") {
-            Ok(v) => v,
-            Err(e) => {
-                println!("WATCH ERROR: {e}");
+        // R4-R-4 / I-1: a failed, empty or contradictory hub reading is
+        // "unknown": skip the round (no rewind, no deletion) instead of
+        // treating it as 0 — or exiting the process.
+        let ls_raw = hub.get_aa_state_var(&config.rollup_address, "last_submitted");
+        let lf_raw = hub.get_aa_state_var(&config.rollup_address, "last_finalized");
+        let (ls_raw, lf_raw) = match (ls_raw, lf_raw) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                println!("WATCH ERROR: hub last_submitted/last_finalized: {e}");
                 std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
                 continue;
             }
         };
+        let (ll, lf) = match sane_chain_readings(
+            ls_raw.and_then(|v| v.as_u64()),
+            lf_raw.and_then(|v| v.as_u64()),
+            known_lf,
+            cursor.processed_upto,
+        ) {
+            Ok(r) => r,
+            Err(why) => {
+                println!("WATCH ERROR: {why}; skipping this round");
+                std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+                continue;
+            }
+        };
+        known_lf = known_lf.max(lf);
 
         // R3-R-2: an accepted height may have been judged fraudulent (by
         // another challenger) and re-submitted since we replayed it. Detect
         // that on-chain and replay the new branch from the checkpoint below.
+        // R4-R-4: never below last_finalized (clamped in rewind_target).
         if cursor.processed_upto > lf {
             match chain_view(&hub, &config, ll, lf, cursor.processed_upto) {
                 Ok(view) => {
@@ -1141,7 +1263,7 @@ fn main() -> anyhow::Result<()> {
                             cursor.processed_upto,
                             view.frozen_at_last_submitted
                         );
-                        match rewind_engine(&state_dir, t) {
+                        match rewind_engine(&state_dir, t, temp_mode) {
                             Ok((eng, at)) => {
                                 engine = eng;
                                 cursor.rewind_to(at);
@@ -1164,17 +1286,75 @@ fn main() -> anyhow::Result<()> {
                     // verified against the chain): record what is there now.
                     for (h, cur) in view.da_units {
                         if let (true, Some(c)) = (h <= cursor.processed_upto, cur) {
-                            accepted.entry(h).or_insert(c);
+                            if !c.is_empty() {
+                                accepted.entry(h).or_insert(c);
+                            }
                         }
                     }
                 }
                 Err(e) => println!("WATCH ERROR: re-submission check: {e}"),
             }
         }
+
+        // R4-R-6: the da_unit comparison above only covers heights that are
+        // not final yet. If a height we accepted was judged, re-submitted
+        // AND finalized before we looked, the chain's root at our tip no
+        // longer matches the engine: rewind to the newest checkpoint the
+        // chain still agrees with instead of replaying the next height on a
+        // dead branch (false ROOT MISMATCH, possibly a paid challenge).
+        if cursor.processed_upto >= 1 && cursor.processed_upto <= ll {
+            let h = cursor.processed_upto;
+            match hub.get_aa_state_var(&config.rollup_address, &format!("state_root_{h}")) {
+                Ok(v) => {
+                    let mine = hex::encode(engine.state.state_root());
+                    if root_diverged(&mine, v.as_ref()) {
+                        println!(
+                            "WATCH ALERT: the chain's state_root_{h} no longer matches the \
+                             replayed h={h} (re-submitted, possibly already finalized): \
+                             rewinding to the newest checkpoint the chain agrees with"
+                        );
+                        match rewind_to_chain_root(&hub, &config, &state_dir, h, temp_mode) {
+                            Ok((eng, at)) => {
+                                engine = eng;
+                                cursor.rewind_to(at);
+                                accepted.retain(|k, _| *k <= at);
+                                println!("WATCH ALERT: rewound the replay to h={at}");
+                            }
+                            Err(e) => println!(
+                                "WATCH CRITICAL: cannot rewind off the dead branch at h={h}: \
+                                 {e} — restart with a trusted checkpoint"
+                            ),
+                        }
+                    }
+                }
+                Err(e) => println!("WATCH ERROR: state_root_{h}: {e}"),
+            }
+        }
         accepted.retain(|h, _| *h > lf);
 
+        // R4-R-8: a tip judged fraudulent (frozen = 2) waits for a
+        // re-submission; re-checking it each round only produced false
+        // BINDING MISMATCH / STALLED alerts.
+        let frozen_tip = if cursor.next_start() <= ll {
+            read_u64_var(&hub, &config, &format!("frozen_{ll}")).unwrap_or(0)
+        } else {
+            0
+        };
+        if frozen_tip != 2 {
+            announced_frozen = None;
+        }
         let mut stalled: Option<u64> = None;
         for h in cursor.next_start()..=ll {
+            if tip_awaiting_resubmission(h, ll, frozen_tip) {
+                if announced_frozen != Some(h) {
+                    println!(
+                        "WATCH INFO: h={h} was judged fraudulent (frozen_{h}=2); waiting for \
+                         its re-submission"
+                    );
+                    announced_frozen = Some(h);
+                }
+                break;
+            }
             let mut advanced: Option<String> = None;
             match check_height(&hub, &config, &mut engine, h, &mut advanced) {
                 Ok(None) => {}
@@ -1188,6 +1368,16 @@ fn main() -> anyhow::Result<()> {
                 // keeping every checkpoint back to last_finalized.
                 if let Err(e) = save_checkpoint_retaining(&state_dir, &engine, lf) {
                     println!("WATCH ERROR: checkpoint at h={h} failed: {e}");
+                }
+                // R4-R-7: a temp-dir store is capped (count and bytes).
+                if temp_mode {
+                    if let Err(e) = minuend_state::persist::cap_snapshots(
+                        &state_dir,
+                        TEMP_MAX_CHECKPOINTS,
+                        TEMP_MAX_CHECKPOINT_BYTES,
+                    ) {
+                        println!("WATCH ERROR: capping temp checkpoints failed: {e}");
+                    }
                 }
             } else {
                 // No DA yet, or a mismatch this round: the replay retries

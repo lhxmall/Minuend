@@ -1008,6 +1008,10 @@ v7 及更早的检查点不可读；watcher 会按 R3-R-7 明确报错，需清�
   纯减仓请用 IOC / 市价单（按实际净额计算）。最终只减仓的挂单，其托管在成交时经
   原有 "pure-reduce post" 路径退回 collateral。`resting_open_im`：逐仓挂单按
   `max(0, 开仓部分需求 − margin_left)` 计，现货挂单不与仓位轧差（影响下单与提款储备）。
+- **R4-E-3**：现货（`spot_only`）市场的挂单储备改为**买卖两侧相加**（`bid + ask`），
+  不再取 `max`：买单成交后可用 IOC 平仓（纯减仓不过门），剩下的卖单随后开空，`max`
+  会让第二侧用第一侧已经亏掉的钱开仓，而现货仓位永不清算。影响下单门槛（`resting + extra`）
+  与提款储备；永续市场仍取 `max`（可清算，损失有上限）。
 - **R3-E-4**：逐仓 taker 手续费检查改在每笔真实成交前、基于已扣过前面 claw 的账户进行。
 - **R3-E-5**：`funding_rate_bps` 饱和减法（release 结果不变，debug 不再 panic）。
 - **R3-E-6**：`spot_only` 市场的 `TakerFeeBps` 提案不得高于现行费率。
@@ -1021,9 +1025,24 @@ v7 及更早的检查点不可读；watcher 会按 R3-R-7 明确报错，需清�
   `state_root_<h>` 相同的检查点恢复。检查点内含 `deposit_backing`，所以回退/恢复后的
   节点与一直运行的节点状态完全相同；DAG 不持久化，验证完全依赖批次自带的 unit 正文。
 - **R3-R-3**：挑战去重键 = (高度, da_unit, 谓词)。
-- **R3-R-5**：已执行但尚未导出的 unit 正文离开 `PARENT_WINDOW` 后保留到被导出 /
-  验证为止（`batch_body` / `release_batched`）；共识规则不变。
+- **R3-R-5**：已执行但尚未切批的 unit 正文离开 `PARENT_WINDOW` 后保留到被切进批次
+  （生产者在 `Batch::from_applied` 内、导出 / 发帖**之前**调用 `release_batched`）或
+  验证成功为止（`batch_body` / `release_batched`）；共识规则不变。I-2：释放之后 DAG
+  不能再提供这些正文，同一高度若需重新导出（例如被判欺诈后用同一批 unit 重提），
+  生产者必须自己保留 `Batch`（或其帧）直到该高度 finalize。
 - **R3-R-6 / R3-R-7**：私有随机临时目录；检查点存在但都读不了时报错而非静默从 genesis 开始。
+- **R4-R-4**：`last_submitted` / `last_finalized` 读取失败、为空或自相矛盾（`ls < lf`、
+  `lf` 倒退、已验证过高度却读到 0）时整轮跳过，不回退、不删除；`da_unit_<h>` 为空视为
+  未知而非"已重提"；基于这些读数的回退目标不低于 `last_finalized`；死分支检查点移到
+  `dead/` 子目录而不是删除（I-4），找不到可用检查点时不做任何改动。
+- **R4-R-6**：每轮比较链上 `state_root_<processed_upto>` 与引擎根；不一致（重提的高度在
+  watcher 查看前已 finalize）时回退到链上根仍一致的最新检查点（可以低于 `last_finalized`，
+  因为目标经过根验证），而不是在死分支上报虚假的 ROOT MISMATCH。
+- **R4-R-7**：不带 `--state-dir` 时检查点最多 8 份、512 MiB（总是保留最新一份）；退出时清理
+  本次的检查点（证明文件保留）；启动时清理此前被信号杀掉的运行留下的检查点（`owner.pid`
+  对应的进程已不存在）。
+- **R4-R-8**：链尖 `frozen = 2`（已被判欺诈、等待重提）时不再重新检查该高度，只提示一次，
+  不报 BINDING MISMATCH / STALLED。
 
 ## 11. Witness 树与谓词承诺
 
