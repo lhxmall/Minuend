@@ -1931,9 +1931,10 @@ fn fill_proof(
             if who_taker && kind >= 2 && iso {
                 continue;
             }
-            // R5-A-2: the AA requires the maker's PRE ord leaf on every
-            // order-book leg, taker included (price and qty bound to it),
-            // except for ADL (kind 2: no maker order, no escrow).
+            // R5-A-2: the AA reads the maker's PRE ord leaf on every
+            // order-book leg — a taker leg whenever supplied (always here)
+            // and necessarily at price / qty >= 1e14 — except for ADL
+            // (kind 2: no maker order, no escrow).
             let maker_ord = if kind != 2 {
                 pre_leaves
                     .iter()
@@ -1942,7 +1943,13 @@ fn fill_proof(
             } else {
                 None
             };
-            if kind != 2 && maker_ord.is_none() {
+            // A taker leg may omit it only below 1e14 price / qty.
+            if kind != 2
+                && maker_ord.is_none()
+                && (!who_taker
+                    || i128::from(price).abs() >= FILL_MAX
+                    || i128::from(qty) >= FILL_MAX)
+            {
                 continue;
             }
             // The AA bounces ('bad maker ord') a fill whose maker order is

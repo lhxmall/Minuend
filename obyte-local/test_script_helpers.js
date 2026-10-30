@@ -121,6 +121,7 @@ require("./test_frame_stamp");
   assert.strictEqual(targetForPred("ghost"), "book");
   assert.strictEqual(targetForPred("skip"), "book");
   assert.strictEqual(targetForPred("mbind"), "book"); // R4-A-1
+  assert.strictEqual(targetForPred("fsane"), "book"); // R5-A-2
   assert.strictEqual(targetForPred("fill_math"), "fill");
   for (const p of ["wpin", "adr", "tip", "keep", "mirror", "frame"]) assert.strictEqual(targetForPred(p), "bind");
   assert.strictEqual(targetForPred("deposit"), "main");

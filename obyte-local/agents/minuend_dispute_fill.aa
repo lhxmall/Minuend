@@ -39,21 +39,19 @@
 	//   - (taker_post + still): escrow left collateral at place, the
 	//   fill's escrow share moved to the bucket (or back on a pure
 	//   reduce), and the post ord leaf holds the un-rested remainder.
-	// Post-fill, a negative expected fill-stage collateral never gets a
-	// verdict: the engine claws a fill's hole back from the winner
-	// (zero-sum, insurance untouched) and any remainder stays negative —
-	// a shape these leaves cannot pin down. #47: the WINNER's leg is
-	// judged only when a proven positive counterparty post acct leaf
-	// (cp_acct) rules the claw out (all kinds), and a kind 0/1 maker leg
-	// additionally needs a cross Place taker (an isolated taker's escrow
-	// refund lands after the claw). Otherwise a mismatch bounces.
-	// kind 2 (ADL) / kind 3 (liquidation) legs are judged only on the
-	// order-book Liquidate path with every same-unit cash leg pinned
-	// (#47 B1/B2: op L: with taker == target, caller != maker, cross
-	// target, proven positive counterparty post collateral — see the
-	// arm below); funding off-book ADL and the insurance account's own
-	// leaf always bounce. Missing proofs (ops/ord) bounce without a
-	// verdict.
+	// R5-A-2: the claw (a fill party's negative fill-stage collateral pulled
+	// back from the OTHER party, capped at what it can pay) is judged as a
+	// RANGE — a leg receives at most -m from a negative fill stage m and
+	// pays at most a positive m (none when a proven positive counterparty
+	// rules it out) — and no skip gate reads an operator-chosen value: the
+	// Oscript rounding slack grows with proven magnitudes only (6 + S/1e12),
+	// and fills the engine can never emit (bad shape, kind vs market, a fill
+	// under a rejected Place, an absent party) are P-fsane's (book AA).
+	// kind 2/3 on a regular market are book-path liquidations of the taker;
+	// a maker that may be the keeper gets the reward as upper slack. A
+	// funding-market kind 2 (off-book ADL), an isolated target (STP refunds),
+	// kind 1 (R2-A-7 peg) and the insurance account's own leaf are not
+	// judged. Missing proofs (ops/ord) bounce without a verdict.
 	// #47 A3: a kind 0/1 taker leg recomputes taker_post from its own
 	// Place op (book.rs pro_rata_post) and derives the resting escrow
 	// from the op's typ/tif — committed F[13]/F[5] are checked, never
@@ -365,11 +363,13 @@
 					// EVERY order-book maker leg, so a maker with no prior
 					// position whose order is isolated gets its new bucket
 					// checked too (its order mode is now proven).
-					// R5-A-2: every order-book leg (taker too) reads the
-					// maker's PRE ord leaf, so price and qty are bounded by
-					// proven values: a fill off its maker order's price, or
-					// past its remaining, is P-mbind's fraud (bounce here).
-					if ($kind != 2) {
+					// R5-A-2: an order-book TAKER leg reads it too whenever it
+					// is supplied, and must when price or qty reach 1e14, so
+					// the tolerance below only grows with proven magnitudes:
+					// a fill off its maker order's price, or past its
+					// remaining, is P-mbind's fraud (bounce here).
+					if ($kind != 2 AND ($who == 'maker' OR typeof(trigger.data.maker_ord) != 'boolean'
+						OR abs($price) >= 100000000000000 OR $qty >= 100000000000000)) {
 						$mord = trigger.data.maker_ord;
 						if (typeof($mord) == 'boolean'
 							OR !starts_with($mord, 'ord:' || $F[6] || ':')
