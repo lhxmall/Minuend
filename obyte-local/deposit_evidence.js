@@ -25,12 +25,20 @@
 
 const VAULT_BOUNCE_FEE = 10000n;
 const MAX_AA_STRING_LENGTH = 4096;
-// Mirrors minuend-settle deposit_verify::{DEPOSIT_EVIDENCE_UNIT_MAX_BYTES,
-// DEPOSIT_EVIDENCE_BATCH_MAX_BYTES}. JSON.stringify and serde_json can
-// differ by a few bytes (number formatting), so the poster keeps a margin.
+// R5-E-1 / R5-R-1: ONE set of size limits, mirrored from minuend-settle
+// deposit_verify (the Rust test r5_limits_are_strictly_ordered_and_mirrored_in_js
+// reads these lines, so keep the `const NAME = a * b;` form). Three tiers:
+//   admit  (producer, admit_deposit / DepositEvidenceBudget, BEFORE apply)
+//   < post (this file: the poster refuses only above these)
+//   < verify (watchers' validate_against)
+// The gaps absorb any JSON.stringify / serde_json byte difference, so an
+// evidence the producer admitted is always postable and always accepted.
 const DEPOSIT_EVIDENCE_UNIT_MAX_BYTES = 256 * 1024;
 const DEPOSIT_EVIDENCE_BATCH_MAX_BYTES = 1048576;
-const SIZE_MARGIN = 0.95;
+const DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES = 240 * 1024;
+const DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES = 960 * 1024;
+const DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES = 248 * 1024;
+const DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES = 992 * 1024;
 
 // ocore string_utils.toNumber (post-aa2): number or null.
 function oscriptToNumber(s) {
@@ -141,6 +149,13 @@ function frameDeposit(frame) {
   return null;
 }
 
+// R5-E-1: what to do when a size limit refuses a cut batch. A producer that
+// admits through deposit_verify::DepositEvidenceBudget never gets here.
+const RECOVERY = "The producer admitted this deposit outside deposit_verify::admit_deposit / " +
+  "DepositEvidenceBudget (whose limits are below these). This height cannot be posted as cut: " +
+  "restore the producer to the snapshot of the previous height, re-ingest its units through " +
+  "deposit_verify::ingest_within_budget (the oversize deposit is then refused or deferred) and cut again.";
+
 // Build evidence for every applied deposit. Throws on ANY problem.
 //   applied     batch.json applied_deposits [{index, aa_unit, is_perp}]
 //   frames      batch.json frames (strings)
@@ -207,11 +222,13 @@ async function buildAppliedEvidences(applied, frames, opts) {
       joint: unit,
     };
     const n = evidenceBytes(ev);
-    if (n > DEPOSIT_EVIDENCE_UNIT_MAX_BYTES * SIZE_MARGIN)
-      throw new Error(`anchor ${aaUnit}: evidence ${n} bytes exceeds the per-deposit cap; the producer must not apply it`);
+    if (n > DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES)
+      throw new Error(`anchor ${aaUnit}: evidence ${n} bytes exceeds the posting limit ${DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES} ` +
+        `(admission limit ${DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES}). ${RECOVERY}`);
     total += n;
-    if (total > DEPOSIT_EVIDENCE_BATCH_MAX_BYTES * SIZE_MARGIN)
-      throw new Error(`deposit evidence exceeds the batch budget (${total} bytes): cut the batch earlier`);
+    if (total > DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES)
+      throw new Error(`deposit evidence of this batch is ${total} bytes, above the posting limit ${DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES} ` +
+        `(admission budget ${DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES}). ${RECOVERY}`);
     out.set(idx, ev);
   }
   return out;
@@ -221,6 +238,11 @@ module.exports = {
   VAULT_BOUNCE_FEE,
   DEPOSIT_EVIDENCE_UNIT_MAX_BYTES,
   DEPOSIT_EVIDENCE_BATCH_MAX_BYTES,
+  DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES,
+  DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES,
+  DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES,
+  DEPOSIT_EVIDENCE_POST_BATCH_MAX_BYTES,
+  evidenceBytes,
   oscriptToNumber,
   oscriptTruthy,
   vaultAccount,

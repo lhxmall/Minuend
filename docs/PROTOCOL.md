@@ -206,8 +206,10 @@ docs/MECHANISMS.md「spot_only 的偿付不变量」。提款后既不得落入 
 金额 > 0、PERP 资产 id、10000 bounce 费、`max_aa_responses`），见
 `deposit_verify::vault_deposit_of`。**生产者要求**：只有当金库记录存在且
 `deposit_verify::admit_deposit(evidence, vault, PERP, 记录)` 通过时才 `allow_deposit`，
-并为执行成功的充值帧附上该 evidence；单份 evidence ≤ 256 KiB（超出即不可登记），
-一批 evidence 合计 ≤ 1 MiB（生产者提前切批，`post_batch.js` 超出即拒发）。
+并为执行成功的充值帧附上该 evidence。R5-E-1：大小上限三级严格递增——生产者登记
+单份 ≤ 240 KiB（`admit_deposit`）、整批 ≤ 960 KiB（执行充值**之前**由
+`DepositEvidenceBudget` / `ingest_within_budget` 检查，放不下的充值留到下一批）<
+`post_batch.js` 发帖 248 KiB / 992 KiB < watcher 验证 256 KiB / 1 MiB。
 每个登记的锚点都带 `deposit_backing = (amount, payer, account)`（`allow_deposit`），
 Deposit / GovDeposit 必须与之完全一致：账户不同 → `BadAccount`，金额或地址不同 →
 `UnbackedDeposit`；被拒 unit 不使批次无效，但任何 Applied 的充值必须有验过的 evidence。

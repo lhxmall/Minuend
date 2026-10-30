@@ -963,13 +963,20 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
    base 金额 = 求和 − 10000 > 0，PERP = PERP 资产求和 > 0；base 输出 < 10000、
    `max_aa_responses: 0`、account 不是 64 位小写 hex 字符串（或会被 Oscript 转成数字）
    都视为没有记账。类别由 joint 决定，不由 op 决定。
-3. **大小**（R4-R-2）：被拒的充值不带 evidence，总量只计执行成功的充值；单份上限
-   `DEPOSIT_EVIDENCE_UNIT_MAX_BYTES = 256 KiB`（超出 = 不可登记，按 unit 拒绝），整批上限
-   1 MiB 由生产者切批保证。
+3. **大小**（R4-R-2 / R5-E-1 / R5-R-1）：被拒的充值不带 evidence，总量只计执行成功的充值。
+   上限只有一套（`deposit_verify` 常量，`deposit_evidence.js` 逐字镜像，Rust 测试读取 JS
+   源码核对），三级严格递增：生产者登记 240 KiB / 整批 960 KiB < 发帖 248 KiB / 992 KiB <
+   watcher 验证 256 KiB / 1 MiB。`admit_deposit` 拒绝 > 240 KiB 的 evidence；整批预算在
+   **执行充值之前**由 `DepositEvidenceBudget::try_reserve` / `ingest_within_budget` 检查
+   （超出预算的充值本批不 ingest，切批后再放入），不再在切批之后由 JS 发现超限。两级之间
+   的余量吸收 `JSON.stringify` 与 `serde_json` 的字节差（共享向量
+   `obyte-local/test_vectors/evidence_size.json`）。
 4. **发帖**（R4-R-5）：`post_batch.js` 只为执行成功的充值取 joint；取不到（不存在或
    重试后仍出错）、与金库 `dep_`/`depp_` 记录不符、超限 → 抛错、不发帖。
-5. **生产者要求**：金库记录存在且 `deposit_verify::admit_deposit` 通过才 `allow_deposit`。
-   这样无论生产者何时看到记录，重放结果都与它一致。已知限制：形状特殊（例如 > 256 KiB）
+5. **生产者要求**：金库记录存在且 `deposit_verify::admit_deposit`（或
+   `DepositEvidenceBudget::admit`）通过才 `allow_deposit`；充值 unit 经
+   `ingest_within_budget` 执行，切批后调用 `on_batch_cut`。这样无论生产者何时看到记录，
+   重放结果都与它一致，登记过的充值一定能发帖。已知限制：形状特殊（evidence > 240 KiB）
    的付款不会被登记，钱留在金库中，需要另行处理。
 
 ### 10.10 第 4 轮（#47 R4）AA 变更
@@ -1111,9 +1118,21 @@ v7 及更早的检查点不可读；watcher 会按 R3-R-7 明确报错，需清�
 - **R4-R-6**：每轮比较链上 `state_root_<processed_upto>` 与引擎根；不一致（重提的高度在
   watcher 查看前已 finalize）时回退到链上根仍一致的最新检查点（可以低于 `last_finalized`，
   因为目标经过根验证），而不是在死分支上报虚假的 ROOT MISMATCH。
-- **R4-R-7**：不带 `--state-dir` 时检查点最多 8 份、512 MiB（总是保留最新一份）；退出时清理
-  本次的检查点（证明文件保留）；启动时清理此前被信号杀掉的运行留下的检查点（`owner.pid`
-  对应的进程已不存在）。
+- **R4-R-7 / R5-R-3 / R5-R-6 / R5-R-7**：不带 `--state-dir` 时检查点（含 `dead/`）按 1 GiB
+  字节预算保留到 `last_finalized`：最新一份与"地板"（≤ `last_finalized` 的最新一份）总是保留，
+  超预算时先删两者之间最老的，因此回退不会落到 genesis；万一需要从 genesis 重放而 h=1 的 DA
+  已取不到，报 CRITICAL 并保持现状。`dead/` 两种模式都有上限（临时目录 2 份；`--state-dir`
+  16 份 / 2 GiB，保留最近移入的）。SIGINT / SIGTERM 让主循环正常返回，退出时清理本次检查点
+  （证明文件保留）。启动时清理此前运行留下的检查点：以 `owner.lock` 上的 `flock` 判断属主
+  是否存活（跨 PID 命名空间有效），没有锁文件的目录不动。
+- **R5-R-2**：金库 `dep_`/`depp_` 记录只为证明可能用到的锚点读取：key 从 unit 自身的 op
+  推导（`ops[k]` 必须等于 `ops_element(unit_k)`），且只在发布的 post 树含该 op 的新绑定
+  `adr:{addr}:{acct}`、批内没有已验证 evidence 时读；每高度每轮最多 64 次、60 s，且不晚于
+  发帖截止前 300 s；失败按轮缓存；hub 连接 10 s 超时。
+- **R5-R-4**：`last_submitted` 低于已验证高度，但 `frozen_<ls> ≠ 2` 且 `da_unit_<ls>` 仍是
+  我们重放过的那个（或为空）时视为自相矛盾的读数，整轮跳过；`da_unit_<ls>` 换成新 unit
+  （判欺诈后重提）时照常回退。
+- **R5-R-5**：按链上根挑选检查点时一次只加载一份，选定后再加载一次。
 - **R4-R-8**：链尖 `frozen = 2`（已被判欺诈、等待重提）时不再重新检查该高度，只提示一次，
   不报 BINDING MISMATCH / STALLED。
 

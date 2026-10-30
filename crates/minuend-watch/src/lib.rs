@@ -961,6 +961,40 @@ pub fn sane_chain_readings(
     Ok((ls, lf))
 }
 
+/// R5-R-4: is a `last_submitted` reading below the last replay-verified
+/// height self-contradictory? The rollup AA lowers `last_submitted` only by
+/// a verdict, which sets `frozen_<ls> = 2`; a re-submission of the judged
+/// height clears the marker but writes a NEW `da_unit_<ls>`. So
+/// `ls < processed_upto` with `frozen_<ls> != 2` is genuine only when
+/// `da_unit_<ls>` now names another unit than the one we replayed; with
+/// the very unit we accepted it is a stale / lagging hub and the round
+/// must be skipped (no rewind, no `dead/` move, no re-replay). `ls == lf`
+/// below our tip can never be genuine (a final height is not judged).
+/// When we hold no record of `ls` (not accepted, e.g. right after a
+/// restart) and `ls > lf`, the reading is not provably wrong: `false`.
+pub fn regressed_tip_contradictory(
+    last_submitted: u64,
+    last_finalized: u64,
+    processed_upto: u64,
+    frozen_at_ls: u64,
+    da_unit_at_ls: Option<&str>,
+    accepted_at_ls: Option<&str>,
+) -> bool {
+    if last_submitted >= processed_upto || frozen_at_ls == 2 {
+        return false;
+    }
+    if last_submitted <= last_finalized {
+        return true;
+    }
+    match (da_unit_at_ls.filter(|d| !d.is_empty()), accepted_at_ls) {
+        (Some(cur), Some(seen)) => cur == seen,
+        // An empty / missing da_unit next to a known acceptance: unknown,
+        // never "re-submitted" (R4-R-4) — skip the round.
+        (None, Some(_)) => true,
+        (_, None) => false,
+    }
+}
+
 /// R4-R-6: whether the chain's `state_root_<h>` contradicts the engine's
 /// root at `h`. Only a present, non-empty string root counts; a missing
 /// value or a non-string (a verdict writes `0`) is "unknown", not a
@@ -1007,8 +1041,80 @@ pub fn tip_awaiting_resubmission(h: u64, last_submitted: u64, frozen_at_tip: u64
     h == last_submitted && frozen_at_tip == 2
 }
 
-/// R4-R-7: name of the owner marker written into a temp checkpoint dir.
+/// R4-R-7: name of the owner marker written into a temp checkpoint dir
+/// (informational since R5-R-7: liveness is the lock below, not the pid).
 pub const TEMP_DIR_OWNER_FILE: &str = "owner.pid";
+/// R5-R-7: lock file a running temp-dir watcher holds an exclusive
+/// `flock` on for its whole lifetime.
+pub const TEMP_DIR_LOCK_FILE: &str = "owner.lock";
+
+#[cfg(unix)]
+mod flock_sys {
+    use std::os::raw::c_int;
+    pub const LOCK_EX: c_int = 2;
+    pub const LOCK_NB: c_int = 4;
+    extern "C" {
+        pub fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+}
+
+/// R5-R-7: try to take an exclusive, non-blocking `flock` on `f`.
+/// `Ok(true)` = locked (released when `f` is closed), `Ok(false)` = held by
+/// another open file description (a live owner, whatever its PID
+/// namespace), `Err` = locking unsupported. `flock` locks belong to the
+/// open file, so this also works across containers sharing `/tmp`.
+#[cfg(unix)]
+pub fn try_flock_exclusive(f: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `flock(2)` on a valid, owned descriptor; no memory involved.
+    let rc = unsafe { flock_sys::flock(f.as_raw_fd(), flock_sys::LOCK_EX | flock_sys::LOCK_NB) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(e)
+    }
+}
+
+/// R5-R-7: the lock a temp-dir watcher holds on its own checkpoint dir.
+/// Dropping it (process exit, including a kill) releases the lock.
+#[derive(Debug)]
+pub struct TempDirLock {
+    _file: std::fs::File,
+}
+
+/// R5-R-7: create `dir/`[`TEMP_DIR_LOCK_FILE`] (fresh, 0600) and lock it.
+/// Fails if the file already exists or the lock cannot be taken.
+#[cfg(unix)]
+pub fn lock_temp_dir(dir: &std::path::Path) -> std::io::Result<TempDirLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join(TEMP_DIR_LOCK_FILE))?;
+    if !try_flock_exclusive(&f)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "temp dir lock is held by another process",
+        ));
+    }
+    Ok(TempDirLock { _file: f })
+}
+
+#[cfg(not(unix))]
+pub fn lock_temp_dir(dir: &std::path::Path) -> std::io::Result<TempDirLock> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(dir.join(TEMP_DIR_LOCK_FILE))?;
+    Ok(TempDirLock { _file: f })
+}
 
 /// R4-R-7: remove the checkpoints (live, dead-branch and half-written ones)
 /// from a throw-away checkpoint dir; proofs and other files are kept (a
@@ -1021,7 +1127,11 @@ pub fn clear_temp_checkpoints(dir: &std::path::Path) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             let is_file = e.file_type().map(|t| t.is_file()).unwrap_or(false);
-            if is_file && (name.starts_with(SNAPSHOT_PREFIX) || name == TEMP_DIR_OWNER_FILE) {
+            if is_file
+                && (name.starts_with(SNAPSHOT_PREFIX)
+                    || name == TEMP_DIR_OWNER_FILE
+                    || name == TEMP_DIR_LOCK_FILE)
+            {
                 let _ = std::fs::remove_file(e.path());
             }
         }
@@ -1031,19 +1141,19 @@ pub fn clear_temp_checkpoints(dir: &std::path::Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
-/// R4-R-7: clear the checkpoints left in OUR earlier temp dirs (same
-/// `prefix-…` name in the temp dir, a real directory owned by the same
-/// user as `own`, whose `owner.pid` names a process that no longer runs).
-/// Covers runs killed by a signal, where no cleanup ran. Linux only (needs
-/// `/proc`); a no-op elsewhere. Returns the dirs cleared.
+/// R4-R-7 / R5-R-7: clear the checkpoints left in OUR earlier temp dirs
+/// (same `prefix-…` name next to `own`, a real directory owned by the same
+/// user) whose owner is gone. Liveness is the owner's exclusive `flock` on
+/// [`TEMP_DIR_LOCK_FILE`]: a dir is swept only when WE can take that lock
+/// (then no process anywhere holds it — PID namespaces do not matter, the
+/// old `/proc/<pid>` check wiped live watchers of other containers). A dir
+/// without a lock file (an older watcher version, or one still starting)
+/// is left alone. Unix only; a no-op elsewhere. Returns the dirs cleared.
 pub fn sweep_stale_temp_dirs(prefix: &str, own: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut cleared = Vec::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if !std::path::Path::new("/proc/self").exists() {
-            return cleared;
-        }
         let Ok(own_meta) = std::fs::metadata(own) else {
             return cleared;
         };
@@ -1067,22 +1177,149 @@ pub fn sweep_stale_temp_dirs(prefix: &str, own: &std::path::Path) -> Vec<std::pa
             if !m.is_dir() || m.uid() != own_meta.uid() {
                 continue;
             }
-            let Ok(pid) = std::fs::read_to_string(path.join(TEMP_DIR_OWNER_FILE)) else {
+            let lock_path = path.join(TEMP_DIR_LOCK_FILE);
+            match std::fs::symlink_metadata(&lock_path) {
+                Ok(lm) if lm.is_file() && lm.uid() == own_meta.uid() => {}
+                _ => continue,
+            }
+            let Ok(f) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+            else {
                 continue;
             };
-            let Ok(pid) = pid.trim().parse::<u32>() else {
-                continue;
-            };
-            if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists() {
-                continue;
+            if !matches!(try_flock_exclusive(&f), Ok(true)) {
+                continue; // a live owner holds it (or locking failed)
             }
             clear_temp_checkpoints(&path);
+            drop(f);
             cleared.push(path);
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let _ = (prefix, own);
     cleared
+}
+
+/// R5-R-2: most vault-ledger reads the watcher makes for ONE height per
+/// round (each is one hub round trip).
+pub const MAX_VAULT_READS_PER_HEIGHT: usize = 64;
+/// R5-R-2: wall-clock budget for one height's vault reads per round.
+pub const VAULT_READ_BUDGET_SECS: u64 = 60;
+/// R5-R-2: reads stop this long before the challenge-posting deadline so
+/// the proof can still be built and posted.
+pub const VAULT_READ_DEADLINE_RESERVE_SECS: u64 = 300;
+
+/// R5-R-2: per-round cache of vault ledger reads, failures included
+/// (`Err(())` = the read failed this round; it is not retried until the
+/// next round). Create a fresh one each poll round.
+pub type VaultReadCache = std::collections::HashMap<String, Result<Option<String>, ()>>;
+
+/// R5-R-2: the vault ledger keys (`dep_`/`depp_<anchor_b64>`) a P-adr
+/// proof of `batch` could actually need, i.e. the records the binding
+/// predicate consults (`binding_violation` in prove.rs) — and nothing else:
+///
+/// * only units whose posted op string `ops[k]` is exactly the op of the
+///   unit itself (`ops_element(unit_k)`), so the key is derived from the
+///   unit's real op, never from operator-chosen `"o"` text;
+/// * only `d:`/`D:` ops whose POSTED post tree (`leaf_trace[k]`) carries
+///   the new binding `adr:{addr}:{acct}` of that very op (the only leaf
+///   for which the record is consulted);
+/// * not when a verified deposit evidence in the batch already
+///   determines the record of that anchor.
+///
+/// Deduplicated, in batch order.
+pub fn vault_keys_needed(batch: &Batch) -> Vec<String> {
+    let vault = minuend_settle::expected_vault();
+    let mut out: Vec<String> = Vec::new();
+    for (k, unit) in batch.units.iter().enumerate() {
+        let (Some(op_str), Some(id)) = (batch.ops.get(k), batch.checkpoint.unit_ids.get(k)) else {
+            continue;
+        };
+        if minuend_settle::deposit_key(&unit.op).is_none() {
+            continue;
+        }
+        if *op_str != minuend_settle::ops_element(&hex::encode(id.0), &unit.op) {
+            continue;
+        }
+        let Some(key) = prove::vault_key_of_op(op_str) else {
+            continue;
+        };
+        let o: Vec<&str> = op_str.split(':').collect();
+        if o.len() != 5 {
+            continue;
+        }
+        let binding = format!("adr:{}:{}", o[3], o[1]);
+        if !batch
+            .leaf_trace
+            .get(k)
+            .is_some_and(|ls| ls.contains(&binding))
+        {
+            continue;
+        }
+        let anchor_hex = minuend_settle::deposit_key(&unit.op)
+            .map(|(a, _)| hex::encode(a))
+            .unwrap_or_default();
+        let covered = batch.unit_evidences.iter().flatten().any(|e| {
+            e.aa_unit.eq_ignore_ascii_case(&anchor_hex)
+                && minuend_settle::deposit_verify::verify_evidence(
+                    e,
+                    &vault,
+                    &minuend_types::PERP_ASSET,
+                )
+                .is_ok()
+        });
+        if covered || out.contains(&key) {
+            continue;
+        }
+        out.push(key);
+    }
+    out
+}
+
+/// R5-R-2: read the vault records for `keys` with hard bounds: at most
+/// `max_reads` hub reads, none after `deadline` (unix seconds, `now()` is
+/// the clock), and every outcome — failures too — cached in `cache` for
+/// the rest of the round. Keys not read (budget, deadline, failure) stay
+/// UNKNOWN (absent from the returned ledger), which only makes the proof
+/// builder stay silent on the backing condition.
+pub fn read_vault_ledger_bounded<H: HubClient>(
+    hub: &H,
+    vault: &str,
+    keys: &[String],
+    cache: &mut VaultReadCache,
+    max_reads: usize,
+    deadline: u64,
+    now: &mut dyn FnMut() -> u64,
+) -> prove::VaultLedger {
+    let mut ledger = prove::VaultLedger::new();
+    if vault.is_empty() {
+        return ledger;
+    }
+    let mut reads = 0usize;
+    for key in keys {
+        let got = match cache.get(key) {
+            Some(r) => r.clone(),
+            None => {
+                if reads >= max_reads || now() >= deadline {
+                    continue;
+                }
+                reads += 1;
+                let r = match hub.get_aa_state_var(vault, key) {
+                    Ok(None) => Ok(None),
+                    Ok(Some(v)) => v.as_str().map(|r| Some(r.to_string())).ok_or(()),
+                    Err(_) => Err(()),
+                };
+                cache.insert(key.clone(), r.clone());
+                r
+            }
+        };
+        if let Ok(v) = got {
+            ledger.insert(key.clone(), v);
+        }
+    }
+    ledger
 }
 
 /// R3-R-6: create a fresh directory only the current user can enter, with
@@ -2176,17 +2413,21 @@ mod tests {
         assert!(!tip_awaiting_resubmission(6, 7, 2));
     }
 
-    /// R4-R-7: clearing a temp checkpoint dir removes checkpoints and the
-    /// dead branch but keeps proofs; a stale dir of a dead process is swept,
-    /// a live one (and our own) is not.
+    /// R4-R-7 / R5-R-7: clearing a temp checkpoint dir removes checkpoints
+    /// and the dead branch but keeps proofs. Liveness is the owner's flock:
+    /// an unlocked lock file is swept, a held one is not — whatever pid
+    /// `owner.pid` names (a pid of another PID namespace is invisible in
+    /// our /proc, which used to wipe live watchers) — and a dir without a
+    /// lock file (older version / still starting) is left alone.
     #[test]
-    fn r4r7_temp_checkpoints_are_cleared_and_stale_dirs_swept() {
+    fn r5r7_sweep_uses_flock_not_pid() {
         use minuend_state::persist::{DEAD_SNAPSHOT_DIR, SNAPSHOT_PREFIX};
-        let prefix = format!("minuend-watch-r4r7-{}", std::process::id());
+        let prefix = format!("minuend-watch-r5r7-{}", std::process::id());
         let own = create_private_temp_dir(&prefix).unwrap();
         let stale = create_private_temp_dir(&prefix).unwrap();
         let live = create_private_temp_dir(&prefix).unwrap();
-        for d in [&own, &stale, &live] {
+        let legacy = create_private_temp_dir(&prefix).unwrap();
+        for d in [&own, &stale, &live, &legacy] {
             std::fs::write(d.join(format!("{SNAPSHOT_PREFIX}1.snap")), b"x").unwrap();
             std::fs::create_dir_all(d.join(DEAD_SNAPSHOT_DIR)).unwrap();
             std::fs::write(
@@ -2196,33 +2437,192 @@ mod tests {
             )
             .unwrap();
         }
-        std::fs::create_dir_all(stale.join("proofs")).unwrap();
-        std::fs::write(stale.join("proofs").join("p.json"), b"{}").unwrap();
-        // pid 0x7fff_fff0 is above Linux's pid_max: never running.
-        std::fs::write(stale.join(TEMP_DIR_OWNER_FILE), "2147483632").unwrap();
+        let _own_lock = lock_temp_dir(&own).unwrap();
+        // Live owner in "another PID namespace": its pid is not in our
+        // /proc (above pid_max), but it holds the lock.
+        let live_lock = lock_temp_dir(&live).unwrap();
+        std::fs::write(live.join(TEMP_DIR_OWNER_FILE), "2147483632").unwrap();
+        // Stale: lock file left behind by a killed run (nobody holds it),
+        // even though its recorded pid (ours) is "running".
+        drop(lock_temp_dir(&stale).unwrap());
         std::fs::write(
-            live.join(TEMP_DIR_OWNER_FILE),
+            stale.join(TEMP_DIR_OWNER_FILE),
             std::process::id().to_string(),
         )
         .unwrap();
+        std::fs::create_dir_all(stale.join("proofs")).unwrap();
+        std::fs::write(stale.join("proofs").join("p.json"), b"{}").unwrap();
+        // Legacy: pid file of a dead process but no lock file.
+        std::fs::write(legacy.join(TEMP_DIR_OWNER_FILE), "2147483632").unwrap();
+        // A second lock of a held dir fails.
+        assert!(lock_temp_dir(&live).is_err());
         let swept = sweep_stale_temp_dirs(&prefix, &own);
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             assert_eq!(swept, vec![stale.clone()]);
             assert!(!stale.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
             assert!(!stale.join(DEAD_SNAPSHOT_DIR).exists());
+            assert!(!stale.join(TEMP_DIR_LOCK_FILE).exists());
             assert!(stale.join("proofs").join("p.json").exists(), "proofs kept");
             assert!(live.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
+            assert!(legacy.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
+            // Once the live owner exits (lock released), it is swept.
+            drop(live_lock);
+            assert_eq!(sweep_stale_temp_dirs(&prefix, &own), vec![live.clone()]);
         }
-        #[cfg(not(target_os = "linux"))]
-        assert!(swept.is_empty());
+        #[cfg(not(unix))]
+        {
+            assert!(swept.is_empty());
+            drop(live_lock);
+        }
         assert!(own.join(format!("{SNAPSHOT_PREFIX}1.snap")).exists());
         // Our own cleanup at exit: no proofs → the whole dir goes.
         clear_temp_checkpoints(&own);
         assert!(!own.exists());
-        for d in [&stale, &live] {
+        for d in [&stale, &live, &legacy] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// R5-R-4: a regressed last_submitted is contradictory unless the AA's
+    /// verdict marker or a re-submission explains it.
+    #[test]
+    fn r5r4_regressed_last_submitted_without_freeze_is_contradictory() {
+        let seen = Some("U6");
+        // Not regressed / verdict marker present → genuine.
+        assert!(!regressed_tip_contradictory(9, 5, 8, 0, Some("U9"), None));
+        assert!(!regressed_tip_contradictory(6, 5, 8, 2, Some("U6"), seen));
+        // Regressed, no freeze, same da_unit we replayed → contradictory.
+        assert!(regressed_tip_contradictory(6, 5, 8, 0, Some("U6"), seen));
+        // Empty / missing da_unit next to a known acceptance → unknown.
+        assert!(regressed_tip_contradictory(6, 5, 8, 0, Some(""), seen));
+        assert!(regressed_tip_contradictory(6, 5, 8, 0, None, seen));
+        // Re-submitted (new da_unit, frozen cleared) → genuine.
+        assert!(!regressed_tip_contradictory(6, 5, 8, 0, Some("U6b"), seen));
+        // ls == lf below our tip can never be genuine.
+        assert!(regressed_tip_contradictory(5, 5, 8, 0, Some("U5"), None));
+        // No record of ls (e.g. after a restart) → not provably wrong.
+        assert!(!regressed_tip_contradictory(6, 5, 8, 0, Some("U6"), None));
+    }
+
+    fn r5_deposit_batch() -> (Batch, String) {
+        use ed25519_dalek::SigningKey;
+        use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
+        let secret = [7u8; 32];
+        let pk = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
+        let acct = minuend_types::account_id_from_pubkey(&pk);
+        let aa = [9u8; 32];
+        let addr = "Q".repeat(32);
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: addr.clone(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(u).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let batch = Batch::from_applied(&prev, &mut eng, &[id]).expect("batch");
+        use base64::Engine as _;
+        let key = format!(
+            "dep_{}",
+            base64::engine::general_purpose::STANDARD.encode(aa)
+        );
+        (batch, key)
+    }
+
+    /// R5-R-2: vault records are read only for anchors a P-adr proof
+    /// could need, derived from the unit's real op.
+    #[test]
+    fn r5r2_vault_keys_only_for_needed_anchors() {
+        let (batch, key) = r5_deposit_batch();
+        assert!(batch.leaf_trace[0].iter().any(|l| l.starts_with("adr:")));
+        assert_eq!(vault_keys_needed(&batch), vec![key.clone()]);
+        // Operator-written "o" that is not the unit's op: no read.
+        let mut forged = batch.clone();
+        forged.ops[0] = forged.ops[0].replace(&key[4..], &"A".repeat(44));
+        assert!(vault_keys_needed(&forged).is_empty());
+        // Posted post tree without the op's new binding: the record is
+        // never consulted → no read.
+        let mut nobind = batch.clone();
+        nobind.leaf_trace[0].retain(|l| !l.starts_with("adr:"));
+        assert!(vault_keys_needed(&nobind).is_empty());
+        // Many units citing the same anchor: one key.
+        let mut dup = batch.clone();
+        for _ in 0..50 {
+            dup.units.push(dup.units[0].clone());
+            dup.ops.push(dup.ops[0].clone());
+            dup.leaf_trace.push(dup.leaf_trace[0].clone());
+            dup.checkpoint.unit_ids.push(dup.checkpoint.unit_ids[0]);
+        }
+        assert_eq!(vault_keys_needed(&dup), vec![key]);
+    }
+
+    struct CountingHub {
+        reads: std::cell::Cell<usize>,
+    }
+    impl HubClient for CountingHub {
+        fn get_aa_state_var(
+            &self,
+            _addr: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, String> {
+            self.reads.set(self.reads.get() + 1);
+            if key.ends_with("_err") {
+                return Err("hub down".into());
+            }
+            if key.ends_with("_absent") {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::json!(format!("P:1:{key}"))))
+        }
+        fn get_joint(&self, _: &str) -> Result<serde_json::Value, String> {
+            Err("n/a".into())
+        }
+    }
+
+    /// R5-R-2: reads are capped by count and deadline, and every outcome
+    /// (failures too) is cached for the round.
+    #[test]
+    fn r5r2_vault_reads_are_bounded_and_cached() {
+        let hub = CountingHub {
+            reads: std::cell::Cell::new(0),
+        };
+        let mut keys: Vec<String> = (0..100).map(|i| format!("dep_k{i}")).collect();
+        keys.push("dep_x_err".into());
+        keys.insert(0, "dep_y_absent".into());
+        keys.insert(0, "dep_z_err".into());
+        let mut cache = VaultReadCache::new();
+        let mut clock = || 100u64;
+        let l = read_vault_ledger_bounded(&hub, "V", &keys, &mut cache, 64, 1000, &mut clock);
+        assert_eq!(hub.reads.get(), 64, "count cap");
+        assert_eq!(l.len(), 63, "the failed read stays unknown");
+        assert_eq!(l.get("dep_y_absent"), Some(&None));
+        assert!(!l.contains_key("dep_z_err"));
+        // Same round: cached keys (failed one included) are not re-read.
+        let l2 =
+            read_vault_ledger_bounded(&hub, "V", &keys[..64], &mut cache, 64, 1000, &mut clock);
+        assert_eq!(hub.reads.get(), 64);
+        assert_eq!(l2.len(), 63);
+        // Deadline passed: no further reads at all.
+        let mut late = || 1000u64;
+        let l3 = read_vault_ledger_bounded(&hub, "V", &keys, &mut cache, 64, 1000, &mut late);
+        assert_eq!(hub.reads.get(), 64);
+        assert_eq!(l3.len(), 63);
+        // A new round retries the failure.
+        let mut fresh = VaultReadCache::new();
+        read_vault_ledger_bounded(&hub, "V", &keys[..1], &mut fresh, 64, 1000, &mut clock);
+        assert_eq!(hub.reads.get(), 65);
+        // No vault configured: nothing read.
+        assert!(
+            read_vault_ledger_bounded(&hub, "", &keys, &mut fresh, 64, 1000, &mut clock).is_empty()
+        );
     }
 
     /// R3-R-6: the no-`--state-dir` proof directory is created fresh at an
