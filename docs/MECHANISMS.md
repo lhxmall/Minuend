@@ -946,6 +946,85 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
   的 `--rollup`，dispute AA 地址取 rollup 自己绑定的变量（R2-R-8）；同一
   `(高度, 谓词)` 不重复付费发帖（R2-R-11）；证明文件私有、不跟随符号链接（R2-R-12）。
 
+### 10.8 第 3 轮（#47 R3）变更汇总
+
+**统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
+
+1. 存款人付款时在 data 里写 `{deposit:1, account:<64 位小写 hex>}`（PERP：
+   `{deposit_perp:1, account}`）；金库缺失/格式错误即 bounce，记账
+   `dep_<unit>` / `depp_<unit>` = `'{payer}:{amount}:{account}'`。
+2. 批次为每个被引用的锚点附一份 DepositEvidence（`post_batch.js`：金额取 joint
+   **实际付给金库**的数额——base 减 10000 bounce 费、PERP 原值——而不是 op 声称的
+   数额；`account` 取 joint 的 data 消息）。锚点不在 Obyte、joint 无合法 account、
+   joint 没付给金库 → 不附 evidence、也不抛错（这样的充值执行时必然被拒）。
+3. 重放（`Batch::validate_against`）调用 `deposit_verify::verify_each`：evidence
+   列表本身的结构错误（超大、重复锚点、hex 非法）仍是整批错误；否则对每个锚点
+   独立验证（joint 哈希 = 锚点、首作者 = payer、付给预期金库、payment 与 data
+   消息的 `payload_hash` 都匹配、data.account = evidence.account、资产类别与 op
+   一致），只返回**验过**的锚点 → `(amount, payer, account)`。验证**不再看 op**。
+4. 验过的锚点用 `ChainState::allow_deposit(anchor, is_perp, amount, payer, account)`
+   登记（`deposits_allowed` + `deposit_backing`）。引擎 `deposit` / `gov_deposit`
+   依次检查：锚点在白名单（否则 `UnbackedDeposit`）→ op 账户 = 指定账户（否则
+   `BadAccount`）→ op 金额与地址 = 付款金额与 payer（否则 `UnbackedDeposit`）。
+5. evidence 缺失/无效的锚点不登记，引用它的 unit 被拒（与生产者一致，生产者的金库
+   feed 里也没有它）；但**任何被执行成功（Applied）的充值都必须有验过的 evidence**，
+   否则整批 `DepositEvidence`（运营者不能给未付款的充值入账）。
+6. 抢跑（别人引用受害者的锚点，账户或地址不同）现在只是一个被拒的 unit，不会让整
+   批 evidence 校验失败；受害者自己的 op 照常入账。
+7. 生产者要求：从金库 `dep_` / `depp_` 记录登记锚点时必须调用 `allow_deposit`
+   （带 amount / payer / account），否则生产者与验证者对同一 op 的判断会不同。
+8. Reveal 不能再包装 Deposit / GovDeposit（ingest 即拒，`reveal_op` 也拒）；
+   `ops_element` 对 Reveal 只转发 `w:` / `W:`。`D:` 与 `d:` 同为 5 段（带锚点）。
+
+**快照**：`deposit_backing`（含指定账户）随快照持久化，`SNAPSHOT_FORMAT_VERSION = 8`
+（v7 = 新增 `deposit_backing`，v8 = 其值改为 `DepositBacking{amount, payer, account}`）。
+AA 分支原本的 `deposit_accounts`（`serde(skip)`，不进快照）已删除：它会让从快照恢复的
+节点对一个已登记、尚未消费的锚点放宽账户检查，与没重启过的节点分叉。布局指纹测试
+现在也覆盖一条 backing 记录（空 map 的编码与值类型无关，否则测不出值类型变化）。
+v7 及更早的检查点不可读；watcher 会按 R3-R-7 明确报错，需清空 state dir 或导入 v8 检查点。
+
+**AA 侧**
+
+- **R3-A-1**：被接受的 `w:` 之后 collateral ≥ 0；pre 不存在账户的 `w:` 只能是被拒
+  （P-withdraw 与 P-wpin 一致）。
+- **R3-A-2**：P-escrow 只认 `acct:` 叶。
+- **R3-A-3（取舍）**：fill_math 的 collateral 恒等式改为容差 ±6，并在任一中间量
+  （|t2|、|pnl|、|exp_t|、|old_col|、bucket、mml）≥ 1e14 或成交阶段 collateral < 6 时
+  bounce。原因：Oscript 只有约 15 位有效数字，而真实成交的中间量常有 16–22 位
+  （qty·price 在 1e8·1e8 尺度）；若"任何中间量 ≥ 1e15 就 bounce"，几乎所有成交的
+  collateral 腿都无法判欺诈。量级 < 1e14 时每个截断项最多差 1（fee/keeper 最多 2），
+  合计 ≤ 6。**代价：运营者每条成交腿最多可以错记 6 个最小单位而不被挑战。**
+  watcher（prove.rs）只在 |posted − exact| > 12、精确成交阶段 ≥ 12 且量级 < 1e14 − 16
+  时才构造证明，保证无论 AA 怎么舍入都判欺诈。
+- **R3-A-4**：P-deposit 可证明 post 树缺少 `adr:{addr}:{acct}`（`aleft/aright`）。
+- **R3-A-5 / R3-A-7**：P-deposit 要求金库记录 3 段且 account == op 账户；`D:` 同样
+  需 `depp_` 支撑。
+- **R3-A-6**：P-keep 覆盖 `acct:` 叶（`[acct:X:, acct:X;)` 区间缺失证明）。
+
+**执行层（只增加拒绝 / 储备，不改变任何已接受操作的结果）**
+
+- **R3-E-2（取舍）**：现货 GTC 限价单无论是否在下单时减仓，都按**全部数量**占用
+  储备（两种模式）；逐仓现货 GTC "减仓单" 必须携带 `margin ≥ spot_order_requirement(全量)`。
+  纯减仓请用 IOC / 市价单（按实际净额计算）。最终只减仓的挂单，其托管在成交时经
+  原有 "pure-reduce post" 路径退回 collateral。`resting_open_im`：逐仓挂单按
+  `max(0, 开仓部分需求 − margin_left)` 计，现货挂单不与仓位轧差（影响下单与提款储备）。
+- **R3-E-4**：逐仓 taker 手续费检查改在每笔真实成交前、基于已扣过前面 claw 的账户进行。
+- **R3-E-5**：`funding_rate_bps` 饱和减法（release 结果不变，debug 不再 panic）。
+- **R3-E-6**：`spot_only` 市场的 `TakerFeeBps` 提案不得高于现行费率。
+
+**重放 / DAG / watcher**
+
+- **R3-R-1**：DA 原始大小上限（`MAX_PACKAGE_RAW_BYTES` / `MAX_COMMITTED_RAW_BYTES`）
+  移到 minuend-settle，生产者按原始大小切包，超限直接拒（`DaTooLarge`），不再剥离 `l`。
+- **R3-R-2**：watcher 保留 last_finalized 以来的全部检查点；已接受但未最终化的高度
+  被判欺诈 / 重新提交时回退到其下方的检查点并删除死分支；启动时只从状态根与链上
+  `state_root_<h>` 相同的检查点恢复。检查点内含 `deposit_backing`，所以回退/恢复后的
+  节点与一直运行的节点状态完全相同；DAG 不持久化，验证完全依赖批次自带的 unit 正文。
+- **R3-R-3**：挑战去重键 = (高度, da_unit, 谓词)。
+- **R3-R-5**：已执行但尚未导出的 unit 正文离开 `PARENT_WINDOW` 后保留到被导出 /
+  验证为止（`batch_body` / `release_batched`）；共识规则不变。
+- **R3-R-6 / R3-R-7**：私有随机临时目录；检查点存在但都读不了时报错而非静默从 genesis 开始。
+
 ## 11. Witness 树与谓词承诺
 
 每批 checkpoint 额外携带（`minuend_settle`）：`wit_root`（执行完最后单元的
@@ -1059,8 +1138,11 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 - P-escrow 只证明 Cancel 退款的精确抵押变化，不覆盖 Place 的托管变动；Place 中
   带托管的自家 maker 会在撮合时拒单，以免产生未建模的同单元退款现金腿
 - `temp_data` 正文 24h 后被节点剥除——揭发必须自带那一笔与证明
-- `validate_against` 对提供的充值 joint 重算哈希、核收款/金额/资产，并要求
-  joint 首作者 = payer = 侧链 `addr`；它不证明 joint 已进入 Obyte DAG 或稳定。
+- `validate_against` 对提供的充值 joint 重算哈希、核收款/金额/资产、payment 与
+  data 消息的 payload_hash、指定账户，并要求 joint 首作者 = payer；op 的金额、地址、
+  账户必须与之完全一致，否则该 unit 被拒（第 3 轮）。它不证明 joint 已进入 Obyte DAG 或稳定。
+- 第 3 轮取舍：fill_math collateral 恒等式容差 ±6（R3-A-3），运营者每条成交腿最多可
+  错记 6 个最小单位而不被挑战；现货 GTC 减仓挂单需全额储备（R3-E-2）
   `MINUEND_VAULT_AA` 为空且带 evidence 会被 `validate_against` 拒
 - 预言机为债券注册制（ORACLE_BOND_PERP = 50_000 PERP，无许可）；按债券计
   的多数合谋仍可在两次罚没之间偏置中位数；外部价锚需治理切换 + keeper 喂价

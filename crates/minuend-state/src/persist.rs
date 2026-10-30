@@ -435,6 +435,30 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// R3 integration: the deposit backing (amount, payer, designated
+    /// account) of an admitted but not yet consumed anchor survives a
+    /// snapshot round trip, so a restored node rejects a front-running
+    /// deposit exactly like a node that never restarted.
+    #[test]
+    fn deposit_backing_survives_snapshot() {
+        let dir =
+            std::env::temp_dir().join(format!("minuend-snap-dep-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut st = ChainState::new();
+        let victim = minuend_types::AccountId([7u8; 32]);
+        let thief = minuend_types::AccountId([8u8; 32]);
+        st.allow_deposit([9u8; 32], false, 123, "PAYER", victim);
+        save_snapshot_with_anchors(&dir, &st, &[]).unwrap();
+        let (_, got, _) = load_latest_with_anchors(&dir).unwrap().unwrap();
+        assert_eq!(got.deposit_backing, st.deposit_backing);
+        assert!(got.deposits_allowed.contains(&([9u8; 32], false)));
+        assert!(got.deposit_account_matches([9u8; 32], false, victim));
+        assert!(!got.deposit_account_matches([9u8; 32], false, thief));
+        assert!(got.deposit_backing_matches([9u8; 32], false, Some(123), "PAYER"));
+        assert!(!got.deposit_backing_matches([9u8; 32], false, Some(124), "PAYER"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// R2-R-14: bincode is not self-describing, so a layout change that
     /// forgets to bump `SNAPSHOT_FORMAT_VERSION` silently invalidates (or,
     /// worse, mis-decodes) old snapshots. The digest below covers the
@@ -455,7 +479,7 @@ mod tests {
         let fp = hex::encode(minuend_types::sha256(&body));
         const PINNED: (u32, &str) = (
             8,
-            "c482cb149679f551d65ff3807485d02e837884d36c485bc74be154897a6422b1",
+            "ea0934c60774c7747d3f0b4325d6bfc20ecf85f18eef9e37f517226215499407",
         );
         assert_eq!(
             (SNAPSHOT_FORMAT_VERSION, fp.as_str()),

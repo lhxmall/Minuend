@@ -1442,7 +1442,10 @@ impl Engine {
         aa_unit: [u8; 32],
         is_perp: bool,
     ) -> Result<(), RejectReason> {
-        if self.state.deposit_account_matches(aa_unit, is_perp, account) {
+        if self
+            .state
+            .deposit_account_matches(aa_unit, is_perp, account)
+        {
             Ok(())
         } else {
             Err(RejectReason::BadAccount)
@@ -10206,7 +10209,8 @@ mod tests {
         let anchor = [42u8; 32];
         let gov_anchor = [43u8; 32];
         eng.state.allow_deposit(anchor, false, 1, &test_addr(6), ma);
-        eng.state.allow_deposit(gov_anchor, true, 7, &test_addr(6), ma);
+        eng.state
+            .allow_deposit(gov_anchor, true, 7, &test_addr(6), ma);
         let g = genesis_id();
         for inner in [
             Op::Deposit {

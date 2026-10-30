@@ -2473,7 +2473,8 @@ mod tests {
         let v = &got[&(a, false)];
         assert_eq!((v.amount, v.payer.as_str()), (5_000, test_addr(6).as_str()));
         let mut eng = Engine::new();
-        eng.state.allow_deposit(a, false, v.amount, &v.payer, v.account);
+        eng.state
+            .allow_deposit(a, false, v.amount, &v.payer, v.account);
         let evs = eng.ingest(u2).unwrap();
         assert!(
             evs.iter().any(|e| matches!(

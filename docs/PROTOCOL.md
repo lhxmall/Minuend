@@ -197,10 +197,13 @@ docs/MECHANISMS.md「spot_only 的偿付不变量」。提款后既不得落入 
   无法撑爆 books / Merkle 叶子集合。
 - `deposits_allowed: HashSet<aa_unit>`：deposit op 引用的 AA 存款事件必须出现在
   本批次窗口的白名单里，否则 `UnbackedDeposit` 拒绝——存款不能凭空铸造。
-生产路径中该集合来自真实 Obyte AA 存款事件；replay 时由
-`validate_against` 从批次自身声明的 deposit ops 注入并交叉校验。
-Replay 还会核对提供的 joint 哈希、实际付款内容、调用方绑定的 vault/asset，
-并要求 joint 首作者 = evidence payer = 侧链 `addr`。该本地证据校验不证明
+生产路径中该集合来自真实 Obyte AA 存款事件（金库 `dep_` / `depp_` 记录）；replay 时由
+`validate_against` 只为 evidence **验过**的锚点登记（第 3 轮 R3-R-4：`verify_each`）。
+每个登记的锚点都带 `deposit_backing = (amount, payer, account)`（`allow_deposit`），
+Deposit / GovDeposit 必须与之完全一致：账户不同 → `BadAccount`，金额或地址不同 →
+`UnbackedDeposit`；被拒 unit 不使批次无效，但任何 Applied 的充值必须有验过的 evidence。
+Replay 核对 joint 哈希、实际付款内容与 payload_hash、data 消息里的指定账户、调用方绑定的
+vault/asset，并要求 joint 首作者 = evidence payer。该本地证据校验不证明
 joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证这类 L1 事实。
 
 ## 3. 结算层：状态根与争议承诺
@@ -428,7 +431,14 @@ DepositEvidence 新增 `account` 字段（= joint 中 data 消息的 account，p
 `WITHDRAWALS_CAP`）；`MIN_WITHDRAW_AMOUNT = 1 USD`，更小的正数提款只在等于全部
 collateral（清仓）时允许；提款后 equity 必须仍覆盖挂单开仓保证金（R2-E-3）。
 cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永不被清算（R2-E-4）。
-快照格式 `SNAPSHOT_FORMAT_VERSION = 6`，由布局指纹测试钉住。
+快照格式 `SNAPSHOT_FORMAT_VERSION = 8`（第 3 轮：v7 `deposit_backing`，v8 其值含
+指定账户），由布局指纹测试钉住。
+
+第 3 轮执行层（只会拒更多）：Reveal 不能包装 Deposit/GovDeposit（R3-E-1）；现货 GTC
+限价单一律按全部数量占用储备，逐仓现货 GTC 减仓单需带足 margin，纯减仓用 IOC/市价单
+（R3-E-2，取舍）；`resting_open_im` 逐仓挂单扣除 `margin_left`、现货挂单不与仓位轧差；
+逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
+fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
 
 ### 生命周期（高度 h）
 
@@ -522,14 +532,15 @@ Oscript 实现细节（踩过的坑）：
 | 偷 AA 资金 | 提款只认 finalized 森林的 Merkle 证明；leaf 绑定地址；wd_/wp_ 防重放 |
 | 付钱杀根 | 已删除：challenge 无 case；假证明 bounce `no fraud` |
 | 审查 | rollup inbox `{force}` 钉时间戳；P-omit 按 #23 禁用（force 无法证明单元存在，恒 bounce） |
-| 存款自铸 | deposits_allowed 白名单 + replay 交叉注入 + evidence 绑定 `MINUEND_VAULT_AA` |
+| 存款自铸 / 抢跑 | deposits_allowed + deposit_backing(amount, payer, account) + 逐锚点 evidence 校验（payload_hash、指定账户）+ evidence 绑定 `MINUEND_VAULT_AA` |
 | 溢出 DoS / 签名延展 / 乱序 | 入口 checked-mul / verify_strict / orphan 缓冲 |
 
 ## 6. 已知局限
 
 见 README「局限与主网就绪度」。付钱否决已删；仍未链上验：`fill_math` 对
 负的预期 collateral 只会 bounce `no fraud`，ADL kind-2 没有 fill-proof 分支，
-仓位 entry 比较允许 ±1 最小单位容差；提供的充值 joint 也不证明 Obyte inclusion/
+仓位 entry 比较允许 ±1 最小单位容差；collateral 恒等式容差 ±6（第 3 轮 R3-A-3：
+每条成交腿最多 6 个最小单位错记不可挑战，换取在 Oscript 15 位精度下仍能判欺诈）；提供的充值 joint 也不证明 Obyte inclusion/
 stability。P-escrow 只验证 Cancel 退款的精确变化，不覆盖 Place escrow。`temp_data`
 正文保留 24h。默认执行序 UnitId 字典序
 （v2 commit-reveal 高度 0 生效）；报价质量受债券多数约束。

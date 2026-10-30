@@ -355,7 +355,12 @@ impl ChainState {
     /// R3-A-5 / R3-E-3: whether `account` is the payer-designated account
     /// of `(anchor, is_perp)` (true when no backing is recorded — legacy
     /// fixtures).
-    pub fn deposit_account_matches(&self, anchor: [u8; 32], is_perp: bool, account: AccountId) -> bool {
+    pub fn deposit_account_matches(
+        &self,
+        anchor: [u8; 32],
+        is_perp: bool,
+        account: AccountId,
+    ) -> bool {
         match self.deposit_backing.get(&(anchor, is_perp)) {
             Some(b) => b.account == account,
             None => true,
