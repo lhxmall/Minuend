@@ -193,7 +193,11 @@ async function main() {
   // when the AA actually accepted the deposit.
   let smokeOutcome;
   try {
-    const unit = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1 } }, "vault smoke");
+    // R3-A-5: a deposit must name the credited sidechain account (64 hex);
+    // the smoke byte goes to MINUEND_SMOKE_ACCOUNT (default: the all-zero
+    // account no one can sign for — the byte just stays in the vault).
+    const smokeAccount = process.env.MINUEND_SMOKE_ACCOUNT || "0".repeat(64);
+    const unit = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1, account: smokeAccount } }, "vault smoke");
     // Wait a beat, then confirm the vault AA state still answers (the AA
     // existed before the smoke, so a bounced deposit is not detectable from
     // state; the honest claim is "submitted and propagated").

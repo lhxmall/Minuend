@@ -31,6 +31,19 @@ pub struct StateJournal {
     book: Option<(MarketId, bool, BookJournal)>,
 }
 
+/// R3-E-1 / R3-A-5: the verified on-chain payment behind a deposit
+/// anchor (see [`ChainState::deposit_backing`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DepositBacking {
+    /// Amount in the deposit's own unit (collateral base units excluding
+    /// the vault bounce fee, or PERP).
+    pub amount: u128,
+    /// The paying Obyte address (`trigger.address`).
+    pub payer: String,
+    /// The sidechain account the payer designated (`trigger.data.account`).
+    pub account: AccountId,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChainState {
     pub height: Height,
@@ -71,15 +84,21 @@ pub struct ChainState {
     /// endorsing PERP are distinct entries. Deposit ops referencing units
     /// outside this set are rejected.
     pub deposits_allowed: HashSet<([u8; 32], bool)>,
-    /// R3-E-1: the verified payment behind each `deposits_allowed` anchor:
-    /// `(anchor, is_perp) -> (amount, payer address)`. When an anchor has
-    /// an entry here, a Deposit/GovDeposit consuming it must carry exactly
-    /// this amount and address ([`ChainState::deposit_backing_matches`]).
-    /// The batch verifier fills it from the evidence-checked top-level
-    /// deposit ops; a producer fills it from the vault's `dep_<unit>` record
-    /// via [`ChainState::allow_deposit`]. Not committed in any root; pruned
-    /// with `deposits_allowed`.
-    pub deposit_backing: BTreeMap<([u8; 32], bool), (u128, String)>,
+    /// R3-E-1 / R3-A-5 / R3-E-3: the verified payment behind each
+    /// `deposits_allowed` anchor: `(anchor, is_perp) ->` [`DepositBacking`]
+    /// (amount, payer address, payer-designated sidechain account). When an
+    /// anchor has an entry here, a Deposit/GovDeposit consuming it must
+    /// carry exactly this amount and address
+    /// ([`ChainState::deposit_backing_matches`]) and credit exactly this
+    /// account ([`ChainState::deposit_account_matches`]), so nobody can
+    /// front-run a payment to credit or bind it to themselves. The batch
+    /// verifier fills it from evidence-checked anchors only; a producer
+    /// fills it from the vault's `dep_<unit>` / `depp_<unit>` record via
+    /// [`ChainState::allow_deposit`]. Not committed in any root, but
+    /// persisted in snapshots (format v8) together with `deposits_allowed`
+    /// so a snapshot-restored node judges a pending anchor exactly like a
+    /// node that never restarted. Pruned with `deposits_allowed`.
+    pub deposit_backing: BTreeMap<([u8; 32], bool), DepositBacking>,
     /// Highest consumed GovWithdraw nonce per account: strict watermark —
     /// nonces must be strictly increasing per account (`nonce <= watermark`
     /// bounces). Bounded by the account count, unlike a spent-nonce set.
@@ -295,12 +314,26 @@ impl ChainState {
         let allowed = &self.deposits_allowed;
         self.deposit_backing.retain(|k, _| allowed.contains(k));
     }
-    /// R3-E-1: admit a deposit anchor together with the payment it was
-    /// verified against (amount in the deposit's own unit, payer address).
-    pub fn allow_deposit(&mut self, anchor: [u8; 32], is_perp: bool, amount: u128, payer: &str) {
+    /// R3-E-1 / R3-A-5: admit a deposit anchor together with the payment it
+    /// was verified against (amount in the deposit's own unit, payer
+    /// address, payer-designated account).
+    pub fn allow_deposit(
+        &mut self,
+        anchor: [u8; 32],
+        is_perp: bool,
+        amount: u128,
+        payer: &str,
+        account: AccountId,
+    ) {
         self.deposits_allowed.insert((anchor, is_perp));
-        self.deposit_backing
-            .insert((anchor, is_perp), (amount, payer.to_string()));
+        self.deposit_backing.insert(
+            (anchor, is_perp),
+            DepositBacking {
+                amount,
+                payer: payer.to_string(),
+                account,
+            },
+        );
     }
     /// R3-E-1: whether a deposit op of `amount` paid by `addr` may consume
     /// `(anchor, is_perp)`. With a recorded backing the match must be exact
@@ -315,7 +348,16 @@ impl ChainState {
         addr: &str,
     ) -> bool {
         match self.deposit_backing.get(&(anchor, is_perp)) {
-            Some((want, payer)) => amount == Some(*want) && addr == payer,
+            Some(b) => amount == Some(b.amount) && addr == b.payer,
+            None => true,
+        }
+    }
+    /// R3-A-5 / R3-E-3: whether `account` is the payer-designated account
+    /// of `(anchor, is_perp)` (true when no backing is recorded — legacy
+    /// fixtures).
+    pub fn deposit_account_matches(&self, anchor: [u8; 32], is_perp: bool, account: AccountId) -> bool {
+        match self.deposit_backing.get(&(anchor, is_perp)) {
+            Some(b) => b.account == account,
             None => true,
         }
     }

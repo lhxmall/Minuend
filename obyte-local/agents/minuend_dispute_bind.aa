@@ -22,7 +22,10 @@
 	//           A was re-pointed, or (R2-A-8) X was already bound to an
 	//           address in the pre tree (proven `adrx:{X}:...` member).
 	//   P-keep (R2-A-3/8): a permanent leaf (`adr:`, `adrx:`, `dep:`) of the
-	//           pre tree is missing from the post tree at unit k.
+	//           pre tree is missing from the post tree at unit k; R3-A-6:
+	//           an `acct:{X}:...` pre leaf whose account has NO post leaf
+	//           (prefix range [acct:X:, acct:X;) empty) — the engine never
+	//           deletes an account.
 	//   P-mirror (R2-A-8): a post `adr:{A}:{X}` without `adrx:{X}:{A}` (or
 	//           the reverse) at unit k.
 	// Absence is proven by an ADJACENT straddle or before-min only (every
@@ -41,7 +44,7 @@
 	//   adr:{obyte_address}:{acct_hex_64}   adrx:{acct_hex_64}:{obyte_address}
 	//   dep:{aa_unit_b64}                   ~:end (max sentinel)
 	// Ops (crates/minuend-settle/src/lib.rs ops_element):
-	//   d:{acct}:{amount}:{addr}:{aa_unit_b64}   D:{acct}:{amount}:{addr}
+	//   d:{acct}:{amount}:{addr}:{aa_unit_b64}   D:{acct}:{amount}:{addr}:{aa_unit_b64}
 	//   w:{acct}:{amount}:{nonce}
 	// Empty-sentinel wit root: Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=
 	bounce_fees: { base: 10000 },
@@ -238,7 +241,10 @@
 									AND length($c0s) <= 15 AND length($w0s) <= 15
 									AND $O[2] + 0 > 0
 									AND $P[4] + 0 == $w0s + $O[2]
-									AND $P[2] + 0 == $c0s - $O[2]);
+									AND $P[2] + 0 == $c0s - $O[2]
+									// R3-A-1: an accepted withdrawal is paid
+									// from cash held: never a negative post.
+									AND !starts_with($P[2], '-'));
 						} else {
 							$ok = ($P[4] == $w0s);
 						}
@@ -255,7 +261,7 @@
 								AND is_valid_merkle_proof($xl, trigger.data.xleaf_proof)
 								AND trigger.data.xleaf_proof.root == $pre_wit;
 							$ok = !$bound
-								AND (($O[0] == 'd' AND array_length($O) == 5) OR ($O[0] == 'D' AND array_length($O) == 4))
+								AND ($O[0] == 'd' OR $O[0] == 'D') AND array_length($O) == 5
 								AND $O[1] == $P[2] AND $O[3] == $P[1];
 						}
 					}
@@ -325,8 +331,11 @@
 					$is_adr = array_length($Q) == 3 AND $Q[0] == 'adr' AND length($Q[1]) == 32 AND length($Q[2]) == 64;
 					$is_adrx = array_length($Q) == 3 AND $Q[0] == 'adrx' AND length($Q[1]) == 64 AND length($Q[2]) == 32;
 					$is_dep = array_length($Q) == 2 AND $Q[0] == 'dep' AND length($Q[1]) == 44;
+					// R3-A-6: an account leaf is permanent too; its absence is
+					// judged over the whole prefix range of the account.
+					$is_acct = array_length($Q) == 5 AND $Q[0] == 'acct' AND length($Q[1]) == 64;
 					if (trigger.data.pred == 'keep') {
-						if (!$is_adr AND !$is_adrx AND !$is_dep) bounce('bad leaf');
+						if (!$is_adr AND !$is_adrx AND !$is_dep AND !$is_acct) bounce('bad leaf');
 						$pre_wit = trigger.data.pre_wit;
 						if ($k == 0){
 							if ($h == 1){
@@ -348,20 +357,23 @@
 							bounce('bad leaf proof');
 						$M = ($is_adr ? 'adrx:' : 'adr:') || $Q[2] || ':' || $Q[1];
 					}
-					// Exact non-membership of $M in post_wit.
+					// Exact non-membership of $M in post_wit (acct: the
+					// prefix range [acct:X:, acct:X;) instead).
+					$lo = $is_acct ? ('acct:' || $Q[1] || ':') : $M;
+					$hi = $is_acct ? ('acct:' || $Q[1] || ';') : $M;
 					$m1 = trigger.data.left AND trigger.data.right
 						AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
 						AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
 						AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
 						AND trigger.data.left_proof.root == $post_wit
 						AND trigger.data.right_proof.root == $post_wit
-						AND trigger.data.left < $M AND $M < trigger.data.right
+						AND trigger.data.left < $lo AND ($is_acct ? ($hi <= trigger.data.right) : ($M < trigger.data.right))
 						AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
 						AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
 					$m2 = trigger.data.left AND contains(trigger.data.left, ':')
 						AND trigger.data.left_proof.index == 0
 						AND trigger.data.left_proof.root == $post_wit
-						AND $M < trigger.data.left
+						AND ($is_acct ? ($hi <= trigger.data.left) : ($M < trigger.data.left))
 						AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
 					if (!$m1 AND !$m2) bounce('no fraud');
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');

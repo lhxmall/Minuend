@@ -43,10 +43,12 @@ const KEEP_SNAPSHOTS: usize = 2;
 /// help). History: v4 = `(ChainState, anchors)` tuple (#45); v5 =
 /// `MarketParams` gained `min_price`/`max_price` (#46, M3 in #47); v6 =
 /// `ChainState.aa_address_owners` (#47 A2, added after the v5 bump without
-/// one — R2-R-14); v7 = `ChainState.deposit_backing` (R3-E-1).
+/// one — R2-R-14); v7 = `ChainState.deposit_backing` (R3-E-1); v8 = its value became
+/// `DepositBacking { amount, payer, account }` (R3-A-5: the payer-designated
+/// account is persisted instead of a transient `serde(skip)` map).
 /// `layout_fingerprint_is_pinned_to_format_version` pins
 /// the layout so the next change cannot land without a bump.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
 /// #37-14: bounded pre-snapshot DAG anchors persisted with the state. A
 /// restored engine cannot rebuild the DAG, so these ids are treated as
 /// already-executed ancestors when replaying post-snapshot batches.
@@ -387,10 +389,13 @@ mod tests {
             .insert(minuend_types::BTC_USD, minuend_types::genesis_params());
         let id = minuend_types::AccountId([3u8; 32]);
         st.accounts.insert(id, crate::Account::new(id));
+        // R3: one deposit backing so a change of its value type is caught
+        // too (an empty map encodes the same whatever its value type).
+        st.allow_deposit([4u8; 32], false, 5, "ADDR", id);
         let body = bincode::serialize(&(&st, vec![[1u8; 32]])).unwrap();
         let fp = hex::encode(minuend_types::sha256(&body));
         const PINNED: (u32, &str) = (
-            7,
+            8,
             "c482cb149679f551d65ff3807485d02e837884d36c485bc74be154897a6422b1",
         );
         assert_eq!(

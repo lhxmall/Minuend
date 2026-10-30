@@ -798,7 +798,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈 |
 | tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
 | keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
-| deposit（第 2 轮加强） | dispute | R2-A-3：`d:` 入账必须由金库 `dep_<u>` 记录支撑（payer == op 地址、amount ≤ 记录值），pre 树不得已有 `dep:{u}`（重复入账），post 树必须出现 `dep:{u}` |
+| deposit（第 2/3 轮加强） | dispute | R2-A-3：`d:` 入账必须由金库 `dep_<u>` 记录支撑（payer == op 地址、amount ≤ 记录值），pre 树不得已有 `dep:{u}`（重复入账），post 树必须出现 `dep:{u}`；第 3 轮：记录的 account == op 账户（R3-A-5）、post 树必须有 `adr:{addr}:{acct}`（R3-A-4）、`D:` 同样需 `depp_<u>` 支撑（R3-A-7）、被接受的提款后 collateral ≥ 0（R3-A-1） |
 
 **"被拒 = 不变"规则（#47 跨 PR）**：被拒的 unit 同样进入批次（每个执行
 过的 unit 在 trace 中占一项）。#49 让更多提款/存款被拒（现货储备、nonce
@@ -889,10 +889,11 @@ claim 四态：`reward|sbond|slash` 按旧键支付；`pool` 仅链空闲
   `minuend_dispute.aa` 只需硬编码 base 地址（占位 `VAULT_BASE_HERE`），即可用
   `chash160` 推导出某个 rollup 唯一的真金库并读它的账本，不必信任调用方给的地址
   （rollup 不能硬编码金库：金库指向 rollup，会形成 chash 循环）。
-- **`dep_` 记录**：金库每笔 `{deposit}` 写 `dep_<trigger.unit> = '{payer}:{amount}'`
-  （amount = 输出 − 10000 bounce 费）。
+- **`dep_` 记录**：金库每笔 `{deposit}` 写 `dep_<trigger.unit> = '{payer}:{amount}:{account}'`
+  （amount = 输出 − 10000 bounce 费；第 3 轮 R3-A-5：`account` = 付款 data 里存款人指定的
+  侧链账户，缺失或格式错误则 bounce；PERP 存款写 `depp_<unit>`，R3-A-7）。
 - **`d:` 变为 5 段**：`d:{acct}:{amount}:{addr}:{aa_unit_b64}`，第 5 段即金库
-  `dep_` 键里的 unit（标准 base64）。`D:`（PERP）仍是 4 段。
+  `dep_` 键里的 unit（标准 base64）。第 3 轮起 `D:`（PERP）同样 5 段（`depp_` 键）。
 - **Reveal 描述串（R2-E-2）**：`Reveal{inner}` 的 inner 为 Deposit / GovDeposit /
   Withdraw / GovWithdraw 时，`ops_element` 输出 inner 的描述串（`d:`/`D:`/`w:`/`W:`），
   其余仍为 `x:{unit}`。配合执行层 R2-E-1（inner 签名账户必须等于 Reveal 账户），

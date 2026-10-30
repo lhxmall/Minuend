@@ -1429,6 +1429,26 @@ impl Engine {
         Ok(Vec::new())
     }
 
+    /// R3-A-5 / R3-E-3: the anchor's payer-designated account (vault
+    /// `trigger.data.account`, recorded with the verified payment in
+    /// `ChainState::deposit_backing`) must be the op's account. Production
+    /// replay (`Batch::validate_inner`) records a backing for every deposit
+    /// anchor whose evidence verifies; an anchor without one (unit-test
+    /// fixtures seeding `deposits_allowed` directly) keeps the pre-R3
+    /// behaviour.
+    fn deposit_target_ok(
+        &self,
+        account: AccountId,
+        aa_unit: [u8; 32],
+        is_perp: bool,
+    ) -> Result<(), RejectReason> {
+        if self.state.deposit_account_matches(aa_unit, is_perp, account) {
+            Ok(())
+        } else {
+            Err(RejectReason::BadAccount)
+        }
+    }
+
     fn deposit(
         &mut self,
         account: AccountId,
@@ -1446,6 +1466,9 @@ impl Engine {
         if !self.state.deposits_allowed.contains(&(aa_unit, false)) {
             return Err(RejectReason::UnbackedDeposit);
         }
+        // R3-A-5 / R3-E-3: only the account the payer designated may claim
+        // (and bind) this anchor — a front-running Deposit is rejected.
+        self.deposit_target_ok(account, aa_unit, false)?;
         // R3-E-1 (defense in depth): the op must credit EXACTLY the verified
         // payment — same amount, same payer address.
         if !self
@@ -2234,6 +2257,8 @@ impl Engine {
         if !self.state.deposits_allowed.contains(&(aa_unit, true)) {
             return Err(RejectReason::UnbackedDeposit);
         }
+        // R3-A-5 / R3-E-3 / R3-A-7: same payer-designated account rule.
+        self.deposit_target_ok(account, aa_unit, true)?;
         // R3-E-1: exact amount/payer match against the verified payment.
         if !self
             .state
@@ -10180,8 +10205,8 @@ mod tests {
         let ma = acct_of(&m);
         let anchor = [42u8; 32];
         let gov_anchor = [43u8; 32];
-        eng.state.allow_deposit(anchor, false, 1, &test_addr(6));
-        eng.state.allow_deposit(gov_anchor, true, 7, &test_addr(6));
+        eng.state.allow_deposit(anchor, false, 1, &test_addr(6), ma);
+        eng.state.allow_deposit(gov_anchor, true, 7, &test_addr(6), ma);
         let g = genesis_id();
         for inner in [
             Op::Deposit {

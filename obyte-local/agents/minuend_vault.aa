@@ -42,8 +42,14 @@
 	// R2-A-8: a second address bound to the same account can never spend
 	// the same W twice), wp_<addr> (cumulative PERP withdrawn),
 	// pperp_<addr> (PERP deposits received), dep_<unit> =
-	// '{payer}:{amount}' (R2-A-3: every base deposit, keyed by the trigger
-	// unit hash in base64 — the anchor a `d:` op must cite).
+	// '{payer}:{amount}:{account}' (R2-A-3 + R3-A-5: every base deposit,
+	// keyed by the trigger unit hash in base64 — the anchor a `d:` op must
+	// cite; {account} = trigger.data.account, the payer-chosen sidechain
+	// account, the ONLY account that anchor can credit), depp_<unit> =
+	// '{payer}:{amount}:{account}' (R3-A-7: same for PERP / `D:`).
+	// Deposits: {deposit:1, account:<64 lowercase hex>} (base) or
+	// {deposit_perp:1, account:<64 lowercase hex>} (PERP); a missing or
+	// malformed account bounces.
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
@@ -53,6 +59,12 @@
 					if (!params.rollup) bounce('base AA');
 					if (trigger.output[[asset=base]] - 10000 <= 0)
 						bounce('deposit too small');
+					// R3-A-5: the PAYER names the credited sidechain account
+					// (64 lowercase hex); only that account can ever claim it.
+					$acct = trigger.data.account;
+					if (typeof($acct) != 'string' OR length($acct) != 64
+						OR length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($acct, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) != 0)
+						bounce('bad account');
 				}",
 				messages: [
 					{
@@ -63,7 +75,7 @@
 						// an amount <= the recorded one.
 						app: "state",
 						state: "{
-							var['dep_' || trigger.unit] = trigger.address || ':' || (trigger.output[[asset=base]] - 10000);
+							var['dep_' || trigger.unit] = trigger.address || ':' || (trigger.output[[asset=base]] - 10000) || ':' || $acct;
 						}"
 					}
 				]
@@ -79,12 +91,20 @@
 					if (!params.rollup) bounce('base AA');
 					if (!(trigger.output[[asset='PERP_ASSET_ID_HERE']] > 0))
 						bounce('bad deposit');
+					// R3-A-5/R3-A-7: same payer-chosen account as a base deposit.
+					$acct = trigger.data.account;
+					if (typeof($acct) != 'string' OR length($acct) != 64
+						OR length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($acct, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) != 0)
+						bounce('bad account');
 				}",
 				messages: [
 					{
 						app: "state",
 						state: "{
 							var['pperp_' || trigger.address] = (var['pperp_' || trigger.address] otherwise 0) + trigger.output[[asset='PERP_ASSET_ID_HERE']];
+							// R3-A-7: per-unit PERP deposit ledger, the backing a
+							// credited `D:` op must cite (P-deposit).
+							var['depp_' || trigger.unit] = trigger.address || ':' || trigger.output[[asset='PERP_ASSET_ID_HERE']] || ':' || $acct;
 						}"
 					}
 				]

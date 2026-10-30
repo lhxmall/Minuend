@@ -23,7 +23,7 @@
 	//   pos:{acct_hex_64}:{market}:{qty_signed}:{entry}:{isolated:0|1}:{bucket}
 	//   ord:{order_hex}:{market}:{side}:{price}:{seq}:{remaining}:{acct_hex}:{isolated:0|1}:{margin_left}
 	// Op descriptors (crates/minuend-settle/src/lib.rs ops_element):
-	//   d:{acct}:{amount}:{addr}:{aa_unit_b64}   D:{acct}:{amount}:{addr}
+	//   d:{acct}:{amount}:{addr}:{aa_unit_b64}   D:{acct}:{amount}:{addr}:{aa_unit_b64}
 	//   w:{acct}:{amount}:{nonce}   W:{acct}:{amount}:{nonce}
 	//   c:{acct}:{order_hex}   p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}
 	// Fill descriptors (fills_element): f:{unit}:{idx}:{taker}:{maker}:
@@ -201,7 +201,9 @@
 						// #47 B6: gov ops never create an account, so a proven
 						// post leaf on a pre-absent account is fraud for D:/W:.
 						// A rejected op leaves no leaf (or an empty one, col 0).
-						$match = !$gov AND ($col1 == '0' OR ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1)));
+						// R3-A-1: a withdrawal from a pre-absent account can
+						// only have been REJECTED (no cash): col 0.
+						$match = !$gov AND ($col1 == '0' OR ($deposit AND 0 + $amount == $col1));
 						$cred = !$gov AND $deposit AND $col1 != '0' AND 0 + $amount == $col1;
 					} else {
 						if (typeof($pre_leaf) == 'boolean'
@@ -216,25 +218,45 @@
 						// Gov old account: PERP moves by amount, collateral pinned.
 						// #47 (cross-PR): or the op was REJECTED and the moving
 						// column is unchanged — an honest outcome.
-						$match = $gov ? (($perp0 == $perp1 OR ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1)));
-						$cred = !$gov AND $deposit AND $col0 != $col1 AND $col0 + $amount == $col1;
+						// R3-A-1: an ACCEPTED withdrawal is paid from cash the
+						// account holds (engine debit needs balance >= amount),
+						// so the post column is never negative.
+						$match = $gov ? (($perp0 == $perp1 OR ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1 AND !starts_with($perp1, '-')))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
+						// R3-A-7: a credited PERP deposit (D:) is backed like d:.
+						$cred = $deposit AND ($gov ? ($perp0 != $perp1 AND $perp0 + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));
 					}
-					// R2-A-3: a credited collateral deposit must be BACKED by
-					// the rollup's genuine vault (parameterized instance of the
-					// hardcoded base, derived — never caller-supplied):
-					//   dep_<aa_unit> = '{payer}:{amount}' recorded, payer == the
-					//   op's address and op amount <= the recorded amount;
+					// R2-A-3: a credited collateral (d:) or PERP (D:, R3-A-7)
+					// deposit must be BACKED by the rollup's genuine vault
+					// (parameterized instance of the hardcoded base, derived —
+					// never caller-supplied):
+					//   dep_<aa_unit> (depp_ for D:) = '{payer}:{amount}:{account}'
+					//   recorded, payer == the op's address, account == the
+					//   op's account (R3-A-5: the payer chose it) and op
+					//   amount <= the recorded amount;
 					//   the anchor's `dep:{aa_unit}` marker NOT already in the pre
 					//   tree (re-credit) — proven member => fraud;
 					//   the marker present in the post tree — proven absent
-					//   (adjacent straddle / before-min) => fraud.
+					//   (adjacent straddle / before-min) => fraud;
+					//   R3-A-4: the binding `adr:{addr}:{acct}` present in the
+					//   post tree (the engine credits only an address bound to
+					//   the account) — proven absent => fraud.
 					if ($cred) {
 						$O = split($op, ':');
 						$vault = chash160(['autonomous agent', {base_aa: 'VAULT_BASE_HERE', params: {rollup: $rollup}}]);
-						$rec = (array_length($O) == 5) ? (var[$vault]['dep_' || $O[4]] otherwise '') : '';
-						$backed = length($O[3]) == 32 AND starts_with($rec, $O[3] || ':')
-							AND length($rec) <= 48
-							AND 0 + $amount <= substring($rec, 33) + 0;
+						$R = split((array_length($O) == 5) ? (var[$vault][($gov ? 'depp_' : 'dep_') || $O[4]] otherwise '') : '', ':');
+						$backed = array_length($R) == 3 AND $R[0] == $O[3] AND $R[2] == $O[1]
+							AND 0 + $amount <= $R[1] + 0;
+						$ak = 'adr:' || $O[3] || ':' || $O[1];
+						$noadr = trigger.data.aleft AND contains(trigger.data.aleft, ':')
+							AND trigger.data.aleft_proof.root == $post_wit
+							AND ((trigger.data.aright AND contains(trigger.data.aright, ':')
+								AND is_integer(trigger.data.aleft_proof.index) AND trigger.data.aleft_proof.index >= 0
+								AND trigger.data.aleft_proof.index + 1 == trigger.data.aright_proof.index
+								AND trigger.data.aright_proof.root == $post_wit
+								AND trigger.data.aleft < $ak AND $ak < trigger.data.aright
+								AND is_valid_merkle_proof(trigger.data.aright, trigger.data.aright_proof))
+							OR (trigger.data.aleft_proof.index == 0 AND $ak < trigger.data.aleft))
+							AND is_valid_merkle_proof(trigger.data.aleft, trigger.data.aleft_proof);
 						$mk = 'dep:' || ((array_length($O) == 5) ? $O[4] : '');
 						$dup = trigger.data.dep_pre_proof AND trigger.data.dep_pre_proof.root == $pre_wit
 							AND is_valid_merkle_proof($mk, trigger.data.dep_pre_proof);
@@ -248,7 +270,7 @@
 								AND is_valid_merkle_proof(trigger.data.dright, trigger.data.dright_proof))
 							OR (trigger.data.dleft_proof.index == 0 AND $mk < trigger.data.dleft))
 							AND is_valid_merkle_proof(trigger.data.dleft, trigger.data.dleft_proof);
-						if ($backed AND !$dup AND !$nomark) bounce('no fraud');
+						if ($backed AND !$dup AND !$nomark AND !$noadr) bounce('no fraud');
 					} else {
 						if ($match) bounce('no fraud');
 					}
@@ -348,12 +370,14 @@
 						OR !is_valid_merkle_proof($pre_leaf, trigger.data.pre_leaf_proof)
 						OR trigger.data.pre_leaf_proof.root != $pre_wit)
 						bounce('bad leaf proof');
-					if (substring($pre_leaf, 5, 64) != $acct) bounce('bad leaf');
+					// R3-A-2: only an `acct:` leaf carries collateral — an
+					// `adrx:{acct}:...` leaf shares the 5-char prefix width.
+					if (substring($pre_leaf, 0, 5) != 'acct:' OR substring($pre_leaf, 5, 64) != $acct) bounce('bad leaf');
 					if (typeof($post_leaf) == 'boolean'
 						OR !is_valid_merkle_proof($post_leaf, trigger.data.post_leaf_proof)
 						OR trigger.data.post_leaf_proof.root != $post_wit)
 						bounce('bad leaf proof');
-					if (substring($post_leaf, 5, 64) != $acct) bounce('bad leaf');
+					if (substring($post_leaf, 0, 5) != 'acct:' OR substring($post_leaf, 5, 64) != $acct) bounce('bad leaf');
 					$tail0 = substring($pre_leaf, 70, length($pre_leaf));
 					$col0 = substring($tail0, 0, index_of($tail0, ':'));
 					$tail1 = substring($post_leaf, 70, length($post_leaf));

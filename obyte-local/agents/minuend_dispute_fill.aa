@@ -612,12 +612,25 @@
 					// cover stays as negative collateral — unverifiable
 					// from these leaves either way, so bounce instead of
 					// false-verdicting an honest height.
-					if ($exp_m < 0) bounce('no fraud');
+					// R3-A-3: ocore runs Oscript arithmetic at 15 significant
+					// digits (Decimal precision 15), so a product such as
+					// signed*close*1e6 is rounded and each truncated term
+					// (release, pnl, mpost) can land 1 off the engine's exact
+					// i128 value, fee/keeper 2 off (via the notional). With
+					// every magnitude below 1e14 the total error of exp_t is
+					// at most 6, so the identity is checked to +-6 and a
+					// near-zero fill stage (where an exact negative would mean
+					// a claw) bounces; any larger magnitude bounces (no
+					// verdict) — never slash an honest height on rounding.
+					if ($exp_m < 6 OR abs($t2) >= 100000000000000 OR abs($pnl) >= 100000000000000
+						OR abs($exp_t) >= 100000000000000 OR abs($old_col) >= 100000000000000
+						OR $bucket >= 100000000000000 OR $mml >= 100000000000000)
+						bounce('no fraud');
 					// A collateral mismatch is fraud only when no claw can
 					// have moved this leg: positive counterparty, and for a
 					// kind 0/1 maker leg a CROSS Place taker (no escrow
 					// refund lands on the taker after the claw).
-					$col_ok = ($post_col == $exp_t) OR $kind == 1
+					$col_ok = abs($post_col - $exp_t) <= 6 OR $kind == 1
 						OR !($cp_ok AND ($who == 'taker' OR $kind >= 2 OR $OP[6] == '0'));
 					// Verdict only when a leg is VERIFIED wrong; a bail
 					// (missing evidence) silences its own leg only. The

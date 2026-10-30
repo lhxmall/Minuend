@@ -223,16 +223,28 @@ async function main() {
   console.log("step 1: fund pool + seed vault deposit");
   await trigger(operator, rollup, { pool: 1 }, 10000000010000);
   const dep = await operator.triggerAaWithData({
-    toAddress: vault, amount: 1000000 + 10000, data: { deposit: 1 },
+    toAddress: vault, amount: 1000000 + 10000, data: { deposit: 1, account: ACCT },
   });
   if (dep.error) throw new Error("vault deposit failed: " + dep.error);
   await network.witnessUntilStable(dep.unit);
   {
     const vs = await vars(vault);
-    if (vs["dep_" + dep.unit] !== wdAcct + ":1000000")
-      throw new Error("R2-A-3: vault dep_ ledger wrong: " + JSON.stringify(vs["dep_" + dep.unit]));
+    // R3-A-5: the record names the payer-chosen sidechain account.
+    if (vs["dep_" + dep.unit] !== wdAcct + ":1000000:" + ACCT)
+      throw new Error("R2-A-3/R3-A-5: vault dep_ ledger wrong: " + JSON.stringify(vs["dep_" + dep.unit]));
   }
-  console.log("  vault seeded (dep_ ledger recorded)");
+  // R3-A-5: a deposit without a valid account bounces (refund, no record).
+  for (const [tag, data] of [["missing", { deposit: 1 }], ["upper-hex", { deposit: 1, account: "AB".repeat(32) }], ["short", { deposit: 1, account: "ab".repeat(31) }]]) {
+    const bad = await operator.triggerAaWithData({ toAddress: vault, amount: 50000, data });
+    if (bad.error) throw new Error("bad-account deposit compose failed: " + bad.error);
+    await network.witnessUntilStable(bad.unit);
+    const res = await network.getAaResponseToUnit(bad.unit).catch(() => null);
+    if (!(res && res.response && res.response.bounced))
+      throw new Error("R3-A-5: deposit with " + tag + " account not bounced");
+    const vs = await vars(vault);
+    if (vs["dep_" + bad.unit] !== undefined) throw new Error("R3-A-5: bounced deposit recorded");
+  }
+  console.log("  vault seeded (dep_ ledger recorded with account; account-less deposits bounce)");
 
   async function submitWit(hh, col, w, payee2) {
     const t = witTree(wdAcct, col, w, payee2);
