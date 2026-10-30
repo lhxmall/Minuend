@@ -23,9 +23,21 @@ pub const USD_SCALE: u64 = 1_000_000;
 /// (<= 14 digits) keeps `balance ± amount` exact there. A GovDeposit that
 /// would lift the supply past this is rejected (`RejectReason::Risk`).
 pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
+/// R6-H1 (round 6b of #47): every order quantity and every position stays
+/// below 1e15 (<= 15 digits), the range in which Oscript's 15-significant-
+/// digit arithmetic compares `qty` and `|position|` exactly — the dispute
+/// AAs' flip / close decisions (`qty > |pos|`) would otherwise round a
+/// "close and open 1" into a "pure close" and judge an honest fill as
+/// fraud. Enforced at `place` as an invariant per (account, market):
+/// `|position| + Σ remaining of its live orders + qty < QTY_CAP`. A fill
+/// moves at most its qty from an order's remaining into the position, an
+/// STP cancel or a cancel only lowers the sum, and liquidation / ADL only
+/// shrink positions, so no fill can ever lift a position to `QTY_CAP`.
+/// A Place breaking it is rejected (`RejectReason::Risk`).
+pub const QTY_CAP: u64 = 1_000_000_000_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
-/// Pinned by the rollup AA (`assertion_version != 2` bounces), so it can
+/// Pinned by the rollup AA (`assertion_version != 3` bounces), so it can
 /// only change together with an AA redeploy.
 ///
 /// History (docs/ROLLUP-UPGRADE.md §7):
@@ -36,7 +48,11 @@ pub const CHAIN_ID: &str = "minuend-v2";
 ///   reserve, ADL band clamp, gov-nonce watermark, fill-less liquidation
 ///   no-op, unique address binding), the `p:` op `typ` field and the
 ///   `d:`/`D:` op address field, and the `adr:` witness leaves.
-pub const ASSERTION_VERSION: u32 = 2;
+/// - 3 (#47 round 6/6b, with the P-claw rollup redeploy): a
+///   Reveal{Place|Liquidate} commits its INNER `p:` / `L:` descriptor in
+///   the ops leaf (was `x:{unit}`), and `place` enforces `QTY_CAP`
+///   (R6-H1) — old and new producers disagree on both.
+pub const ASSERTION_VERSION: u32 = 3;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

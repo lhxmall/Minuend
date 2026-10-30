@@ -287,7 +287,8 @@
 				// P-fsane (R5-A-2 / R5-A-3): a posted fill the engine can
 				// never emit, judged from the fill string and PROVEN pre
 				// values only (any idx, any unit):
-				//   • shape: qty not a positive integer, price / taker_post
+				//   • shape: qty not a positive integer or >= QTY_CAP (1e15,
+				//     R6-H1: `place` refuses it), price / taker_post
 				//     not integers, taker_post < 0, side not 0/1, kind not
 				//     0..3, or a kind 2/3 fill with taker_post != 0 (the
 				//     liquidation IOC is cross with margin_left 0 and ADL
@@ -340,7 +341,7 @@
 					}
 					$kd = $shape14 ? $F[12] : 0;
 					$tp = $shape14 ? $F[13] : 0;
-					$bad = !$shape14 OR !is_integer($F[9]) OR $F[9] <= 0 OR !is_integer($F[8])
+					$bad = !$shape14 OR !is_integer($F[9]) OR $F[9] <= 0 OR $F[9] >= 1000000000000000 OR !is_integer($F[8])
 						OR !is_integer($tp) OR $tp < 0
 						OR !($F[11] == '0' OR $F[11] == '1')
 						OR !($kd == '0' OR $kd == '1' OR $kd == '2' OR $kd == '3')

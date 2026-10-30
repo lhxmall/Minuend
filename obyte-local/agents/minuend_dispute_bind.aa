@@ -463,7 +463,9 @@
 					$O = split($op, ':');
 					$t = $O[0];
 					$al = array_length($O);
-					if (!(($t == 'c' AND $al == 3) OR (($t == 'd' OR $t == 'D') AND $al == 5) OR (($t == 'w' OR $t == 'W') AND $al == 4)))
+					// R6-C2: Place / Liquidate units too (see below).
+					$pl = ($t == 'p' AND $al == 10) OR ($t == 'L' AND $al == 4);
+					if (!(($t == 'c' AND $al == 3) OR (($t == 'd' OR $t == 'D') AND $al == 5) OR (($t == 'w' OR $t == 'W') AND $al == 4) OR $pl))
 						bounce('no fraud');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
@@ -496,8 +498,70 @@
 					$isacct = array_length($Q) == 5 AND starts_with($L, 'acct:') AND substring($L, 69, 1) == ':';
 					if (!(($Q[0] == 'pos' AND array_length($Q) == 7) OR ($Q[0] == 'ord' AND array_length($Q) == 10) OR $isacct))
 						bounce('bad leaf');
-					if ($isacct AND substring($L, 5, 64) == substring($op, 2, 64))
+					if (!$pl AND $isacct AND substring($L, 5, 64) == substring($op, 2, 64))
 						bounce('no fraud');
+					if ($pl) {
+						// R6-C2: a regular-market Place / Liquidate with ZERO
+						// or ONE fill writes only these accounts (engine
+						// place / liquidate_book_path / apply_fill_pair): the
+						// op account (p:) or caller + target (L:), and with a
+						// fill its maker and the insurance account (fee). The
+						// acct: / pos: / ord: leaves of every OTHER account are
+						// frozen (P-claw pins the caller's and insurance's
+						// amounts). A Place / Liquidate on a market with no
+						// meta leaf cannot be judged (bounce).
+						// Funding-rate markets (peg moves every holder's
+						// cash) and multi-fill units (未修复项 19) bounce.
+						if (trigger.data.fills_root != var[$rollup]['fills_root_' || $h]
+							OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
+							bounce('stale roots');
+						$u = trigger.data.unit;
+						if (typeof($u) == 'boolean' OR length($u) != 64 OR !trigger.data.units_proof
+							OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root
+							OR !is_valid_merkle_proof($u, trigger.data.units_proof))
+							bounce('bad unit');
+						$mkt = ($t == 'p') ? $O[2] : $O[3];
+						$pm = trigger.data.pre_meta;
+						if (typeof($pm) == 'boolean' OR !is_valid_merkle_proof($pm, trigger.data.pre_meta_proof)
+							OR trigger.data.pre_meta_proof.root != $pre_wit)
+							bounce('bad pre meta proof');
+						$M = split($pm, ':');
+						if (array_length($M) != 11 OR $M[0] != 'meta' OR $M[1] != $mkt) bounce('bad pre meta');
+						if ($M[9] != 0) bounce('no fraud');
+						// Fill count from adjacent fills leaves (fill = leaf
+						// ri - 1, absent iff ri == 0; fright = leaf ri, the `n:`
+						// sentinel or a fill of ANOTHER unit). One fill: fill
+						// is idx 0 of unit k. Zero fills: fills are committed
+						// in unit order, so fill belongs to an earlier unit
+						// and fright to a later one (or is the sentinel).
+						$rt = trigger.data.fright;
+						$ri = trigger.data.fright_proof.index;
+						if (!($rt AND is_integer($ri) AND $ri >= 0 AND trigger.data.fright_proof.root == trigger.data.fills_root
+							AND is_valid_merkle_proof($rt, trigger.data.fright_proof)
+							AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND !starts_with($rt, 'f:' || $u || ':')))))
+							bounce('no fraud');
+						$fl = trigger.data.fill;
+						if ($ri > 0 AND !($fl AND trigger.data.fill_proof.index == $ri - 1 AND trigger.data.fill_proof.root == trigger.data.fills_root
+							AND is_valid_merkle_proof($fl, trigger.data.fill_proof)))
+							bounce('no fraud');
+						$one = $ri > 0 AND starts_with($fl, 'f:' || $u || ':0:');
+						if (!$one AND !(($ri == 0 OR (starts_with($fl, 'f:') AND trigger.data.fill_up.index < $k
+								AND trigger.data.fill_up.root == trigger.data.units_root
+								AND is_valid_merkle_proof(substring($fl, 2, 64), trigger.data.fill_up)))
+							AND (starts_with($rt, 'n:') OR (trigger.data.fright_up.index > $k
+								AND trigger.data.fright_up.root == trigger.data.units_root
+								AND is_valid_merkle_proof(substring($rt, 2, 64), trigger.data.fright_up)))))
+							bounce('no fraud');
+						$a1 = substring($op, 2, 64);
+						$a2 = ($t == 'L') ? substring($op, 67, 64) : $a1;
+						$a3 = $one ? substring($fl, 134, 64) : $a1;
+						$a4 = $one ? '0000000000000000000000000000000000000000000000000000000000000000' : $a1;
+						$la = $isacct ? substring($L, 5, 64) : (($Q[0] == 'pos') ? substring($L, 4, 64) : '-');
+						if ($la == $a1 OR $la == $a2 OR $la == $a3 OR $la == $a4
+							OR ($Q[0] == 'ord' AND (contains($L, ':' || $a1 || ':') OR contains($L, ':' || $a2 || ':')
+								OR contains($L, ':' || $a3 || ':') OR contains($L, ':' || $a4 || ':'))))
+							bounce('no fraud');
+					}
 					$ins = trigger.data.ins ? true : false;
 					$src = $ins ? $post_wit : $pre_wit;
 					$dst = $ins ? $pre_wit : $post_wit;

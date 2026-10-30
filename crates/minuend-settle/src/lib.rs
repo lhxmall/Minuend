@@ -3461,7 +3461,7 @@ mod tests {
             unit_count: 3,
             wit_count: 11,
             fill_count: 2,
-            assertion_version: 2,
+            assertion_version: ASSERTION_VERSION,
             aa_shard_roots: std::array::from_fn(|_| String::new()),
             last_unit: UnitId([0; 32]),
             seq: 0,
@@ -3471,7 +3471,7 @@ mod tests {
             perp_burned: None,
         };
         let s = format!(
-            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|2|{}",
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|3|{}",
             hex::encode([1u8; 32]),
             hex::encode([2u8; 32]),
             "a".repeat(64),

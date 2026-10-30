@@ -2172,7 +2172,7 @@ mod tests {
             "units_set_root": "S".repeat(44), "ops_root": "O".repeat(44),
             "fills_root": "F".repeat(44), "counts_root": "C".repeat(44),
             "unit_count": 2, "wit_count": 5, "fill_count": 1,
-            "assertion_version": 2, "data_root": "44".repeat(32),
+            "assertion_version": 3, "data_root": "44".repeat(32),
         });
         assert_eq!(
             da_bind_from_header(&f).unwrap(),

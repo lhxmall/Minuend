@@ -191,13 +191,20 @@ pub fn build_proof_with_vault(
             {
                 return Some(p);
             }
-            // Round 6: both legs of a single-fill unit against the
-            // engine's two-party claw (P-claw).
-            if let Some(p) =
-                claw_proof(batch, k, unit_hex, &pre_leaves, &post_leaves, &honest_fills)
-            {
-                return Some(p);
-            }
+        }
+        // Round 6: both legs of a single-fill unit against the engine's
+        // two-party claw (P-claw). R6-C1: under ANY committed op — a fill
+        // under a non-`p:` / `L:` op is itself the fraud.
+        if let Some(p) = claw_proof(
+            batch,
+            k,
+            unit_hex,
+            &expected_op,
+            &pre_leaves,
+            &post_leaves,
+            &honest_fills,
+        ) {
+            return Some(p);
         }
         // #47 A2: the two witness columns the vault pays against (W and
         // the adr: binding), pinned on EVERY unit by the binding dispute AA.
@@ -515,12 +522,97 @@ fn keep_mirror_proof(
     None
 }
 
+/// R6-C2: the accounts a zero- / single-fill Place / Liquidate unit on a
+/// regular market may write (engine `place` / `liquidate_book_path` /
+/// `apply_fill_pair`) and the P-frame evidence fields for it (unit, meta,
+/// the adjacent fills leaves that fix the fill count). `None` = the AA
+/// does not judge this unit (funding market, multi-fill, no meta).
+fn pl_frame_scope(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+) -> Option<(Vec<String>, serde_json::Value)> {
+    let o: Vec<&str> = op.split(':').collect();
+    let mkt = match (o.first().copied(), o.len()) {
+        (Some("p"), 10) => o[2],
+        (Some("L"), 4) => o[3],
+        _ => return None,
+    };
+    let meta = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{mkt}:")))?;
+    let m: Vec<&str> = meta.split(':').collect();
+    if m.len() != 11 || oscript_num(m[9]) != Some(0.0) {
+        return None;
+    }
+    let unit_hexes: Vec<String> = batch
+        .checkpoint
+        .unit_ids
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
+    let u = unit_hexes.get(k)?;
+    let tree = minuend_settle::fills_root_elements(&batch.fills);
+    let unit_of = |l: &str| -> Option<usize> {
+        let id = l.strip_prefix("f:")?.get(..64)?;
+        unit_hexes.iter().position(|x| x == id)
+    };
+    let mine = tree
+        .iter()
+        .filter(|l| l.starts_with(&format!("f:{u}:")))
+        .count();
+    let ri = match mine {
+        0 => tree
+            .iter()
+            .position(|l| l.starts_with("n:") || unit_of(l).is_some_and(|j| j > k))?,
+        1 => tree.iter().position(|l| l.starts_with(&format!("f:{u}:0:")))? + 1,
+        _ => return None,
+    };
+    let right = tree.get(ri)?;
+    let mut data = serde_json::json!({
+        "fills_root": batch.checkpoint.fills_root,
+        "units_root": batch.checkpoint.units_root,
+        "unit": u,
+        "units_proof": proof_json(&unit_hexes, k),
+        "pre_meta": meta,
+        "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+        "fright": right,
+        "fright_proof": proof_json(&tree, ri),
+    });
+    let obj = data.as_object_mut()?;
+    let mut allowed = vec![op.get(2..66)?.to_string()];
+    if o[0] == "L" {
+        allowed.push(op.get(67..131)?.to_string());
+    }
+    if ri > 0 {
+        obj.insert("fill".into(), tree[ri - 1].clone().into());
+        obj.insert("fill_proof".into(), proof_json(&tree, ri - 1));
+    }
+    if mine == 1 {
+        allowed.push(tree[ri - 1].get(134..198)?.to_string());
+        allowed.push(CLAW_ZERO.to_string());
+    } else {
+        if ri > 0 {
+            let j = unit_of(&tree[ri - 1]).filter(|j| *j < k)?;
+            obj.insert("fill_up".into(), proof_json(&unit_hexes, j));
+        }
+        if !right.starts_with("n:") {
+            obj.insert("fright_up".into(), proof_json(&unit_hexes, unit_of(right)?));
+        }
+    }
+    Some((allowed, data))
+}
+
 /// R4-A-3 mirror of the binding AA's P-frame: at a unit whose op is
 /// `c:`/`d:`/`w:`/`D:`/`W:` (well-formed), a `pos:`/`ord:` leaf of the PRE
 /// tree missing from the POSTED post tree (except the order a `c:` of its
 /// owner cancels), or a posted `pos:`/`ord:` leaf missing from the pre
 /// tree. Emitted only when the honest replay's post tree agrees with the
 /// pre tree on that leaf (the engine never moves them under these ops).
+/// R6-C2: at a zero- / single-fill `p:` / `L:` unit on a regular market,
+/// the same for every `acct:` / `pos:` / `ord:` leaf of an account outside
+/// `pl_frame_scope`'s set.
 fn frame_proof(
     batch: &Batch,
     k: usize,
@@ -536,20 +628,36 @@ fn frame_proof(
         "w" | "W" => o.len() == 4,
         _ => false,
     };
-    if !shape {
-        return None;
-    }
+    let pl = if shape {
+        None
+    } else {
+        Some(pl_frame_scope(batch, k, op, pre_leaves)?)
+    };
     let posted = batch.leaf_trace.get(k)?;
     // R5-A-1: acct leaves of accounts other than the op's are frozen too
     // (the op account is op[2..66] for all five shapes).
     let op_acct = op.get(2..66);
     let framed = |l: &str| {
         let n = l.split(':').count();
-        let foreign_acct = n == 5
-            && l.starts_with("acct:")
-            && l.as_bytes().get(69) == Some(&b':')
-            && l.get(5..69) != op_acct;
-        (l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10) || foreign_acct
+        let is_acct = n == 5 && l.starts_with("acct:") && l.as_bytes().get(69) == Some(&b':');
+        let is_pos = l.starts_with("pos:") && n == 7;
+        let is_ord = l.starts_with("ord:") && n == 10;
+        match &pl {
+            None => is_pos || is_ord || (is_acct && l.get(5..69) != op_acct),
+            Some((allowed, _)) => {
+                let owner = if is_acct {
+                    l.get(5..69)
+                } else if is_pos {
+                    l.get(4..68)
+                } else {
+                    None
+                };
+                (is_acct || is_pos || is_ord)
+                    && !allowed.iter().any(|a| {
+                        owner == Some(a.as_str()) || (is_ord && l.contains(&format!(":{a}:")))
+                    })
+            }
+        }
     };
     let cancelled = |l: &str| {
         let q: Vec<&str> = l.split(':').collect();
@@ -568,8 +676,11 @@ fn frame_proof(
             "leaf_proof": proof_json(src, index_of(src, leaf)?),
             "ins": ins,
         });
-        data.as_object_mut()?
-            .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        if let Some((_, ev)) = &pl {
+            obj.extend(ev.as_object()?.clone());
+        }
         Some(data)
     };
     // Deletion / rewrite: a pre leaf the posted post tree dropped.
@@ -617,14 +728,15 @@ fn frame_proof(
 /// R5-A-2: the P-fsane shape rule on a fill string (mirrors the book AA's
 /// `$bad`): not 14 fields, qty not a positive integer, price / taker_post
 /// not integers, taker_post < 0, side not 0/1, kind not 0..3, or kind 2/3
-/// with taker_post != 0.
+/// with taker_post != 0; R6-H1: qty >= 1e15.
 fn fsane_shape_bad(parts: &[&str]) -> bool {
     if parts.len() != 14 {
         return true;
     }
     let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
     let Some(q) = int(parts[9]) else { return true };
-    if q <= 0.0 || int(parts[8]).is_none() {
+    // R6-H1: the engine never emits a qty at / above QTY_CAP (1e15).
+    if q <= 0.0 || q >= 1e15 || int(parts[8]).is_none() {
         return true;
     }
     let Some(tp) = int(parts[13]) else {
@@ -2040,6 +2152,10 @@ fn fill_proof(
             // Fill-stage collateral by kind: pre + release + pnl - taker fee
             // (+ maker pro-rata refund). Exact — the AA recomputes it.
             let abs_old = old_qty.unsigned_abs() as i128;
+            // R6-H1: the AA bounces at / above QTY_CAP (1e15).
+            if abs_old >= QTY_CAP_I || i128::from(qty) >= QTY_CAP_I {
+                continue;
+            }
             let abs_delta = delta.unsigned_abs() as i128;
             let same = old_qty == 0 || (old_qty > 0 && delta > 0) || (old_qty < 0 && delta < 0);
             let (exp_qty, exp_entry, exp_fill, exp_absent, pback, exp_bucket, pnl_v) = if same {
@@ -2502,33 +2618,88 @@ struct ClawOut {
     x: i128,
     /// Keeper reward seized from the target.
     kpay: i128,
+    /// R6-H1 (`$fr1`): the fill lifts a position to >= QTY_CAP.
+    over_cap: bool,
+    /// R6-C2 (`x_who`): (who, post - pre - expected, slack) of the
+    /// Liquidate caller ('c', when neither fill party) and the insurance
+    /// account ('i'), when their posted post leaf exists.
+    extra: [Option<(char, i128, i128)>; 2],
 }
 
-/// `None` = the AA bounces before judging (a gate or a missing / malformed
-/// leaf), or a value sits where Oscript's 15-digit comparisons are not
-/// exact (the mirror then stays silent).
-fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<ClawOut> {
-    const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    const EXACT: i128 = 1_000_000_000_000_000;
+const CLAW_ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const QTY_CAP_I: i128 = minuend_types::QTY_CAP as i128;
+
+/// R6-C1 mirror of the claw AA's `$bad` for the FIRST fill of a unit and
+/// the unit's committed op: `Some(true)` = the AA verdicts from these two
+/// strings alone, `Some(false)` = it goes on, `None` = it bounces before
+/// (malformed fill) or an Oscript comparison could go either way.
+fn claw_shape_bad(fill: &str, op: &str) -> Option<bool> {
     let f: Vec<&str> = fill.split(':').collect();
     if f.len() != 14 || f[0] != "f" || f[2] != "0" {
         return None;
     }
     let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if !f[1..7].iter().enumerate().all(|(i, s)| i == 1 || hex64(s)) {
+    if ![1, 3, 4, 5, 6].iter().all(|&i| hex64(f[i])) || !matches!(f[11], "0" | "1") {
+        return None;
+    }
+    let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
+    let qty = int(f[9]).filter(|q| *q > 0.0)?;
+    if qty >= 1e15 {
+        return Some(true);
+    }
+    let kind = oscript_num(f[12]);
+    let kind_in = |ks: &[f64]| kind.is_some_and(|k| ks.contains(&k));
+    let (tk, mk, market) = (f[3], f[4], f[7]);
+    let o: Vec<&str> = op.split(':').collect();
+    let at = |i: usize| op.as_bytes().get(i) == Some(&b':');
+    if op.starts_with("p:") {
+        if o.len() != 10 || op.get(2..66) != Some(tk) || !at(66) {
+            return Some(true);
+        }
+        if !oscript_eq(o[2], market)? || !oscript_eq(o[3], f[11])? || !matches!(o[6], "0" | "1") {
+            return Some(true);
+        }
+        let Some(oq) = int(o[5]) else {
+            return Some(true);
+        };
+        let Some(om) = int(o[7]) else {
+            return Some(true);
+        };
+        Some(oq >= 1e15 || qty > oq || om < 0.0 || !kind_in(&[0.0, 1.0]))
+    } else if op.starts_with("L:") {
+        if o.len() != 4 || !at(66) || !at(131) {
+            return Some(true);
+        }
+        let (caller, tg) = (op.get(2..66)?, op.get(67..131)?);
+        Some(
+            !oscript_eq(o[3], market)?
+                || (tg != tk && tg != mk)
+                || caller == tg
+                || caller == CLAW_ZERO
+                || !kind_in(&[2.0, 3.0]),
+        )
+    } else {
+        Some(true)
+    }
+}
+
+/// `None` = the AA bounces before judging (a gate or a missing / malformed
+/// leaf), or a value sits where Oscript's 15-digit comparisons are not
+/// exact (the mirror then stays silent). Assumes `claw_shape_bad` is
+/// `Some(false)` and the regular-market rule (`claw_regular_rule`) holds.
+fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<ClawOut> {
+    let f: Vec<&str> = fill.split(':').collect();
+    if claw_shape_bad(fill, op) != Some(false) {
         return None;
     }
     let (tk, mk, mo, market, side) = (f[3], f[4], f[6], f[7], f[11]);
-    if side != "0" && side != "1" {
-        return None;
-    }
     let kind: i64 = f[12].parse().ok()?;
-    if !matches!(kind, 0 | 2 | 3) || tk == mk || tk == ZERO || mk == ZERO {
+    if !matches!(kind, 0 | 2 | 3) || tk == mk || tk == CLAW_ZERO || mk == CLAW_ZERO {
         return None;
     }
     let price: i128 = f[8].parse().ok()?;
     let qty: i128 = f[9].parse().ok()?;
-    if qty <= 0 || qty >= EXACT || price.abs() >= EXACT {
+    if qty <= 0 || qty >= QTY_CAP_I || price.abs() >= QTY_CAP_I {
         return None;
     }
     let meta = pre
@@ -2542,15 +2713,12 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
     let keeper_bps: i128 = m[6].parse().ok()?;
     let o: Vec<&str> = op.split(':').collect();
     let (margin, tp, refund, keeper_m) = if kind == 0 {
-        if o.len() != 10 || o[0] != "p" || o[1] != tk || o[2] != market || o[3] != side {
-            return None;
-        }
-        if o[6] != "0" && o[6] != "1" {
+        if o[0] != "p" {
             return None;
         }
         let oqty: i128 = o[5].parse().ok()?;
         let om: i128 = o[7].parse().ok()?;
-        if qty > oqty || om < 0 || oqty >= EXACT || om >= EXACT {
+        if om >= QTY_CAP_I {
             return None;
         }
         let margin = if o[6] == "1" { om } else { 0 };
@@ -2562,7 +2730,7 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
         let rests = o[9] == "0" && o[8] == "0" && qty < oqty;
         (margin, tp, if rests { 0 } else { margin - tp }, false)
     } else {
-        if o.len() != 4 || o[0] != "L" || o[2] != tk || o[3] != market {
+        if o[0] != "L" || o[2] != tk {
             return None;
         }
         (0, 0, 0, o[1] == mk)
@@ -2576,7 +2744,7 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
         let mprice: i128 = mo_[4].parse().ok()?;
         let mrem: i128 = mo_[6].parse().ok()?;
         let mml: i128 = mo_[9].parse().ok()?;
-        if mprice != price || qty > mrem || mrem >= EXACT {
+        if mprice != price || qty > mrem || mrem >= QTY_CAP_I {
             return None;
         }
         (mml, if qty >= mrem { mml } else { mml * qty / mrem })
@@ -2628,7 +2796,12 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
     if kind != 0 && t.iso {
         return None;
     }
+    // R6-H1: a pre position at / above the cap is not judged.
+    if t.qty.abs() >= QTY_CAP_I || mm_.qty.abs() >= QTY_CAP_I {
+        return None;
+    }
     let td = if side == "0" { qty } else { -qty };
+    let over_cap = (t.qty + td).abs() >= QTY_CAP_I || (mm_.qty - td).abs() >= QTY_CAP_I;
     let (trel, tpnl, tback) = claw_leg(&t, td, price, tp);
     let (mrel, mpnl, mback) = claw_leg(&mm_, -td, price, mp);
     // Fill stages, then the engine's claw (taker first, then maker).
@@ -2655,24 +2828,49 @@ fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<Cl
         + margin
         + (t.qty.abs() * t.entry.abs() + mm_.qty.abs() * mm_.entry.abs()) / 10_000_000_000;
     let slack = 4 * (16 + s / FILL_REL);
+    // R6-C2: the caller (a third party) and the insurance account.
+    let extra_of = |who: char, a: &str, exp: i128| -> Option<(char, i128, i128)> {
+        let c1 = col_of(post, a)?;
+        let c0 = col_of(pre, a).unwrap_or(0);
+        Some((who, c1 - c0 - exp, slack + 4 * (c0.abs() / FILL_REL)))
+    };
+    let caller = if kind != 0 && !keeper_m {
+        extra_of('c', o[1], kpay)
+    } else {
+        None
+    };
     Some(ClawOut {
         dt: col_of(post, tk)? - et,
         dm: col_of(post, mk)? - em,
         slack,
         x,
         kpay,
+        over_cap,
+        extra: [caller, extra_of('i', CLAW_ZERO, fee)],
     })
 }
 
-/// Round 6 P-claw builder: the unit's ONLY fill, judged on BOTH legs at
-/// once (the claw one party paid must be the claw the other received, the
-/// keeper seize and the isolated refund on top). Emitted only when the AA's
-/// verdict is certain (a deviation beyond twice its slack) and — for a fill
-/// the honest replay produced — the honest tree passes the same model.
+/// R6-C1 regular-market rule (`$fr0`): after the funding gate a kind-1
+/// fill, or a Liquidate whose target is not the taker, is fraud.
+fn claw_regular_rule(fill: &str, op: &str) -> bool {
+    let f: Vec<&str> = fill.split(':').collect();
+    oscript_num(f.get(12).copied().unwrap_or("")) == Some(1.0)
+        || (op.starts_with("L:") && op.get(67..131) != f.get(3).copied())
+}
+
+/// Round 6 P-claw builder: the unit's FIRST fill against its op (R6-C1:
+/// any mismatch is fraud), then — for the unit's ONLY fill on a regular
+/// market — both legs at once (the claw one party paid must be the claw
+/// the other received, the keeper seize and the isolated refund on top),
+/// the caller / insurance credit (R6-C2) and the position cap (R6-H1).
+/// Emitted only when the AA's verdict is certain (a deviation beyond twice
+/// its slack) and — for the honest fill + op — the honest tree passes the
+/// same model.
 fn claw_proof(
     batch: &Batch,
     k: usize,
     unit_hex: &str,
+    expected_op: &str,
     pre_leaves: &[String],
     post_leaves: &[String],
     honest_fills: &[String],
@@ -2683,29 +2881,9 @@ fn claw_proof(
         .fills
         .iter()
         .position(|f| f.starts_with(&format!("f:{unit_hex}:0:")))?;
-    let right = fills_tree.get(gidx + 1)?;
-    if right.starts_with(&prefix) {
-        return None; // multi-fill unit: not judged
-    }
     let f = batch.fills[gidx].clone();
     let op = batch.ops.get(k)?.clone();
-    let posted: Vec<String> = batch
-        .leaf_trace
-        .get(k)
-        .cloned()
-        .unwrap_or_else(|| post_leaves.to_vec());
-    let c = claw_eval(&f, &op, pre_leaves, &posted)?;
-    if c.dt.abs() <= 2 * c.slack && c.dm.abs() <= 2 * c.slack {
-        return None;
-    }
-    if honest_fills.contains(&f) {
-        match claw_eval(&f, &op, pre_leaves, post_leaves) {
-            Some(h) if h.dt.abs() <= h.slack && h.dm.abs() <= h.slack => {}
-            _ => return None, // the model does not reproduce the replay
-        }
-    }
-    let parts: Vec<&str> = f.split(':').collect();
-    let (tk, mk, market, kind) = (parts[3], parts[4], parts[7], parts[12]);
+    let honest_pair = honest_fills.contains(&f) && op == expected_op;
     let unit_hexes: Vec<String> = batch
         .checkpoint
         .unit_ids
@@ -2721,25 +2899,95 @@ fn claw_proof(
         "fill": f,
         "fill_proof": proof_json(&fills_tree, gidx),
         "units_proof": proof_json(&unit_hexes, k),
-        "right": right,
-        "right_proof": proof_json(&fills_tree, gidx + 1),
-        "post_wit": batch.trace.get(k)?,
-        "post_proof": proof_json(&batch.trace, k),
         "op": op,
         "ops_proof": proof_json(&batch.ops, k),
     });
+    let built = |data: serde_json::Value| BuiltProof {
+        pred: "claw".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    };
+    // R6-C1: the first fill is not its op's (any fill count / market).
+    match claw_shape_bad(&f, &op)? {
+        true if !honest_pair => return Some(built(data)),
+        true => return None,
+        false => {}
+    }
+    let right = fills_tree.get(gidx + 1)?;
+    if right.starts_with(&prefix) {
+        return None; // multi-fill unit: not judged (未修复项 19)
+    }
+    let posted: Vec<String> = batch
+        .leaf_trace
+        .get(k)
+        .cloned()
+        .unwrap_or_else(|| post_leaves.to_vec());
+    let parts: Vec<&str> = f.split(':').collect();
+    let (tk, mk, market, kind) = (parts[3], parts[4], parts[7], parts[12]);
+    let meta = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{market}:")))?
+        .clone();
+    if meta.split(':').nth(9).and_then(oscript_num) != Some(0.0) {
+        return None; // funding-rate market
+    }
+    {
+        let obj = data.as_object_mut()?;
+        obj.insert("right".into(), right.clone().into());
+        obj.insert("right_proof".into(), proof_json(&fills_tree, gidx + 1));
+        obj.insert("post_wit".into(), batch.trace.get(k)?.clone().into());
+        obj.insert("post_proof".into(), proof_json(&batch.trace, k));
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("pre_meta".into(), meta.clone().into());
+        obj.insert(
+            "pre_meta_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, &meta)?),
+        );
+    }
+    if parts[3] == parts[4] || tk == CLAW_ZERO || mk == CLAW_ZERO {
+        return None;
+    }
+    // R6-C1 (`$fr0`): kind 1 / a foreign Liquidate target on a regular market.
+    if claw_regular_rule(&f, &op) {
+        return (!honest_pair).then(|| built(data));
+    }
+    let c = claw_eval(&f, &op, pre_leaves, &posted)?;
+    let leg_bad = c.dt.abs() > 2 * c.slack || c.dm.abs() > 2 * c.slack;
+    let extra_bad = c
+        .extra
+        .iter()
+        .flatten()
+        .find(|(_, d, sl)| d.abs() > 2 * sl)
+        .copied();
+    if !leg_bad && extra_bad.is_none() && !c.over_cap {
+        return None;
+    }
+    if honest_fills.contains(&f) {
+        match claw_eval(&f, &op, pre_leaves, post_leaves) {
+            Some(h)
+                if h.dt.abs() <= h.slack
+                    && h.dm.abs() <= h.slack
+                    && !h.over_cap
+                    && h.extra.iter().flatten().all(|(_, d, sl)| d.abs() <= *sl) => {}
+            _ => return None, // the model does not reproduce the replay
+        }
+    }
+    let x_who = if !leg_bad && !c.over_cap {
+        Some(extra_bad?.0)
+    } else {
+        None
+    };
     let obj = data.as_object_mut()?;
-    obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    if let Some(w) = x_who {
+        obj.insert("x_who".into(), w.to_string().into());
+    }
     let mut put = |key: &str, tree: &[String], leaf: &String| -> Option<()> {
         let i = index_of(tree, leaf)?;
         obj.insert(key.into(), leaf.clone().into());
         obj.insert(format!("{key}_proof"), proof_json(tree, i));
         Some(())
     };
-    let meta = pre_leaves
-        .iter()
-        .find(|l| l.starts_with(&format!("meta:{market}:")))?;
-    put("pre_meta", pre_leaves, meta)?;
     if kind != "2" {
         let mord = pre_leaves
             .iter()
@@ -2765,12 +3013,28 @@ fn claw_proof(
             }
         }
     }
-    Some(BuiltProof {
-        pred: "claw".into(),
-        fill_aa: false,
-        bind_aa: false,
-        data,
-    })
+    if let Some(who) = x_who {
+        let a = if who == 'c' {
+            op.get(2..66)?.to_string()
+        } else {
+            CLAW_ZERO.to_string()
+        };
+        let key = format!("acct:{a}:");
+        let post_acct = posted.iter().find(|l| l.starts_with(&key))?;
+        put("x_post_acct", &posted, post_acct)?;
+        match pre_leaves.iter().find(|l| l.starts_with(&key)) {
+            Some(l) => put("x_pre_acct", pre_leaves, l)?,
+            None => {
+                let i = pre_leaves.iter().position(|l| l.as_str() > key.as_str())?;
+                if i == 0 {
+                    return None; // the AA's absence arm is a straddle only
+                }
+                put("x_pleft", pre_leaves, &pre_leaves[i - 1])?;
+                put("x_pright", pre_leaves, &pre_leaves[i])?;
+            }
+        }
+    }
+    Some(built(data))
 }
 
 #[cfg(test)]

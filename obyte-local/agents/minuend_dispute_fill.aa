@@ -395,6 +395,11 @@
 					$abs_old = ($old_qty < 0) ? (0 - $old_qty) : $old_qty;
 					// R5-A-4: magnitudes, not signed values (a price <= -1e14
 					// rounds the vwap just the same).
+					// R6-H1: below QTY_CAP (1e15) `qty` vs `|pos|` (flip or
+					// pure close: $leftover / $open) compares exactly; the
+					// engine never emits a larger qty (P-fsane: fraud) nor
+					// holds a larger position (its own unit is the fraud).
+					if ($abs_old >= 1000000000000000 OR $qty >= 1000000000000000) bounce('no fraud');
 					$big = abs($price) >= 100000000000000 OR abs($old_entry) >= 100000000000000
 						OR $abs_old >= 100000000000000 OR $qty >= 100000000000000;
 					$abs_delta = ($delta < 0) ? (0 - $delta) : $delta;

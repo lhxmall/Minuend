@@ -709,6 +709,36 @@ impl Engine {
         if live_count >= MAX_LIVE_ORDERS_PER_ACCOUNT {
             return Err(RejectReason::Risk);
         }
+        // R6-H1: quantities and positions stay below QTY_CAP (1e15), where
+        // the dispute AAs' Oscript compares `qty` with `|position|`
+        // exactly. Invariant per (account, market): |position| + the
+        // remaining qty of its live orders + this order's qty < QTY_CAP —
+        // fills only move an order's remaining into its position, and a
+        // liquidation / ADL only shrinks positions, so no fill can lift
+        // any position (taker or maker) to the cap.
+        {
+            let pos_abs = self
+                .state
+                .accounts
+                .get(&account)
+                .and_then(|a| a.positions.get(&market))
+                .map(|p| u128::from(p.qty.unsigned_abs()))
+                .unwrap_or(0);
+            let open: u128 = self
+                .state
+                .books
+                .get(&market)
+                .map(|b| {
+                    b.live_orders()
+                        .filter(|o| o.account == account)
+                        .map(|o| u128::from(o.remaining))
+                        .sum()
+                })
+                .unwrap_or(0);
+            if pos_abs + open + u128::from(qty) >= u128::from(minuend_types::QTY_CAP) {
+                return Err(RejectReason::Risk);
+            }
+        }
         // Signed prices: margin must cover the larger *magnitude* — a plain
         // max() would let a short at -100 post margin against mark -1.
         let px_est = if px_for_notional.unsigned_abs() >= mark.unsigned_abs() {
@@ -10035,19 +10065,38 @@ mod tests {
         eng.ingest(deposit(vec![g], &alice, 1_000_000 * USD_SCALE as i128, 1))
             .unwrap();
         let q = 5_000_000_000_000_000_000u64; // two of these exceed i64::MAX
+        // R6-H1: `place` now refuses any qty >= QTY_CAP, so such orders can
+        // only exist if injected; the reserve sum must still not wrap.
+        let bid = place_on(
+            vec![g],
+            &alice,
+            mkt,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            1,
+            q,
+            1,
+        );
+        assert!(rejected_with(&eng.ingest(bid).unwrap(), RejectReason::Risk));
         for n in 1..=3u64 {
-            let bid = place_on(
-                vec![g],
-                &alice,
-                mkt,
-                Side::Bid,
-                OrderType::Limit,
-                TimeInForce::Gtc,
-                1,
-                q,
-                n,
-            );
-            let _ = eng.ingest(bid).unwrap();
+            eng.state
+                .book_mut(mkt)
+                .submit(minuend_book::Order {
+                    id: order_id(a, mkt, 100 + n),
+                    account: a,
+                    market: mkt,
+                    side: Side::Bid,
+                    typ: OrderType::Limit,
+                    tif: TimeInForce::Gtc,
+                    price: 1,
+                    qty: q,
+                    remaining: q,
+                    seq: 100 + n,
+                    isolated: false,
+                    margin_left: 0,
+                })
+                .unwrap();
         }
         let live = eng.state.books[&mkt]
             .live_orders()
@@ -10060,6 +10109,71 @@ mod tests {
             "reserve wrapped: {}",
             eng.resting_open_im(a)
         );
+    }
+
+    /// R6-H1: `place` keeps |position| + live remaining + qty < QTY_CAP
+    /// per (account, market), so no fill can lift a position to 1e15.
+    #[test]
+    fn r6h1_qty_cap_counts_position_and_live_orders() {
+        let mut eng = activated_engine();
+        let alice = sk(1);
+        let bob = sk(2);
+        let a = acct_of(&alice);
+        let g = genesis_id();
+        let d = gov_dep(vec![g], &sk(9), CREATE_MARKET_FEE_PERP, 99);
+        let tip = unit_id(&d);
+        eng.ingest(d).unwrap();
+        let cm = list_market_with(vec![tip], &sk(9), false);
+        eng.ingest(cm).unwrap();
+        let mkt = MarketId(2);
+        eng.ingest(deposit(vec![g], &alice, 1_000_000 * USD_SCALE as i128, 1))
+            .unwrap();
+        eng.ingest(deposit(vec![g], &bob, 1_000_000 * USD_SCALE as i128, 2))
+            .unwrap();
+        let cap = minuend_types::QTY_CAP;
+        let bid = |q: u64, n: u64| {
+            place_on(
+                vec![g],
+                &alice,
+                mkt,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                1,
+                q,
+                n,
+            )
+        };
+        // One order at the cap: rejected.
+        assert!(rejected_with(&eng.ingest(bid(cap, 1)).unwrap(), RejectReason::Risk));
+        // 6e14 rests; another 4e14 would make the sum reach the cap.
+        let first = 600_000_000_000_000u64;
+        let evs = eng.ingest(bid(first, 1)).unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })));
+        assert!(rejected_with(
+            &eng.ingest(bid(cap - first, 2)).unwrap(),
+            RejectReason::Risk
+        ));
+        let evs = eng.ingest(bid(cap - first - 1, 2)).unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, ExecEvent::Rejected { .. })));
+        // Bob sells 1e14 into the bids: alice's position takes over the
+        // filled remaining, the sum stays at cap - 1 — one more lot is
+        // still refused.
+        let ask = place_on(
+            vec![g],
+            &bob,
+            mkt,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            1,
+            100_000_000_000_000,
+            1,
+        );
+        assert!(applied_with_fills(&eng.ingest(ask).unwrap()));
+        let pos = eng.state.accounts[&a].positions[&mkt].qty;
+        assert_eq!(pos, 100_000_000_000_000);
+        assert!(rejected_with(&eng.ingest(bid(1, 3)).unwrap(), RejectReason::Risk));
     }
 
     /// R2-E-11: a funding-rate off-book liquidation that fails mid-way
