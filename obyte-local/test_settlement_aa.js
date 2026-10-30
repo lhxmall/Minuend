@@ -3405,6 +3405,80 @@ async function main() {
     await triggerBounce(challenger, claw, clawPayload(P7, 82, ok7, MORD7), 20000, "no fraud");
     await live(82, "honest maker flip 1 below the cap");
     console.log("64. R6-H1: flip of |pos| 4e14 by 4e14+1 judged exactly (escrow to the new bucket), fill qty 1e15 → frozen (claw + fsane); honest flip → 'no fraud'");
+
+    // ===================== ROUND 7 (fix/47-r7) ============================
+    // ---- 65. P-opbind (未修复项 10): the ops leaf must be the unit's own ----
+    // descriptor. A unit id is sha256("mnu3|" hex(canonical) "|" E); the
+    // challenger sends the text split at its second '|'.
+    const opUnit = (tag, uPre, uOp, op) => {
+      const id = sha256Hex(uPre + uOp);
+      const units = pad2([id], tag + "-units");
+      return Object.assign(oneUnit(tag, op, [acct(T, 1), END]), {
+        id, uPre, uOp, units, unitsRoot: merkle.getMerkleRoot(units),
+      });
+    };
+    const obPayload = (h, u) => ({
+      pred: "opbind", height: h, rollup: ROLLUP_ADDR, k: 0,
+      ops_root: u.opsRoot, units_root: u.unitsRoot,
+      op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      units_proof: merkle.getMerkleProof(u.units, 0),
+      u_pre: u.uPre, u_op: u.uOp,
+    });
+    const PRE7 = "mnu3|" + "01ab".repeat(40) + "|";
+    // (a) the Place committed as `x:{unit}` (10 (a): third parties of a
+    // zero-fill unit would escape P-frame).
+    const obx = opUnit("r7-obx", PRE7, op1, "x:" + sha256Hex(PRE7 + op1));
+    await submitAt(83, obx);
+    await triggerVerdict(challenger, dispute, obPayload(83, obx), 20000, "P-opbind: Place committed as x:");
+    await frozen(83, "Place committed as x:");
+    // (b) margin / isolated rewritten in the p: leaf (R6-M1).
+    const op1m = `p:${T}:1:0:9000000000000:100000000:1:49955000000:0:0`;
+    const obm = opUnit("r7-obm", PRE7, op1, op1m);
+    await submitAt(83, obm);
+    await triggerVerdict(challenger, dispute, obPayload(83, obm), 20000, "P-opbind: p: margin rewritten");
+    await frozen(83, "p: margin rewritten");
+    // (c) an `x` unit (no descriptor) committed as a p: leaf.
+    const obxp = opUnit("r7-obxp", PRE7, "x", op1);
+    await submitAt(83, obxp);
+    await triggerVerdict(challenger, dispute, obPayload(83, obxp), 20000, "P-opbind: x unit committed as p:");
+    await frozen(83, "x unit committed as p:");
+    // Honest: the leaf is the descriptor / `x:{id}`; a re-split text (a
+    // descriptor holding '|') never frames it.
+    const obok = opUnit("r7-obok", PRE7, op1, op1);
+    await submitAt(83, obok);
+    await triggerBounce(challenger, dispute, obPayload(83, obok), 20000, "no fraud");
+    const odd = `d:${T}:5:A|B:${"A".repeat(43)}=`;
+    const obodd = opUnit("r7-obodd", PRE7, odd, odd);
+    await submitAt(83, obodd);
+    await triggerBounce(challenger, dispute, obPayload(83, obodd), 20000, "no fraud");
+    const cut = odd.indexOf("|") + 1;
+    await triggerBounce(challenger, dispute, Object.assign(obPayload(83, obodd), {
+      u_pre: PRE7 + odd.slice(0, cut), u_op: odd.slice(cut),
+    }), 20000, "bad unit text");
+    const obxok = opUnit("r7-obxok", PRE7, "x", "x:" + sha256Hex(PRE7 + "x"));
+    await submitAt(83, obxok);
+    await triggerBounce(challenger, dispute, obPayload(83, obxok), 20000, "no fraud");
+    await live(83, "honest ops leaves (descriptor, x:{id}, '|' address)");
+    console.log("65. P-opbind: Place as x:, p: margin rewritten, x unit as p: → frozen; honest descriptor / x:{id} / '|' address → 'no fraud', re-split → 'bad unit text'");
+
+    // ---- 66. one fill per unit (未修复项 19): a second fill is fraud ------
+    const f1x = f1.replace(`f:${isoUnit}:0:`, `f:${isoUnit}:1:`);
+    const fsPayload = (h, u, f, i) => ({
+      pred: "fsane", height: h, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot, units_root: ISO_UNITS_ROOT,
+      units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(u.tree, i), pre_wit: obxok.wit,
+    });
+    // The single-fill Place of 62 with a fabricated second fill (the
+    // "make it multi-fill to escape P-claw / P-frame" route).
+    const fab = clawUnit(P5, "r7-fab", op1, [f1, f1x], post5(49955000000, 0, 7000000000));
+    await submitAt(84, fab);
+    await triggerVerdict(challenger, book, fsPayload(84, fab, f1x, 1), 20000, "fabricated second fill (fsane idx)");
+    await frozen(84, "fabricated second fill");
+    const one = clawUnit(P5, "r7-one", op1, [f1], post5(40955000000, 0, 7000000000));
+    await submitAt(84, one);
+    await triggerBounce(challenger, book, fsPayload(84, one, f1, 0), 20000, "no fraud");
+    await live(84, "honest single fill");
+    console.log("66. one fill per unit: a fabricated idx-1 fill → frozen (P-fsane); honest idx-0 fill → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

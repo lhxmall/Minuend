@@ -3139,7 +3139,7 @@ mod tests {
             TimeInForce::Ioc,
             px2,
             2 * q,
-            2,
+            1, // the refused order above did not consume seq 1
         );
         let ib2 = unit_id(&b2);
         let f = fills_of(&eng.ingest(b2).unwrap());
@@ -3155,17 +3155,14 @@ mod tests {
             TimeInForce::Gtc,
             px2,
             2 * q,
-            3,
+            2,
         );
         let f = fills_of(&eng.ingest(b3).unwrap());
         assert_eq!(f.len(), 1);
         assert_eq!((f[0].price, f[0].qty), (px2, q));
         let rest: Vec<_> = eng.state.books[&BTC_USD].live_orders().collect();
         assert_eq!(rest.len(), 1);
-        assert_eq!(
-            (rest[0].account, rest[0].remaining),
-            (acct_of(&alice), q)
-        );
+        assert_eq!((rest[0].account, rest[0].remaining), (acct_of(&alice), q));
     }
 
     #[test]
@@ -11138,12 +11135,20 @@ mod tests {
                 usd(20_000) as u64,
             );
             let evs = eng.ingest(u).unwrap();
-            if bankrupt {
-                assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
-                assert_eq!(r2_root(&eng), before, "rejected = unchanged");
-            } else {
-                assert!(applied_with_fills(&evs), "{evs:?}");
-            }
+            // Round 7 (one fill per unit): the IOC now takes only the best
+            // level (M's reducing ask), so no earlier same-unit claw can
+            // precede a second fill's fee check — both variants apply one
+            // fill and H is never reached.
+            let _ = (bankrupt, before);
+            assert!(applied_with_fills(&evs), "{evs:?}");
+            let n: usize = evs
+                .iter()
+                .map(|e| match e {
+                    ExecEvent::Applied { fills, .. } => fills.len(),
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(n, 1, "one fill per unit");
             // The honest maker never pays the taker's fee.
             assert!(eng.state.accounts[&acct_of(&h)].collateral >= h_before);
         }

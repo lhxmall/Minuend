@@ -494,16 +494,12 @@ pub fn op_descriptor(op: &Op) -> Option<String> {
             account,
             amount,
             nonce,
-        } => {
-            Some(format!("w:{}:{}:{}", hex::encode(account.0), amount, nonce))
-        }
+        } => Some(format!("w:{}:{}:{}", hex::encode(account.0), amount, nonce)),
         GovWithdraw {
             account,
             amount,
             nonce,
-        } => {
-            Some(format!("W:{}:{}:{}", hex::encode(account.0), amount, nonce))
-        }
+        } => Some(format!("W:{}:{}:{}", hex::encode(account.0), amount, nonce)),
         // #47 A3: `typ` (0 Limit / 1 Market) is committed so the fill
         // dispute AA can tell whether an unfilled remainder rests in the
         // book (Limit + Gtc) or is refunded in-unit — the escrow identity
@@ -520,35 +516,33 @@ pub fn op_descriptor(op: &Op) -> Option<String> {
             margin,
             tif,
             ..
-        } => {
-            Some(format!(
-                "p:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                hex::encode(account.0),
-                market.0,
-                side.as_u8(),
-                price,
-                qty,
-                if *isolated { 1 } else { 0 },
-                margin,
-                tif.as_u8(),
-                typ.as_u8()
-            ))
-        }
-        Cancel { account, order_id } => {
-            Some(format!("c:{}:{}", hex::encode(account.0), hex::encode(order_id.0)))
-        }
+        } => Some(format!(
+            "p:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            hex::encode(account.0),
+            market.0,
+            side.as_u8(),
+            price,
+            qty,
+            if *isolated { 1 } else { 0 },
+            margin,
+            tif.as_u8(),
+            typ.as_u8()
+        )),
+        Cancel { account, order_id } => Some(format!(
+            "c:{}:{}",
+            hex::encode(account.0),
+            hex::encode(order_id.0)
+        )),
         Liquidate {
             caller,
             target,
             market,
-        } => {
-            Some(format!(
-                "L:{}:{}:{}",
-                hex::encode(caller.0),
-                hex::encode(target.0),
-                market.0
-            ))
-        }
+        } => Some(format!(
+            "L:{}:{}:{}",
+            hex::encode(caller.0),
+            hex::encode(target.0),
+            market.0
+        )),
         // R2-E-2: a Reveal executes its inner op (or nothing, when
         // rejected), so for the ops whose witness columns the dispute AAs
         // pin (collateral, PERP, W, adr:) the committed descriptor is the

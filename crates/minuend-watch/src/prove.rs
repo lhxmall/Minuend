@@ -4340,9 +4340,9 @@ mod tests {
 
     #[test]
     fn skip_on_first_fill_of_multi_fill_unit_builds_proof() {
-        // #47 B3: carol @100k is better than bob @101k; alice sweeps both
-        // (2 fills). The liar swaps fill idx 0's maker to bob — the first
-        // fill of a multi-fill unit is now challengeable.
+        // #47 B3: carol @100k is better than bob @101k. Round 7: a unit
+        // carries at most one fill (alice's bid @101k takes carol only);
+        // the liar swaps fill idx 0's maker to bob — still challengeable.
         use minuend_types::{
             OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE, QTY_SCALE, USD_SCALE,
         };
@@ -4384,12 +4384,12 @@ mod tests {
         let u1 = mk(vec![i0], &carol, ids[2], Side::Ask, p100, q);
         let i1 = unit_id(&u1);
         eng.ingest(u1).unwrap();
-        let u2 = mk(vec![i1], &alice, ids[0], Side::Bid, p101, 2 * q);
+        let u2 = mk(vec![i1], &alice, ids[0], Side::Bid, p101, q);
         let i2 = unit_id(&u2);
         eng.ingest(u2).unwrap();
         let mut eng2 = eng.clone();
         let mut batch = Batch::from_applied(&prev, &mut eng2, &[i0, i1, i2]).expect("batch");
-        assert_eq!(batch.fills.len(), 2);
+        assert_eq!(batch.fills.len(), 1);
         // Honest: no proof.
         let mut r0 = replay.clone();
         assert!(build_proof(&batch, &mut r0, &[], 0).is_none());
@@ -5750,14 +5750,22 @@ mod tests {
         }
         let pre = d["u_pre"].as_str()?;
         let e = d["u_op"].as_str()?;
-        if e.is_empty() || !pre.starts_with("mnu3|") || !pre.ends_with('|') || pre.split('|').count() != 3 {
+        if e.is_empty()
+            || !pre.starts_with("mnu3|")
+            || !pre.ends_with('|')
+            || pre.split('|').count() != 3
+        {
             return None;
         }
         let id = hex::encode(sha2::Sha256::digest(format!("{pre}{e}").as_bytes()));
         if units.get(k) != Some(&id) || d["units_proof"]["index"].as_u64()? as usize != k {
             return None;
         }
-        let want = if e == "x" { format!("x:{id}") } else { e.to_string() };
+        let want = if e == "x" {
+            format!("x:{id}")
+        } else {
+            e.to_string()
+        };
         Some(op != want)
     }
 
@@ -5873,7 +5881,9 @@ mod tests {
         lie.fills.push(f1.clone());
         refill(&mut lie);
         assert!(fsane_shape_bad(&f1.split(':').collect::<Vec<_>>()));
-        assert!(!fsane_shape_bad(&lie.fills[0].split(':').collect::<Vec<_>>()));
+        assert!(!fsane_shape_bad(
+            &lie.fills[0].split(':').collect::<Vec<_>>()
+        ));
         let pre = minuend_state::wit_leaves(&replay.state);
         let tree = minuend_settle::fills_root_elements(&lie.fills);
         let units = hexes(&lie);
