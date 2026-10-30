@@ -1249,7 +1249,11 @@ fn xframe_proof(
             _ => false,
         };
         if shape {
-            (String::new(), String::new(), vec![op.get(2..66)?.to_string()])
+            (
+                String::new(),
+                String::new(),
+                vec![op.get(2..66)?.to_string()],
+            )
         } else {
             let (allowed, ev) = pl_frame_scope(batch, k, op, pre_leaves)?;
             merge(&mut base, ev)?;
@@ -7045,7 +7049,11 @@ mod tests {
         let pre = l(&x, "100", "5", "0");
         // Bystander collateral / PERP / W under c: d: w: p: → fraud.
         for t in ["c", "d", "w", "p", "L", "D", "W"] {
-            for post in [l(&x, "101", "5", "0"), l(&x, "100", "6", "0"), l(&x, "100", "5", "1")] {
+            for post in [
+                l(&x, "101", "5", "0"),
+                l(&x, "100", "6", "0"),
+                l(&x, "100", "5", "1"),
+            ] {
                 assert_eq!(
                     frame_acct_bad("", "", nx(t), 2, Some(&pre), &post, false),
                     Some(true),
@@ -7054,32 +7062,135 @@ mod tests {
             }
             // Bond returned at the batch boundary: honest at k == 0 only.
             let rel = l(&x, "100", &(5 + bond).to_string(), "0");
-            assert_eq!(frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel, false), Some(false), "{t}");
-            assert_eq!(frame_acct_bad("", "", nx(t), 1, Some(&pre), &rel, false), Some(true), "{t}");
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel, false),
+                Some(false),
+                "{t}"
+            );
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 1, Some(&pre), &rel, false),
+                Some(true),
+                "{t}"
+            );
             // ... on top of nothing else.
             let rel2 = l(&x, "101", &(5 + bond).to_string(), "0");
-            assert_eq!(frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel2, false), Some(true), "{t}");
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel2, false),
+                Some(true),
+                "{t}"
+            );
         }
         // The op account: collateral and W free (judged elsewhere), PERP
         // only under D: / W: (or the k == 0 bond).
         let opre = l(&op, "100", "5", "0");
-        assert_eq!(frame_acct_bad("", "", nx("w"), 2, Some(&opre), &l(&op, "90", "5", "10"), false), Some(false));
-        assert_eq!(frame_acct_bad("", "", nx("d"), 2, Some(&opre), &l(&op, "100", "9", "0"), false), Some(true));
-        assert_eq!(frame_acct_bad("", "", nx("D"), 2, Some(&opre), &l(&op, "100", "9", "0"), false), Some(false));
-        assert_eq!(frame_acct_bad("", "", nx("W"), 2, Some(&opre), &l(&op, "100", "1", "0"), false), Some(false));
         assert_eq!(
-            frame_acct_bad("", "", nx("c"), 0, Some(&opre), &l(&op, "100", &(5 + bond).to_string(), "0"), false),
+            frame_acct_bad(
+                "",
+                "",
+                nx("w"),
+                2,
+                Some(&opre),
+                &l(&op, "90", "5", "10"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("d"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "9", "0"),
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("D"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "9", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("W"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "1", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("c"),
+                0,
+                Some(&opre),
+                &l(&op, "100", &(5 + bond).to_string(), "0"),
+                false
+            ),
             Some(false)
         );
         // A single-fill p: exempts its maker's collateral, not its PERP / W.
         let ex2 = vec![op.clone(), mk.clone(), CLAW_ZERO.to_string()];
         let mpre = l(&mk, "100", "5", "0");
-        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "50", "5", "0"), false), Some(false));
-        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "100", "6", "0"), false), Some(true));
-        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "100", "5", "3"), false), Some(true));
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "50", "5", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "100", "6", "0"),
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "100", "5", "3"),
+                false
+            ),
+            Some(true)
+        );
         // A fresh account with cash under c: → fraud; empty → honest.
-        assert_eq!(frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "7", "0", "0"), false), Some(true));
-        assert_eq!(frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "0", "0", "0"), false), Some(false));
+        assert_eq!(
+            frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "7", "0", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "0", "0", "0"), false),
+            Some(false)
+        );
         // bond_release is the AA's `$p1 == $p0 + 50000` (length($p0) <= 14).
         assert!(bond_release("7", &(7 + bond).to_string()));
         assert!(!bond_release("7", "8"));
@@ -7109,12 +7220,25 @@ mod tests {
             .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
         let px = 90_000 * PRICE_SCALE as i64;
         let q = QTY_SCALE / 1000;
-        let u1 = claw_place(vec![genesis_id()], &a, Side::Bid, TimeInForce::Gtc, px, q, 1, None);
+        let u1 = claw_place(
+            vec![genesis_id()],
+            &a,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+            None,
+        );
         let id1 = unit_id(&u1);
         let prev1 = eng.state.clone();
         eng.ingest(u1).unwrap();
         let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
-        assert_eq!(eng.state.perp_balances[&o], 7 + ORACLE_BOND_PERP, "bond returned at commit");
+        assert_eq!(
+            eng.state.perp_balances[&o],
+            7 + ORACLE_BOND_PERP,
+            "bond returned at commit"
+        );
         let replay = eng.clone();
         let prev2 = eng.state.clone();
         let u2 = claw_place(vec![id1], &a, Side::Bid, TimeInForce::Gtc, px, q, 2, None);
@@ -7136,16 +7260,26 @@ mod tests {
         for l in post.iter().filter(|l| l.starts_with("acct:")) {
             let x = &l[5..69];
             let p0 = pre.iter().find(|q| q.starts_with(&format!("acct:{x}:")));
-            assert_eq!(frame_acct_bad("", "", nx, 0, p0.map(String::as_str), l, false), Some(false), "{l}");
+            assert_eq!(
+                frame_acct_bad("", "", nx, 0, p0.map(String::as_str), l, false),
+                Some(false),
+                "{l}"
+            );
         }
         // Sensitivity: the same delta at k > 0, or one unit more, is fraud.
-        assert_eq!(frame_acct_bad("", "", nx, 1, Some(o_pre), o_post, false), Some(true));
+        assert_eq!(
+            frame_acct_bad("", "", nx, 1, Some(o_pre), o_post, false),
+            Some(true)
+        );
         let over = o_post.replace(
             &format!(":{}:", 7 + ORACLE_BOND_PERP),
             &format!(":{}:", 8 + ORACLE_BOND_PERP),
         );
         assert_ne!(&over, o_post);
-        assert_eq!(frame_acct_bad("", "", nx, 0, Some(o_pre), &over, false), Some(true));
+        assert_eq!(
+            frame_acct_bad("", "", nx, 0, Some(o_pre), &over, false),
+            Some(true)
+        );
         // P-frame (bind) frames pos:/ord: only now.
         assert!(frame_proof(&b2, 0, &b2.ops[0], &pre, post).is_none());
         // And the honest batch replays clean.

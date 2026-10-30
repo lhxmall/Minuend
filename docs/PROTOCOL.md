@@ -390,7 +390,7 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
   pre PERP > 14 位时 bounce，算术只在 post PERP 与 amount ≤ 14 位时进行。
 
 第 5 轮 AA 规则（MECHANISMS §10.11）：
-- **P-frame**（R5-A-1）：也覆盖 op 账户以外的 `acct:` 叶（这些单元不改别人的账户）。
+- **P-frame**（R5-A-1）：也覆盖 op 账户以外的 `acct:` 叶（这些单元不改别人的账户）。第 7c 轮（R7b-N2）起这部分由 dispute_xframe 的 P-xframe 按 pre / post 比对判定（k = 0 放行批次边界退回的 `+ORACLE_BOND_PERP`；PERP 只允许 `D:` / `W:` 的 op 账户变化），dispute_bind 的 P-frame 只判 `pos:` / `ord:`。
 - **fill_math**（R5-A-2 / R5-A-4）：collateral 腿按 claw 区间判定，没有跳过门；容差
   `6 + floor(S/1e12)`，S 只含已证明的量；bucket、op 份额、挂单余量都带比例容差判定；
   kind 2/3 只在资金费率市场或逐仓目标时 bounce；`x:` taker 只判 collateral 上限；

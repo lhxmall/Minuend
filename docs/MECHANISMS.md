@@ -1371,12 +1371,18 @@ dispute_bind 1956、dispute_book 1712、dispute_claw 1780（上限 2000）。
 5. **Low**：R7-L1 P-fsane 新增一臂（左邻也是 `f:{U}:0:` → 欺诈；watcher `fsane_dup_proof`）；
    R7-L2 P-fsane 要求 `length(F[1]) == 64`；R7-L3 快照格式升到 v9，v8 快照加载时被拒，回落 genesis。
 
-**已知但未修（R7b-N2，新发现）**：`prune_oracle_unbonding` 在批次提交后把解押完成的保证金退回
-预言机的 PERP 余额，这个变化落在下一批次 k = 0 的 post 树里。若 k = 0 是 `c:` / `d:` / `w:` /
-`p:` / `L:` 单元，P-frame 会把该预言机的 `acct:` 叶当作被改写的第三方叶判欺诈（诚实批次可被判，
-条件：同一批次边界上恰好有保证金退回）。P-xframe 已对 `x:` 单元放行这一变化；P-frame 在
-dispute_bind 里只剩约 40 ops，修法（同样的 `+ORACLE_BOND_PERP` 例外，或把退回改为显式 op）
-留给下一轮。
+**R7b-N2（第 7c 轮修复）**：`prune_oracle_unbonding` 在批次提交后（最后一个 trace 叶之后）把解押完成的
+保证金退回预言机的 PERP 余额，这个变化落在下一批次 k = 0 的 post 树里（pre 为 `wit_root_{h-1}`）。
+以前若 k = 0 是 `c:` / `d:` / `w:` / `p:` / `L:` 单元，P-frame 会把该预言机的 `acct:` 叶当作被改写的
+第三方叶判欺诈。第 7c 轮把 P-frame 的 `acct:` 部分挪到 P-xframe（dispute_xframe，`pred: 'xframe'`
+的 `post_acct` 臂接受所有 op 种类）：挑战者给出账户的 pre / post 叶（或 pre 树的 `[acct:X:, acct:X;)`
+夹逼），豁免账户为 op 账户、`L:` 的 target、单成交 `p:` / `L:` 的 maker 与保险账户（成交证据同
+P-frame，资金费率市场 bounce）；非豁免账户的 collateral / W / PERP 冻结，op 账户的 W 归 P-wpin，
+PERP 只允许 `D:` / `W:` 的 op 账户变化（顺带钉住了以前无人判的 op 账户 PERP），k = 0 时任何账户
+PERP 可恰好 `+ORACLE_BOND_PERP`。P-deposit gov 臂与 fill_math #37-17 钉在 k = 0 同样放行。
+P-frame 只剩 `pos:` / `ord:`。残留：保证金不在 witness 里，k = 0 的放行对任何账户成立（每批次
+每账户至多 50000 PERP 单位，链上不可判，watcher 重放报不一致）；彻底修法是 witness 加入
+`obond:` 叶。
 
 **测试**：Rust `r7b_tree_depth_matches_obyte_proofs`、`r7b_node_as_leaf_no_longer_frames_opbind`
 （第 7 轮审查 PoC：ocore 验过、镜像 bounce）、`r7b_tsize_proves_a_tree_larger_than_its_count`、
