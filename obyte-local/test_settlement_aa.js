@@ -4014,15 +4014,15 @@ async function main() {
     {
       const FR = "cc".repeat(32);
       const chalAddr = await challenger.getAddress();
-      const dUnit = (await trigger(challenger, vault, { deposit_perp: 1, account: FR }, 7000)).unit;
-      const dOp = `D:${FR}:7000:${chalAddr}:${dUnit}`;
-      const okLeaf = `acct:${FR}:0:7000:0`;
+      const dUnit = (await trigger(challenger, vault, { deposit_perp: 1, account: FR }, 20000)).unit;
+      const dOp = `D:${FR}:20000:${chalAddr}:${dUnit}`;
+      const okLeaf = `acct:${FR}:0:20000:0`;
       const dPost = [okLeaf, "dep:" + dUnit, `adr:${chalAddr}:${FR}`, `adrx:${FR}:${chalAddr}`];
       await submitAt(111, oneUnit("r8-c3-pre", "x:" + sha256Hex("r8-c3-pre"), [DEP_PRE]));
       const li = GENESIS_LEAVES.findIndex((l) => l > `acct:${FR}:`);
       const preAbs = { pre_absent: true, left: GENESIS_LEAVES[li - 1], left_proof: genProof(GENESIS_LEAVES[li - 1]),
         right: GENESIS_LEAVES[li], right_proof: genProof(GENESIS_LEAVES[li]) };
-      const lieLeaf = `acct:${FR}:0:7001:0`;
+      const lieLeaf = `acct:${FR}:0:20001:0`;
       const lie = oneUnit("r8-c3-lie", dOp, [lieLeaf].concat(dPost.slice(1)));
       await submitAt(112, lie);
       await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 112 }, depositPayload(lie, lieLeaf), preAbs), 20000, "R8-C3: fresh PERP holder credited past the deposit");
