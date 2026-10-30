@@ -105,6 +105,23 @@ function tempDataMessage(data) {
 // unit_hash(joint) and compare against the sidechain deposit's aa_unit, so
 // a deposit endorsement is verifiable without trusting the operator.
 const { hub } = require(path.join(aaRoot, "node_modules", "ocore", "network.js"));
+// R3-R-4: fetch an anchor joint; `null` = not on Obyte. Hub errors are
+// retried a few times before the anchor is treated as absent.
+async function fetchAnchorJoint(aaUnit, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const j = await new Promise((resolve, reject) => {
+        hub.getJoint(Buffer.from(aaUnit, "hex").toString("base64"), (err, jt) => (err ? reject(err) : resolve(jt)));
+      });
+      if (j && j.unit) return j;
+    } catch (_) {
+      // fall through to retry
+    }
+    if (i + 1 < tries) await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+  }
+  return null;
+}
+
 async function buildDepositEvidences(batchData, vaultAddress) {
   const evidences = [];
   const seen = new Set();
@@ -125,24 +142,16 @@ async function buildDepositEvidences(batchData, vaultAddress) {
     if (typeof aaUnit !== "string" || aaUnit.length !== 64) continue;
     if (seen.has(aaUnit)) continue;
     seen.add(aaUnit);
-    let joint;
-    try {
-      joint = await new Promise((resolve, reject) => {
-        hub.getJoint(Buffer.from(aaUnit, "hex").toString("base64"), (err, j) => (err ? reject(err) : resolve(j)));
-      });
-    } catch (e) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for missing joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("deposit anchor missing on Obyte: " + aaUnit.slice(0, 16));
-    }
+    // R3-R-4: a Deposit naming an anchor that is not on Obyte (anyone can
+    // sign one) was rejected by the producer and needs no evidence: the
+    // watcher replay endorses only anchors whose evidence verifies and
+    // rejects the unit the same way. Throwing here used to make the batch
+    // unpostable. A transient hub error is retried before giving up on the
+    // anchor (an APPLIED deposit without evidence fails watcher replay).
+    const joint = await fetchAnchorJoint(aaUnit);
     if (!joint || !joint.unit) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for empty joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("no joint for " + aaUnit.slice(0, 16));
+      console.log("deposit anchor not on Obyte (rejected unit, no evidence):", aaUnit.slice(0, 16));
+      continue;
     }
     // joint carries the FULL joint unit object: the watcher recomputes
     // unit_hash(joint.unit) via minuend_settle::obyte_hash::get_unit_hash and
@@ -151,12 +160,13 @@ async function buildDepositEvidences(batchData, vaultAddress) {
     const authors = Array.isArray(joint.unit.authors) ? joint.unit.authors : [];
     const payer = authors[0] && authors[0].address;
     if (typeof payer !== "string") {
-      throw new Error("deposit joint has no authors: " + aaUnit.slice(0, 16));
+      console.log("deposit joint has no authors (no evidence):", aaUnit.slice(0, 16));
+      continue;
     }
     if (dep.addr && dep.addr !== payer) {
-      throw new Error(
-        `deposit payer ${payer} != sidechain op addr ${dep.addr}: ` + aaUnit.slice(0, 16)
-      );
+      // R3-R-4: still attach it; it does not verify, so the watcher does
+      // not endorse the anchor for this op and rejects it like the producer.
+      console.log(`deposit payer ${payer} != sidechain op addr ${dep.addr}:`, aaUnit.slice(0, 16));
     }
     evidences.push({
       aa_unit: aaUnit,

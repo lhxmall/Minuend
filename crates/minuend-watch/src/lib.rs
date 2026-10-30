@@ -1807,7 +1807,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(load_checkpoint(&dir).unwrap().is_none(), "empty dir = genesis");
         std::fs::write(dir.join("chainstate.7.snap"), b"\x05\0\0\0old-format").unwrap();
-        let err = load_checkpoint(&dir).err().expect("must refuse");
+        let Err(err) = load_checkpoint(&dir) else {
+            panic!("all-unreadable checkpoints must refuse");
+        };
         assert!(err.to_string().contains("h=7"), "{err}");
         // One readable checkpoint is enough to resume.
         let mut eng = setup_engine();
