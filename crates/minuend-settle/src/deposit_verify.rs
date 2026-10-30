@@ -16,7 +16,10 @@ use crate::obyte_hash::{get_payload_hash, get_unit_hash};
 /// R3-A-5: a message's payload is covered by the unit hash only through
 /// its `payload_hash` — check it before trusting the payload.
 fn payload_hash_ok(msg: &serde_json::Value, unit: &serde_json::Value) -> bool {
-    match (msg.get("payload"), msg.get("payload_hash").and_then(|h| h.as_str())) {
+    match (
+        msg.get("payload"),
+        msg.get("payload_hash").and_then(|h| h.as_str()),
+    ) {
         (Some(p), Some(h)) => get_payload_hash(p, unit).map(|c| c == h).unwrap_or(false),
         _ => false,
     }
@@ -36,7 +39,11 @@ fn designated_account(unit: &serde_json::Value) -> Option<AccountId> {
         return None;
     }
     let acct = msg.get("payload")?.get("account")?.as_str()?;
-    if acct.len() != 64 || !acct.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if acct.len() != 64
+        || !acct
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     let mut out = [0u8; 32];

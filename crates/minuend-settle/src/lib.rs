@@ -2105,8 +2105,14 @@ mod tests {
         );
         let oid = unit_id(&own);
         eng.ingest(own).unwrap();
-        assert_eq!(eng.state.accounts[&acct_of(&victim)].collateral, 5_000_000_000);
-        assert_eq!(eng.state.aa_address_owners.get(&test_addr(4)), Some(&acct_of(&victim)));
+        assert_eq!(
+            eng.state.accounts[&acct_of(&victim)].collateral,
+            5_000_000_000
+        );
+        assert_eq!(
+            eng.state.aa_address_owners.get(&test_addr(4)),
+            Some(&acct_of(&victim))
+        );
         // Validator replay: evidence installs the designated account, the
         // thief's unit replays as rejected, roots agree.
         let mut batch = Batch::from_applied(&pre.state, &mut eng, &[sid, oid]).unwrap();

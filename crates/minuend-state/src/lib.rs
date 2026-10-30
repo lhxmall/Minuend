@@ -293,8 +293,9 @@ impl ChainState {
             }
         });
         let allowed = &self.deposits_allowed;
-        self.deposit_accounts
-            .retain(|unit, _| allowed.contains(&(*unit, false)) || allowed.contains(&(*unit, true)));
+        self.deposit_accounts.retain(|unit, _| {
+            allowed.contains(&(*unit, false)) || allowed.contains(&(*unit, true))
+        });
     }
     /// Window prune (2048 from genesis, mainnet launch). Same `window` on
     /// producer and replay keeps batch commits deterministic.

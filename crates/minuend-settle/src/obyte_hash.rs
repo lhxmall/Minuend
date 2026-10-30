@@ -369,6 +369,34 @@ mod tests {
         );
     }
 
+    /// R3-A-5: payload hashes match ocore `objectHash.getBase64Hash(payload,
+    /// bVersion2)` (vectors computed with the vendored ocore).
+    #[test]
+    fn payload_hash_matches_ocore() {
+        let pay = json!({
+            "inputs": [{"unit": "abcdEFGH0123456789abcdEFGH0123456789abcdEFG=", "message_index": 0, "output_index": 1}],
+            "outputs": [
+                {"address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "amount": 1010000},
+                {"address": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "amount": 98765432}
+            ]
+        });
+        let data = json!({"deposit": 1, "account": "ab".repeat(32)});
+        let v4 = json!({"version": "4.0"});
+        let v1 = json!({"version": "1.0"});
+        assert_eq!(
+            get_payload_hash(&pay, &v4).unwrap(),
+            "l904YMnNR+ownMd8E3hhc7rYcROsU2KZx58Qdj8S8TA="
+        );
+        assert_eq!(
+            get_payload_hash(&data, &v4).unwrap(),
+            "/3CieJIbTw/7msgN/sCq9xFIrNpatiphwaNRds0f318="
+        );
+        assert_eq!(
+            get_payload_hash(&pay, &v1).unwrap(),
+            "Z2hyr6G9GbOf39jJ/+5hhksqEJHYaq8N5zcaTirA6Xk="
+        );
+    }
+
     #[test]
     fn canonical_number_rejects_ambiguous_forms() {
         // `1.0` would print "1.0" in Rust but "1" in JS: fail closed.

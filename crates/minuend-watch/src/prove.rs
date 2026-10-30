@@ -332,7 +332,9 @@ fn keep_mirror_proof(
     // the honest post tree still holds it.
     for l in pre_leaves.iter() {
         let Some(key) = acct_key(l) else { continue };
-        if posted.iter().any(|p| p.starts_with(&key)) || !post_leaves.iter().any(|p| p.starts_with(&key)) {
+        if posted.iter().any(|p| p.starts_with(&key))
+            || !post_leaves.iter().any(|p| p.starts_with(&key))
+        {
             continue;
         }
         let mut data = base();
