@@ -158,6 +158,7 @@ struct Args {
     dispute: Option<String>,
     dispute_fill: Option<String>,
     dispute_bind: Option<String>,
+    dispute_book: Option<String>,
     hub: String,
     from_height: Option<u64>,
     state_dir: Option<PathBuf>,
@@ -170,6 +171,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dispute = None;
     let mut dispute_fill = None;
     let mut dispute_bind = None;
+    let mut dispute_book = None;
     let mut state_dir = None;
     let mut hub = None;
     let mut from_height = None;
@@ -187,6 +189,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dispute-bind" => {
                 dispute_bind = Some(it.next().ok_or("--dispute-bind needs a value")?)
+            }
+            "--dispute-book" => {
+                dispute_book = Some(it.next().ok_or("--dispute-book needs a value")?)
             }
             "--state-dir" => {
                 state_dir = Some(PathBuf::from(it.next().ok_or("--state-dir needs a value")?))
@@ -228,6 +233,7 @@ fn parse_args() -> Result<Args, String> {
         dispute,
         dispute_fill,
         dispute_bind,
+        dispute_book,
         hub: hub.ok_or("missing --hub")?,
         from_height,
         state_dir,
@@ -239,7 +245,7 @@ fn parse_args() -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "minuend-watch --rollup <rollup-aa-addr> --vault <vault-aa-addr> --hub <hub-url> [--dispute <dispute-aa-addr>] \
- [--dispute-fill <addr>] [--dispute-bind <addr>] [--state-dir <dir>] [--from-height <u64>] \
+ [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--state-dir <dir>] [--from-height <u64>] \
  [--poll-interval <secs>] [--bond <gross-bytes>]\n\
  \n\
 Polls the rollup's da_unit_<h> assertions, checks the DA header against the roots the\n\
@@ -332,15 +338,19 @@ struct ChallengeCtx {
     dispute_main: Option<String>,
     dispute_fill: Option<String>,
     dispute_bind: Option<String>,
+    /// Round 2: P-ghost / P-skip live on `minuend_dispute_book.aa`
+    /// (rollup var `dispute_book_aa`).
+    dispute_book: Option<String>,
     proof_dir: PathBuf,
 }
 
 impl ChallengeCtx {
     fn dispute_for(&self, target: &str) -> Option<&str> {
-        // Any other target (e.g. a future `book` dispute AA) gets no
-        // address: the live poster then uses the rollup's own binding.
+        // A target with no configured address gets none: the live poster
+        // then uses the rollup's own `dispute_*_aa` binding.
         match target {
             "main" => self.dispute_main.as_deref(),
+            "book" => self.dispute_book.as_deref(),
             "fill" => self.dispute_fill.as_deref(),
             "bind" => self.dispute_bind.as_deref(),
             _ => None,
@@ -850,6 +860,7 @@ fn maybe_post_challenge(h: u64, alert: &str, proof: Option<&prove::BuiltProof>) 
         match p.target() {
             "fill" => args.push("--fill".into()),
             "bind" => args.push("--bind".into()),
+            "book" => args.push("--book".into()),
             _ => {}
         }
         cmd.args(args)
@@ -938,6 +949,7 @@ fn main() -> anyhow::Result<()> {
         dispute_main: args.dispute.clone(),
         dispute_fill: args.dispute_fill.clone(),
         dispute_bind: args.dispute_bind.clone(),
+        dispute_book: args.dispute_book.clone(),
         proof_dir,
     });
 
@@ -1127,6 +1139,7 @@ mod tests {
             dispute_main: Some("M".repeat(32)),
             dispute_fill: None,
             dispute_bind: Some("B".repeat(32)),
+            dispute_book: Some("K".repeat(32)),
             proof_dir: Default::default(),
         };
         let s = std::path::Path::new("/x/p.js");
@@ -1165,6 +1178,19 @@ mod tests {
         ));
         assert!(!fill.iter().any(|a| a == "--dispute-address"));
         assert!(fill.contains(&"X".repeat(32)));
+        // Round 2: ghost/skip proofs target the book AA and carry its
+        // configured address (`--dispute-book`).
+        let ghost = minuend_watch::prove::BuiltProof {
+            pred: "ghost".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data: serde_json::json!({}),
+        };
+        let book = strs(live_challenge_args(s, 3, &ghost, p, "mainnet", &ctx));
+        let t = book.iter().position(|a| a == "--target").unwrap();
+        assert_eq!(book[t + 1], "book");
+        let j = book.iter().position(|a| a == "--dispute-address").unwrap();
+        assert_eq!(book[j + 1], "K".repeat(32));
     }
 
     /// R2-R-11: a challenge in flight or already broadcast is never posted

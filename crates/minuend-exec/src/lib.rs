@@ -1835,7 +1835,10 @@ impl Engine {
     /// positions, then positive-PnL counterparties take a pro-rata haircut
     /// of any residual hole — zero-sum, insurance untouched. A hole they
     /// cannot cover stays on the account: collateral is never printed.
-    /// Keeper reward is seized from the target afterwards.
+    /// Keeper reward is seized from the target afterwards, on the qty the
+    /// ADL actually closed (R2-A-11); when no opposite-sign holder exists
+    /// nothing closes and the liquidation is rejected (`NotLiquidatable`,
+    /// the caller rolls the journal back), so no reward is paid.
     /// Returns synthetic fills for the event log (state is already applied).
     fn liquidate_funding_off_book(
         &mut self,
@@ -2055,6 +2058,16 @@ impl Engine {
             });
             remaining -= take;
         }
+        // R2-A-11 (round 2 of #47): only the qty the ADL loop actually
+        // closed counts. With no opposite-sign holders nothing closed: the
+        // old code still paid the keeper on the full `dq` (a cash transfer
+        // with no fill behind it, invisible to the fill dispute AA) and
+        // reported success. Now that is a rejected Liquidate: no state
+        // change (the caller rolls the journal back), no reward.
+        let closed = dq - remaining;
+        if closed == 0 {
+            return Err(RejectReason::NotLiquidatable);
+        }
         let target_equity = |s: &ChainState| {
             s.accounts
                 .get(&target)
@@ -2125,11 +2138,12 @@ impl Engine {
                 }
             }
         }
-        // Keeper reward: bps of the multiplier notional of the closed qty,
-        // seized from the target's positive collateral after the steps
-        // above. No book fill, so no reward from a book price.
+        // Keeper reward: bps of the multiplier notional of the qty actually
+        // closed (R2-A-11: `closed`, not the planned `dq`), seized from the
+        // target's positive collateral after the steps above. No book fill,
+        // so no reward from a book price.
         let reward = bps(
-            funding_notional_usd(dq, usd),
+            funding_notional_usd(closed, usd),
             self.state.market_params(market).keeper_reward_bps,
         );
         if reward > 0 {
@@ -7440,6 +7454,131 @@ mod tests {
         assert!(
             eng.state.accounts[&INSURANCE_ACCOUNT].collateral <= ins_before,
             "insurance only pays, never gains, here"
+        );
+    }
+
+    /// Shared fixture for the R2-A-11 tests: a funding-rate market with a
+    /// liquidatable long `alice` (entry 40, mark 30, fresh index 50) holding
+    /// `alice_col` collateral, and optionally a short `bob` of `bob_qty`.
+    fn funding_liq_fixture(
+        alice_col: i128,
+        bob_qty: Option<i64>,
+    ) -> (Engine, MarketId, AccountId, AccountId) {
+        use minuend_account::Position;
+        let mut eng = activated_engine();
+        let creator = acct_of(&sk(1));
+        eng.state
+            .perp_balances
+            .insert(creator, CREATE_MARKET_FEE_PERP);
+        let mut symbol = [0u8; 16];
+        symbol[..6].copy_from_slice(b"FUNDLQ");
+        eng.state.perp_supply += CREATE_MARKET_FEE_PERP;
+        eng.create_market(
+            creator, symbol, 1, 100, 50, 5, 10, false, true, 10_000, 10, 0, 0,
+        )
+        .unwrap();
+        let mkt = MarketId(2);
+        let alice = acct_of(&sk(2));
+        let bob = acct_of(&sk(3));
+        let entry = minuend_types::encode_funding_price(40);
+        {
+            let a = eng.state.account_mut(alice);
+            a.collateral = alice_col;
+            a.positions.insert(
+                mkt,
+                Position {
+                    market: mkt,
+                    qty: QTY_SCALE as i64,
+                    entry_price: entry,
+                    isolated: false,
+                },
+            );
+        }
+        if let Some(q) = bob_qty {
+            let a = eng.state.account_mut(bob);
+            a.positions.insert(
+                mkt,
+                Position {
+                    market: mkt,
+                    qty: -q,
+                    entry_price: entry,
+                    isolated: false,
+                },
+            );
+        }
+        eng.state
+            .marks
+            .insert(mkt, minuend_types::encode_funding_price(30));
+        eng.state
+            .external_price_ring
+            .entry(mkt)
+            .or_default()
+            .push_back(minuend_types::ExternalSample {
+                seq: 0,
+                height: eng.state.height,
+                price: minuend_types::encode_funding_price(50),
+                source_id: 0,
+            });
+        (eng, mkt, alice, bob)
+    }
+
+    /// R2-A-11: a funding-rate liquidation with no opposite-sign holder
+    /// closes nothing, so it is rejected with the state untouched — the
+    /// keeper is not paid on the planned size.
+    #[test]
+    fn funding_liq_without_adl_counterparty_is_rejected_and_pays_nothing() {
+        let (mut eng, mkt, alice, _bob) = funding_liq_fixture(5 * USD_SCALE as i128, None);
+        let keeper = acct_of(&sk(4));
+        assert!(
+            eng.state.accounts[&alice]
+                .snapshot(&eng.state.marks, &eng.state.markets)
+                .liquidatable
+        );
+        let root_before = eng.state.state_root();
+        let alice_before = eng.state.accounts[&alice].clone();
+        let r = eng.liquidate(UnitId([9u8; 32]), eng.state.seq, keeper, alice, mkt);
+        assert_eq!(r, Err(RejectReason::NotLiquidatable));
+        assert_eq!(eng.state.accounts[&alice], alice_before, "target untouched");
+        assert_eq!(
+            eng.state
+                .accounts
+                .get(&keeper)
+                .map(|a| a.collateral)
+                .unwrap_or(0),
+            0,
+            "keeper not paid"
+        );
+        assert_eq!(eng.state.state_root(), root_before, "state unchanged");
+    }
+
+    /// R2-A-11: when the opposite side can absorb only part of the planned
+    /// close, the keeper reward is computed on the qty actually closed.
+    #[test]
+    fn funding_liq_keeper_reward_is_on_closed_qty_only() {
+        let small = (QTY_SCALE / 10) as i64;
+        let (mut eng, mkt, alice, bob) =
+            funding_liq_fixture(40 * USD_SCALE as i128, Some(small));
+        let keeper = acct_of(&sk(4));
+        assert!(
+            eng.state.accounts[&alice]
+                .snapshot(&eng.state.marks, &eng.state.markets)
+                .liquidatable
+        );
+        let fills = eng
+            .liquidate(UnitId([9u8; 32]), eng.state.seq, keeper, alice, mkt)
+            .expect("partial ADL applies");
+        let closed: u64 = fills.iter().map(|f| f.qty).sum();
+        assert_eq!(closed, small as u64, "only bob's qty could close");
+        assert!(!eng.state.accounts[&bob].positions.contains_key(&mkt)
+            || eng.state.accounts[&bob].positions[&mkt].qty == 0);
+        let params = eng.state.market_params(mkt);
+        let expected = bps(
+            funding_notional_usd(closed, params.usd_per_unit),
+            params.keeper_reward_bps,
+        );
+        assert_eq!(
+            eng.state.accounts[&keeper].collateral, expected,
+            "reward on the closed qty, not the planned close"
         );
     }
 
