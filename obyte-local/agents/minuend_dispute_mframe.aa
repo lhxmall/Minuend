@@ -1,0 +1,433 @@
+{
+	// MINUEND m-frame dispute AA (minuend-v2) — round 8, seventh dispute
+	// AA (split from minuend_dispute_xframe.aa for the ops budget).
+	//
+	// Bind: {bind_mframe:1, rollup:<addr>} payment 20000 -> forwards 10000
+	// to the rollup with {set_dispute_mframe:1} (the rollup hardcodes THIS
+	// address: placeholder DISPUTE_MFRAME_AA_HERE, var dispute_mframe_aa).
+	//
+	// pred 'mframe' (any op; an `x:` op REQUIRES {unit, units_proof, u_pre},
+	//   R8-C1 — see minuend_dispute_xframe.aa for the unit-text layout):
+	//   * `leaf` band: (+leaf_proof, ins, left/right): a band is fixed at
+	//     CreateMarket; a pre band missing from post is fraud, a post band
+	//     missing from pre is fraud unless the op is CreateMarket (0a).
+	//   * `leaf` obond:{X}:{unlock} (R8-H2): created only by StakeOracle
+	//     of X (unlock 0) or UnstakeOracle of X (unlock h + 255, the
+	//     execution height h - 1 plus ORACLE_UNBOND_HEIGHTS); removed only by
+	//     UnstakeOracle of X (unlock 0), SlashOracle of target X, or the
+	//     batch boundary (k == 0, 0 < unlock <= h - 1). `keep` (+keep_proof
+	//     in post): such an expired leaf still in unit 0's post tree.
+	//   * `pre_meta` / `post_meta` (+proofs) of one market: both given and
+	//     different -> a parameter change is fraud outside a 0d that
+	//     changes ONE of im / mm / fee / keeper to a risk_params_ok set, or
+	//     delists 0 -> 1, with tick / usd / cap / mark untouched (R8-C5,
+	//     interim); a mark-only change is fraud outside a p: / L: of that
+	//     market to its unit's fill price (fill + fill_proof, unit +
+	//     units_proof, fills_root) or an accepted 06 of that market
+	//     (regular, non-spot; oracle bonded unless bleft/bright prove
+	//     otherwise), regular markets within +-10 % (R8-H1); pre only + the
+	//     [meta:m:, meta:m;) straddle in post -> deleted (fraud); post only +
+	//     the straddle in pre -> created outside
+	//     CreateMarket (fraud).
+	// pred 'noband' moved to minuend_dispute_claw.aa in round 9 (ops budget).
+	// Witness layout (minuend-state wit_leaves): band:{m}:{min}:{max},
+	// obond:{X}:{unlock}, meta: 11 fields
+	// (meta:{m}:{tick}:{im}:{mm}:{fee}:{keeper}:{delisted}:{mark}:{usd}:{cap}).
+	bounce_fees: { base: 10000 },
+	messages: {
+		cases: [
+			{
+				if: "{trigger.data.bind_mframe}",
+				init: "{
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							set_dispute_mframe: 1
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['bound_mframe'] = 1;
+						}"
+					}
+				]
+			},
+			{
+				if: "{trigger.data.pred == 'mframe'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					if (trigger.data.trace_root != var[$rollup]['trace_root_' || $h]
+						OR trigger.data.ops_root != var[$rollup]['ops_root_' || $h]
+						OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
+						bounce('stale roots');
+					$k = trigger.data.k;
+					if (!is_integer($k) OR $k < 0 OR $k >= $n)
+						bounce('bad k');
+					// R11-C1: no `$S = trigger.data` (ocore caps a local object at 4096
+					// chars after pemCurvesFix); every field is read from trigger.data.
+					$post_wit = trigger.data.post_wit;
+					if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !trigger.data.post_proof OR trigger.data.post_proof.index != $k
+						OR trigger.data.post_proof.root != trigger.data.trace_root
+						OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof)
+						OR ($n > 1 AND (2 ^ array_length(trigger.data.post_proof.siblings) < $n OR 2 ^ array_length(trigger.data.post_proof.siblings) >= 2 * $n)))
+						bounce('bad post proof');
+					// R8-C2: indices compared in the sorted witness tree can only
+					// wrap to (max leaf `~:end`, min leaf), which never straddles.
+					$op = trigger.data.op;
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof)
+						OR ($n > 1 AND (2 ^ array_length(trigger.data.ops_proof.siblings) < $n OR 2 ^ array_length(trigger.data.ops_proof.siblings) >= 2 * $n)))
+						bounce('bad ops proof');
+					$pre_wit = trigger.data.pre_wit;
+					if ($k == 0){
+						if ($pre_wit != (($h == 1) ? 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=' : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
+					} else {
+						if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !trigger.data.pre_proof OR trigger.data.pre_proof.index != $k - 1 OR trigger.data.pre_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($pre_wit, trigger.data.pre_proof))
+							bounce('bad pre proof');
+					}
+					$isx = starts_with($op, 'x:');
+					// R8-C1: every allowance below depends on the op tag,
+					// so an `x:` op is judged only with its unit text (a
+					// challenger can no longer hide an honest tag by
+					// leaving `u_pre` out).
+					// R11-C4: an `x:` unit is the raw 64 chars of its proven
+					// op; a p:/L: unit arrives as 'Z' || hex (a digit-only hex
+					// in trigger.data is a Decimal).
+					$u = $isx ? substring($op, 2, 64) : substring(trigger.data.unit otherwise '', 1);
+					if ($isx) {
+						$pre = trigger.data.u_pre;
+						if (length($op) != 66 OR !trigger.data.units_proof
+							OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root
+							OR !is_valid_merkle_proof($u, trigger.data.units_proof)
+							OR ($n > 1 AND array_length(trigger.data.units_proof.siblings) != array_length(trigger.data.ops_proof.siblings)))
+							bounce('bad unit');
+						if (typeof($pre) != 'string' OR !starts_with($pre, 'mnu3|') OR !ends_with($pre, '|') OR array_length(split($pre, '|')) != 3
+							OR sha256($pre || 'x', 'hex') != $u)
+							bounce('bad unit text');
+						$np = substring($pre, 13, 2);
+						if ($np != '00' AND $np != '01' AND $np != '02') bounce('bad unit text');
+						$tp = 15 + (($np == '02') ? 128 : (($np == '01') ? 64 : 0));
+						$tq = (substring($pre, $tp, 2) == '13') ? $tp + 130 : $tp;
+						$tag = substring($pre, $tq, 2);
+						$oa = substring($pre, $tq + 2, 64);
+					} else {
+						$tag = '';
+						$oa = '';
+					}
+					// Straddle of the bond prefix of the op account in pre:
+					// the oracle holds no bond, so a ReportPrice is ignored.
+					$bdlo = 'obond:' || $oa || ':';
+					$bdhi = 'obond:' || $oa || ';';
+					$nobond = $isx AND trigger.data.bleft AND contains(trigger.data.bleft, ':') AND trigger.data.bleft_proof.root == $pre_wit
+						AND is_valid_merkle_proof(trigger.data.bleft, trigger.data.bleft_proof)
+						AND ((trigger.data.bright AND contains(trigger.data.bright, ':')
+							AND is_integer(trigger.data.bleft_proof.index) AND trigger.data.bleft_proof.index >= 0
+							AND trigger.data.bleft_proof.index + 1 == trigger.data.bright_proof.index
+							AND trigger.data.bright_proof.root == $pre_wit
+							AND trigger.data.bleft < $bdlo AND $bdhi <= trigger.data.bright
+							AND is_valid_merkle_proof(trigger.data.bright, trigger.data.bright_proof))
+						OR (trigger.data.bleft_proof.index == 0 AND $bdhi <= trigger.data.bleft));
+					$L = trigger.data.leaf;
+					if (typeof($L) == 'string') {
+						$Q = split($L, ':');
+						// R11-C3: the obond account from the ':'->':Z' split.
+						$QZ = split(replace($L, ':', ':Z'), ':');
+						$ins = trigger.data.ins ? true : false;
+						if ($Q[0] == 'band' AND array_length($Q) == 4) {
+							if (trigger.data.keep) bounce('bad leaf');
+							// A band appears only with its CreateMarket.
+							if ($ins AND $tag == '0a') bounce('no fraud');
+						} else {
+							// R8-H2: `obond:{X}:{unlock}` frame. Created by
+							// StakeOracle (unlock 0) or UnstakeOracle (unlock
+							// = the batch's execution height h - 1 +
+							// ORACLE_UNBOND_HEIGHTS) of X; removed by
+							// UnstakeOracle (the unlock-0 leaf), SlashOracle
+							// of target X, or the batch boundary (k == 0,
+							// 0 < unlock <= h - 1). `keep`: such an expired
+							// leaf still in unit 0's post tree.
+							if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($QZ[1]) == 65))
+								bounce('bad leaf');
+							// R10-H1: no json_parse of an operator-written field
+							// (json_parse('1e400') is a fatal error that bounced
+							// the proof): split already yields a Decimal for a
+							// numeric field; anything else is not an expiring
+							// unlock here and is itself P-wf fraud.
+							$exp = $k == 0 AND is_integer($Q[2]) AND $Q[2] > 0 AND $Q[2] <= $h - 1;
+							if (trigger.data.keep) {
+								if (!$exp OR !is_valid_merkle_proof($L, trigger.data.leaf_proof) OR trigger.data.leaf_proof.root != $pre_wit
+									OR !is_valid_merkle_proof($L, trigger.data.keep_proof) OR trigger.data.keep_proof.root != $post_wit)
+									bounce('no fraud');
+							} else {
+								// A rejected 0e / 0f writes nothing: the
+								// challenger may show oa already holds a bond
+								// leaf (pob) — a 0e is then rejected, a 0f
+								// needs it at unlock 0 — that oa holds no bond
+								// (bleft/bright: 0f rejected), or that oa's
+								// PERP was not debited by the 0e (pa0 / pa1
+								// with equal PERP, or no pre acct leaf of oa:
+								// aleft/aright).
+								// R9-H1: at k == 0 an EXPIRED leaf of oa (0 < unlock
+								// <= h - 1) was released at the commit of h - 1, so
+								// it does not reject a 0e, and the refund
+								// (+ORACLE_BOND_PERP) nets the 0e debit to 0.
+								$pob = trigger.data.pob;
+								$PB = split((typeof($pob) == 'string') ? $pob : '-', ':');
+								$pqv = $PB[2];
+								$pobok = typeof($pob) == 'string' AND starts_with($pob, $bdlo)
+									AND is_valid_merkle_proof($pob, trigger.data.pob_proof) AND trigger.data.pob_proof.root == $pre_wit;
+								$pexp = $pobok AND $k == 0 AND is_integer($pqv) AND $pqv > 0 AND $pqv <= $h - 1;
+								$alo = 'acct:' || $oa || ':';
+								$ahi = 'acct:' || $oa || ';';
+								$A0 = split(typeof(trigger.data.pa0) == 'string' ? trigger.data.pa0 : '-', ':');
+								$A1 = split(typeof(trigger.data.pa1) == 'string' ? trigger.data.pa1 : '-', ':');
+								// Not debited: equal PERP (at k == 0 only with
+								// bleft/bright proving oa held no bond, else the
+								// refund may have paid the 0e), or +50000 at k == 0.
+								$nodebit = (array_length($A0) == 5 AND array_length($A1) == 5 AND starts_with(trigger.data.pa0, $alo) AND starts_with(trigger.data.pa1, $alo)
+										AND (($A0[3] == $A1[3]) ? ($k > 0 OR $nobond) : ($k == 0 AND length($A0[3]) <= 14 AND $A1[3] == $A0[3] + 50000))
+										AND is_valid_merkle_proof(trigger.data.pa0, trigger.data.pa0_proof) AND trigger.data.pa0_proof.root == $pre_wit
+										AND is_valid_merkle_proof(trigger.data.pa1, trigger.data.pa1_proof) AND trigger.data.pa1_proof.root == $post_wit)
+									OR (trigger.data.aleft AND contains(trigger.data.aleft, ':') AND trigger.data.aleft_proof.root == $pre_wit
+										AND is_valid_merkle_proof(trigger.data.aleft, trigger.data.aleft_proof)
+										AND ((trigger.data.aright AND contains(trigger.data.aright, ':')
+											AND is_integer(trigger.data.aleft_proof.index) AND trigger.data.aleft_proof.index >= 0
+											AND trigger.data.aleft_proof.index + 1 == trigger.data.aright_proof.index
+											AND trigger.data.aright_proof.root == $pre_wit
+											AND trigger.data.aleft < $alo AND $ahi <= trigger.data.aright
+											AND is_valid_merkle_proof(trigger.data.aright, trigger.data.aright_proof))
+										OR (trigger.data.aleft_proof.index == 0 AND $ahi <= trigger.data.aleft)));
+								if ($ins ? ($QZ[1] == ('Z' || $oa) AND (($tag == '0e' AND $Q[2] == '0' AND !($pobok AND !$pexp) AND !$nodebit)
+										OR ($tag == '0f' AND $Q[2] == $h + 255 AND !$nobond AND !($pobok AND $pob != ($bdlo || '0')))))
+									: (($QZ[1] == ('Z' || $oa) AND $tag == '0f' AND $Q[2] == '0') OR ($tag == '10' AND $QZ[1] == ('Z' || substring($pre, $tq + 66, 64))) OR $exp))
+									bounce('no fraud');
+							}
+						}
+						if (!trigger.data.keep) {
+							// Leaf frame: member of src, exactly absent from dst.
+							$src = $ins ? $post_wit : $pre_wit;
+							$dst = $ins ? $pre_wit : $post_wit;
+							if (!is_valid_merkle_proof($L, trigger.data.leaf_proof) OR trigger.data.leaf_proof.root != $src)
+								bounce('bad leaf proof');
+							$m1 = trigger.data.left AND trigger.data.right AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
+								AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+								AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+								AND trigger.data.left_proof.root == $dst AND trigger.data.right_proof.root == $dst
+								AND trigger.data.left < $L AND $L < trigger.data.right
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+								AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+							$m2 = trigger.data.left AND contains(trigger.data.left, ':') AND trigger.data.left_proof.index == 0
+								AND trigger.data.left_proof.root == $dst AND $L < trigger.data.left
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
+							if (!$m1 AND !$m2) bounce('no fraud');
+						}
+					} else {
+						// meta arms.
+						$m0 = trigger.data.pre_meta;
+						$m1x = trigger.data.post_meta;
+						$g0 = typeof($m0) == 'string';
+						$g1 = typeof($m1x) == 'string';
+						if (!$g0 AND !$g1) bounce('bad meta');
+						$M0 = split($g0 ? $m0 : '-', ':');
+						$M1 = split($g1 ? $m1x : '-', ':');
+						if ($g0 AND (array_length($M0) != 11 OR $M0[0] != 'meta'
+							OR !is_valid_merkle_proof($m0, trigger.data.pre_meta_proof) OR trigger.data.pre_meta_proof.root != $pre_wit))
+							bounce('bad pre meta');
+						if ($g1 AND (array_length($M1) != 11 OR $M1[0] != 'meta'
+							OR !is_valid_merkle_proof($m1x, trigger.data.post_meta_proof) OR trigger.data.post_meta_proof.root != $post_wit))
+							bounce('bad post meta');
+						if ($g0 AND $g1) {
+							if ($M0[1] != $M1[1]) bounce('bad meta');
+							if ($m0 == $m1x) bounce('no fraud');
+							$d3 = $M0[3] != $M1[3];
+							$d4 = $M0[4] != $M1[4];
+							$d5 = $M0[5] != $M1[5];
+							$d6 = $M0[6] != $M1[6];
+							$d7 = $M0[7] != $M1[7];
+							$pc = $d3 OR $d4 OR $d5 OR $d6 OR $d7 OR $M0[2] != $M1[2] OR $M0[9] != $M1[9] OR $M0[10] != $M1[10];
+							if ($pc) {
+								// R8-C5 (interim, the proposal is not in the
+								// witness): FinalizeProposal (0d) applies ONE
+								// key — im / mm / fee / keeper with the new set
+								// still risk_params_ok (spot: fee never
+								// raised), or Delist 0 -> 1 — and never
+								// touches tick, usd, cap or the mark.
+								// R10-C1: the split fields themselves (Decimal when
+								// numeric), never json_parse: a non-integer POST
+								// field ('1e400', 'x') is simply not legal (fraud).
+								$im = $M1[3];
+								$mm = $M1[4];
+								$fee = $M1[5];
+								$kp = $M1[6];
+								$cap = $M1[10];
+								$fee0 = $M0[5];
+								$legal = is_integer($im) AND is_integer($mm) AND is_integer($fee) AND is_integer($kp) AND is_integer($cap) AND is_integer($fee0)
+									AND $fee >= 1 AND $fee <= 200 AND $kp >= 1 AND $im > $mm
+									AND (($im == 10000) ? ($mm >= 500 AND $kp <= 500 AND $cap == 0 AND $fee <= $fee0)
+										: ($im <= 5000 AND (($cap == 0) ? ($mm >= 500 AND $kp <= 500 AND $im >= 500)
+											: ($mm >= 50 AND $im >= 100 AND $cap <= 500 AND $im >= 10 * $cap AND $kp * 10 <= $im))));
+								if ($tag == '0d' AND $M0[8] == $M1[8] AND $M0[2] == $M1[2] AND $M0[9] == $M1[9] AND $M0[10] == $M1[10]
+									AND ($d3 ? 1 : 0) + ($d4 ? 1 : 0) + ($d5 ? 1 : 0) + ($d6 ? 1 : 0) + ($d7 ? 1 : 0) == 1
+									AND ($d7 ? ($M0[7] == '0' AND $M1[7] == '1') : $legal)
+									AND (($M0[3] == 10000) ? $im == 10000 : $im != 10000))
+									bounce('no fraud');
+							} else {
+								// R8-H1: only the mark moved. Allowed only in
+								// the op's own market: a Place / Liquidate to
+								// its unit's fill price (one fill per unit),
+								// an accepted ReportPrice (bonded oracle,
+								// regular non-spot market) within +-10 % of
+								// the old mark; UpdateExternalPrice never.
+								// Regular markets (usd 0) move at most 10 %.
+								// R9-H2: the engine never writes a mark with
+								// |mark| >= MARK_CAP (1e15), where Oscript's 15
+								// significant digits compare exactly; such a mark
+								// is OUT of band (fraud).
+								// R10-C1: the split fields (Decimal when numeric; a
+								// non-numeric or non-finite field stays a string and
+								// is_integer is false), no json_parse; |mark| < 1e15
+								// now gates the funding step as well.
+								$o8 = $M0[8];
+								$n8 = $M1[8];
+								$pi = is_integer($o8) AND is_integer($n8) AND abs($o8) < 1000000000000000 AND abs($n8) < 1000000000000000;
+								$band = $pi AND ($o8 == 0 OR abs($n8 - $o8) <= abs($o8) / 10 + 1);
+								// R9-L2: a funding-rate market's fill moves the mark
+								// only by the engine's step rule: the funding rate
+								// trunc((mark - 1e12) / 1e4) bps moves by at most
+								// max(|old rate| / 10, 1); a first mark (0) is
+								// anchored on the external index (not witnessed).
+								// R10-M1: trunc((m - 1e12) / 1e4) = trunc_toward_0 of
+								// m / 1e4 shifted by 1e8, computed on m / 1e4 (exact:
+								// |m| < 1e15 keeps 15 significant digits) — m - 1e12
+								// itself has 16 digits for m <= -9.99e14 and rounded.
+								$ro = $pi ? (($o8 < 1000000000000) ? ceil($o8 / 10000) : floor($o8 / 10000)) - 100000000 : 0;
+								$rn = $pi ? (($n8 < 1000000000000) ? ceil($n8 / 10000) : floor($n8 / 10000)) - 100000000 : 0;
+								// p: / L: of this market: the unit's fill (one
+								// per unit) is REQUIRED evidence — or the proof
+								// that unit k has none (its fills-tree
+								// neighbours belong to an earlier / a later
+								// unit, every compared index inside its tree;
+								// R8-C2) — so leaving it out cannot hide an
+								// honest move.
+								$zO = split($op, ':');
+								$plm = ($zO[0] == 'p' AND array_length($zO) == 10 AND $zO[2] == $M0[1]) OR ($zO[0] == 'L' AND array_length($zO) == 4 AND $zO[3] == $M0[1]);
+								if ($plm) {
+									if (trigger.data.fills_root != var[$rollup]['fills_root_' || $h] OR length($u) != 64 OR !trigger.data.units_proof
+										OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root OR !is_valid_merkle_proof($u, trigger.data.units_proof))
+										bounce('bad unit');
+									$fl = trigger.data.fill;
+									$F = split(typeof($fl) == 'string' ? $fl : '-', ':');
+									$hasF = array_length($F) == 14 AND starts_with($fl, 'f:' || $u || ':0:')
+										AND trigger.data.fill_proof.root == trigger.data.fills_root AND is_valid_merkle_proof($fl, trigger.data.fill_proof);
+									if (!$hasF) {
+										$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+										$rt = trigger.data.fright;
+										$ri = trigger.data.fright_proof.index;
+										$pv = trigger.data.fprev;
+										if ($fc > 1 AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND trigger.data.fright_proof.root == trigger.data.fills_root
+											AND 2 ^ array_length(trigger.data.fright_proof.siblings) >= $fc AND 2 ^ array_length(trigger.data.fright_proof.siblings) < 2 * $fc
+											AND is_valid_merkle_proof($rt, trigger.data.fright_proof)
+											AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND is_integer(trigger.data.fright_up.index) AND trigger.data.fright_up.index > $k
+												AND trigger.data.fright_up.index < $n AND trigger.data.fright_up.root == trigger.data.units_root
+												AND is_valid_merkle_proof(substring($rt, 2, 64), trigger.data.fright_up)))
+											AND ($ri == 0 OR ($pv AND starts_with($pv, 'f:') AND trigger.data.fprev_proof.index == $ri - 1 AND trigger.data.fprev_proof.root == trigger.data.fills_root
+												AND array_length(trigger.data.fprev_proof.siblings) == array_length(trigger.data.fright_proof.siblings)
+												AND is_valid_merkle_proof($pv, trigger.data.fprev_proof)
+												AND is_integer(trigger.data.fprev_up.index) AND trigger.data.fprev_up.index >= 0 AND trigger.data.fprev_up.index < $k
+												AND trigger.data.fprev_up.root == trigger.data.units_root
+												AND is_valid_merkle_proof(substring($pv, 2, 64), trigger.data.fprev_up)))))
+											bounce('no fraud');
+									}
+								}
+								$okp = $plm AND $hasF AND $F[7] == $M0[1] AND $F[8] == $M1[8]
+									AND (($M0[9] != 0) ? ($pi AND ($o8 == 0 OR abs($rn - $ro) <= max(floor(abs($ro) / 10), 1))) : $band);
+								$mk = $M0[1];
+								$hx = '0123456789abcdef';
+								$ok6 = ($tag == '06' AND !$nobond AND $M0[9] == 0 AND $M0[3] != 10000 AND $band AND is_integer($mk))
+									? substring($pre, $tq + 66, 8) == (substring($hx, floor(($mk % 256) / 16), 1) || substring($hx, ($mk % 256) % 16, 1) || substring($hx, floor((floor($mk / 256) % 256) / 16), 1) || substring($hx, (floor($mk / 256) % 256) % 16, 1) || substring($hx, floor((floor($mk / 65536) % 256) / 16), 1) || substring($hx, (floor($mk / 65536) % 256) % 16, 1) || substring($hx, floor(floor($mk / 16777216) / 16), 1) || substring($hx, floor($mk / 16777216) % 16, 1))
+									: false;
+								if ($okp OR $ok6) bounce('no fraud');
+							}
+						} else {
+							// One side only: the market's whole prefix is
+							// absent from the other tree.
+							$mk = $g0 ? $M0[1] : $M1[1];
+							$T = $g0 ? $post_wit : $pre_wit;
+							$lo = 'meta:' || $mk || ':';
+							$hi = 'meta:' || $mk || ';';
+							$q1 = trigger.data.left AND trigger.data.right AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
+								AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+								AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+								AND trigger.data.left_proof.root == $T AND trigger.data.right_proof.root == $T
+								AND trigger.data.left < $lo AND $hi <= trigger.data.right
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+								AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+							$q2 = trigger.data.left AND contains(trigger.data.left, ':') AND trigger.data.left_proof.index == 0
+								AND trigger.data.left_proof.root == $T AND $hi <= trigger.data.left
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
+							if (!$q1 AND !$q2) bounce('no fraud');
+							// A market is created only by CreateMarket.
+							if (!$g0 AND $tag == '0a') bounce('no fraud');
+						}
+					}
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			}
+		]
+	}
+}

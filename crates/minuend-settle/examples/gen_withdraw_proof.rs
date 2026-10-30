@@ -1,35 +1,30 @@
-//! Generates a vault-AA withdrawal claim (JSON) for a target account.
+//! Generates a vault-AA withdrawal claim (JSON) for one Obyte address.
 //!
-//! Output JSON shape consumed by obyte-local/test_settlement_aa.js (Phase 5.2
-//! sharded forest wire format):
+//! #47 A2: the vault pays against the finalized WITNESS root (`wit_root_<h>`,
+//! Obyte merkle over `minuend_state::wit_leaves`), proving two leaves:
+//!   adr:{address}:{account_hex}                      — payee binding
+//!   acct:{account_hex}:{collateral}:{perp}:{withdrawn} — balance + W
+//! (The 1024-hex aa_forest is no longer payment authority: its leaves are
+//! never published, so no dispute could point at a forged forest leaf.)
+//!
+//! Output JSON shape (obyte-local/withdraw_claim.json):
 //! {
-//!   "height": <finalized height>,
-//!   "leaf_account": "<hex account id>",
-//!   "collateral": "<decimal collateral string>",
-//!   "perp": "<decimal PERP balance string>",
-//!   "withdrawn": "<decimal cumulative-withdrawn string>",
-//!   "shard": <shard index 0..15 of leaf_account>,
-//!   "aa_root": "<64-hex forest hash over the concatenated shard roots>",
-//!   "aa_forest": "<1024-hex concat of the 16 shard roots>",
-//!   "proof": [ { "hash": "<hex>", "right": true|false }, ... ]
+//!   "height": 1,
+//!   "wit_root": "<44-char base64 witness root>",
+//!   "account": "<64-hex account id>",
+//!   "collateral": "<decimal>", "perp": "<decimal>", "withdrawn": "<decimal>",
+//!   "adr_proof":  { "root", "siblings", "index" },
+//!   "acct_proof": { "root", "siblings", "index" }
 //! }
-//!
-//! The proof is a sibling path WITHIN the target's shard tree; the AA folds
-//! it and compares against substring(aa_forest, shard*64, 64).
-//!
-//! NOTE on bucket padding: ocore fatals on EMPTY arrays in trigger data, so a
-//! singleton shard bucket (whose proof would be `[]`) must never reach the
-//! chain. We keep every emitted claim's shard bucket at >=2 accounts by
-//! appending deterministic decoy peers until one lands in the target's shard
-//! (chosen over re-bucketing because the AA trusts the claimed `shard` tag;
-//! decoys are inert leaves that nobody can prove ownership of).
+//! The vault trigger is {withdraw:1, amount, account, collateral, perp,
+//! withdrawn, adr_proof, acct_proof} sent FROM `address`.
 //!
 //! Usage: cargo run -p minuend-settle --example gen_withdraw_proof -- <obyte_address> [collateral] [perp] [withdrawn]
+use minuend_state::{obyte_merkle, wit_leaves, Account, ChainState};
+use minuend_types::AccountId;
 use std::path::PathBuf;
 
 fn main() {
-    // The AA verifies leaf_account == trigger.address (an Obyte address string),
-    // so the claim tree is keyed by the withdrawal address itself.
     let addr = std::env::args()
         .nth(1)
         .expect("usage: gen_withdraw_proof <obyte_address> [collateral] [perp] [withdrawn]");
@@ -41,68 +36,58 @@ fn main() {
         .nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    // Cumulative sidechain-signed withdrawals (W): the AA enforces
-    // "this claim + prior claims <= W" against replay.
+    // Cumulative sidechain-signed withdrawals (W): the vault enforces
+    // "this claim + prior claims <= W".
     let withdrawn: i128 = std::env::args()
         .nth(4)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    // The AA verifies leaf_account == trigger.address (an Obyte address string),
-    // so the claim tree is keyed by the withdrawal address itself.
-    let shard = minuend_state::aa_shard_of(&addr);
-    let mut pairs = vec![
-        (addr.clone(), collateral, perp, withdrawn),
-        (
-            "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK3UEE4O25".to_string(),
-            500i128,
-            0u128,
-            0i128,
-        ), // decoy peer
-    ];
-    // Keep the target's shard bucket >=2 accounts: a singleton bucket would
-    // need an EMPTY proof array and ocore fatally rejects empty arrays in
-    // trigger data. Deterministic PAD addresses fill whichever shard lacks a
-    // second member; see the module note above.
-    let mut pad = 0u32;
-    while !pairs
-        .iter()
-        .any(|(a, ..)| a != &addr && minuend_state::aa_shard_of(a) == shard)
-    {
-        pad += 1;
-        pairs.push((format!("{:0<32}", format!("PAD{}", pad)), 500, 0, 0));
-    }
+    // A deterministic account id for the claim, bound to `addr` exactly as
+    // the engine binds it at the first deposit, plus a decoy peer so every
+    // proof carries at least one sibling (ocore bans empty arrays).
+    let account = AccountId(minuend_types::sha256(format!("claim:{addr}").as_bytes()));
+    let decoy = AccountId([0x5b; 32]);
+    let mut state = ChainState::new();
+    let mut a = Account::new(account);
+    a.collateral = collateral;
+    state.accounts.insert(account, a);
+    state.perp_balances.insert(account, perp);
+    state.withdrawn_total.insert(account, withdrawn);
+    state.bind_aa_address(account, &addr);
+    let mut d = Account::new(decoy);
+    d.collateral = 500;
+    state.accounts.insert(decoy, d);
+    state.bind_aa_address(decoy, "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK");
 
-    let (shard, siblings, shard_root) = minuend_state::aa_sharded_proof_for(&pairs, &addr)
-        .unwrap_or_else(|| {
-            panic!(
-                "no sharded proof for {addr}: register PAD decoy bindings for its shard first \
-                     (see the bucket-padding note above)"
-            )
-        });
-    let roots = minuend_state::aa_sharded_roots_of(&pairs);
-    assert_eq!(
-        roots[shard as usize], shard_root,
-        "proof must reach its shard root"
-    );
-    let forest = roots.concat();
-    assert_eq!(forest.len(), 1024, "forest is 16 x 64 hex");
-    let proof_json = serde_json::json!({
+    let leaves = wit_leaves(&state);
+    let acct_hex = hex::encode(account.0);
+    let adr_leaf = format!("adr:{addr}:{acct_hex}");
+    let acct_leaf = format!("acct:{acct_hex}:{collateral}:{perp}:{withdrawn}");
+    let proof_of = |leaf: &str| {
+        let i = leaves
+            .iter()
+            .position(|l| l == leaf)
+            .unwrap_or_else(|| panic!("leaf {leaf} missing from the witness tree"));
+        let p = obyte_merkle::proof(&leaves, i);
+        serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
+    };
+    let claim = serde_json::json!({
         "height": 1,
-        "leaf_account": addr,
+        "wit_root": obyte_merkle::root(&leaves),
+        "account": acct_hex,
         "collateral": collateral.to_string(),
         "perp": perp.to_string(),
         "withdrawn": withdrawn.to_string(),
-        "shard": shard,
-        "aa_root": minuend_state::aa_forest_hash(&roots),
-        "aa_forest": forest,
-        "proof": siblings
-            .iter()
-            .map(|(hash, right)| serde_json::json!({ "hash": hash, "right": right }))
-            .collect::<Vec<_>>(),
+        "adr_proof": proof_of(&adr_leaf),
+        "acct_proof": proof_of(&acct_leaf),
     });
     let out =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../obyte-local/withdraw_claim.json");
-    std::fs::write(&out, serde_json::to_string_pretty(&proof_json).unwrap()).expect("write");
-    println!("wrote {} (shard {})", out.display(), shard);
+    std::fs::write(&out, serde_json::to_string_pretty(&claim).unwrap()).expect("write");
+    println!(
+        "wrote {} (witness root {})",
+        out.display(),
+        claim["wit_root"]
+    );
 }

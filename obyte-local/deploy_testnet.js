@@ -37,14 +37,49 @@ function resolveAa(agentFile, subs, outName) {
   fs.writeFileSync(out, src);
   return out;
 }
-function resolveRollupAa(disputeAddr, fillAddr) {
-  return resolveAa("minuend_rollup.aa", { DISPUTE_AA_HERE: disputeAddr, DISPUTE_FILL_AA_HERE: fillAddr }, ".minuend_rollup.resolved.aa");
+function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr, wfAddr) {
+  return resolveAa("minuend_rollup.aa", {
+    DISPUTE_AA_HERE: disputeAddr,
+    DISPUTE_FILL_AA_HERE: fillAddr,
+    DISPUTE_BIND_AA_HERE: bindAddr,
+    DISPUTE_BOOK_AA_HERE: bookAddr,
+    DISPUTE_CLAW_AA_HERE: clawAddr,
+    DISPUTE_XFRAME_AA_HERE: xfAddr,
+    DISPUTE_MFRAME_AA_HERE: mfAddr,
+    DISPUTE_WF_AA_HERE: wfAddr,
+  }, ".minuend_rollup.resolved.aa");
 }
-function resolveDisputeAa() {
-  return resolveAa("minuend_dispute.aa", {}, ".minuend_dispute.resolved.aa");
+function resolveBookAa() {
+  return resolveAa("minuend_dispute_book.aa", {}, ".minuend_dispute_book.resolved.aa");
 }
-function resolveVaultAa(rollupAddress, perpAssetId) {
-  return resolveAa("minuend_vault.aa", { ROLLUP_AA_HERE: rollupAddress, PERP_ASSET_ID_HERE: perpAssetId }, ".minuend_vault.resolved.aa");
+// Round 6: P-claw (both legs of one fill) on a fifth dispute AA.
+function resolveClawAa() {
+  return resolveAa("minuend_dispute_claw.aa", {}, ".minuend_dispute_claw.resolved.aa");
+}
+// Round 7b: P-xframe (+ P-tsize since round 8) on a sixth dispute AA.
+function resolveXframeAa() {
+  return resolveAa("minuend_dispute_xframe.aa", {}, ".minuend_dispute_xframe.resolved.aa");
+}
+// Round 8: P-mframe on a seventh dispute AA (P-noband: claw AA since round 9).
+function resolveMframeAa() {
+  return resolveAa("minuend_dispute_mframe.aa", {}, ".minuend_dispute_mframe.resolved.aa");
+}
+// Round 10: P-wf (malformed leaf / fill field) on an eighth dispute AA.
+function resolveWfAa() {
+  return resolveAa("minuend_dispute_wf.aa", {}, ".minuend_dispute_wf.resolved.aa");
+}
+// R4-A-4: P-adr derives the vault from the base too (deposit ledger).
+function resolveBindAa(vaultBaseAddr) {
+  return resolveAa("minuend_dispute_bind.aa", { VAULT_BASE_HERE: vaultBaseAddr }, ".minuend_dispute_bind.resolved.aa");
+}
+// Round 2 (R2-A-3): the vault is a parameterized instance of a BASE AA
+// that names no address; dispute.aa hardcodes the base and derives the
+// rollup's vault as chash160(['autonomous agent', {base_aa, params:{rollup}}]).
+function resolveDisputeAa(vaultBaseAddr) {
+  return resolveAa("minuend_dispute.aa", { VAULT_BASE_HERE: vaultBaseAddr }, ".minuend_dispute.resolved.aa");
+}
+function resolveVaultBaseAa(perpAssetId) {
+  return resolveAa("minuend_vault.aa", { PERP_ASSET_ID_HERE: perpAssetId }, ".minuend_vault_base.resolved.aa");
 }
 function resolveFillAa() {
   return resolveAa("minuend_dispute_fill.aa", {}, ".minuend_dispute_fill.resolved.aa");
@@ -69,7 +104,6 @@ async function main() {
   console.log("deploying minuend_rollup.aa / minuend_dispute.aa / minuend_vault.aa to TESTNET ...");
   // #13 order: dispute AAs hash first (no rollup in their defs), then the
   // rollup hardcodes them, then vault + binds (rollup rides trigger data).
-  const disputePath = resolveDisputeAa();
   const fillPath = resolveFillAa();
   const chashOf = (file) => {
     let parsed = null;
@@ -79,11 +113,27 @@ async function main() {
     });
     return objectHash.getChash160(["autonomous agent", parsed]);
   };
+  const vaultBasePath = resolveVaultBaseAa(PERP_ASSET_ID);
+  const vaultBaseAddr = chashOf(vaultBasePath);
+  const disputePath = resolveDisputeAa(vaultBaseAddr);
   const disputeAddr = chashOf(disputePath);
+  const bookPath = resolveBookAa();
+  const bookAddr = chashOf(bookPath);
   const fillAddr = chashOf(fillPath);
-  const rollupPath = resolveRollupAa(disputeAddr, fillAddr);
+  const bindPath = resolveBindAa(vaultBaseAddr);
+  const bindAddr = chashOf(bindPath);
+  const clawPath = resolveClawAa();
+  const clawAddr = chashOf(clawPath);
+  const xfPath = resolveXframeAa();
+  const xfAddr = chashOf(xfPath);
+  const mfPath = resolveMframeAa();
+  const mfAddr = chashOf(mfPath);
+  const wfPath = resolveWfAa();
+  const wfAddr = chashOf(wfPath);
+  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr, wfAddr);
 
   const network = await Network.create()
+    .with.agent({ vaultBase: vaultBasePath })
     .with.agent({ rollup: rollupPath })
     .with.wallet({ operator: 1e14 })
     .run();
@@ -94,11 +144,23 @@ async function main() {
   const network2 = await Network.create()
     .with.agent({ dispute: disputePath })
     .with.agent({ fill: fillPath })
-    .with.agent({ vault: resolveVaultAa(rollup, PERP_ASSET_ID) })
+    .with.agent({ bind: bindPath })
+    .with.agent({ book: bookPath })
+    .with.agent({ claw: clawPath })
+    .with.agent({ xframe: xfPath })
+    .with.agent({ mframe: mfPath })
+    .with.agent({ wf: wfPath })
+    .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ operator: 1e14 })
     .run();
   const dispute = network2.agent.dispute;
   const fill = network2.agent.fill;
+  const bindAa = network2.agent.bind;
+  const bookAa = network2.agent.book;
+  const clawAa = network2.agent.claw;
+  const xfAa = network2.agent.xframe;
+  const mfAa = network2.agent.mframe;
+  const wfAa = network2.agent.wf;
   const vault = network2.agent.vault;
   console.log("dispute AA address:", dispute);
   console.log("fill AA address   :", fill);
@@ -122,6 +184,54 @@ async function main() {
   if (fb.error || !fb.unit) throw new Error("fill bind failed: " + fb.error);
   await network2.witnessUntilStable(fb.unit);
   console.log("fill bound; unit =", fb.unit);
+  const bb = await op2.triggerAaWithData({
+    toAddress: bindAa,
+    amount: 20000,
+    data: { bind_bind: 1, rollup },
+  });
+  if (bb.error || !bb.unit) throw new Error("binding-dispute bind failed: " + bb.error);
+  await network2.witnessUntilStable(bb.unit);
+  console.log("binding dispute bound; unit =", bb.unit);
+  const kb = await op2.triggerAaWithData({
+    toAddress: bookAa,
+    amount: 20000,
+    data: { bind_book: 1, rollup },
+  });
+  if (kb.error || !kb.unit) throw new Error("book-dispute bind failed: " + kb.error);
+  await network2.witnessUntilStable(kb.unit);
+  console.log("book dispute bound; unit =", kb.unit);
+  const cb = await op2.triggerAaWithData({
+    toAddress: clawAa,
+    amount: 20000,
+    data: { bind_claw: 1, rollup },
+  });
+  if (cb.error || !cb.unit) throw new Error("claw-dispute bind failed: " + cb.error);
+  await network2.witnessUntilStable(cb.unit);
+  console.log("claw dispute bound; unit =", cb.unit);
+  const xb = await op2.triggerAaWithData({
+    toAddress: xfAa,
+    amount: 20000,
+    data: { bind_xframe: 1, rollup },
+  });
+  if (xb.error || !xb.unit) throw new Error("xframe-dispute bind failed: " + xb.error);
+  await network2.witnessUntilStable(xb.unit);
+  console.log("xframe dispute bound; unit =", xb.unit);
+  const mb = await op2.triggerAaWithData({
+    toAddress: mfAa,
+    amount: 20000,
+    data: { bind_mframe: 1, rollup },
+  });
+  if (mb.error || !mb.unit) throw new Error("mframe-dispute bind failed: " + mb.error);
+  await network2.witnessUntilStable(mb.unit);
+  console.log("mframe dispute bound; unit =", mb.unit);
+  const wb = await op2.triggerAaWithData({
+    toAddress: wfAa,
+    amount: 20000,
+    data: { bind_wf: 1, rollup },
+  });
+  if (wb.error || !wb.unit) throw new Error("wf-dispute bind failed: " + wb.error);
+  await network2.witnessUntilStable(wb.unit);
+  console.log("wf dispute bound; unit =", wb.unit);
 
   const v = await operator.readAAStateVars(rollup);
   const vars_ = v.vars || v;
@@ -129,6 +239,18 @@ async function main() {
     throw new Error("dispute_aa not bound: " + JSON.stringify(vars_.dispute_aa));
   if (String(vars_.dispute_fill_aa) !== String(fill))
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(vars_.dispute_fill_aa));
+  if (String(vars_.dispute_bind_aa) !== String(bindAa))
+    throw new Error("dispute_bind_aa not bound: " + JSON.stringify(vars_.dispute_bind_aa));
+  if (String(vars_.dispute_book_aa) !== String(bookAa))
+    throw new Error("dispute_book_aa not bound: " + JSON.stringify(vars_.dispute_book_aa));
+  if (String(vars_.dispute_claw_aa) !== String(clawAa))
+    throw new Error("dispute_claw_aa not bound: " + JSON.stringify(vars_.dispute_claw_aa));
+  if (String(vars_.dispute_xframe_aa) !== String(xfAa))
+    throw new Error("dispute_xframe_aa not bound: " + JSON.stringify(vars_.dispute_xframe_aa));
+  if (String(vars_.dispute_mframe_aa) !== String(mfAa))
+    throw new Error("dispute_mframe_aa not bound: " + JSON.stringify(vars_.dispute_mframe_aa));
+  if (String(vars_.dispute_wf_aa) !== String(wfAa))
+    throw new Error("dispute_wf_aa not bound: " + JSON.stringify(vars_.dispute_wf_aa));
   if (Number(vars_.last_submitted || 0) !== 0)
     throw new Error("boot last_submitted wrong");
   if (Number(vars_.last_finalized || 0) !== 0)
@@ -140,13 +262,25 @@ async function main() {
     rollup_aa_address: rollup,
     dispute_aa_address: dispute,
     dispute_fill_aa_address: fill,
+    dispute_bind_aa_address: bindAa,
+    dispute_book_aa_address: bookAa,
+    dispute_claw_aa_address: clawAa,
+    dispute_xframe_aa_address: xfAa,
+    dispute_mframe_aa_address: mfAa,
+    dispute_wf_aa_address: wfAa,
     vault_aa_address: vault,
+    vault_base_aa_address: vaultBaseAddr,
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
+    assertion_version: 9,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };
+  // #47 B5: the info object used to be built and never written, leaving a
+  // stale pre-#44 record in deployment.json.
+  fs.writeFileSync(path.join(__dirname, "deployment.json"), JSON.stringify(info, null, 2) + "\n");
+  console.log("deployment.json written");
   console.log("NOTE: mainnet deployment requires a formal AA audit.");
   await network.stop();
   await network2.stop();

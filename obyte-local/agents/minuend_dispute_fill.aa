@@ -11,8 +11,9 @@
 	// The rollup address rides every trigger (bind, challenge) instead of
 	// living in this definition: the rollup hardcodes THIS address (#13),
 	// and mutual hardcoding would be a chash cycle.
-	// Empty-sentinel wit root (obyte_merkle::root(["empty"]), pinned by the
-	// Rust unit test): Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=
+	// Genesis witness root (R9-C1: obyte_merkle::root(wit_leaves(ChainState::new())),
+	// minuend_state::GENESIS_WIT_ROOT, pinned by the Rust unit test that also
+	// checks every AA): eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=
 	//
 	// Fill string (crates/minuend-settle/src/lib.rs fills_element):
 	//   f:{unit_hex}:{idx}:{taker_hex}:{maker_hex}:{taker_order_hex}:
@@ -39,14 +40,23 @@
 	//   - (taker_post + still): escrow left collateral at place, the
 	//   fill's escrow share moved to the bucket (or back on a pure
 	//   reduce), and the post ord leaf holds the un-rested remainder.
-	// Post-fill, a negative expected collateral never gets a verdict:
-	// the engine claws a fill's hole back from the winner (zero-sum,
-	// insurance untouched) and any remainder stays negative — a shape
-	// these leaves cannot pin down. A non-negative expectation keeps
-	// the exact identity, empty range or not.
-	// kind 2 (ADL) and the insurance account are unmodelable (top-up /
-	// haircut / fee exemptions live outside the fill) and always bounce.
-	// Missing proofs (ops/ord) bounce without a verdict.
+	// R5-A-2: the claw (a fill party's negative fill-stage collateral pulled
+	// back from the OTHER party, capped at what it can pay) is judged as a
+	// RANGE — a leg receives at most -m from a negative fill stage m and
+	// pays at most a positive m (none when a proven positive counterparty
+	// rules it out) — and no skip gate reads an operator-chosen value: the
+	// Oscript rounding slack grows with proven magnitudes only (6 + S/1e12),
+	// and fills the engine can never emit (bad shape, kind vs market, a fill
+	// under a rejected Place, an absent party) are P-fsane's (book AA).
+	// kind 2/3 on a regular market are book-path liquidations of the taker;
+	// a maker that may be the keeper gets the reward as upper slack. A
+	// funding-market kind 2 (off-book ADL), an isolated target (STP refunds),
+	// kind 1 (R2-A-7 peg) and the insurance account's own leaf are not
+	// judged. Missing proofs (ops/ord) bounce without a verdict.
+	// #47 A3: a kind 0/1 taker leg recomputes taker_post from its own
+	// Place op (book.rs pro_rata_post) and derives the resting escrow
+	// from the op's typ/tif — committed F[13]/F[5] are checked, never
+	// trusted.
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
@@ -120,7 +130,6 @@
 					if (array_length($F) != 14) bounce('bad fill');
 					if ($F[11] != '0' AND $F[11] != '1') bounce('bad fill');
 					if ($F[12] != '0' AND $F[12] != '1' AND $F[12] != '2' AND $F[12] != '3') bounce('bad fill');
-					if (length($F[1]) != 64 OR length($F[3]) != 64 OR length($F[4]) != 64) bounce('bad fill');
 					// Taker escrow share of this fill (USD_SCALE, 0 for a
 					// cross taker); non-numeric input bounces on coercion.
 					$tpost = $F[13] + 0;
@@ -128,32 +137,44 @@
 					// element of the committed units_root (#1).
 					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
 						OR trigger.data.units_proof.root != trigger.data.units_root
-						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
+						OR !is_valid_merkle_proof(substring($fill, 2, 64), trigger.data.units_proof))
 						bounce('bad unit');
 					// Single-fill completeness: idx 0 plus a right neighbor
 					// outside this unit's prefix — the trailing fill's neighbor
 					// is the fills_root length sentinel — proves this is the
 					// unit's only fill, so pre->post delta is exactly this fill.
-					if ($F[2] != '0') bounce('no fraud');
+					if (substring($fill, 66, 3) != ':0:') bounce('no fraud');
 					$right_ok = trigger.data.right
 						AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
 						AND trigger.data.right_proof.root == trigger.data.fills_root
+						AND is_integer(trigger.data.fill_proof.index) AND trigger.data.fill_proof.index >= 0
 						AND trigger.data.right_proof.index == trigger.data.fill_proof.index + 1
-						AND !starts_with(trigger.data.right, 'f:' || $F[1] || ':');
+						// R2-A-5: the neighbour must be a real fills leaf (f:)
+						// or the length sentinel (n:) — never an internal node.
+						AND (starts_with(trigger.data.right, 'f:') OR starts_with(trigger.data.right, 'n:'))
+						AND !starts_with(trigger.data.right, 'f:' || substring($fill, 2, 64) || ':');
 					if (!$right_ok) bounce('no fraud');
 					$who = trigger.data.who;
 					if ($who != 'taker' AND $who != 'maker') bounce('bad who');
-					$acct_hex = ($who == 'taker') ? $F[3] : $F[4];
+					$tk = $who == 'taker';
+					// R11-C3/C4: every id is the RAW fill text at its fixed
+					// offset (idx is '0' here: unit 2, taker 69, maker 134,
+					// taker order 199, maker order 264) and every leaf id is
+					// a raw substring too — never a split() field, which
+					// turns a digit-only 64-hex id into a Decimal.
+					$acct_hex = substring($fill, $tk ? 69 : 134, 64);
 					// The insurance fund's own leaf moves via fee credits and
 					// OTHER parties' shortfalls — unmodelable here.
-					if ($acct_hex == '0000000000000000000000000000000000000000000000000000000000000000')
+					// R10-I1: compared on the RAW fill text (idx is '0' here):
+					// split turns the 64-zero hex into the number 0.
+					if (substring($fill, $tk ? 69 : 134, 64) == '0000000000000000000000000000000000000000000000000000000000000000')
 						bounce('no fraud');
 					// #37-10: kind 2 (ADL transfer, not a trade) runs the
 					// same collateral/position math arm as 0/1/3 — with fee
 					// forced to 0 below (the engine charges no taker fee on
 					// ADL; #37-16). Bouncing kind 2 outright left every ADL
 					// math lie unchallengeable.
-					$side_acct = ($who == 'taker') ? $F[11] : (($F[11] == '0') ? '1' : '0');
+					$side_acct = $tk ? $F[11] : (($F[11] == '0') ? '1' : '0');
 					$delta = ($side_acct == '0') ? ($F[9] + 0) : (0 - ($F[9] + 0));
 					$price = $F[8] + 0;
 					$qty = $F[9] + 0;
@@ -161,7 +182,7 @@
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}
@@ -180,7 +201,7 @@
 						OR trigger.data.pre_acct_proof.root != $pre_wit)
 						bounce('bad pre acct proof');
 					$A0 = split($pre_acct, ':');
-					if (array_length($A0) != 5 OR $A0[1] != $acct_hex) bounce('bad pre acct');
+					if (array_length($A0) != 5 OR substring($pre_acct, 5, 64) != $acct_hex) bounce('bad pre acct');
 					$old_col = $A0[2] + 0;
 					if (trigger.data.pos_absent){
 						// Claimed-absent pre pos needs prefix-range
@@ -191,21 +212,21 @@
 						// WITH a pre position and freeze honest heights.
 						$plo = 'pos:' || $acct_hex || ':' || $market || ':';
 						$phi = 'pos:' || $acct_hex || ':' || $market || ';';
-						$phit1 = trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
-							AND trigger.data.pleft_proof.root == $pre_wit
-							AND trigger.data.pright AND is_valid_merkle_proof(trigger.data.pright, trigger.data.pright_proof)
-							AND trigger.data.pright_proof.root == $pre_wit
+						$phit1 = trigger.data.pleft AND trigger.data.pright
+							AND contains(trigger.data.pleft, ':') AND contains(trigger.data.pright, ':')
+							AND is_integer(trigger.data.pleft_proof.index) AND trigger.data.pleft_proof.index >= 0
 							AND trigger.data.pleft_proof.index + 1 == trigger.data.pright_proof.index
-							AND trigger.data.pleft < $plo AND $phi <= trigger.data.pright;
-						$phit2 = trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
 							AND trigger.data.pleft_proof.root == $pre_wit
+							AND trigger.data.pright_proof.root == $pre_wit
+							AND trigger.data.pleft < $plo AND $phi <= trigger.data.pright
+							AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
+							AND is_valid_merkle_proof(trigger.data.pright, trigger.data.pright_proof);
+						$phit2 = trigger.data.pleft AND contains(trigger.data.pleft, ':')
 							AND trigger.data.pleft_proof.index == 0
-							AND $phi <= trigger.data.pleft;
-						$phit3 = ($k == 0 AND $h > 1) AND trigger.data.pleft AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof)
 							AND trigger.data.pleft_proof.root == $pre_wit
-							AND trigger.data.pleft_proof.index == (var[$rollup]['wit_count_' || ($h - 1)] otherwise 0) - 1
-							AND trigger.data.pleft < $plo;
-						if (!$phit1 AND !$phit2 AND !$phit3) bounce('no fraud');
+							AND $phi <= trigger.data.pleft
+							AND is_valid_merkle_proof(trigger.data.pleft, trigger.data.pleft_proof);
+						if (!$phit1 AND !$phit2) bounce('no fraud');
 						$old_qty = 0;
 						$old_entry = 0;
 						$iso = '0';
@@ -217,7 +238,7 @@
 							OR trigger.data.pre_pos_proof.root != $pre_wit)
 							bounce('bad pre pos proof');
 						$PP = split($pre_pos, ':');
-						if (array_length($PP) != 7 OR $PP[1] != $acct_hex OR $PP[2] != $market) bounce('bad pre pos');
+						if (array_length($PP) != 7 OR substring($pre_pos, 4, 64) != $acct_hex OR $PP[2] != $market) bounce('bad pre pos');
 						if ($PP[5] != '0' AND $PP[5] != '1') bounce('bad pre pos');
 						$old_qty = $PP[3] + 0;
 						$old_entry = $PP[4] + 0;
@@ -236,36 +257,38 @@
 					if (array_length($M) != 11 OR $M[1] != $market) bounce('bad pre meta');
 					$fee_bps = $M[5] + 0;
 					$keeper_bps = $M[6] + 0;
-					$usd = $M[9] + 0;
-					// Taker fee by kind, matching the engine's integer chains:
-					// kind 1 prices off the listing multiplier (funding
-					// notional), kind 0/3 off the encoded price, truncating
-					// toward zero at every step like Rust i128 division.
+										// Price notional (engine notional_usd), truncating toward
+					// zero at each step like Rust i128 division: the fee base
+					// of kind 0/3 and the keeper-reward base of kind 2/3.
 					$kind = $F[12] + 0;
+					$t1 = ($qty * $price < 0) ? ceil($qty * $price / 100000000) : floor($qty * $price / 100000000);
+					$t2 = ($t1 * 1000000 < 0) ? ceil($t1 * 1000000 / 100000000) : floor($t1 * 1000000 / 100000000);
 					if ($kind == 2) {
 						// #37-10/#37-16: ADL pays no taker fee (transfer,
 						// not a trade) — the engine skips it, so the model
 						// must too, or honest ADL heights false-verdict.
 						$fee = 0;
 					} else {
-						if ($kind == 1) {
-							$fn = floor($qty * $usd * 1000000 / 100000000);
-							$fee = floor($fn * $fee_bps / 10000);
-						} else {
-							$t1 = ($qty * $price < 0) ? ceil($qty * $price / 100000000) : floor($qty * $price / 100000000);
-							$t2 = ($t1 * 1000000 < 0) ? ceil($t1 * 1000000 / 100000000) : floor($t1 * 1000000 / 100000000);
-							$fee = floor(abs($t2) * $fee_bps / 10000);
-						}
+						// R2-A-7: a kind-1 (funding-rate market) fill may run
+						// settle_funding_peg inside apply_fill_pair, moving
+						// rate-cash between ALL holders of the market — fill
+						// parties included. Unmodelable here: the kind-1
+						// collateral leg never verdicts (see $col_ok), so its
+						// fee/PnL are not computed (position legs still are).
+						$fee = ($kind == 1) ? 0 : floor(abs($t2) * $fee_bps / 10000);
 					}
-					$tfee = ($who == 'taker') ? $fee : 0;
+					$tfee = $tk ? $fee : 0;
+					$reward = floor(abs($t2) * $keeper_bps / 10000);
 					$post_acct = trigger.data.post_acct;
 					if (typeof($post_acct) == 'boolean'
 						OR !is_valid_merkle_proof($post_acct, trigger.data.post_acct_proof)
 						OR trigger.data.post_acct_proof.root != $post_wit)
 						bounce('bad post acct proof');
 					$A1 = split($post_acct, ':');
-					if (array_length($A1) != 5 OR $A1[1] != $acct_hex) bounce('bad post acct');
-					$post_col = $A1[2] + 0;
+					if (array_length($A1) != 5 OR substring($post_acct, 5, 64) != $acct_hex) bounce('bad post acct');
+					// R10-H2: a non-integer POST collateral is fraud (never
+					// a fatal '+'); the sentinel fails $col_ok below.
+					$post_col = is_integer($A1[2]) ? $A1[2] : 1000000000000000000000000000000;
 					// #37-17: Place/fill never touches PERP balances or the
 					// cumulative-withdrawn ledger (fill path writes neither;
 					// only GovDeposit/GovWithdraw move perp, only Withdraw
@@ -273,62 +296,141 @@
 					// past the collateral identity is fraud — record the pin
 					// and fold it into $fraud below (never bounce here: a
 					// drifted leaf IS the fraud this predicate hunts).
-					$pin_ok = ($A1[3] == $A0[3] AND $A1[4] == $A0[4]);
-					// Is the challenged account's POST position range provably
-					// empty? Then equity == collateral and a non-negative
-					// expected lands exact on its own. Either way a negative
-					// expected never verdicts — the claw's remainder is
-					// unprovable from these leaves (see the arm below).
-					$eplo = 'pos:' || $acct_hex || ':';
-					$ephi = 'pos:' || $acct_hex || ';';
-					$pe1 = trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
-						AND trigger.data.eleft_proof.root == $post_wit
-						AND trigger.data.eright AND is_valid_merkle_proof(trigger.data.eright, trigger.data.eright_proof)
-						AND trigger.data.eright_proof.root == $post_wit
-						AND trigger.data.eleft_proof.index + 1 == trigger.data.eright_proof.index
-						AND trigger.data.eleft < $eplo AND $ephi <= trigger.data.eright;
-					$pe2 = trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
-						AND trigger.data.eleft_proof.root == $post_wit
-						AND trigger.data.eleft_proof.index == 0
-						AND $ephi <= trigger.data.eleft;
-					$pe3 = ($k + 1 == $n) AND trigger.data.eleft AND is_valid_merkle_proof(trigger.data.eleft, trigger.data.eleft_proof)
-						AND trigger.data.eleft_proof.root == $post_wit
-						AND trigger.data.eleft_proof.index == (var[$rollup]['wit_count_' || $h] otherwise 1) - 1
-						AND trigger.data.eleft < $eplo;
-					$empty = ($pe1 OR $pe2 OR $pe3) ? '1' : '0';
-					// A maker-side isolated reduce returns the maker order's
-					// pro-rata escrow to collateral — derivable from the
-					// maker's PRE ord leaf (fill qty vs remaining).
-					if ($who == 'maker' AND $iso == '1') {
+					// R7b-N2: k == 0 may carry an oracle bond returned at
+					// the batch boundary (+ORACLE_BOND_PERP).
+					$pin_ok = ($A1[3] == $A0[3] OR ($k == 0 AND $A1[3] == $A0[3] + 50000)) AND $A1[4] == $A0[4];
+					// R5-A-2 (ops budget): the account-wide empty-range arm is
+					// gone — a market-range straddle over the POST tree (always
+					// available: every tree ends with `~:end`) proves the same
+					// close-to-flat absence.
+					// #47 A3/B1: every leg binds the fill to the unit op at k
+					// (ops_root membership); a kind 0/1 maker leg reads only
+					// the Place's margin mode from it (claw guard below).
+					$op = trigger.data.op;
+					// R7-C1 audit: honest ops leaves hold a ':' (node-as-leaf).
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
+						bounce('bad ops proof');
+					$OP = split($op, ':');
+					// R5-A-2: a kind 0/1 taker whose unit descriptor is not a
+					// direct 10-part `p:` (a Reveal{Place} is `x:`) hides the
+					// margin and tif: that leg keeps the position leg and an
+					// upper collateral bound only.
+					$xt = $tk AND $kind <= 1
+						AND !(array_length($OP) == 10 AND $OP[0] == 'p' AND ($OP[6] == '0' OR $OP[6] == '1'));
+					// #47 claw guard (all kinds): the engine claws a party's
+					// negative fill-stage collateral back from the OTHER fill
+					// party. A counterparty that ended the fill negative is
+					// left at <= 0 by the claw (and nothing later in the unit
+					// raises it, see below), so a proven POSITIVE counterparty
+					// post acct leaf excludes a claw on this leg.
+					$cp = trigger.data.cp_acct;
+					$cp_ok = typeof($cp) != 'boolean'
+						AND starts_with($cp, 'acct:' || substring($fill, $tk ? 134 : 69, 64) || ':')
+						AND is_valid_merkle_proof($cp, trigger.data.cp_acct_proof)
+						AND trigger.data.cp_acct_proof.root == $post_wit
+						// collateral column (offset 70) strictly positive
+						AND !starts_with(substring($cp, 70), '-')
+						AND !starts_with(substring($cp, 70), '0:');
+					// #47 B1/B2: kind 2 (ADL) and kind 3 (liquidation book
+					// fill) at idx 0 of a single-fill unit come only from a
+					// Liquidate unit `L:{caller}:{target}:{market}` on the
+					// order-book path, where taker == target. Every same-unit
+					// cash leg outside the fill is then pinned or excluded:
+					//   • keeper reward is seized from the target only and
+					//     credited to the caller — a caller that is also the
+					//     maker would see it on its own leaf: bounce;
+					//   • an isolated target may get STP escrow refunds in
+					//     the same unit: bounce (cross targets cannot hold
+					//     escrowed orders on this market — mode gate);
+					//   • the claw moves collateral between the two fill
+					//     parties when one ends the fill negative. A negative
+					//     fill-stage on THIS leg bounces below; the other
+					//     party's negative fill-stage leaves it at <= 0 after
+					//     the claw (keeper never raises the target), so a
+					//     proven POSITIVE counterparty post leaf excludes it.
+					// Funding-rate off-book ADL (taker = counterparty, maker =
+					// target, haircut, rate-cash PnL) fails `taker == target`
+					// and bounces: conservative, never verdicts honest data.
+					// R5-A-2: the gates below read only PROVEN values. On a
+					// regular market (meta usd_per_unit 0) every kind 2/3
+					// fill is the book-path Liquidate of its TAKER (IOC fill
+					// or mark-price ADL take, taker == target in both), so
+					// the op is needed only to know the keeper: unless the
+					// op is `L:` with caller != maker, the maker leg may
+					// also hold the keeper reward ($kc). The claw is now a
+					// range (see $col_ok), not a bounce. A funding-market
+					// kind 2 (off-book ADL: haircut, rate cash) and an
+					// isolated target (STP escrow refunds) stay unmodelled.
+					// kind 3 on a funding market / kind 2 or 3 with a
+					// non-zero taker_post never come from the engine:
+					// P-fsane (book AA) verdicts those.
+					if ($kind >= 2 AND ($M[9] != 0 OR ($tk AND $iso == '1')))
+						bounce('no fraud');
+					$kc = $kind >= 2 AND !($OP[0] == 'L' AND array_length($OP) == 4 AND substring($op, 2, 64) != substring($fill, 134, 64));
+					// A maker-side isolated fill moves the maker order's
+					// pro-rata escrow — derivable from the maker's PRE ord
+					// leaf (fill qty vs remaining). ADL (kind 2) has no maker
+					// order and moves no escrow. #47: the leaf is read for
+					// EVERY order-book maker leg, so a maker with no prior
+					// position whose order is isolated gets its new bucket
+					// checked too (its order mode is now proven).
+					// R5-A-2: an order-book TAKER leg reads it too whenever it
+					// is supplied, and must when price or qty reach 1e14, so
+					// the tolerance below only grows with proven magnitudes:
+					// a fill off its maker order's price, or past its
+					// remaining, is P-mbind's fraud (bounce here).
+					if ($kind != 2 AND ($who == 'maker' OR typeof(trigger.data.maker_ord) != 'boolean'
+						OR abs($price) >= 100000000000000 OR $qty >= 100000000000000)) {
 						$mord = trigger.data.maker_ord;
 						if (typeof($mord) == 'boolean'
-							OR !starts_with($mord, 'ord:' || $F[6] || ':')
+							OR !starts_with($mord, 'ord:' || substring($fill, 264, 64) || ':')
 							OR !is_valid_merkle_proof($mord, trigger.data.maker_ord_proof)
 							OR trigger.data.maker_ord_proof.root != $pre_wit)
 							bounce('bad maker ord');
 						$MO = split($mord, ':');
-						if (array_length($MO) != 10 OR $MO[7] != $acct_hex) bounce('bad maker ord');
+						// R11-C3: the maker acct is the only other ':'-delimited
+						// 64-hex field of the leaf (its id is the proven order).
+						if (array_length($MO) != 10 OR !contains($mord, ':' || substring($fill, 134, 64) || ':') OR $MO[4] != $price OR $qty > $MO[6])
+							bounce('bad maker ord');
 						$mrem = $MO[6] + 0;
 						$mml = $MO[9] + 0;
+						$mo_iso = $MO[8];
 					} else {
 						$mrem = 1;
 						$mml = 0;
+						$mo_iso = '0';
 					}
+					$mpost_any = ($qty >= $mrem) ? $mml : floor($mml * $qty / $mrem);
+					// The escrow share this fill moves for the challenged
+					// leg (taker: committed taker_post, bound to the op
+					// below; maker: pro-rata of its order's escrow).
+					$post_any = $tk ? $tpost : $mpost_any;
 					$abs_old = ($old_qty < 0) ? (0 - $old_qty) : $old_qty;
+					// R5-A-4: magnitudes, not signed values (a price <= -1e14
+					// rounds the vwap just the same).
+					// R6-H1: below QTY_CAP (1e15) `qty` vs `|pos|` (flip or
+					// pure close: $leftover / $open) compares exactly; the
+					// engine never emits a larger qty (P-fsane: fraud) nor
+					// holds a larger position (its own unit is the fraud).
+					if ($abs_old >= 1000000000000000 OR $qty >= 1000000000000000) bounce('no fraud');
+					$big = abs($price) >= 100000000000000 OR abs($old_entry) >= 100000000000000
+						OR $abs_old >= 100000000000000 OR $qty >= 100000000000000;
 					$abs_delta = ($delta < 0) ? (0 - $delta) : $delta;
 					$same = ($old_qty == 0 OR (($old_qty > 0 AND $delta > 0) OR ($old_qty < 0 AND $delta < 0)));
 					if ($same){
 						$exp_qty = $old_qty + $delta;
 						$exp_entry = ($old_qty == 0) ? $price : floor(($abs_old * $old_entry + $qty * $price) / ($abs_old + $qty));
 						$exp_absent = false;
-						$exp_fill = ($who == 'taker') ? ($old_col - $tfee) : $old_col;
+						$exp_fill = $tk ? ($old_col - $tfee) : $old_col;
 						// Same-sign fills never release escrow or settle
 						// realized PnL, and always produce open qty, so the
-						// taker's post escrows into the bucket, not
-						// collateral.
+						// post escrows into the bucket, not collateral.
 						$release = 0;
 						$pnl = 0;
 						$pback = 0;
+						$exp_bucket = $bucket + $post_any;
 					} else {
 						$close = ($abs_old < $abs_delta) ? $abs_old : $abs_delta;
 						// Isolated release: engine releases bucket*close/old
@@ -339,15 +441,9 @@
 						// Realized PnL by kind. kind 1 = funding rate cash,
 						// rate diff UNCLAMPED (engine apply_fill has no cap),
 						// trunc-toward-zero at both division steps.
+						// R2-A-7: kind-1 PnL is not modelled (collateral leg skipped).
 						if ($kind == 1) {
-							$bp0 = ($price - 10000000000000);
-							$bp1 = ($old_entry - 10000000000000);
-							$bpp = ($bp0 < 0) ? ceil($bp0 / 10000) : floor($bp0 / 10000);
-							$bpe = ($bp1 < 0) ? ceil($bp1 / 10000) : floor($bp1 / 10000);
-							$sq = ($old_qty > 0) ? $close : (0 - $close);
-							$cx = $sq * ($bpp - $bpe) * $usd * 1000000;
-							$c1 = ($cx < 0) ? ceil($cx / 100000000) : floor($cx / 100000000);
-							$pnl = ($c1 < 0) ? ceil($c1 / 10000) : floor($c1 / 10000);
+							$pnl = 0;
 						} else {
 							$signed = ($old_qty > 0) ? ($price - $old_entry) : ($old_entry - $price);
 							$pr = $signed * $close * 1000000;
@@ -359,10 +455,8 @@
 						// A maker's pro-rata escrow returns to collateral only
 						// when the fill does NOT produce new open qty (flip
 						// fills escrow the post into the bucket instead).
-						$mpost = ($who == 'maker' AND ($leftover > 0 OR $open == 0))
-							? (($qty >= $mrem) ? $mml : floor($mml * $qty / $mrem))
-							: 0;
-						$exp_fill = ($who == 'taker')
+						$mpost = ($who == 'maker' AND ($leftover > 0 OR $open == 0)) ? $mpost_any : 0;
+						$exp_fill = $tk
 							? ($old_col + $release + $pnl - $tfee)
 							: ($old_col + $release + $pnl + $mpost);
 						// Engine apply_fill puts the taker's post into the
@@ -370,6 +464,10 @@
 						// handled above; here: leftover 0 and open > 0),
 						// otherwise returns it to collateral.
 						$pback = ($leftover == 0 AND $open > 0) ? 0 : $tpost;
+						// Bucket after the fill: a flip released the whole
+						// old bucket and escrows the post; a partial reduce
+						// keeps the unreleased rest.
+						$exp_bucket = ($leftover == 0) ? $post_any : ($bucket - $release);
 						if ($leftover == 0 AND $open == 0){
 							$exp_qty = 0;
 							$exp_entry = 0;
@@ -382,10 +480,16 @@
 							$exp_absent = false;
 						}
 					}
+					// #47 A3: the post bucket is checked wherever the
+					// escrow flowing into it is known — an isolated taker
+					// Place (kind 0/1) or an isolated pre position on the
+					// maker side. A pre-absent maker's bucket stays
+					// unchecked (its order mode is not proven here).
+					$chk_b = $tk ? ($kind <= 1 AND !$xt AND $OP[6] == '1') : ($iso == '1' OR $mo_iso == '1');
 					// Position leg: a surviving pos leaf where the engine
 					// removed the position is fabricated (verdict); otherwise
 					// proven absence (straddle over the POST tree, never a
-					// bare claim) or exact qty/entry match.
+					// bare claim) or exact qty/entry/bucket match.
 					if ($exp_absent) {
 						$spoof = (typeof(trigger.data.post_pos) != 'boolean'
 							AND starts_with(trigger.data.post_pos, 'pos:' || $acct_hex || ':' || $market || ':')
@@ -395,33 +499,28 @@
 							$pos_ok = false;
 							$pos_bail = false;
 						} else {
-							if ($empty == '1') {
+							$slo = 'pos:' || $acct_hex || ':' || $market || ':';
+							$shi = 'pos:' || $acct_hex || ':' || $market || ';';
+							$ps1 = trigger.data.post_pleft AND trigger.data.post_pright
+								AND contains(trigger.data.post_pleft, ':') AND contains(trigger.data.post_pright, ':')
+								AND is_integer(trigger.data.post_pleft_proof.index) AND trigger.data.post_pleft_proof.index >= 0
+								AND trigger.data.post_pleft_proof.index + 1 == trigger.data.post_pright_proof.index
+								AND trigger.data.post_pleft_proof.root == $post_wit
+								AND trigger.data.post_pright_proof.root == $post_wit
+								AND trigger.data.post_pleft < $slo AND $shi <= trigger.data.post_pright
+								AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
+								AND is_valid_merkle_proof(trigger.data.post_pright, trigger.data.post_pright_proof);
+							$ps2 = trigger.data.post_pleft AND contains(trigger.data.post_pleft, ':')
+								AND trigger.data.post_pleft_proof.index == 0
+								AND trigger.data.post_pleft_proof.root == $post_wit
+								AND $shi <= trigger.data.post_pleft
+								AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof);
+							if ($ps1 OR $ps2) {
 								$pos_ok = true;
 								$pos_bail = false;
 							} else {
-								$slo = 'pos:' || $acct_hex || ':' || $market || ':';
-								$shi = 'pos:' || $acct_hex || ':' || $market || ';';
-								$ps1 = trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
-									AND trigger.data.post_pleft_proof.root == $post_wit
-									AND trigger.data.post_pright AND is_valid_merkle_proof(trigger.data.post_pright, trigger.data.post_pright_proof)
-									AND trigger.data.post_pright_proof.root == $post_wit
-									AND trigger.data.post_pleft_proof.index + 1 == trigger.data.post_pright_proof.index
-									AND trigger.data.post_pleft < $slo AND $shi <= trigger.data.post_pright;
-								$ps2 = trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
-									AND trigger.data.post_pleft_proof.root == $post_wit
-									AND trigger.data.post_pleft_proof.index == 0
-									AND $shi <= trigger.data.post_pleft;
-								$ps3 = ($k + 1 == $n) AND trigger.data.post_pleft AND is_valid_merkle_proof(trigger.data.post_pleft, trigger.data.post_pleft_proof)
-									AND trigger.data.post_pleft_proof.root == $post_wit
-									AND trigger.data.post_pleft_proof.index == (var[$rollup]['wit_count_' || $h] otherwise 1) - 1
-									AND trigger.data.post_pleft < $slo;
-								if ($ps1 OR $ps2 OR $ps3) {
-									$pos_ok = true;
-									$pos_bail = false;
-								} else {
-									$pos_ok = false;
-									$pos_bail = true;
-								}
+								$pos_ok = false;
+								$pos_bail = true;
 							}
 						}
 					} else {
@@ -432,130 +531,160 @@
 							$pos_bail = true;
 						} else {
 							$PS = split(trigger.data.post_pos, ':');
-							$pos_ok = (array_length($PS) == 7 AND $PS[1] == $acct_hex AND $PS[2] == $market
-								AND $PS[3] + 0 == $exp_qty AND abs($PS[4] + 0 - $exp_entry) <= 1);
+							// R4-A-5: qty/entry values past Oscript's exact
+							// range (>= 1e14) skip their numeric compare.
+							// R5-A-2: the bucket compare is never skipped;
+							// its tolerance grows with the PROVEN inflow
+							// magnitudes (bucket, the escrow share — bound
+							// to the op margin <= pre collateral or to the
+							// maker's proven margin_left) instead.
+							$pos_ok = (array_length($PS) == 7 AND substring(trigger.data.post_pos, 4, 64) == $acct_hex AND $PS[2] == $market
+								AND ($big OR ($PS[3] == $exp_qty AND is_integer($PS[4]) AND abs($PS[4] - $exp_entry) <= 1))
+								AND (!$chk_b OR (is_integer($PS[6]) AND abs($PS[6] - $exp_bucket) <= 1 + floor(($bucket + $post_any) / 1000000000000))));
 							$pos_bail = false;
 						}
 					}
-					// Collateral leg. kind 3 taker = liquidation: the keeper
-					// reward is seized from the target after the fills and
-					// claw, so it is only exact in the provable
-					// no-positions regime.
-					if ($kind == 3 AND $who == 'taker') {
-						if ($empty == '1') {
-							$bal = ($exp_fill < 0) ? 0 : $exp_fill;
-							$reward = floor(abs($t2) * $keeper_bps / 10000);
-							$pay = ($reward < $bal) ? $reward : $bal;
-							if (typeof(trigger.data.pre_keeper) == 'boolean'
-								OR typeof(trigger.data.post_keeper) == 'boolean'
-								OR !is_valid_merkle_proof(trigger.data.pre_keeper, trigger.data.pre_keeper_proof)
-								OR trigger.data.pre_keeper_proof.root != $pre_wit
-								OR !is_valid_merkle_proof(trigger.data.post_keeper, trigger.data.post_keeper_proof)
-								OR trigger.data.post_keeper_proof.root != $post_wit) {
-								$col_ok = false;
-								$col_bail = true;
-							} else {
-								$KT0 = split(trigger.data.pre_keeper, ':');
-								$KT1 = split(trigger.data.post_keeper, ':');
-								$kp0 = $KT0[2] + 0;
-								$kp1 = $KT1[2] + 0;
-								$col_ok = (array_length($KT0) == 5 AND array_length($KT1) == 5
-									AND $post_col == $bal - $pay AND $kp1 == $kp0 + $pay);
-								$col_bail = false;
-							}
-						} else {
-							$col_ok = false;
-							$col_bail = true;
-						}
+					// Collateral leg: expected post (exp_t) and fill-stage (exp_m);
+					// the claw range and tolerance are applied in $col_ok.
+					if ($tk AND $kind >= 2) {
+						// #47 B1/B2: liquidation target (kind 3 book fill or
+						// kind 2 ADL take): fill-stage collateral, then the
+						// keeper reward bps(|notional|) seized from its own
+						// non-negative collateral (credited to the caller;
+						// a maker that may be the caller gets the reward as
+						// upper slack on its own leg). No keeper leaves needed.
+						$kpay = ($exp_fill > 0) ? (($reward < $exp_fill) ? $reward : $exp_fill) : 0;
+						$exp_t = $exp_fill - $kpay;
+						$exp_m = $exp_t;
+						$sx = 0;
+						$op_ok = true;
+						$ord_ok = true;
+						$ord_bail = true;
 					} else {
-						// Taker collateral: EXACT identity (no direction
-						// range — a larger post is fraud, not honesty). The
-						// fill's unit op must be this taker's own Place: the
-						// escrow the identity models happens inside that op.
-						if ($who == 'taker') {
-							$op = trigger.data.op;
-							if (!trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
-								OR trigger.data.ops_proof.root != trigger.data.ops_root
-								OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
-								bounce('bad ops proof');
-							// A fill kind 0/1 only ever comes from a place;
-							// anything else at k is unmodelable here. A place
-							// can only refund the unfilled remainder — an
-							// escrowed own maker is rejected outright
-							// (SelfTrade::Reject), so no other cash leg can
-							// move this account's collateral in this unit.
-							if (!starts_with($op, 'p:')) bounce('no fraud');
-							$OP = split($op, ':');
+						if ($tk) {
+							// kind 0/1 at idx 0 of a single-fill unit: only
+							// ever the unit's own Place, filling its brand-new
+							// taker order (remaining == qty, margin_left ==
+							// margin before this fill).
 							// p:{acct}:{market}:{side}:{price}:{qty}:
-							//    {isolated}:{margin}:{tif}
-							if (array_length($OP) != 9 OR ($OP[6] != '0' AND $OP[6] != '1'))
-								bounce('bad op');
-							$margin = $OP[7] + 0;
-							if ($OP[6] == '1') {
-								// Isolated taker order: margin left
-								// collateral at escrow and the unit-end
-								// refund returns (margin - taker_post -
-								// still), so the net escrow effect collapses
-								// to -(taker_post + still). `still` is the
-								// post ord leaf's margin_left: prove member
-								// (id = $F[5], acct = $F[3]) or prefix
-								// non-membership over post_wit.
-								$to = 'ord:' || $F[5] || ':';
-								$thi = 'ord:' || $F[5] || ';';
-								if (trigger.data.tord AND starts_with(trigger.data.tord, $to)
-									AND is_valid_merkle_proof(trigger.data.tord, trigger.data.tord_proof)
-									AND trigger.data.tord_proof.root == $post_wit) {
-									$TO = split(trigger.data.tord, ':');
-									if (array_length($TO) != 10 OR $TO[7] != $F[3])
-										bounce('bad ord proof');
-									$still = $TO[9] + 0;
-								} else {
-									// Same three-way straddle the AA already
-									// uses for pos absence (straddle /
-									// before-min / final-tree after-max).
-									$oh1 = trigger.data.oleft AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
-										AND trigger.data.oleft_proof.root == $post_wit
-										AND trigger.data.oright AND is_valid_merkle_proof(trigger.data.oright, trigger.data.oright_proof)
-										AND trigger.data.oright_proof.root == $post_wit
-										AND trigger.data.oleft_proof.index + 1 == trigger.data.oright_proof.index
-										AND trigger.data.oleft < $to AND $thi <= trigger.data.oright;
-									$oh2 = trigger.data.oleft AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
-										AND trigger.data.oleft_proof.root == $post_wit
-										AND trigger.data.oleft_proof.index == 0
-										AND $thi <= trigger.data.oleft;
-									$oh3 = ($k + 1 == $n) AND trigger.data.oleft AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
-										AND trigger.data.oleft_proof.root == $post_wit
-										AND trigger.data.oleft_proof.index == (var[$rollup]['wit_count_' || $h] otherwise 1) - 1
-										AND trigger.data.oleft < $to;
-									if (!$oh1 AND !$oh2 AND !$oh3) bounce('bad ord proof');
-									$still = 0;
-								}
-								$exp_t = $old_col - $tpost - $still + $pback + $release + $pnl - $tfee;
+							//    {isolated}:{margin}:{tif}:{typ}
+							$oqty = $xt ? $qty : $OP[5] + 0;
+							$margin = $xt ? 0 : $OP[7] + 0;
+							// #47 A3: recompute the taker's escrow share
+							// on-chain (book.rs pro_rata_post) instead of
+							// trusting the committed F[13]; a fill string
+							// whose taker/market/side/qty/post disagree with
+							// its own Place is fraud by itself. ±1 absorbs
+							// Oscript's 15-digit rounding of margin*qty.
+							$tpost_exp = (!$xt AND $OP[6] == '1')
+								? (($qty >= $oqty) ? $margin : floor($margin * $qty / $oqty))
+								: 0;
+							// R5-A-2: no 1e14 skip — the share compare's
+							// tolerance grows with the margin, which P-fsane
+							// bounds by the proven pre collateral.
+							$op_ok = $xt OR (substring($op, 2, 64) == substring($fill, 69, 64) AND $OP[2] == $market AND $OP[3] == $F[11]
+								AND $qty <= $oqty AND $tpost >= 0 AND abs($tpost - $tpost_exp) <= 1 + floor($margin / 1000000000000)
+								AND ($OP[6] == '1' OR $tpost == 0));
+							// The unfilled remainder rests iff Limit (typ 0) +
+							// Gtc (tif 0) and qty is left; it then keeps
+							// margin - taker_post in escrow, else the whole
+							// remainder is refunded in-unit. `still` is
+							// derived from the op, never from a leaf.
+							$rest = (!$xt AND $OP[9] == '0' AND $OP[8] == '0' AND $qty < $oqty);
+							$tml = (!$xt AND $OP[6] == '1') ? $margin - $tpost : 0;
+							$still = $rest ? $tml : 0;
+							// Resting-order leg: the post ord leaf of F[5]
+							// must exist exactly when the order rests, with
+							// the op's fields and margin_left == $tml.
+							// Membership, or prefix non-membership (straddle
+							// or before-min; an after-max absence just bails —
+							// the ops budget has no room for that arm).
+							$to = 'ord:' || substring($fill, 199, 64) || ':';
+							$thi = 'ord:' || substring($fill, 199, 64) || ';';
+							if ($xt) {
+								$ord_ok = true;
+								$ord_bail = true;
+							} else if (trigger.data.tord AND starts_with(trigger.data.tord, $to)
+								AND is_valid_merkle_proof(trigger.data.tord, trigger.data.tord_proof)
+								AND trigger.data.tord_proof.root == $post_wit) {
+								$TO = split(trigger.data.tord, ':');
+								$ord_ok = ($rest AND array_length($TO) == 10 AND $TO[2] == $market
+									AND $TO[3] == $F[11] AND $TO[4] == $OP[4] AND is_integer($TO[6]) AND abs($TO[6] - ($oqty - $qty)) <= floor($oqty / 1000000000000)
+									AND contains(trigger.data.tord, ':' || substring($fill, 69, 64) || ':') AND $TO[8] == $OP[6] AND $TO[9] == $tml);
+								$ord_bail = false;
 							} else {
-								// Cross taker order carries no escrow: the
-								// fill-stage identity is exp_fill as-is.
-								$exp_t = $exp_fill;
+								$oh1 = trigger.data.oleft AND trigger.data.oright
+									AND contains(trigger.data.oleft, ':') AND contains(trigger.data.oright, ':')
+									AND is_integer(trigger.data.oleft_proof.index) AND trigger.data.oleft_proof.index >= 0
+									AND trigger.data.oleft_proof.index + 1 == trigger.data.oright_proof.index
+									AND trigger.data.oleft_proof.root == $post_wit
+									AND trigger.data.oright_proof.root == $post_wit
+									AND trigger.data.oleft < $to AND $thi <= trigger.data.oright
+									AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
+									AND is_valid_merkle_proof(trigger.data.oright, trigger.data.oright_proof);
+								$oh2 = trigger.data.oleft AND contains(trigger.data.oleft, ':')
+									AND trigger.data.oleft_proof.index == 0
+									AND trigger.data.oleft_proof.root == $post_wit
+									AND $thi <= trigger.data.oleft
+									AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof);
+								$ord_ok = !$rest;
+								$ord_bail = !($oh1 OR $oh2);
 							}
+							// x: taker: the cross identity is the ceiling
+							// (escrow only lowers it; an escrowed refund is
+							// <= margin <= max(pre collateral, 0)).
+							$exp_t = $xt ? $exp_fill : $old_col - $tpost - $still + $pback + $release + $pnl - $tfee;
+							// Fill-stage (pre-refund) collateral: the unrested
+							// escrow (tml - still) is refunded only AFTER the
+							// claw, so the claw sees exp_t minus that refund.
+							$exp_m = $xt ? $exp_t - max($old_col, 0) : $exp_t - $tml + $still;
+							$sx = $margin;
 						} else {
 							$exp_t = $exp_fill;
+							$exp_m = $exp_t;
+							$sx = 0;
+							$op_ok = true;
+							$ord_ok = true;
+							$ord_bail = true;
 						}
-						// Negative expected post: the engine claws a fill's
-						// hole back from the winner (zero-sum, insurance
-						// untouched) and any remainder the winner cannot
-						// cover stays as negative collateral — unverifiable
-						// from these leaves either way, so bounce instead of
-						// false-verdicting an honest height. Applies whether
-						// the position range is empty or not; a non-negative
-						// expectation keeps the exact identity.
-						if ($exp_t < 0) bounce('no fraud');
-						$col_ok = ($post_col == $exp_t);
-						$col_bail = false;
 					}
+					// Collateral leg as a RANGE (R5-A-2: no skip gate reads an
+					// operator-chosen value). The engine's claw only moves
+					// collateral between the two fill parties: a leg whose
+					// fill-stage collateral m (exp_m) is negative receives
+					// at most -m, a leg with m > 0 pays at most m (and none
+					// when a proven POSITIVE counterparty post leaf rules the
+					// claw out — for a kind 0/1 maker that also needs a cross
+					// Place taker, whose refund cannot land after the claw;
+					// for kind 2/3 a known keeper != maker). A maker that may
+					// be the keeper ($kc) may also gain the reward. So:
+					//   exp_t - max(tol, m) <= post <= exp_t + max(tol, -m) (+ reward)
+					// An x: taker ($xt) has exp_m = cross ceiling - max(pre, 0)
+					// and no lower bound (escrow is unknown).
+					// R3-A-3 rounding: Oscript keeps 15 significant digits;
+					// below 1e14 every term is off by at most 6 in total, and
+					// above it the error stays far below 1e-12 of the summed
+					// magnitudes, so tol = 6 + S / 1e12 where S sums PROVEN
+					// magnitudes only (price/qty bound to the maker order,
+					// margin <= pre collateral via P-fsane, mml/bucket/entry
+					// from pre leaves). kind 1 (funding-rate market, now
+					// bound to the proven meta by P-fsane) is never judged
+					// (R2-A-7 peg).
+					$tol = 6 + floor((abs($old_col) + abs($t2) + abs($pnl) + $bucket + $mml + $sx
+						+ $abs_old * abs($old_entry) / 10000000000) / 1000000000000);
+					$cpx = $cp_ok AND !$kc AND ($tk OR $kind >= 2 OR (array_length($OP) == 10 AND $OP[6] == '0'));
+					$dcol = $post_col - $exp_t;
+					$col_ok = $kind == 1 OR (($xt OR $dcol >= 0 - ($cpx ? $tol : max($tol, $exp_m)))
+						AND $dcol <= max($tol, 0 - $exp_m) + (($who == 'maker' AND $kc) ? $reward : 0));
 					// Verdict only when a leg is VERIFIED wrong; a bail
 					// (missing evidence) silences its own leg only. The
-					// #37-17 perp/W pin needs no bail: both leaves are
-					// already proven members above.
-					$fraud = (!$pos_bail AND !$pos_ok) OR (!$col_bail AND !$col_ok) OR !$pin_ok;
+					// #37-17 perp/W pin and the #47 op binding need no bail:
+					// their leaves are already proven members above.
+					// R5-A-2: an ADL take (kind 2, unit's only fill) closes at
+					// most the leg's PRE position (target and counterparty
+					// alike) — a larger qty is never engine output.
+					$fraud = (!$pos_bail AND !$pos_ok) OR !$col_ok OR !$pin_ok OR !$op_ok
+						OR (!$ord_bail AND !$ord_ok) OR ($kind == 2 AND $qty > $abs_old);
 					if ($fraud) {
 						if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 					} else {

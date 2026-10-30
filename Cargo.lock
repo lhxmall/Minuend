@@ -219,6 +219,7 @@ dependencies = [
 name = "minuend-dag"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "hex",
  "minuend-types",
@@ -308,6 +309,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "minuend-account",
  "minuend-dag",
  "minuend-exec",
  "minuend-settle",

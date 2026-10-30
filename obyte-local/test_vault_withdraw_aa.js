@@ -1,30 +1,27 @@
 "use strict";
 
-// MINUEND vault withdrawal E2E — #37 items 4 (forest↔hash fold) + 11 (W watermark).
+// MINUEND vault withdrawal E2E — #37-11 (W watermark) + #47 A2 (the vault
+// pays against the finalized WITNESS root, not the unpublished aa_forest).
 //
 // Standalone from test_settlement_aa.js: the withdraw drill needs its own
-// short chain (submit h1..h3 carrying REAL sharded forests, finalize in
-// order, then withdraw against the finalized forest). Running it inside
-// the settlement suite pushes the shared 20-minute CI job over its limit,
-// so it lives here with per-step logging.
+// short chain (submit h1..h3 carrying REAL witness roots, finalize in
+// order, then withdraw against the finalized root). Running it inside the
+// settlement suite pushes the shared CI job over its limit, so it lives
+// here with per-step logging.
 //
-// Flow (all amounts in micro-base; the vault is seeded with a 1 USD deposit):
-//   h1: forest F1 leaf (wdAcct, col=1000000, W=0)   → finalize
-//       claim {700000 @ W=0} must bounce 'bad claim amount' (nothing debited)
-//   h2: forest F2 leaf (wdAcct, col=300000, W=700000) → finalize
-//       claim {700000 @ W=700000} PAYS (the issue's shape: sidechain had
-//       already debited the 700000; the old min(col,W) gate refused it)
-//       → wd_ == 700000
-//       replay F1 leaf (W=0, amount 0) → bounces (watermark)
-//   h3: forest F3 leaf (wdAcct, col=0, W=1000000)     → finalize
+// Each height's wit_root is ocore's merkle root over sorted witness leaves
+// (the Rust wit_leaves shape): adr:{payee}:{acct}, acct:{acct}:{col}:{perp}:{W}
+// plus a decoy account/binding. Flow (micro-base; vault seeded with 1e6):
+//   h1: (col=1000000, W=0)        → finalize
+//       claim {700000 @ W=0} bounces 'bad claim amount' (nothing debited)
+//   h2: (col=300000, W=700000)    → finalize
+//       claim {700000 @ W=700000} PAYS → wd_ == 700000
+//       replay of the h1 leaf (W=0) bounces (watermark)
+//       #47 A2: the decoy's acct leaf claimed by the payee (no adr: leaf
+//       binds the payee to it) bounces 'bad binding proof'
+//   h3: (col=0, W=1000000)        → finalize
 //       claim {300000 @ W=1000000} PAYS → wd_ == 1000000 (no dead-end)
-//       replay F3 leaf (amount 1) → bounces 'bad claim amount'
-//
-// The forests are built in JS with the SAME fold the vault AA runs
-// (leaf = sha256('acct:a:c:p:w'), node = sha256_hex(left||right), odd
-// levels duplicate the last element; empty shards commit sha256("empty:i")).
-// A decoy peer keeps every touched bucket at >= 2 members (ocore bans
-// empty arrays in trigger data).
+//       replay (amount 1) bounces 'bad claim amount'
 
 if (process.platform === "win32") {
   console.log("SKIP: e2e requires a POSIX env (aa-testkit child env omits APPDATA on win32); see CI e2e job.");
@@ -68,34 +65,38 @@ function writeResolved(file, subs, out) {
   return p;
 }
 
-const ROLLUP_ADDR = chashOf(
-  readDef("minuend_rollup.aa")
-    .split("DISPUTE_AA_HERE").join("00000000000000000000000000000000")
-    .split("DISPUTE_FILL_AA_HERE").join("00000000000000000000000000000000")
-);
-const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
+const NO_DISPUTE = {
   DISPUTE_AA_HERE: "00000000000000000000000000000000",
   DISPUTE_FILL_AA_HERE: "00000000000000000000000000000000",
-}, ".e2e_vault_rollup.aa");
-const VAULT_SRC = writeResolved("minuend_vault.aa", { ROLLUP_AA_HERE: ROLLUP_ADDR, PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw.aa");
+  DISPUTE_BIND_AA_HERE: "00000000000000000000000000000000",
+};
+const ROLLUP_SRC = writeResolved("minuend_rollup.aa", NO_DISPUTE, ".e2e_vault_rollup.aa");
+const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
+// Round 2: the vault is a parameterized instance of the base AA.
+const VAULT_BASE_SRC = writeResolved("minuend_vault.aa", { PERP_ASSET_ID_HERE: "base" }, ".e2e_vault_withdraw_base.aa");
+const VAULT_BASE_ADDR = chashOf(fs.readFileSync(VAULT_BASE_SRC, "utf8"));
+const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
+const { daBindHash } = require("./script_helpers");
 
 const SUBMIT_FEE = 10000;
 const STATE_ROOT = sha256Hex("state-1");
 const PREV_ROOT = sha256Hex("genesis");
-// 44-char witness roots: content-free here (no dispute predicates run).
+// 44-char roots for the commitments the vault does not read.
 const b64root = (s) => Buffer.from(sha256Hex(s), "hex").toString("base64");
+const merkle = require("ocore/merkle.js");
+const FOREST = sha256Hex("f0").repeat(16); // informational only since #47 A2
 
-function submitData(height, stateRoot, prev, forest) {
+function submitData(height, stateRoot, prev, witRoot) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 1,
+    assertion_version: 9,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
-    aa_forest: forest,
-    aa_root: sha256Hex(forest),
-    wit_root: b64root("wit-" + height),
+    aa_forest: FOREST,
+    aa_root: sha256Hex(FOREST),
+    wit_root: witRoot,
     trace_root: b64root("trace-" + height),
     units_root: b64root("units-" + height),
     units_set_root: b64root("set-" + height),
@@ -105,6 +106,28 @@ function submitData(height, stateRoot, prev, forest) {
     unit_count: 1,
     wit_count: 1,
     fill_count: 0,
+    data_root: sha256Hex("frames-" + height),
+  };
+}
+// R2-R-1: submits carry ONE temp_data header + da_bind over the roots.
+function bindSubmit(sd) {
+  sd.da_bind = daBindHash(sd);
+  const header = Object.assign({}, sd);
+  delete header.submit;
+  delete header.aa_forest;
+  return {
+    messages: [
+      {
+        app: "temp_data",
+        payload_location: "inline",
+        payload: {
+          data_length: require("ocore/object_length.js").getLength(header, true),
+          data_hash: require("ocore/object_hash.js").getBase64Hash(header, true),
+          data: header,
+        },
+      },
+      { app: "data", payload: sd },
+    ],
   };
 }
 
@@ -151,87 +174,90 @@ function bounceDetail(res) {
   return (reason ? reason + " :: " : "") + JSON.stringify(r).slice(0, 1500);
 }
 
-// --- hex-domain sharded forest (mirrors minuend_state aa_* fns) ---
-const wdShard = (addr) => parseInt(sha256Hex(addr).slice(0, 2), 16) & 15;
-const hexLeafOf = (addr, col, perp, w) => sha256Hex(`acct:${addr}:${col}:${perp}:${w}`);
-const foldLR = (l, r) => sha256Hex(l + r);
-function shardRoot(bucket, addr) {
-  let level = bucket.map(([a, c, p, w]) => hexLeafOf(a, c, p, w)).sort();
-  const leaf = hexLeafOf(addr, ...bucket.find(([a]) => a === addr).slice(1));
-  let idx = level.indexOf(leaf);
-  const sibs = [];
-  while (level.length > 1) {
-    if (level.length % 2 === 1) level.push(level[level.length - 1]);
-    const pairIdx = idx ^ 1;
-    sibs.push({ hash: level[pairIdx], right: pairIdx > idx });
-    const nxt = [];
-    for (let j = 0; j < level.length; j += 2) nxt.push(foldLR(level[j], level[j + 1]));
-    level = nxt;
-    idx = idx >> 1;
-  }
-  return [level[0], sibs];
-}
-function buildForest(pairs, wdAddr) {
-  // ocore fatals on EMPTY arrays in trigger data, so the withdrawer's
-  // shard bucket must hold >= 2 members for a non-empty proof (same
-  // bucket-padding rule as gen_withdraw_proof.rs): deterministic PAD
-  // decoys fill whichever shard lacks a second member.
-  const all = pairs.slice();
-  let pad = 0;
-  const inShard = (a, s) => wdShard(a) === s;
-  while (!all.some(([a]) => a !== wdAddr && inShard(a, wdShard(wdAddr)))) {
-    pad += 1;
-    all.push([`PAD${pad}`.padEnd(32, "0"), 500, 0, 0]);
-  }
-  const buckets = Array.from({ length: 16 }, () => []);
-  for (const pr of all) buckets[wdShard(pr[0])].push(pr);
-  const wdBucket = buckets[wdShard(wdAddr)];
-  const [wdRoot, sibs] = shardRoot(wdBucket, wdAddr);
-  if (sibs.length === 0) throw new Error("withdrawer shard proof is empty after padding");
-  const roots = [];
-  for (let i = 0; i < 16; i++) {
-    if (buckets[i].length === 0) { roots[i] = sha256Hex("empty:" + i); continue; }
-    const [r] = shardRoot(buckets[i], buckets[i][0][0]);
-    roots[i] = r;
-  }
-  roots[wdShard(wdAddr)] = wdRoot;
-  return { roots, sibs, shard: wdShard(wdAddr) };
+// --- witness tree (mirrors minuend_state::wit_leaves for the leaves the
+// vault reads): sorted leaves, ocore merkle (the same is_valid_merkle_proof
+// the vault runs). ---
+const ACCT = "ab".repeat(32);
+const DECOY_ACCT = "cd".repeat(32);
+function witTree(payee, col, w, payee2) {
+  const DECOY = "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK";
+  const leaves = [
+    ...(payee2 ? [`adr:${payee2}:${ACCT}`] : []),
+    `adr:${payee}:${ACCT}`,
+    `acct:${ACCT}:${col}:0:${w}`,
+    `adr:${DECOY}:${DECOY_ACCT}`,
+    `acct:${DECOY_ACCT}:500:0:900000`,
+    "meta:1:1:1000:500:5:100:0:100:0:0",
+  ].sort();
+  const proofOf = (leaf) => {
+    const i = leaves.indexOf(leaf);
+    if (i < 0) throw new Error("leaf not in tree: " + leaf);
+    return merkle.getMerkleProof(leaves, i);
+  };
+  return {
+    root: merkle.getMerkleRoot(leaves),
+    adrProof: proofOf(`adr:${payee}:${ACCT}`),
+    acctProof: proofOf(`acct:${ACCT}:${col}:0:${w}`),
+    decoyProof: proofOf(`acct:${DECOY_ACCT}:500:0:900000`),
+    adr2Proof: payee2 ? proofOf(`adr:${payee2}:${ACCT}`) : null,
+  };
 }
 
 async function main() {
   network = await Network.create()
+    .with.agent({ vaultBase: VAULT_BASE_SRC })
     .with.agent({ rollup: ROLLUP_SRC })
-    .with.agent({ vault: VAULT_SRC })
+    .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
+    .with.wallet({ other: 1e9 })
     .run();
-  const { operator } = network.wallet;
+  const { operator, other } = network.wallet;
+  const otherAddr = await other.getAddress();
   const rollup = network.agent.rollup;
   const vault = network.agent.vault;
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
   console.log("network up:", { rollup, vault });
   const wdAcct = await operator.getAddress();
-  const DECOY = "5B7BJSCMFQYUOLDLJHROMOKC5QCLPZLK3UEE4O25";
-  console.log("withdrawer:", wdAcct, "shard:", wdShard(wdAcct));
+  console.log("withdrawer:", wdAcct);
 
   console.log("step 1: fund pool + seed vault deposit");
   await trigger(operator, rollup, { pool: 1 }, 10000000010000);
   const dep = await operator.triggerAaWithData({
-    toAddress: vault, amount: 1000000 + 10000, data: { deposit: 1 },
+    toAddress: vault, amount: 1000000 + 10000, data: { deposit: 1, account: ACCT },
   });
   if (dep.error) throw new Error("vault deposit failed: " + dep.error);
   await network.witnessUntilStable(dep.unit);
-  console.log("  vault seeded");
+  {
+    const vs = await vars(vault);
+    // R3-A-5: the record names the payer-chosen sidechain account.
+    if (vs["dep_" + dep.unit] !== wdAcct + ":1000000:" + ACCT)
+      throw new Error("R2-A-3/R3-A-5: vault dep_ ledger wrong: " + JSON.stringify(vs["dep_" + dep.unit]));
+  }
+  // R3-A-5: a deposit without a valid account bounces (refund, no record).
+  for (const [tag, data] of [["missing", { deposit: 1 }], ["upper-hex", { deposit: 1, account: "AB".repeat(32) }], ["short", { deposit: 1, account: "ab".repeat(31) }]]) {
+    const bad = await operator.triggerAaWithData({ toAddress: vault, amount: 50000, data });
+    if (bad.error) throw new Error("bad-account deposit compose failed: " + bad.error);
+    await network.witnessUntilStable(bad.unit);
+    const res = await network.getAaResponseToUnit(bad.unit).catch(() => null);
+    if (!(res && res.response && res.response.bounced))
+      throw new Error("R3-A-5: deposit with " + tag + " account not bounced");
+    const vs = await vars(vault);
+    if (vs["dep_" + bad.unit] !== undefined) throw new Error("R3-A-5: bounced deposit recorded");
+  }
+  console.log("  vault seeded (dep_ ledger recorded with account; account-less deposits bounce)");
 
-  async function submitForest(hh, pairs) {
-    const forest = buildForest(pairs, wdAcct);
-    console.log(`step: submit h${hh} forest (shard ${forest.shard}, ${forest.sibs.length} siblings)`);
-    const sd = submitData(hh, STATE_ROOT, hh === 1 ? PREV_ROOT : STATE_ROOT, forest.roots.join(""));
-    await trigger(operator, rollup, sd, SUBMIT_FEE);
+  async function submitWit(hh, col, w, payee2) {
+    const t = witTree(wdAcct, col, w, payee2);
+    console.log(`step: submit h${hh} wit_root (col=${col}, W=${w})`);
+    const sd = submitData(hh, STATE_ROOT, hh === 1 ? PREV_ROOT : STATE_ROOT, t.root);
+    const m = bindSubmit(sd);
+    const r = await operator.sendMulti({ messages: m.messages, base_outputs: [{ address: rollup, amount: SUBMIT_FEE }] });
+    if (r.error) throw new Error(`h${hh} submit failed: ` + r.error);
+    await network.witnessUntilStable(r.unit);
     const st = await vars(rollup);
     if (Number(st.last_submitted) !== hh) throw new Error(`h${hh} did not land`);
-    if (st["aa_root_" + hh] !== sha256Hex(forest.roots.join("")))
-      throw new Error(`aa_root_${hh} not stored`);
-    return forest;
+    if (st["wit_root_" + hh] !== t.root) throw new Error(`wit_root_${hh} not stored`);
+    return t;
   }
   async function finalize(hh) {
     await network.timetravel({ shift: "3600s" });
@@ -240,14 +266,14 @@ async function main() {
     if (Number(st.last_finalized) !== hh) throw new Error(`h${hh} not finalized`);
     console.log(`  h${hh} finalized`);
   }
-  async function withdrawOk(forest, amount, withdrawn, col, wantWd) {
-    console.log(`step: withdraw amount=${amount} withdrawn=${withdrawn} col=${col}`);
+  const claim = (t, amount, withdrawn, col, extra) => Object.assign({
+    withdraw: 1, amount, withdrawn: String(withdrawn), account: ACCT,
+    collateral: String(col), perp: "0", adr_proof: t.adrProof, acct_proof: t.acctProof,
+  }, extra || {});
+  async function withdrawOk(t, amount, withdrawn, col, wantWd, extra) {
+    console.log(`step: withdraw amount=${amount} withdrawn=${withdrawn} col=${col} ${JSON.stringify(extra || {})}`);
     const r = await operator.triggerAaWithData({
-      toAddress: vault, amount: 20000,
-      data: {
-        withdraw: 1, amount, withdrawn, leaf_account: wdAcct,
-        collateral: String(col), perp: "0", shard: forest.shard, proof: forest.sibs,
-      },
+      toAddress: vault, amount: 20000, data: claim(t, amount, withdrawn, col, extra),
     });
     if (r.error) throw new Error("withdraw trigger failed: " + r.error);
     await network.witnessUntilStable(r.unit);
@@ -255,41 +281,63 @@ async function main() {
     if (JSON.stringify(res || {}).includes('"bounced":true'))
       throw new Error("withdraw bounced: " + bounceDetail(res));
     const st = await vars(vault);
-    if (Number(st["wd_" + wdAcct] || 0) !== wantWd)
-      throw new Error(`wd_ == ${st["wd_" + wdAcct]}, want ${wantWd}`);
+    // R2-A-8: the watermark is per ACCOUNT, not per payee address.
+    if (Number(st["wd_" + ACCT] || 0) !== wantWd)
+      throw new Error(`wd_ == ${st["wd_" + ACCT]}, want ${wantWd}`);
     console.log(`  paid, wd_ == ${wantWd}`);
   }
 
   // h1: (col=1e6, W=0) — nothing debited, nothing payable.
-  const f1 = await submitForest(1, [[wdAcct, 1000000, 0, 0], [DECOY, 500, 0, 0]]);
+  const t1 = await submitWit(1, 1000000, 0);
   await finalize(1);
-  await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 700000, withdrawn: 0, leaf_account: wdAcct,
-    collateral: "1000000", perp: "0", shard: f1.shard, proof: f1.sibs,
-  }, 20000, "bad claim amount");
+  await triggerBounce(operator, vault, claim(t1, 700000, 0, 1000000), 20000, "bad claim amount");
   console.log("  h1: zero-W claim refused");
 
   // h2: (col=300000, W=700000) — the issue's shape pays its pending 700k.
-  const f2 = await submitForest(2, [[wdAcct, 300000, 0, 700000], [DECOY, 500, 0, 0]]);
+  const t2 = await submitWit(2, 300000, 700000);
   await finalize(2);
-  await withdrawOk(f2, 700000, 700000, 300000, 700000);
-  console.log("  h2: issue shape (col=300k, W=700k) pays — no brick");
+  // #47 A2: an acct leaf the payee is NOT bound to (no adr: leaf links the
+  // payee to the decoy account) cannot pay, even with a valid acct proof.
   await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 0, withdrawn: 0, leaf_account: wdAcct,
-    collateral: "1000000", perp: "0", shard: f1.shard, proof: f1.sibs,
-  }, 20000, "bad claim amount");
-  console.log("  h2: stale-leaf replay bounces (watermark)");
-
-  // h3: (col=0, W=1000000) — residual 300k pays, no dead-end.
-  const f3 = await submitForest(3, [[wdAcct, 0, 0, 1000000], [DECOY, 500, 0, 0]]);
+    withdraw: 1, amount: 1, withdrawn: "900000", account: DECOY_ACCT,
+    collateral: "500", perp: "0", adr_proof: t2.adrProof, acct_proof: t2.decoyProof,
+  }, 20000, "bad binding proof");
+  console.log("  h2: unbound acct leaf refused (A2 binding)");
+  // A proof against a non-finalized/other root bounces.
+  await triggerBounce(operator, vault, claim(t1, 0, 0, 1000000), 20000, "bad binding proof");
+  console.log("  h2: proof against a superseded root refused");
+  // h3: (col=0, W=1000000), and a SECOND address bound to the same account.
+  const t3 = await submitWit(3, 0, 1000000, otherAddr);
   await finalize(3);
-  await withdrawOk(f3, 300000, 1000000, 0, 1000000);
+  // R2-A-12: a proof against a recent finalized root (h2) still pays —
+  // last_finalized moved on while the claim was in flight.
+  await withdrawOk(t2, 700000, 700000, 300000, 700000, { height: 2 });
+  console.log("  h3: h2-root claim pays after finalize moved (R2-A-12)");
+  await triggerBounce(operator, vault, claim(t2, 1, 700000, 300000, { height: 2 }), 20000, "bad claim amount");
+  console.log("  h3: older-root replay bounces on the per-account watermark");
+  await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0, { height: 4 }), 20000, "bad height");
+  await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0, { height: 1.5 }), 20000, "bad height");
+  await withdrawOk(t3, 300000, 1000000, 0, 1000000);
   console.log("  h3: residual pays, deposit fully drained");
-  await triggerBounce(operator, vault, {
-    withdraw: 1, amount: 1, withdrawn: 1000000, leaf_account: wdAcct,
-    collateral: "0", perp: "0", shard: f3.shard, proof: f3.sibs,
-  }, 20000, "bad claim amount");
+  await triggerBounce(operator, vault, claim(t3, 1, 1000000, 0), 20000, "bad claim amount");
   console.log("  h3: post-drain replay bounces");
+  // R2-A-8: the second address bound to ACCT cannot spend the same W again.
+  {
+    const r = await other.triggerAaWithData({
+      toAddress: vault, amount: 20000,
+      data: { withdraw: 1, amount: 300000, withdrawn: "1000000", account: ACCT, collateral: "0", perp: "0", adr_proof: t3.adr2Proof, acct_proof: t3.acctProof },
+    });
+    if (r.error && !String(r.error).includes("bad claim amount")) throw new Error("second-address claim: " + r.error);
+    if (!r.error) {
+      await network.witnessUntilStable(r.unit);
+      const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+      if (!JSON.stringify(res || {}).includes("bad claim amount")) {
+        failures++;
+        console.error("FAIL: second bound address double-spent W: " + JSON.stringify(res || {}).slice(0, 300));
+      }
+    }
+    console.log("  R2-A-8: second bound address refused (per-account wd_)");
+  }
 
   await network.stop();
   process.exit(failures === 0 ? 0 : 1);
