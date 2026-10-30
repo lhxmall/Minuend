@@ -2513,6 +2513,7 @@ mod tests {
             }
             batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
             batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+            batch.checkpoint.wit_root = batch.trace[1].clone();
         };
         // R3-A-3: inside the rounding band (+1 .. +2*FILL_TOL) — the AA may
         // read it as its own rounding, so the mirror stays silent.

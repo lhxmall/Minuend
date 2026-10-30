@@ -336,7 +336,7 @@ meta:{market}:{tick}:{im}:{mm}:{taker_fee}:{keeper}:{delisted}:{mark}:{usd_per_u
 
 ```
 d:{acct}:{amount}:{addr}:{aa_unit_b64}                    # 第 2 轮 R2-A-3：5 段，带金库锚点
-D:{acct}:{amount}:{addr}                                   # PERP 充值仍 4 段
+D:{acct}:{amount}:{addr}:{aa_unit_b64}                    # 第 3 轮 R3-A-7：PERP 充值也带锚点（5 段）
 w:{acct}:{amount}:{nonce}    W:{acct}:{amount}:{nonce}
 c:{acct}:{order_hex}
 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}   # #47 A3：typ 0=Limit 1=Market
@@ -346,8 +346,17 @@ x:{unit_hex}                                               # 其他 op
 
 第 2 轮 R2-E-2：`Reveal{inner}` 的 inner 为 Deposit/GovDeposit/Withdraw/GovWithdraw
 时输出 inner 的描述串（`d:`/`D:`/`w:`/`W:`），其余 Reveal 仍为 `x:`。P-deposit 的
-入账分支要求：金库 `dep_<aa_unit>` 记录存在且 payer == op 地址、amount ≤ 记录值，
-pre 树无 `dep:{u}`（防重复入账），post 树有 `dep:{u}`。
+入账分支要求：金库 `dep_<aa_unit>`（`D:` 用 `depp_<aa_unit>`）记录 =
+`{payer}:{amount}:{account}` 存在且 payer == op 地址、**account == op 账户**（第 3 轮
+R3-A-5：存款人自己在付款 data 里指定入账账户）、amount ≤ 记录值，pre 树无 `dep:{u}`
+（防重复入账），post 树有 `dep:{u}`，且 post 树有绑定叶 `adr:{addr}:{acct}`（第 3 轮
+R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
+
+第 3 轮其它规则：被接受的 `w:` 之后 collateral 不得为负、pre 不存在的账户的 `w:`
+只能是被拒（R3-A-1，P-withdraw 与 P-wpin 同步）；P-escrow 只认 `acct:` 叶
+（R3-A-2）；P-keep 覆盖 `acct:` 叶（账户只会变、不会消失，按 `[acct:X:, acct:X;)`
+区间证明缺失，R3-A-6）；fill_math 的 collateral 恒等式容差 ±6，任何量级 ≥ 1e14
+或成交阶段 collateral < 6 时 bounce（Oscript 只有 15 位有效数字，R3-A-3）。
 
 **被拒单元同样提交**（每个执行过的单元都占一个 trace 位置、一个 op 串）。
 因此所有按 op 判定的谓词都把“相关列不变”视为诚实结果（被拒），只有既不是
@@ -408,7 +417,11 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>   # sbond 仅遗留路径
 proposals、oracle 账本。金库 vault AA 只有 `deposit` / `deposit_perp` /
 `withdraw`，提款读 `var[params.rollup]['wit_root_'||h]`，h ∈ (lf−32, lf]（缺省
 last_finalized；#47 A2，§3.4；第 2 轮 R2-A-12）。金库状态：`wd_<account>`（按账户
-累计已提，R2-A-8）、`wp_<addr>`、`pperp_<addr>`、`dep_<unit>='{payer}:{amount}'`（R2-A-3）。
+累计已提，R2-A-8）、`wp_<addr>`、`pperp_<addr>`、`dep_<unit>='{payer}:{amount}:{account}'`
+（R2-A-3 + R3-A-5）、`depp_<unit>='{payer}:{amount}:{account}'`（R3-A-7）。存款必须带
+`{deposit:1, account:<64 位小写 hex>}`（PERP：`{deposit_perp:1, account}`），否则 bounce；
+DepositEvidence 新增 `account` 字段（= joint 中 data 消息的 account，payload_hash 校验），
+引擎只给该账户入账/绑定，其他账户引用该锚点的 Deposit 被拒（BadAccount，不使批次无效）。
 
 执行层第 2 轮新增的提款限制（只会拒更多，AA 无需感知）：每账户在 2048 高度
 修剪窗口内最多 `MAX_PENDING_WITHDRAWALS_PER_ACCOUNT = 64` 笔待处理提款（取代全局
