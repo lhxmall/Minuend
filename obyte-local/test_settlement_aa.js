@@ -2251,7 +2251,7 @@ async function main() {
     const PAYEE = "Q".repeat(32);
     const adr = `adr:${PAYEE}:${DEP_ACCT}`;
     const adrx = `adrx:${DEP_ACCT}:${PAYEE}`;
-    const liar = oneUnit("r2-mirror", "x:" + sha256Hex("mirror"), [DEP_PRE, adr]);
+    const liar = oneUnit("r2-mirror", "x:" + sha256Hex("mirror"), [DEP_PRE, adr, META1]);
     await submitAt(41, liar);
     const ai = liar.post.indexOf(adr);
     if (!(liar.post[ai] < adrx && adrx < liar.post[ai + 1])) throw new Error("fixture: mirror straddle");
@@ -2268,7 +2268,7 @@ async function main() {
     // already-bound: pre holds adrx:{DEP}:{OTHER}; a new adr:{PAYEE}:{DEP} → fraud.
     const OTHER = "R".repeat(32);
     const XPRE = [DEP_PRE, `adr:${OTHER}:${DEP_ACCT}`, `adrx:${DEP_ACCT}:${OTHER}`, META1].sort();
-    const honest = oneUnit("r2-mirror-ok", "x:" + sha256Hex("mirror-ok"), [DEP_PRE, adr, adrx]);
+    const honest = oneUnit("r2-mirror-ok", "x:" + sha256Hex("mirror-ok"), [DEP_PRE, adr, adrx, META1]);
     await submitAt(41, Object.assign(honest, { witRoot: merkle.getMerkleRoot(XPRE) }));
     const hp = mirrorPayload(honest);
     await triggerBounce(challenger, bindAa, Object.assign(hp, {
