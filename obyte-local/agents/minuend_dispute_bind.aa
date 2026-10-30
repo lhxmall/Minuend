@@ -528,24 +528,27 @@
 						$M = split($pm, ':');
 						if (array_length($M) != 11 OR $M[0] != 'meta' OR $M[1] != $mkt) bounce('bad pre meta');
 						if ($M[9] != 0) bounce('no fraud');
-						// Fill count from adjacent fills leaves (fill = leaf
+						// Fill count: a batch with fill_count 0 has none (its
+						// one-leaf fills tree `n:0` has no sendable proof).
+						// Otherwise from adjacent fills leaves (fill = leaf
 						// ri - 1, absent iff ri == 0; fright = leaf ri, the `n:`
 						// sentinel or a fill of ANOTHER unit). One fill: fill
 						// is idx 0 of unit k. Zero fills: fills are committed
 						// in unit order, so fill belongs to an earlier unit
 						// and fright to a later one (or is the sentinel).
+						$nf = (var[$rollup]['fill_count_' || $h] otherwise 0) == 0;
 						$rt = trigger.data.fright;
 						$ri = trigger.data.fright_proof.index;
-						if (!($rt AND is_integer($ri) AND $ri >= 0 AND trigger.data.fright_proof.root == trigger.data.fills_root
+						if (!$nf AND !($rt AND is_integer($ri) AND $ri >= 0 AND trigger.data.fright_proof.root == trigger.data.fills_root
 							AND is_valid_merkle_proof($rt, trigger.data.fright_proof)
 							AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND !starts_with($rt, 'f:' || $u || ':')))))
 							bounce('no fraud');
 						$fl = trigger.data.fill;
-						if ($ri > 0 AND !($fl AND trigger.data.fill_proof.index == $ri - 1 AND trigger.data.fill_proof.root == trigger.data.fills_root
+						if (!$nf AND $ri > 0 AND !($fl AND trigger.data.fill_proof.index == $ri - 1 AND trigger.data.fill_proof.root == trigger.data.fills_root
 							AND is_valid_merkle_proof($fl, trigger.data.fill_proof)))
 							bounce('no fraud');
-						$one = $ri > 0 AND starts_with($fl, 'f:' || $u || ':0:');
-						if (!$one AND !(($ri == 0 OR (starts_with($fl, 'f:') AND trigger.data.fill_up.index < $k
+						$one = !$nf AND $ri > 0 AND starts_with($fl, 'f:' || $u || ':0:');
+						if (!$nf AND !$one AND !(($ri == 0 OR (starts_with($fl, 'f:') AND trigger.data.fill_up.index < $k
 								AND trigger.data.fill_up.root == trigger.data.units_root
 								AND is_valid_merkle_proof(substring($fl, 2, 64), trigger.data.fill_up)))
 							AND (starts_with($rt, 'n:') OR (trigger.data.fright_up.index > $k

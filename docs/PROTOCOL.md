@@ -505,7 +505,7 @@ cross 现货与非现货敞口不得混用（R2-E-8），`spot_only` 仓位永�
 逐仓 taker 手续费逐笔成交前检查（R3-E-4）；`spot_only` 市场不得提高 taker 费率（R3-E-6）。
 fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单位的错记无法被挑战。
 
-第 6 轮部署变化：新增 dispute_claw；rollup 新占位与 case。第 6b 轮 op 预算：vault 364、rollup 996、dispute 1383、dispute_fill 1966、dispute_bind 1937、dispute_book 1708、dispute_claw 1706（上限 2000）；rollup 只接受 `assertion_version == 3`。
+第 6 轮部署变化：新增 dispute_claw；rollup 新占位与 case。第 6b 轮 op 预算：vault 364、rollup 996、dispute 1383、dispute_fill 1966、dispute_bind 1956、dispute_book 1708、dispute_claw 1706（上限 2000）；rollup 只接受 `assertion_version == 3`。
 
 第 5 轮部署变化：vault 新增 `pperp_total` 与 `perp cap` bounce（vault base 哈希改变，部署
 脚本推导）；op 预算 vault 364、rollup 976、dispute 1383、dispute_fill 1959、dispute_bind 1618、

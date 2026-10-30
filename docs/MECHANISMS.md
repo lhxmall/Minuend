@@ -1179,7 +1179,7 @@ dispute_bind 1618、dispute_book 1704、dispute_claw 1434（上限 2000）。
      fills 叶确定成交笔数——`fright`（叶 ri：`n:` 哨兵或**别的** unit 的成交）与 `fill`
      （叶 ri−1，ri = 0 时没有）。`fill` 是本 unit 的 idx 0 → 单成交；否则 `fill` 属于更早的
      unit、`fright` 属于更晚的 unit（各带 units_root 证明，`fill_up` / `fright_up`）或是哨兵
-     → 零成交（fills 按 unit 顺序提交）。多成交 → bounce（项 19）。
+     → 零成交（fills 按 unit 顺序提交）；整批 `fill_count_h == 0` 时直接视为零成交（单叶树 `n:0` 的证明 siblings 为空，发不出去）。多成交 → bounce（项 19）。
    - 允许变化的账户：op 账户（`L:` 为 caller 与 target）；单成交时再加 maker 与保险账户。
      其余账户的 `acct:` / `pos:` / `ord:` 叶（`ord:` 以 `:{account}:` 子串判 owner）
      不得出现、消失或改写——与 c/d/w 单元相同的插入 / 删除两臂。
@@ -1223,7 +1223,7 @@ kind 3→0、`x:` op、他人的 `p:`、target 不在成交里的 `L:`；单成�
 引擎 `QTY_CAP`（单笔与"仓位 + 挂单"之和）。devnet e2e 场景 62–64（高度 76–82）。
 
 部署 op 预算（第 6b 轮）：vault 364、rollup 996、dispute 1383、dispute_fill 1966、
-dispute_bind 1937、dispute_book 1708、dispute_claw 1706（上限 2000）。
+dispute_bind 1956、dispute_book 1708、dispute_claw 1706（上限 2000）。
 
 ### 10.8 第 3 轮（#47 R3）变更汇总
 

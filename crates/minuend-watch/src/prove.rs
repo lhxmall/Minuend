@@ -553,6 +553,23 @@ fn pl_frame_scope(
         .map(|id| hex::encode(id.0))
         .collect();
     let u = unit_hexes.get(k)?;
+    // A batch with fill_count 0: the AA reads it from the rollup (the
+    // one-leaf fills tree `n:0` has no sendable proof).
+    if batch.checkpoint.fill_count == 0 && batch.fills.is_empty() {
+        let data = serde_json::json!({
+            "fills_root": batch.checkpoint.fills_root,
+            "units_root": batch.checkpoint.units_root,
+            "unit": u,
+            "units_proof": proof_json(&unit_hexes, k),
+            "pre_meta": meta,
+            "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+        });
+        let mut allowed = vec![op.get(2..66)?.to_string()];
+        if o[0] == "L" {
+            allowed.push(op.get(67..131)?.to_string());
+        }
+        return Some((allowed, data));
+    }
     let tree = minuend_settle::fills_root_elements(&batch.fills);
     let unit_of = |l: &str| -> Option<usize> {
         let id = l.strip_prefix("f:")?.get(..64)?;
@@ -5496,7 +5513,8 @@ mod tests {
         bump_col(&mut lie, 0, &carol, 5);
         let proof = build_proof(&lie, &mut zr.clone(), &[], 0).expect("frame proof");
         assert_eq!(proof.pred, "frame");
-        assert!(proof.data["fright"].as_str().unwrap().starts_with("n:"));
+        // fill_count 0: the AA reads it from the rollup, no fills leaves.
+        assert!(proof.data.get("fright").is_none());
         assert!(proof.data.get("fill").is_none());
         // The op account's own escrow move is not P-frame's business.
         let mut own = zb.clone();

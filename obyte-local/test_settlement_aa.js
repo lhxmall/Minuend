@@ -3228,8 +3228,8 @@ async function main() {
         leaf, ins, leaf_proof: ins ? u.leafProof(leaf) : P.proof(leaf),
         fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF,
         pre_meta: META1, pre_meta_proof: P.proof(META1),
-        fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri),
-      }, u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {},
+      }, tree.length > 1 ? { fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri) } : {},
+        u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {},
         absentIn(ins ? P.pre : u.post, leaf));
     };
 
@@ -3276,13 +3276,16 @@ async function main() {
     await triggerBounce(challenger, claw, clawPayload(P5, 77, ok5, MORD), 20000, "no fraud");
     await triggerBounce(challenger, bindAa, pfPayload(P5, 77, ok5, acct(M, 1000000000), false), 20000, "no fraud");
     await live(77, "honest kind-0 Place (shape + frame)");
-    // (b) zero-fill Place (a cross bid rests): only T may change.
+    // (b) zero-fill Place (a cross bid rests): only T may change. The
+    // height has fill_count 0, so no fills evidence is needed (the one-leaf
+    // tree `n:0` has no sendable proof).
     const restOp = `p:${T}:1:0:8000000000000:100000000:0:0:0:0`;
     const tOrd = `ord:${"ea".repeat(32)}:1:0:8000000000000:9:100000000:${T}:0:0`;
     const zpost = (cc) => P5.pre.filter((l) => l !== acct(C, 7000000000)).concat([acct(C, cc), tOrd]);
     const z3p = clawUnit(P5, "r6b-z3p", restOp, [], zpost(7000000005));
     await submitAt(78, z3p);
     await triggerVerdict(challenger, bindAa, pfPayload(P5, 78, z3p, acct(C, 7000000005), true), 20000, "R6-C2 third-party credit (zero-fill Place)");
+    if (pfPayload(P5, 78, z3p, acct(C, 7000000005), true).fright) throw new Error("fixture: one-leaf fills tree");
     await frozen(78, "third-party credit in a zero-fill Place");
     const zok = clawUnit(P5, "r6b-zok", restOp, [], zpost(7000000000));
     await submitAt(78, zok);
