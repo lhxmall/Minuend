@@ -62,8 +62,8 @@ function challengeGate({ now, submittedAt, frozen, windowSecs = CHALLENGE_WINDOW
 }
 
 // Which dispute AA a proof goes to: main (deposit/withdraw/escrow/omit),
-// book (ghost/skip, split out in round 2), fill (fill_math) or bind
-// (#47 A2 + round 2: wpin/adr/tip/keep/mirror).
+// book (ghost/skip, split out in round 2; mbind round 4), fill (fill_math)
+// or bind (#47 A2 + round 2: wpin/adr/tip/keep/mirror; frame round 4).
 const TARGETS = {
   book: { deployKey: "dispute_book_aa_address", env: "MINUEND_DISPUTE_BOOK_AA", bind: { bind_book: 1 }, rollupVar: "dispute_book_aa" },
   main: { deployKey: "dispute_aa_address", env: "MINUEND_DISPUTE_AA", bind: { bind: 1 }, rollupVar: "dispute_aa" },
@@ -138,8 +138,9 @@ function daBindHash(f) {
 // Proof-target routing by predicate name (round 2 split).
 function targetForPred(pred) {
   if (pred === "fill_math") return "fill";
-  if (pred === "ghost" || pred === "skip") return "book";
-  if (["wpin", "adr", "tip", "keep", "mirror"].includes(pred)) return "bind";
+  // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA.
+  if (pred === "ghost" || pred === "skip" || pred === "mbind") return "book";
+  if (["wpin", "adr", "tip", "keep", "mirror", "frame"].includes(pred)) return "bind";
   return "main";
 }
 
