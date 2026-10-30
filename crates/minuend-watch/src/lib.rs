@@ -91,6 +91,17 @@ pub trait HubClient {
     ) -> Result<Option<serde_json::Value>, String>;
     /// Fetch a unit/joint by its hash as the hub returns it.
     fn get_joint(&self, unit_hash: &str) -> Result<serde_json::Value, String>;
+    /// R11b: every state var of `address` whose name starts with `prefix`
+    /// (the open-element challenges on the wf AA). Clients that cannot list
+    /// by prefix answer `Err`, and the watcher then skips open servicing.
+    fn get_aa_state_vars_prefix(
+        &self,
+        address: &str,
+        prefix: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let _ = (address, prefix);
+        Err("prefix state-var listing unsupported by this hub client".into())
+    }
 }
 
 /// Fetch the `da_unit_<height>` package from the hub, verifying the recorded
@@ -1485,6 +1496,179 @@ pub fn write_private_proof(
 
 pub use minuend_settle::obyte_hash;
 
+// ---------------------------------------------------------------------------
+// R11b: servicing open-element challenges (wf AA `open` / `answer` / `expire`)
+// ---------------------------------------------------------------------------
+
+/// Seconds past an open's recorded expiry (`open_…_t`) before the watcher
+/// posts `expire`: unit timestamps trail the local clock, and an early
+/// expire only bounces `not expired` (losing the fee).
+pub const OPEN_EXPIRE_GRACE_SECS: u64 = 60;
+/// An answer is posted only while at least this many seconds are left before
+/// expiry (a later answer would race the expire and likely bounce).
+pub const OPEN_ANSWER_MIN_LEFT_SECS: u64 = 60;
+/// Trees an open may name (the wf AA's `open` case).
+pub const OPEN_TREES: [&str; 5] = ["ops", "units", "trace", "fills", "wit"];
+
+/// One unanswered open-element challenge as recorded in the wf AA state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenRecord {
+    /// The state var name `open_<rollup>_<h>_<tree>_<k>_<index>`.
+    pub key: String,
+    pub height: u64,
+    pub tree: String,
+    /// Unit index for `wit` (0 for every other tree).
+    pub k: usize,
+    pub index: usize,
+    /// Address that opened it (bond refund target).
+    pub challenger: String,
+    /// `open_…_t`: first timestamp at which `expire` is accepted.
+    pub expires_at: u64,
+    /// `open_…_r`: the committed root the answer's proof must name.
+    pub root: String,
+    /// `open_…_s`: the rollup's `submitted_at_<h>` when it was opened.
+    pub submitted_at: u64,
+}
+
+/// The wf AA's state var name of an open (mirrors its `$key`).
+pub fn open_state_key(rollup: &str, h: u64, tree: &str, k: usize, index: usize) -> String {
+    format!("open_{rollup}_{h}_{tree}_{k}_{index}")
+}
+
+fn state_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| *f >= 0.0 && f.fract() == 0.0 && *f < 9_007_199_254_740_992.0)
+                .map(|f| f as u64)
+        }),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Parse a prefix listing of the wf AA's state (`open_<rollup>_…`) into the
+/// open challenges against `rollup`, soonest expiry first. Suffixed vars
+/// (`_t`, `_r`, …), other rollups, non-canonical keys and unknown trees are
+/// skipped; an open without a readable `_t` is skipped too (never expired
+/// on a guess).
+pub fn parse_open_vars(
+    rollup: &str,
+    vars: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<OpenRecord> {
+    let prefix = format!("open_{rollup}_");
+    let mut out = Vec::new();
+    for (key, v) in vars {
+        let Some(rest) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+        let (Ok(h), Ok(k), Ok(index)) = (
+            parts[0].parse::<u64>(),
+            parts[2].parse::<usize>(),
+            parts[3].parse::<usize>(),
+        ) else {
+            continue;
+        };
+        let tree = parts[1];
+        if !OPEN_TREES.contains(&tree) || (tree != "wit" && k != 0) {
+            continue;
+        }
+        if open_state_key(rollup, h, tree, k, index) != *key {
+            continue;
+        }
+        let Some(challenger) = v.as_str().filter(|c| !c.is_empty()) else {
+            continue;
+        };
+        let Some(expires_at) = state_u64(vars.get(&format!("{key}_t"))) else {
+            continue;
+        };
+        out.push(OpenRecord {
+            key: key.clone(),
+            height: h,
+            tree: tree.to_string(),
+            k,
+            index,
+            challenger: challenger.to_string(),
+            expires_at,
+            root: vars
+                .get(&format!("{key}_r"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string(),
+            submitted_at: state_u64(vars.get(&format!("{key}_s"))).unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| (a.expires_at, &a.key).cmp(&(b.expires_at, &b.key)));
+    out
+}
+
+/// What the watcher does about one open this round.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenAction {
+    /// Post `{answer:1, …}` (trigger data, poster adds height/rollup/pred).
+    Answer(serde_json::Value),
+    /// Post `{expire:1, …}`.
+    Expire(serde_json::Value),
+    /// Nothing yet.
+    Wait,
+}
+
+/// Whether an `answer` payload (from [`prove::open_answer`]) would pass
+/// the wf AA's `answer` case for `rec`: same tree / k / index, a `Z`-prefixed
+/// element of the tree's shape within [`minuend_types::MAX_ELEMENT_LEN`],
+/// and a proof against the root the open recorded (a re-submitted height
+/// has another root: no answer).
+pub fn answer_fits_open(rec: &OpenRecord, a: &serde_json::Value) -> bool {
+    let k_want = if rec.tree == "wit" { rec.k } else { 0 };
+    let el = a["element"].as_str().unwrap_or("");
+    let Some(e) = el.strip_prefix('Z') else {
+        return false;
+    };
+    let shape = match rec.tree.as_str() {
+        "units" => e.len() == 64,
+        "trace" => e.len() == 44,
+        _ => e.contains(':'),
+    };
+    a["answer"] == 1
+        && a["tree"] == rec.tree.as_str()
+        && a["k"].as_u64() == Some(k_want as u64)
+        && a["index"].as_u64() == Some(rec.index as u64)
+        && e.len() <= minuend_types::MAX_ELEMENT_LEN
+        && shape
+        && !rec.root.is_empty()
+        && a["proof"]["root"].as_str() == Some(rec.root.as_str())
+        && a["proof"]["index"].as_u64() == Some(rec.index as u64)
+}
+
+/// Decide one open (pure; `now` is the local clock in seconds). Expired
+/// (past [`OPEN_EXPIRE_GRACE_SECS`]) → `expire` — anyone may post it: a
+/// live height gets the fraud verdict, otherwise only the bond is refunded.
+/// Otherwise, when the caller built an answer for it (only an operator's
+/// own watcher with answering enabled does) and it fits the open, answer
+/// while [`OPEN_ANSWER_MIN_LEFT_SECS`] remain.
+pub fn plan_open(rec: &OpenRecord, now: u64, answer: Option<&serde_json::Value>) -> OpenAction {
+    if now >= rec.expires_at.saturating_add(OPEN_EXPIRE_GRACE_SECS) {
+        return OpenAction::Expire(serde_json::json!({
+            "expire": 1,
+            "tree": rec.tree,
+            "k": if rec.tree == "wit" { rec.k } else { 0 },
+            "index": rec.index,
+        }));
+    }
+    if let Some(a) = answer {
+        if now.saturating_add(OPEN_ANSWER_MIN_LEFT_SECS) < rec.expires_at
+            && answer_fits_open(rec, a)
+        {
+            return OpenAction::Answer(a.clone());
+        }
+    }
+    OpenAction::Wait
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2713,5 +2897,130 @@ mod tests {
         write_private_proof(&a, 1, "wpin", &serde_json::json!({})).unwrap();
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+    #[test]
+    fn r11b_parse_open_vars_reads_only_canonical_opens_of_this_rollup() {
+        let r = "ROLLUPADDRESS0000000000000000000";
+        let other = "OTHERROLLUP000000000000000000000";
+        let mut m = serde_json::Map::new();
+        let mut put = |k: &str, v: serde_json::Value| {
+            m.insert(k.to_string(), v);
+        };
+        let a = open_state_key(r, 7, "ops", 0, 3);
+        put(&a, serde_json::json!("CHALLENGER"));
+        put(&format!("{a}_t"), serde_json::json!(5000));
+        put(&format!("{a}_r"), serde_json::json!("ROOTA"));
+        put(&format!("{a}_s"), serde_json::json!(1000));
+        put(&format!("{a}_c"), serde_json::json!(9));
+        let w = open_state_key(r, 7, "wit", 2, 0);
+        put(&w, serde_json::json!("C2"));
+        put(&format!("{w}_t"), serde_json::json!("4000"));
+        put(&format!("{w}_r"), serde_json::json!("ROOTW"));
+        // no _t → never expired on a guess
+        let n = open_state_key(r, 8, "units", 0, 0);
+        put(&n, serde_json::json!("C3"));
+        // other rollup, unknown tree, non-wit k != 0, non-canonical number
+        let o = open_state_key(other, 7, "ops", 0, 3);
+        put(&o, serde_json::json!("C4"));
+        put(&format!("{o}_t"), serde_json::json!(1));
+        for bad in [
+            format!("open_{r}_7_bogus_0_1"),
+            format!("open_{r}_7_ops_1_1"),
+            format!("open_{r}_07_ops_0_1"),
+        ] {
+            put(&bad, serde_json::json!("C5"));
+            put(&format!("{bad}_t"), serde_json::json!(1));
+        }
+        let got = parse_open_vars(r, &m);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].key, w, "soonest expiry first");
+        assert_eq!(
+            (got[0].tree.as_str(), got[0].k, got[0].index),
+            ("wit", 2, 0)
+        );
+        assert_eq!(got[0].expires_at, 4000);
+        assert_eq!(got[1].height, 7);
+        assert_eq!(got[1].root, "ROOTA");
+        assert_eq!(got[1].submitted_at, 1000);
+        assert_eq!(got[1].challenger, "CHALLENGER");
+    }
+
+    #[test]
+    fn r11b_plan_open_expires_after_grace_and_answers_only_a_fitting_proof() {
+        let rec = OpenRecord {
+            key: "k".into(),
+            height: 3,
+            tree: "ops".into(),
+            k: 0,
+            index: 1,
+            challenger: "C".into(),
+            expires_at: 10_000,
+            root: "R".into(),
+            submitted_at: 8_000,
+        };
+        let ans = serde_json::json!({
+            "answer": 1, "tree": "ops", "k": 0, "index": 1,
+            "element": "Zp:1:2", "proof": {"root": "R", "index": 1, "siblings": []},
+        });
+        assert_eq!(plan_open(&rec, 9_000, None), OpenAction::Wait);
+        assert_eq!(
+            plan_open(&rec, 9_000, Some(&ans)),
+            OpenAction::Answer(ans.clone())
+        );
+        // too close to expiry to answer; not yet past the grace to expire
+        assert_eq!(plan_open(&rec, 9_950, Some(&ans)), OpenAction::Wait);
+        assert_eq!(plan_open(&rec, 10_030, Some(&ans)), OpenAction::Wait);
+        match plan_open(&rec, 10_000 + OPEN_EXPIRE_GRACE_SECS, Some(&ans)) {
+            OpenAction::Expire(d) => {
+                assert_eq!(d["expire"], 1);
+                assert_eq!(d["tree"], "ops");
+                assert_eq!(d["index"], 1);
+                assert_eq!(d["k"], 0);
+            }
+            other => panic!("{other:?}"),
+        }
+        // a re-submitted height (other root), wrong index, oversized or
+        // shapeless element: no answer
+        let mut a2 = ans.clone();
+        a2["proof"]["root"] = "R2".into();
+        assert_eq!(plan_open(&rec, 9_000, Some(&a2)), OpenAction::Wait);
+        let mut a3 = ans.clone();
+        a3["index"] = 2.into();
+        assert_eq!(plan_open(&rec, 9_000, Some(&a3)), OpenAction::Wait);
+        let mut a4 = ans.clone();
+        a4["element"] = format!("Zx:{}", "0".repeat(minuend_types::MAX_ELEMENT_LEN)).into();
+        assert_eq!(plan_open(&rec, 9_000, Some(&a4)), OpenAction::Wait);
+        let mut a5 = ans.clone();
+        a5["element"] = "Znocolon".into();
+        assert_eq!(plan_open(&rec, 9_000, Some(&a5)), OpenAction::Wait);
+        // wit: k must match
+        let wrec = OpenRecord {
+            tree: "wit".into(),
+            k: 2,
+            ..rec.clone()
+        };
+        let mut aw = ans.clone();
+        aw["tree"] = "wit".into();
+        assert_eq!(plan_open(&wrec, 9_000, Some(&aw)), OpenAction::Wait);
+        aw["k"] = 2.into();
+        assert_eq!(
+            plan_open(&wrec, 9_000, Some(&aw)),
+            OpenAction::Answer(aw.clone())
+        );
+        // the default hub client cannot list by prefix
+        struct NoList;
+        impl HubClient for NoList {
+            fn get_aa_state_var(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<serde_json::Value>, String> {
+                Ok(None)
+            }
+            fn get_joint(&self, _: &str) -> Result<serde_json::Value, String> {
+                Err("none".into())
+            }
+        }
+        assert!(NoList.get_aa_state_vars_prefix("A", "open_").is_err());
     }
 }

@@ -5768,6 +5768,42 @@ mod tests {
         }
         let ans = open_answer(&honest, "ops", 0, 1).unwrap();
         assert_eq!(ans["proof"]["root"], honest.checkpoint.ops_root);
+        // R11b: the watcher's planner answers every honest open against the
+        // root it recorded, and never answers one recorded against another
+        // submission's root.
+        for (tree, k, i) in [
+            ("ops", 0, 1),
+            ("units", 0, 0),
+            ("trace", 0, 1),
+            ("fills", 0, 0),
+            ("wit", 1, 0),
+        ] {
+            let ans = open_answer(&honest, tree, k, i).expect(tree);
+            let rec = crate::OpenRecord {
+                key: crate::open_state_key("R", 1, tree, k, i),
+                height: 1,
+                tree: tree.into(),
+                k,
+                index: i,
+                challenger: "C".into(),
+                expires_at: 10_000,
+                root: ans["proof"]["root"].as_str().unwrap().to_string(),
+                submitted_at: 1,
+            };
+            assert_eq!(
+                crate::plan_open(&rec, 5_000, Some(&ans)),
+                crate::OpenAction::Answer(ans.clone()),
+                "{tree}"
+            );
+            let stale = crate::OpenRecord {
+                root: "X".repeat(44),
+                ..rec.clone()
+            };
+            assert_eq!(
+                crate::plan_open(&stale, 5_000, Some(&ans)),
+                crate::OpenAction::Wait
+            );
+        }
         // Ingest refuses a unit whose text breaks the caps (a 3000-char
         // deposit address would be an unreadable ops element).
         let secret = sk(7);

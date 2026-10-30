@@ -113,7 +113,7 @@ async function main() {
   // Fresh on-chain window facts + fresh clock, right before sending.
   const sa = (await readVars(rollup, "submitted_at_" + height))["submitted_at_" + height];
   const fr = (await readVars(rollup, "frozen_" + height))["frozen_" + height];
-  const gate = challengeGate({ now: Math.floor(Date.now() / 1000), submittedAt: sa, frozen: fr });
+  const gate = challengeGate({ now: Math.floor(Date.now() / 1000), submittedAt: sa, frozen: fr, marginSecs: require("./script_helpers").gateMarginFor(pred) });
   if (!gate.ok) {
     console.error(`REFUSED: h=${height} ${gate.reason} — challenge NOT sent`);
     process.exit(EXIT_REFUSED);

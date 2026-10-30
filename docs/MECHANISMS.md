@@ -1630,8 +1630,16 @@ dispute_xframe 61 / 1929、dispute_mframe 48 / 1891、dispute_wf 18 / 1177（com
    - 取舍：诚实运营方必须在线（20 分钟内回答）；押金让骚扰有成本（回答者拿走押金）。超长元素和"不公开的
      元素"都变成运营方的损失。开放只能在窗口前半段发起，保证到期后还有至少 600 秒发出 verdict。
    - watcher（`prove::open_proof`）发现超长 / 形状不对的元素就发起 open（金额 110 000，`challengeAmount`）；
-     `prove::open_answer` 给诚实运营方生成回答。到期后的 `expire` 需要再触发一次（`post_challenge*.js
-     --pred expire`）。
+     `prove::open_answer` 给诚实运营方生成回答。
+   - 第 11b 轮：watcher 每轮轮询读 wf AA 里针对本 rollup 的 `open_<rollup>_…` 状态（按前缀列出，
+     `parse_open_vars`），由纯函数 `plan_open` 决定：过了 `_t` + 60 秒宽限就发 `expire`（任何 watcher
+     都发：live 高度得到 verdict，否则只退押金）；设置 `MINUEND_WATCH_ANSWER_OPENS=1`（运营方自己的
+     watcher）时，从已承诺的批次取元素和证明（`open_answer`），证明根等于 open 记录的 `_r`（重新提交的高度
+     根不同，不回答）、形状合法、离到期还有 60 秒以上才回答。answer / expire 的发送安全边距是 120 秒
+     （`OPEN_POST_MARGIN_SECS`，Rust 与 `script_helpers.js` 一致）而不是新挑战的 600 秒：窗口末尾发起的
+     open 在 deadline 前 600 秒到期，600 秒边距会让 expire 永远发不出去。高度冻结 / 出窗口 / 进入最后
+     120 秒时只打印提醒（这时 expire 只退押金，需手动发）。Rust 测试 `r11b_*` 3 个 + open 测试里的
+     planner 往返。
 4. **R11-M1：P-wf 只判新写入的叶**。见证模式要求证明这片叶不在 unit k 的 pre 树里（相邻夹逼、
    before-min，或 after-max：pre 树最后一片叶，下标由 pre 叶数钉住——k = 0 用 rollup 的
    `wit_count_{h-1}`，h = 1 用 genesis 叶数 4，k > 0 用 counts_root 第 k − 1 项）。恢复路径：一片畸形叶

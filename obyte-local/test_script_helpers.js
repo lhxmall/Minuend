@@ -49,6 +49,19 @@ assert.strictEqual(finalizeReached("NaN", 5), false);
   const sa = 1_000_000;
   assert.strictEqual(challengeGate({ now: sa + 10, submittedAt: sa, frozen: 0 }).ok, true);
   assert.strictEqual(challengeGate({ now: sa + 3600 - 601, submittedAt: sa, frozen: 0 }).ok, true);
+  // R11b: answer / expire keep a 120 s margin (an open expires up to 600 s
+  // before the deadline); every other predicate keeps 600 s.
+  {
+    const { gateMarginFor, OPEN_POST_MARGIN_SECS } = require("./script_helpers");
+    assert.strictEqual(OPEN_POST_MARGIN_SECS, 120);
+    assert.strictEqual(gateMarginFor("expire"), 120);
+    assert.strictEqual(gateMarginFor("answer"), 120);
+    assert.strictEqual(gateMarginFor("open"), 600);
+    assert.strictEqual(gateMarginFor("wf"), 600);
+    assert.strictEqual(challengeGate({ now: sa + 3060, submittedAt: sa, frozen: 0, marginSecs: gateMarginFor("expire") }).ok, true);
+    assert.strictEqual(challengeGate({ now: sa + 3060, submittedAt: sa, frozen: 0, marginSecs: gateMarginFor("open") }).ok, false);
+    assert.strictEqual(challengeGate({ now: sa + 3481, submittedAt: sa, frozen: 0, marginSecs: gateMarginFor("expire") }).ok, false);
+  }
   const edge = challengeGate({ now: sa + 3600 - 600, submittedAt: sa, frozen: 0 });
   assert.strictEqual(edge.ok, false);
   assert.ok(/600s/.test(edge.reason));

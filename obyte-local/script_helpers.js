@@ -48,6 +48,15 @@ function finalizeReached(lastFinalized, height) {
 // unit becoming stable). Evaluate with a FRESH clock right before sending.
 const CHALLENGE_WINDOW_SECS = 3600;
 const CHALLENGE_SAFETY_MARGIN_SECS = 600;
+// R11b: answer / expire of an open-element challenge must land before the
+// height finalizes (an open made late in its 1800 s window expires 1200 s
+// later, i.e. up to 600 s before the deadline), so they keep a shorter
+// safety margin than a fresh fraud challenge.
+const OPEN_POST_MARGIN_SECS = 120;
+function gateMarginFor(pred) {
+  return pred === "answer" || pred === "expire" ? OPEN_POST_MARGIN_SECS : CHALLENGE_SAFETY_MARGIN_SECS;
+}
+
 function challengeGate({ now, submittedAt, frozen, windowSecs = CHALLENGE_WINDOW_SECS, marginSecs = CHALLENGE_SAFETY_MARGIN_SECS }) {
   const sa = Number(submittedAt);
   const t = Number(now);
@@ -182,6 +191,8 @@ function hubFor(network, override) {
 }
 
 module.exports = {
+  OPEN_POST_MARGIN_SECS,
+  gateMarginFor,
   envCompat,
   finalizeReached,
   challengeGate,

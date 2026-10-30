@@ -18,11 +18,12 @@ use minuend_types::env_compat::env_var_compat;
 use minuend_watch::{
     batch_from_committed, check_committed_roots, clear_temp_checkpoints, committed_frame_bytes,
     create_private_temp_dir, fetch_da_unit, load_checkpoint, load_checkpoint_at, lock_temp_dir,
-    pick_root_verified_checkpoint, prove, read_vault_ledger_bounded, regressed_tip_contradictory,
-    resolve_start_height, rewind_target, root_diverged, sane_chain_readings,
-    save_checkpoint_retaining, sweep_stale_temp_dirs, tip_awaiting_resubmission, vault_keys_needed,
-    verify_da_binding, write_private_proof, ChainView, HubClient, VaultReadCache, WatchConfig,
-    WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, MAX_VAULT_READS_PER_HEIGHT,
+    parse_open_vars, pick_root_verified_checkpoint, plan_open, prove, read_vault_ledger_bounded,
+    regressed_tip_contradictory, resolve_start_height, rewind_target, root_diverged,
+    sane_chain_readings, save_checkpoint_retaining, sweep_stale_temp_dirs,
+    tip_awaiting_resubmission, vault_keys_needed, verify_da_binding, write_private_proof,
+    ChainView, HubClient, OpenAction, OpenRecord, VaultReadCache, WatchConfig, WatchError,
+    CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, MAX_VAULT_READS_PER_HEIGHT,
     TEMP_DIR_OWNER_FILE, VAULT_READ_BUDGET_SECS, VAULT_READ_DEADLINE_RESERVE_SECS,
 };
 use std::collections::BTreeMap;
@@ -161,6 +162,23 @@ impl HubClient for HttpHubClient {
             serde_json::Value::Null => Ok(None),
             serde_json::Value::Object(map) => Ok(map.get(key).cloned()),
             other => Ok(Some(other)),
+        }
+    }
+
+    /// R11b: the hub's `getAaStateVars` takes a var prefix (Obyte's
+    /// `light/get_aa_state_vars` semantics) and answers the matching map.
+    fn get_aa_state_vars_prefix(
+        &self,
+        address: &str,
+        prefix: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        match self.rpc("getAaStateVars", serde_json::json!([address, prefix]))? {
+            serde_json::Value::Null => Ok(serde_json::Map::new()),
+            serde_json::Value::Object(map) => Ok(map
+                .into_iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .collect()),
+            other => Err(format!("unexpected prefix listing: {other}")),
         }
     }
 
@@ -305,7 +323,11 @@ so a restart resumes instead of replaying from genesis (temp_data is purged afte
 \n\
 Limits (R2-R-2/R2-R-5): <= {MAX_PKG} packages, <= {PKG_MB} MiB decompressed per package,\n\
 <= {TOT_MB} MiB per height, unit_count <= 200000. Replay cost is O(units x state size)\n\
-(full witness rebuild per unit); size the host for the largest expected state.",
+(full witness rebuild per unit); size the host for the largest expected state.\n\
+\n\
+Open-element challenges (wf AA, R11): every watcher posts `expire` for an open left\n\
+unanswered past its expiry; with MINUEND_WATCH_ANSWER_OPENS=1 (run it on the operator's\n\
+own watcher) it also answers opens from the committed batch.",
         MAX_PKG = minuend_watch::MAX_PACKAGES,
         PKG_MB = minuend_watch::MAX_PACKAGE_RAW_BYTES >> 20,
         TOT_MB = minuend_watch::MAX_COMMITTED_RAW_BYTES >> 20,
@@ -515,6 +537,8 @@ fn challenge_key(h: u64, submission: &str, pred: &str) -> ChallengeKey {
 struct ChallengeTracker {
     states: BTreeMap<ChallengeKey, AttemptState>,
     children: BTreeMap<ChallengeKey, (Child, String)>,
+    /// R11b: open-challenge notices already printed (one line per open).
+    noted: std::collections::BTreeSet<String>,
 }
 
 impl ChallengeTracker {
@@ -941,6 +965,124 @@ fn check_height(
         ),
         proof_hint.as_ref(),
     )))
+}
+
+/// R11b: answer / expire keep this margin to the dispute deadline instead
+/// of [`CHALLENGE_SAFETY_MARGIN_SECS`] (an open made late in its 1800 s
+/// window expires 1200 s later, only 600 s before the deadline). Mirrors
+/// `OPEN_POST_MARGIN_SECS` in `obyte-local/script_helpers.js`.
+const OPEN_POST_MARGIN_SECS: u64 = 120;
+
+/// R11b: may an `answer` / `expire` for a height still be posted? `false`
+/// once frozen, outside the window, or within [`OPEN_POST_MARGIN_SECS`] of
+/// its deadline (an expire then only refunds the bond: post it by hand).
+fn open_postable(submitted_at: u64, now: u64, frozen: u64) -> bool {
+    challenge_window_open(submitted_at, now, frozen)
+        && now.saturating_add(OPEN_POST_MARGIN_SECS)
+            < submitted_at.saturating_add(CHALLENGE_WINDOW_SECS)
+}
+
+/// R11b: the committed batch of height `h` as published (no replay), for
+/// answering an open; `None` when it cannot be read / decoded.
+fn committed_batch(
+    hub: &HttpHubClient,
+    config: &WatchConfig,
+    h: u64,
+) -> Option<minuend_settle::Batch> {
+    let win = read_window(hub, config, h).ok()?;
+    let (da, raw) = fetch_committed(hub, config, h, win).ok()??;
+    batch_from_committed(&da.data, &raw).ok()
+}
+
+/// R11b: once per poll round, service the wf AA's open-element challenges
+/// against the watched rollup. Every watcher posts `expire` for an open
+/// left unanswered past its expiry (verdict on a live height, else the
+/// bond refund). With `MINUEND_WATCH_ANSWER_OPENS=1` (the operator's own
+/// watcher) it also answers each open with the element and proof read from
+/// the committed batch, when that fits the root the open recorded.
+fn service_opens(hub: &HttpHubClient, config: &WatchConfig) {
+    let ctx = CHALLENGE_CTX.get().cloned().unwrap_or_default();
+    let wf = match ctx.dispute_wf.clone() {
+        Some(a) => a,
+        None => match hub.get_aa_state_var(&config.rollup_address, "dispute_wf_aa") {
+            Ok(Some(v)) => match v.as_str() {
+                Some(a) if a.len() == 32 => a.to_string(),
+                _ => return,
+            },
+            _ => return,
+        },
+    };
+    let prefix = format!("open_{}_", config.rollup_address);
+    let vars = match hub.get_aa_state_vars_prefix(&wf, &prefix) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("WATCH ERROR: wf AA open listing: {e}");
+            return;
+        }
+    };
+    let opens: Vec<OpenRecord> = parse_open_vars(&config.rollup_address, &vars);
+    let answering = env_var_compat("MINUEND_WATCH_ANSWER_OPENS").as_deref() == Some("1");
+    let mut batches: BTreeMap<u64, Option<minuend_settle::Batch>> = BTreeMap::new();
+    for rec in &opens {
+        let now = now_secs();
+        let answer = if answering && now < rec.expires_at {
+            batches
+                .entry(rec.height)
+                .or_insert_with(|| committed_batch(hub, config, rec.height))
+                .as_ref()
+                .and_then(|b| prove::open_answer(b, &rec.tree, rec.k, rec.index))
+        } else {
+            None
+        };
+        let what = format!(
+            "h={} open tree={} k={} index={} by {} (expires {})",
+            rec.height, rec.tree, rec.k, rec.index, rec.challenger, rec.expires_at
+        );
+        let (pred, data) = match plan_open(rec, now, answer.as_ref()) {
+            OpenAction::Answer(d) => ("answer", d),
+            OpenAction::Expire(d) => ("expire", d),
+            OpenAction::Wait => {
+                let once = with_tracker(|t| t.noted.insert(rec.key.clone()));
+                if once && !answering {
+                    println!(
+                        "WATCH ALERT: {what} is unanswered; the operator's watcher answers it \
+                         (MINUEND_WATCH_ANSWER_OPENS=1), else it expires into a fraud verdict"
+                    );
+                } else if once {
+                    println!("WATCH ALERT: {what} cannot be answered from the committed batch");
+                }
+                continue;
+            }
+        };
+        let win = match read_window(hub, config, rec.height) {
+            Ok(w) => w,
+            Err(e) => {
+                println!("WATCH ERROR: {what}: {e}");
+                continue;
+            }
+        };
+        let alert = format!("{what}: posting {pred}");
+        if !open_postable(win.submitted_at, now_secs(), win.frozen) {
+            if with_tracker(|t| t.noted.insert(format!("{}#late", rec.key))) {
+                println!(
+                    "WATCH ALERT: {alert} — NOT posted: frozen / outside the window / within \
+                     {OPEN_POST_MARGIN_SECS}s of the deadline (an expire now only refunds the \
+                     bond; post it by hand)"
+                );
+            }
+            continue;
+        }
+        let p = prove::BuiltProof {
+            pred: pred.into(),
+            fill_aa: false,
+            bind_aa: false,
+            data,
+        };
+        // Keyed by the open (and its expiry) so two opens of one height,
+        // or a re-opened key, are tracked separately.
+        let submission = format!("{}@{}", rec.key, rec.expires_at);
+        maybe_post_challenge(rec.height, &submission, &alert, Some(&p));
+    }
 }
 
 /// Act on a challengeable alert according to [`ChallengeMode`] (L5, #47).
@@ -1510,6 +1652,8 @@ fn main() -> anyhow::Result<()> {
         // R4-R-4 / I-1: a failed, empty or contradictory hub reading is
         // "unknown": skip the round (no rewind, no deletion) instead of
         // treating it as 0 — or exiting the process.
+        // R11b: answer / expire open-element challenges on the wf AA.
+        service_opens(&hub, &config);
         let ls_raw = hub.get_aa_state_var(&config.rollup_address, "last_submitted");
         let lf_raw = hub.get_aa_state_var(&config.rollup_address, "last_finalized");
         let (ls_raw, lf_raw) = match (ls_raw, lf_raw) {
@@ -1757,6 +1901,29 @@ mod tests {
         ChallengeTracker, PostDecision, ReplayCursor, CHALLENGE_SAFETY_MARGIN_SECS,
         CHALLENGE_WINDOW_SECS, LIVE_EXIT_REFUSED, MAX_POST_FAILURES,
     };
+
+    /// R11b: answer / expire keep only a 120 s margin, so an open made at
+    /// the end of its 1800 s window can still be expired (1200 s later, +60 s
+    /// grace) before the deadline; a fresh challenge keeps 600 s.
+    #[test]
+    fn r11b_open_postable_margin() {
+        use super::{open_postable, OPEN_POST_MARGIN_SECS};
+        let sa = 1_000_000u64;
+        let late_expire = sa + 1799 + 1200 + minuend_watch::OPEN_EXPIRE_GRACE_SECS;
+        assert!(open_postable(sa, late_expire, 0));
+        assert!(!challenge_postable(sa, late_expire, 0));
+        let edge = sa + CHALLENGE_WINDOW_SECS - OPEN_POST_MARGIN_SECS;
+        assert!(open_postable(sa, edge - 1, 0));
+        assert!(!open_postable(sa, edge, 0));
+        assert!(!open_postable(sa, sa + 10, 1), "frozen");
+        assert!(!open_postable(0, 10, 0), "not submitted");
+        // submission keys of two opens of one height never collide
+        let a = challenge_key(5, "open_R_5_ops_0_1@100", "expire");
+        let b = challenge_key(5, "open_R_5_ops_0_2@100", "expire");
+        assert_ne!(a, b);
+        let t = ChallengeTracker::default();
+        assert!(t.noted.is_empty());
+    }
 
     /// R3-R-3: the challenge key carries the submission (`da_unit_<h>`): a
     /// frozen and re-submitted height that cheats again with the same
