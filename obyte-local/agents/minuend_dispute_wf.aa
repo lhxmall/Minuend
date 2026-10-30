@@ -1,0 +1,193 @@
+{
+	// MINUEND well-formedness dispute AA (minuend-v2) — round 10 (R10-C1 /
+	// R10-H1 / R10-H2 common cause), eighth dispute AA.
+	//
+	// Every dispute AA reads numeric fields of operator-written leaves
+	// (`split(leaf, ':')[i]`) with arithmetic, ordered comparisons or
+	// json_parse. A field that is not a canonical integer ('x', '1e400',
+	// '01', '1.0', '+1', '-0') or is out of range made those predicates
+	// BOUNCE (fatal Oscript error), so a lie that also wrote one such field
+	// was unprovable. This AA makes the malformed field itself the fraud:
+	// one leaf of a unit's POST witness tree, or one element of the height's
+	// fills tree, whose layout is not exactly what the engine writes.
+	//
+	// Bind: {bind_wf:1, rollup:<addr>} payment 20000 -> forwards 10000 to
+	// the rollup with {set_dispute_wf:1} (the rollup hardcodes THIS address:
+	// placeholder DISPUTE_WF_AA_HERE, var dispute_wf_aa).
+	//
+	// pred 'wf':
+	//   * witness mode: {k, post_wit, post_proof (trace_root, index k),
+	//     leaf, leaf_proof (root post_wit)}; a leaf without ':' (never an
+	//     honest leaf) also needs end_proof: the `~:end` sentinel's proof in
+	//     the same tree with as many siblings (so the element is a leaf, not
+	//     an internal node: base64 node strings never contain ':').
+	//   * fills mode: {fills_root, leaf, leaf_proof (root fills_root, exact
+	//     depth for fill_count + 1 elements)}.
+	// Layouts (minuend-state wit_leaves / minuend-settle fills_element);
+	// field classes: h = 64 chars, x = non-empty, u = canonical integer >= 0
+	// with <= 39 digits, s = canonical integer (optional '-') <= 39 digits.
+	// Canonical = [1-9][0-9]* or 0 (no '+', '.', 'e', 'E', leading zero, -0):
+	//   acct:{h}:{s col}:{u perp}:{s withdrawn}
+	//   pos:{h}:{u mkt}:{s qty}:{s entry}:{u iso}:{s bucket}
+	//   ord:{h id}:{u mkt}:{u side}:{s price}:{u seq}:{u rem}:{h acct}:{u iso}:{s margin}
+	//   obond:{h}:{u unlock}      band:{u mkt}:{s min}:{s max}
+	//   meta:{u mkt}:{s tick}:{u im}:{u mm}:{u fee}:{u keeper}:{u delisted}:{s mark}:{u usd}:{u cap}
+	//   adr:{x}:{h}   adrx:{h}:{x}   dep:{x}   ~:end (exactly)
+	//   fills: f:{h unit}:{u idx}:{h}:{h}:{h}:{h}:{u mkt}:{s price}:{u qty}:{u seq}:{u side}:{u kind}:{s taker_post}
+	//          n:{u count}
+	// Any other tag (or a witness tag in the fills tree and vice versa) is
+	// malformed. The bounds are the engine's integer types (i128 / u128 have
+	// at most 39 digits), so an honest leaf is never malformed, and no
+	// product of a few fields can overflow Oscript's double range.
+	bounce_fees: { base: 10000 },
+	messages: {
+		cases: [
+			{
+				if: "{trigger.data.bind_wf}",
+				init: "{
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							set_dispute_wf: 1
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['bound_wf'] = 1;
+						}"
+					}
+				]
+			},
+			{
+				if: "{trigger.data.pred == 'wf'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					$S = trigger.data;
+					$L = $S.leaf;
+					if (typeof($L) != 'string' OR !$S.leaf_proof) bounce('bad leaf');
+					$fm = $S.fills_root ? true : false;
+					$sib = array_length($S.leaf_proof.siblings);
+					if ($fm) {
+						$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+						if ($S.fills_root != var[$rollup]['fills_root_' || $h] OR $S.leaf_proof.root != $S.fills_root
+							OR !is_valid_merkle_proof($L, $S.leaf_proof)
+							OR ($fc > 1 AND (2 ^ $sib < $fc OR 2 ^ $sib >= 2 * $fc)))
+							bounce('bad fill proof');
+					} else {
+						if ($S.trace_root != var[$rollup]['trace_root_' || $h]) bounce('stale roots');
+						$k = $S.k;
+						if (!is_integer($k) OR $k < 0 OR $k >= $n)
+							bounce('bad k');
+						$post_wit = $S.post_wit;
+						if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !$S.post_proof OR $S.post_proof.index != $k
+							OR $S.post_proof.root != $S.trace_root
+							OR !is_valid_merkle_proof($post_wit, $S.post_proof)
+							OR ($n > 1 AND (2 ^ array_length($S.post_proof.siblings) < $n OR 2 ^ array_length($S.post_proof.siblings) >= 2 * $n)))
+							bounce('bad post proof');
+						if ($S.leaf_proof.root != $post_wit OR !is_valid_merkle_proof($L, $S.leaf_proof))
+							bounce('bad leaf proof');
+						// A ':'-less element is judged only as a leaf: same depth
+						// as the `~:end` sentinel leaf of the same tree.
+						if (!contains($L, ':') AND !($S.end_proof AND $S.end_proof.root == $post_wit
+							AND array_length($S.end_proof.siblings) == $sib
+							AND is_valid_merkle_proof('~:end', $S.end_proof)))
+							bounce('not a leaf');
+					}
+					// One field of class $c: $v = the split value (numeric
+					// strings arrive as Decimal), $r = 'Z' || the raw field.
+					$fok = ($v, $r, $c) => ($c == 'h') ? length($r) == 65
+						: (($c == 'x') ? length($r) > 1
+						: (is_integer($v) AND length(replace($r, '-', '')) <= 40
+							AND !contains($r, 'e') AND !contains($r, 'E') AND !contains($r, '.') AND !contains($r, '+')
+							AND ($r == 'Z0' OR !starts_with($r, 'Z0'))
+							AND !starts_with($r, 'Z-0') AND ($c == 's' OR !contains($r, '-'))));
+					$Q = split($L, ':');
+					$R = split(replace($L, ':', ':Z'), ':');
+					$t = $R[0];
+					$sp = $fm
+						? (($t == 'f') ? 'huhhhhusuuuus' : (($t == 'n') ? 'u' : ''))
+						: (($t == 'acct') ? 'hsus'
+						: (($t == 'pos') ? 'hussus'
+						: (($t == 'ord') ? 'huusuuhus'
+						: (($t == 'obond') ? 'hu'
+						: (($t == 'band') ? 'uss'
+						: (($t == 'meta') ? 'usuuuuusuu'
+						: (($t == 'adr') ? 'xh'
+						: (($t == 'adrx') ? 'hx'
+						: (($t == 'dep') ? 'x'
+						: (($t == '~' AND $L == '~:end') ? 'x' : ''))))))))));
+					$ln = length($sp);
+					$ok = $ln > 0 AND array_length($Q) == $ln + 1
+						AND $fok($Q[1], $R[1], substring($sp, 0, 1))
+						AND ($ln < 2 OR $fok($Q[2], $R[2], substring($sp, 1, 1)))
+						AND ($ln < 3 OR $fok($Q[3], $R[3], substring($sp, 2, 1)))
+						AND ($ln < 4 OR $fok($Q[4], $R[4], substring($sp, 3, 1)))
+						AND ($ln < 5 OR $fok($Q[5], $R[5], substring($sp, 4, 1)))
+						AND ($ln < 6 OR $fok($Q[6], $R[6], substring($sp, 5, 1)))
+						AND ($ln < 7 OR $fok($Q[7], $R[7], substring($sp, 6, 1)))
+						AND ($ln < 8 OR $fok($Q[8], $R[8], substring($sp, 7, 1)))
+						AND ($ln < 9 OR $fok($Q[9], $R[9], substring($sp, 8, 1)))
+						AND ($ln < 10 OR $fok($Q[10], $R[10], substring($sp, 9, 1)))
+						AND ($ln < 11 OR $fok($Q[11], $R[11], substring($sp, 10, 1)))
+						AND ($ln < 12 OR $fok($Q[12], $R[12], substring($sp, 11, 1)))
+						AND ($ln < 13 OR $fok($Q[13], $R[13], substring($sp, 12, 1)));
+					if ($ok) bounce('no fraud');
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			}
+		]
+	}
+}

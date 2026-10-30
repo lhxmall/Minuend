@@ -187,6 +187,7 @@ struct Args {
     dispute_claw: Option<String>,
     dispute_xframe: Option<String>,
     dispute_mframe: Option<String>,
+    dispute_wf: Option<String>,
     hub: String,
     from_height: Option<u64>,
     state_dir: Option<PathBuf>,
@@ -203,6 +204,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dispute_claw = None;
     let mut dispute_xframe = None;
     let mut dispute_mframe = None;
+    let mut dispute_wf = None;
     let mut state_dir = None;
     let mut hub = None;
     let mut from_height = None;
@@ -230,6 +232,7 @@ fn parse_args() -> Result<Args, String> {
             "--dispute-mframe" => {
                 dispute_mframe = Some(it.next().ok_or("--dispute-mframe needs a value")?)
             }
+            "--dispute-wf" => dispute_wf = Some(it.next().ok_or("--dispute-wf needs a value")?),
             "--dispute-xframe" => {
                 dispute_xframe = Some(it.next().ok_or("--dispute-xframe needs a value")?)
             }
@@ -277,6 +280,7 @@ fn parse_args() -> Result<Args, String> {
         dispute_claw,
         dispute_xframe,
         dispute_mframe,
+        dispute_wf,
         hub: hub.ok_or("missing --hub")?,
         from_height,
         state_dir,
@@ -288,7 +292,7 @@ fn parse_args() -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "minuend-watch --rollup <rollup-aa-addr> --vault <vault-aa-addr> --hub <hub-url> [--dispute <dispute-aa-addr>] \
- [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--dispute-claw <addr>] [--dispute-xframe <addr>] [--dispute-mframe <addr>] [--state-dir <dir>] [--from-height <u64>] \
+ [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--dispute-claw <addr>] [--dispute-xframe <addr>] [--dispute-mframe <addr>] [--dispute-wf <addr>] [--state-dir <dir>] [--from-height <u64>] \
  [--poll-interval <secs>] [--bond <gross-bytes>]\n\
  \n\
 Polls the rollup's da_unit_<h> assertions, checks the DA header against the roots the\n\
@@ -393,6 +397,9 @@ struct ChallengeCtx {
     /// Round 8: P-mframe lives on `minuend_dispute_mframe.aa` (rollup var
     /// `dispute_mframe_aa`); P-noband moved to the claw AA in round 9.
     dispute_mframe: Option<String>,
+    /// Round 10: P-wf (malformed leaf / fill field) lives on
+    /// `minuend_dispute_wf.aa` (rollup var `dispute_wf_aa`).
+    dispute_wf: Option<String>,
     proof_dir: PathBuf,
 }
 
@@ -406,6 +413,7 @@ impl ChallengeCtx {
             "claw" => self.dispute_claw.as_deref(),
             "xframe" => self.dispute_xframe.as_deref(),
             "mframe" => self.dispute_mframe.as_deref(),
+            "wf" => self.dispute_wf.as_deref(),
             "fill" => self.dispute_fill.as_deref(),
             "bind" => self.dispute_bind.as_deref(),
             _ => None,
@@ -1022,6 +1030,7 @@ fn maybe_post_challenge(h: u64, submission: &str, alert: &str, proof: Option<&pr
             "claw" => args.push("--claw".into()),
             "xframe" => args.push("--xframe".into()),
             "mframe" => args.push("--mframe".into()),
+            "wf" => args.push("--wf".into()),
             _ => {}
         }
         cmd.args(args)
@@ -1444,6 +1453,7 @@ fn main() -> anyhow::Result<()> {
         dispute_claw: args.dispute_claw.clone(),
         dispute_xframe: args.dispute_xframe.clone(),
         dispute_mframe: args.dispute_mframe.clone(),
+        dispute_wf: args.dispute_wf.clone(),
         proof_dir,
     });
 
@@ -1904,6 +1914,7 @@ mod tests {
             dispute_claw: Some("C".repeat(32)),
             dispute_xframe: Some("Q".repeat(32)),
             dispute_mframe: Some("R".repeat(32)),
+            dispute_wf: Some("W".repeat(32)),
             proof_dir: Default::default(),
         };
         let s = std::path::Path::new("/x/p.js");
@@ -1974,6 +1985,7 @@ mod tests {
             ("tsize", "xframe", "Q"),
             ("mframe", "mframe", "R"),
             ("noband", "claw", "C"),
+            ("wf", "wf", "W"),
         ] {
             let xf = minuend_watch::prove::BuiltProof {
                 pred: pred.into(),

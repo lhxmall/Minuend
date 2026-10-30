@@ -410,13 +410,15 @@
 						// in pre (obond) with unlock 0 or > h - 1.
 						$T = ($isx AND $X == $oa) ? (($tag == '0e') ? -50000 : (($tag == '0a') ? -10000 : (($tag == '10') ? 25000 : 0))) : 0;
 						$ob = $S.obond;
-						$ou = (typeof($ob) == 'string') ? substring($ob, 71, length($ob)) : '';
+						$OB = split((typeof($ob) == 'string') ? $ob : '-', ':');
 						$olo = 'obond:' || $X || ':';
 						$ohi = 'obond:' || $X || ';';
-						$ouq = json_parse($ou);
+						// R10-H1: the split unlock (Decimal when numeric), no json_parse
+						// (fatal on '1e400'); a malformed unlock is not expiring.
+						$ouq = $OB[2];
 						$nob = (typeof($ob) == 'string' AND starts_with($ob, $olo)
 								AND is_valid_merkle_proof($ob, $S.obond_proof) AND $S.obond_proof.root == $pre_wit
-								AND !(length($ou) <= 15 AND !starts_with($ou, '0') AND is_integer($ouq) AND $ouq <= $h - 1))
+								AND !(is_integer($ouq) AND $ouq > 0 AND $ouq <= $h - 1))
 							OR ($S.oleft AND contains($S.oleft, ':') AND $S.oleft_proof.root == $pre_wit
 								AND is_valid_merkle_proof($S.oleft, $S.oleft_proof)
 								AND (($S.oright AND contains($S.oright, ':')
@@ -429,7 +431,7 @@
 						$B = ($k == 0 AND !$nob) ? 50000 : 0;
 						$pfree = !$isx AND $X == $z1 AND ($zt == 'D' OR $zt == 'W');
 						$pb = $p0 != $p1 AND !$pfree
-							AND !(length($p0) <= 14 AND is_integer(json_parse($p0)) AND ($p1 == $p0 + $T OR $p1 == $p0 + $B OR $p1 == $p0 + $T + $B));
+							AND !(length($p0) <= 14 AND !contains($p0, 'e') AND !contains($p0, 'E') AND is_integer(json_parse($p0)) AND ($p1 == $p0 + $T OR $p1 == $p0 + $B OR $p1 == $p0 + $T + $B));
 						if (!$cb AND !$wb AND !$pb) bounce('no fraud');
 					}
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');

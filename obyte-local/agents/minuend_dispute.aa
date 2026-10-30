@@ -247,13 +247,15 @@
 						// obond leaf in pre (obond) with unlock 0 or > h - 1
 						// (same evidence as P-xframe).
 						$ob = trigger.data.obond;
-						$ou = (typeof($ob) == 'string') ? substring($ob, 71, length($ob)) : '';
+						$OB = split((typeof($ob) == 'string') ? $ob : '-', ':');
 						$olo = 'obond:' || $acct || ':';
 						$ohi = 'obond:' || $acct || ';';
-						$ouq = json_parse($ou);
+						// R10-H1: the split unlock (Decimal when numeric), no json_parse
+						// (fatal on '1e400'); a malformed unlock is not expiring.
+						$ouq = $OB[2];
 						$nob = (typeof($ob) == 'string' AND starts_with($ob, $olo)
 								AND is_valid_merkle_proof($ob, trigger.data.obond_proof) AND trigger.data.obond_proof.root == $pre_wit
-								AND !(length($ou) <= 15 AND !starts_with($ou, '0') AND is_integer($ouq) AND $ouq <= $h - 1))
+								AND !(is_integer($ouq) AND $ouq > 0 AND $ouq <= $h - 1))
 							OR (trigger.data.oleft AND contains(trigger.data.oleft, ':') AND trigger.data.oleft_proof.root == $pre_wit
 								AND is_valid_merkle_proof(trigger.data.oleft, trigger.data.oleft_proof)
 								AND ((trigger.data.oright AND contains(trigger.data.oright, ':')

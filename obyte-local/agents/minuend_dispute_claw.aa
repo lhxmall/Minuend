@@ -333,7 +333,8 @@
 							$tS0 = split($tA0, ':');
 							$tS1 = split($tA1, ':');
 							$tc0 = $tS0[2] + 0;
-							$tc1 = $tS1[2] + 0;
+							// R10-H2: non-integer POST collateral = fraud (sentinel).
+							$tc1 = is_integer($tS1[2]) ? $tS1[2] : 1000000000000000000000000000000;
 							$tlo = 'pos:' || $tk || ':' || $market || ':';
 							$thi = 'pos:' || $tk || ':' || $market || ';';
 							$tPP = trigger.data.t_pre_pos;
@@ -394,7 +395,7 @@
 							$mS0 = split($mA0, ':');
 							$mS1 = split($mA1, ':');
 							$mc0 = $mS0[2] + 0;
-							$mc1 = $mS1[2] + 0;
+							$mc1 = is_integer($mS1[2]) ? $mS1[2] : 1000000000000000000000000000000;
 							$mlo = 'pos:' || $mk || ':' || $market || ':';
 							$mhi = 'pos:' || $mk || ':' || $market || ';';
 							$mPP = trigger.data.m_pre_pos;
@@ -496,7 +497,7 @@
 									$xc0 = 0;
 								}
 								$xS1 = split($xA1, ':');
-								$xok = abs($xS1[2] - $xc0 - (($xw == 'c') ? $kpay : $fee))
+								$xok = is_integer($xS1[2]) AND abs($xS1[2] - $xc0 - (($xw == 'c') ? $kpay : $fee))
 									<= $slack + 4 * floor(abs($xc0) / 1000000000000);
 							} else {
 								$xok = true;

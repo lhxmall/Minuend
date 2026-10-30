@@ -108,6 +108,9 @@ const XF_ADDR = chashOf(fs.readFileSync(XF_SRC, "utf8"));
 // Round 8: P-mframe / P-noband on the m-frame dispute AA.
 const MF_SRC = writeResolved("minuend_dispute_mframe.aa", {}, ".e2e_mframe.aa");
 const MF_ADDR = chashOf(fs.readFileSync(MF_SRC, "utf8"));
+// Round 10: P-wf (malformed leaf / fill field) on the wf dispute AA.
+const WF_SRC = writeResolved("minuend_dispute_wf.aa", {}, ".e2e_wf.aa");
+const WF_ADDR = chashOf(fs.readFileSync(WF_SRC, "utf8"));
 // R4-A-4: P-adr derives the vault from the base (deposit ledger backing).
 const BIND_SRC = writeResolved("minuend_dispute_bind.aa", { VAULT_BASE_HERE: VAULT_BASE_ADDR }, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
@@ -121,6 +124,7 @@ const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_CLAW_AA_HERE: CLAW_ADDR,
   DISPUTE_XFRAME_AA_HERE: XF_ADDR,
   DISPUTE_MFRAME_AA_HERE: MF_ADDR,
+  DISPUTE_WF_AA_HERE: WF_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
 const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
@@ -250,7 +254,7 @@ function submitDataBase(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 7,
+    assertion_version: 8,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -365,6 +369,7 @@ async function main() {
     .with.agent({ claw: CLAW_SRC })
     .with.agent({ xframe: XF_SRC })
     .with.agent({ mframe: MF_SRC })
+    .with.agent({ wf: WF_SRC })
     .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
@@ -381,6 +386,8 @@ async function main() {
   if (xframe !== XF_ADDR) throw new Error(`xframe address mismatch: ${xframe} != ${XF_ADDR}`);
   const mframe = network.agent.mframe;
   if (mframe !== MF_ADDR) throw new Error(`mframe address mismatch: ${mframe} != ${MF_ADDR}`);
+  const wf = network.agent.wf;
+  if (wf !== WF_ADDR) throw new Error(`wf address mismatch: ${wf} != ${WF_ADDR}`);
   if (claw !== CLAW_ADDR) throw new Error(`claw address mismatch: ${claw} != ${CLAW_ADDR}`);
   if (vault !== VAULT_ADDR) throw new Error(`vault address mismatch: ${vault} != ${VAULT_ADDR}`);
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
@@ -394,7 +401,9 @@ async function main() {
   await trigger(operator, claw, { bind_claw: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, xframe, { bind_xframe: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, mframe, { bind_mframe: 1, rollup: ROLLUP_ADDR }, 20000);
+  await trigger(operator, wf, { bind_wf: 1, rollup: ROLLUP_ADDR }, 20000);
   let st = await vars(rollup);
+  if (String(st.dispute_wf_aa) !== wf) throw new Error("dispute_wf_aa not set: " + JSON.stringify(st.dispute_wf_aa));
   if (String(st.dispute_mframe_aa) !== mframe) throw new Error("dispute_mframe_aa not set: " + JSON.stringify(st.dispute_mframe_aa));
   if (String(st.dispute_xframe_aa) !== xframe) throw new Error("dispute_xframe_aa not set: " + JSON.stringify(st.dispute_xframe_aa));
   if (String(st.dispute_claw_aa) !== claw) throw new Error("dispute_claw_aa not set: " + JSON.stringify(st.dispute_claw_aa));
@@ -412,6 +421,7 @@ async function main() {
   await triggerBounce(operator, rollup, { set_dispute_claw: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_xframe: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_mframe: 1 }, 20000, "not authorized");
+  await triggerBounce(operator, rollup, { set_dispute_wf: 1 }, 20000, "not authorized");
   // A second bind succeeds on the dispute AA (it just re-forwards), but the
   // rollup bounces the secondary 'not authorized' verdict — dispute_aa var
   // must be unchanged afterwards.
@@ -4192,6 +4202,144 @@ async function main() {
       await live(122, "honest FinalizeProposal im 1000 -> 2000");
     }
     console.log("84. R9-L1: FinalizeProposal im 1000 -> 10000 (spot flip) → frozen; im 1000 -> 2000 → 'no fraud'");
+
+    // ===================== ROUND 10 (fix/47-r10) ============================
+    // P-wf (minuend_dispute_wf.aa): a malformed field of a POST witness leaf
+    // or of a fills-tree element is fraud by itself.
+    const wfLeaf = (h, u, L) => ({
+      pred: "wf", height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot,
+      post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      leaf: L, leaf_proof: u.leafProof(L), end_proof: u.leafProof(END),
+    });
+    const wfFill = (h, u, L) => ({
+      pred: "wf", height: h, rollup: ROLLUP_ADDR, fills_root: u.fillsRoot,
+      leaf: L, leaf_proof: merkle.getMerkleProof(u.tree, u.tree.indexOf(L)),
+    });
+    // ---- 85. R10-C1: a malformed meta field no longer hides a meta lie ----
+    {
+      const P17 = await clawSetup(123, "r10-p17", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBT, END]);
+      const keep17 = [tA(1000000000, 60000), mA(2000000000), BAND1, posM9, OBT, END];
+      const rpU = (name, meta) => xUnitP(P17, "06", T, rp(1, 105), name, [meta].concat(keep17));
+      for (const [m, what] of [
+        ["meta:1:1:1e400:500:5:100:0:9000000000000000000:0:0", "mark -> 9e18 + im '1e400'"],
+        ["meta:1:1:1000:500:5:100:0:100:0:1e400", "cap '1e400'"],
+        ["meta:1:1000000000:1000:500:5:1e400:0:100:0:0", "tick 1 -> 1e9 + keeper '1e400'"],
+        ["meta:1:1:1000:-1e400:5:100:1:100:0:0", "delist + mm '-1e400'"],
+      ]) {
+        const u = rpU("r10-c1-" + what.length, m);
+        await submitAt(124, u);
+        await triggerVerdict(challenger, mframe, metaP(124, P17, u, META1, m), 20000, "R10-C1 (P-mframe): " + what);
+        await frozen(124, what + " (P-mframe)");
+        await submitAt(124, u);
+        await triggerVerdict(challenger, wf, wfLeaf(124, u, m), 20000, "R10-C1 (P-wf): " + what);
+        await frozen(124, what + " (P-wf)");
+      }
+      // Honest control: ReportPrice +5 %; P-wf bounces on EVERY leaf.
+      const okM = "meta:1:1:1000:500:5:100:0:105:0:0";
+      const ok = rpU("r10-c1-ok", okM);
+      await submitAt(124, ok);
+      await triggerBounce(challenger, mframe, metaP(124, P17, ok, META1, okM), 20000, "no fraud");
+      for (const L of [okM].concat(keep17))
+        await triggerBounce(challenger, wf, wfLeaf(124, ok, L), 20000, "no fraud");
+      await live(124, "honest ReportPrice (every leaf well-formed)");
+    }
+    console.log("85. R10-C1: meta lie + im/cap/keeper/mm '1e400' → frozen (P-mframe and P-wf); honest ReportPrice: every post leaf → 'no fraud' (P-wf)");
+
+    // ---- 86. R10-H1: a fake obond leaf with an unparsable unlock ----------
+    {
+      const OBX = `obond:${K}:1e400`;
+      const P18 = await clawSetup(125, "r10-p18", [tA(1000000000, 60000), acct(K, 0), META1, BAND1, OBT, END]);
+      const keep18 = [tA(1000000000, 60000), acct(K, 0), META1, BAND1, OBT, END];
+      const lie = xUnitP(P18, "06", T, rp(1, 100), "r10-h1-ins", [OBX].concat(keep18));
+      await submitAt(126, lie);
+      await triggerVerdict(challenger, mframe, Object.assign(xfB("mframe", 126, P18, lie), {
+        leaf: OBX, ins: true, leaf_proof: lie.leafProof(OBX),
+      }, absentIn(P18.pre, OBX)), 20000, "R10-H1 (P-mframe): obond:K:1e400 inserted");
+      await frozen(126, "fake obond (P-mframe)");
+      await submitAt(126, lie);
+      await triggerVerdict(challenger, wf, wfLeaf(126, lie, OBX), 20000, "R10-H1 (P-wf): obond:K:1e400");
+      await frozen(126, "fake obond (P-wf)");
+      const ok = xUnitP(P18, "06", T, rp(1, 100), "r10-h1-ok", keep18);
+      await submitAt(126, ok);
+      await triggerBounce(challenger, wf, wfLeaf(126, ok, OBT), 20000, "no fraud");
+      await live(126, "honest unit (no obond change)");
+      // Next height, unit 0, with the fake leaf in pre: K +50000 PERP. The
+      // fake leaf as evidence now reads as "no expiring bond" (P-xframe).
+      const P19 = await clawSetup(127, "r10-p19", [tA(1000000000, 60000), acct(K, 0), META1, BAND1, OBT, OBX, END]);
+      const keep19 = [tA(1000000000, 60000), META1, BAND1, OBT, OBX, END];
+      const mint = xUnitP(P19, "06", T, rp(1, 100), "r10-h1-mint", [`acct:${K}:0:50000:0`].concat(keep19));
+      await submitAt(128, mint);
+      await triggerVerdict(challenger, xframe, xfA8(128, P19, mint, K, { obond: OBX, obond_proof: P19.proof(OBX) }), 20000,
+        "R10-H1 (P-xframe): +50000 PERP against a fake obond leaf");
+      await frozen(128, "PERP mint against a fake bond");
+      const same = xUnitP(P19, "06", T, rp(1, 100), "r10-h1-same", [acct(K, 0)].concat(keep19));
+      await submitAt(128, same);
+      await live(128, "honest resubmit");
+    }
+    console.log("86. R10-H1: obond:K:1e400 inserted → frozen (P-mframe and P-wf); k == 0 +50000 PERP with the fake leaf as evidence → frozen (P-xframe); honest → 'no fraud'");
+
+    // ---- 87. R10-H2: a counterparty's collateral written as garbage -------
+    {
+      const PRE20 = [acct(T, 50000000000), acct(M, 1000000000), META1, MORD, `pos:${M}:1:100000000:10000000000000:0:0`, END];
+      const P20 = await clawSetup(129, "r10-p20", PRE20);
+      const f20 = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:9000000000000:100000000:9:0:0:0`;
+      const op20 = `p:${T}:1:0:9000000000000:100000000:0:0:0:0`;
+      const tPos20 = `pos:${T}:1:100000000:9000000000000:0:0`;
+      const post20 = (tc, mc) => [acct(T, tc), acct(M, mc), META1, tPos20, END];
+      for (const junk of ["x", "1e400"]) {
+        const u = clawUnit(P20, "r10-h2-" + junk, op20, [f20], post20(40955000000, junk));
+        await submitAt(130, u);
+        await triggerVerdict(challenger, claw, clawPayload(P20, 130, u, MORD), 20000, "R10-H2 (P-claw): maker collateral '" + junk + "'");
+        await frozen(130, "maker collateral " + junk + " (P-claw)");
+        await submitAt(130, u);
+        await triggerVerdict(challenger, wf, wfLeaf(130, u, acct(M, junk)), 20000, "R10-H2 (P-wf): maker collateral '" + junk + "'");
+        await frozen(130, "maker collateral " + junk + " (P-wf)");
+      }
+      // A fill descriptor with a non-integer price (fills-tree mode).
+      const fBad = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:9e12:100000000:9:0:0:0`;
+      const ub = clawUnit(P20, "r10-h2-fill", op20, [fBad], post20(40955000000, 0));
+      await submitAt(130, ub);
+      await triggerVerdict(challenger, wf, wfFill(130, ub, fBad), 20000, "R10-H2 (P-wf): fill price '9e12'");
+      await frozen(130, "fill price 9e12 (P-wf)");
+      // Honest control: the r6 kind-0 claw (T pays the 9000 lifting M to 0).
+      const ok = clawUnit(P20, "r10-h2-ok", op20, [f20], post20(40955000000, 0));
+      await submitAt(130, ok);
+      await triggerBounce(challenger, claw, clawPayload(P20, 130, ok, MORD), 20000, "no fraud");
+      await triggerBounce(challenger, wf, wfFill(130, ok, f20), 20000, "no fraud");
+      await triggerBounce(challenger, wf, wfFill(130, ok, "n:1"), 20000, "no fraud");
+      for (const L of post20(40955000000, 0))
+        await triggerBounce(challenger, wf, wfLeaf(130, ok, L), 20000, "no fraud");
+      await live(130, "honest kind-0 claw (every leaf / fill well-formed)");
+    }
+    console.log("87. R10-H2: maker collateral 'x' / '1e400' → frozen (P-claw and P-wf); fill price '9e12' → frozen (P-wf fills mode); honest claw → 'no fraud'");
+
+    // ---- 88. R10-M1: funding step exact at marks <= -9.99e14 --------------
+    {
+      const fm = (mark) => `meta:1:1:1000:500:10:50:0:${mark}:100:100`;
+      const O88 = "-999123456789999";
+      const P21 = await clawSetup(131, "r10-p21", [tA(1000000000, 60000), mA(2000000000), fm(O88), BAND1, END]);
+      const fundU = (name, mark) => {
+        const f = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:${mark}:1:1:0:0:0`;
+        return clawUnit(P21, name, `p:${T}:1:0:${mark}:1:0:0:1:1`, [f], [tA(1000000000, 60000), mA(2000000000), fm(mark), BAND1, END]);
+      };
+      const mfFund = (h, u, mark) => Object.assign(xfB("mframe", h, P21, u, true), {
+        unit: isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: u.fillsRoot,
+        fill: u.fill, fill_proof: merkle.getMerkleProof(u.tree, 0),
+        pre_meta: fm(O88), pre_meta_proof: P21.proof(fm(O88)), post_meta: fm(mark), post_meta_proof: u.leafProof(fm(mark)),
+      });
+      // Rust: rate trunc((m - 1e12) / 1e4) = -100012345678, step 10001234567.
+      const lieM = "-899111111100000"; // rate -90011111110: one step + 1 bps
+      const lie = fundU("r10-m1-lie", lieM);
+      await submitAt(132, lie);
+      await triggerVerdict(challenger, mframe, mfFund(132, lie, lieM), 20000, "R10-M1: funding step + 1 bps");
+      await frozen(132, "funding step + 1 bps");
+      const okM = "-899111111110000"; // rate -90011111111: exactly one step (was misjudged)
+      const ok = fundU("r10-m1-ok", okM);
+      await submitAt(132, ok);
+      await triggerBounce(challenger, mframe, mfFund(132, ok, okM), 20000, "no fraud");
+      await live(132, "honest funding step at mark -9.99e14");
+    }
+    console.log("88. R10-M1: funding-rate step at mark -999123456789999: exactly one step → 'no fraud' (was fraud); one step + 1 bps → frozen (P-mframe)");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

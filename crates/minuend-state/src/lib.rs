@@ -2087,6 +2087,7 @@ mod tests {
             "minuend_dispute_claw.aa",
             "minuend_dispute_xframe.aa",
             "minuend_dispute_mframe.aa",
+            "minuend_dispute_wf.aa",
             "minuend_rollup.aa",
             "minuend_vault.aa",
         ] {

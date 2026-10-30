@@ -75,10 +75,12 @@ const TARGETS = {
   xframe: { deployKey: "dispute_xframe_aa_address", env: "MINUEND_DISPUTE_XFRAME_AA", bind: { bind_xframe: 1 }, rollupVar: "dispute_xframe_aa" },
   // Round 8: P-mframe on the m-frame AA (P-noband: claw AA since round 9).
   mframe: { deployKey: "dispute_mframe_aa_address", env: "MINUEND_DISPUTE_MFRAME_AA", bind: { bind_mframe: 1 }, rollupVar: "dispute_mframe_aa" },
+  // Round 10: P-wf (malformed leaf / fill field) on the wf AA.
+  wf: { deployKey: "dispute_wf_aa_address", env: "MINUEND_DISPUTE_WF_AA", bind: { bind_wf: 1 }, rollupVar: "dispute_wf_aa" },
 };
 function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
   const t = TARGETS[target];
-  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind|claw|xframe|mframe)`);
+  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind|claw|xframe|mframe|wf)`);
   const address = (deploy && deploy[t.deployKey]) || envCompat(t.env, env, warn);
   return Object.assign({ address: address || null }, t);
 }
@@ -151,6 +153,8 @@ function targetForPred(pred) {
   // leaf on the m-frame AA.
   if (pred === "xframe" || pred === "tsize") return "xframe";
   if (pred === "mframe") return "mframe";
+  // Round 10: P-wf (malformed leaf / fill field) on the wf AA.
+  if (pred === "wf") return "wf";
   // Round 9: P-noband moved to the claw AA (m-frame ops budget).
   if (pred === "noband") return "claw";
   // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA;

@@ -110,11 +110,11 @@ require("./test_frame_stamp");
     wit_root: "W".repeat(44), trace_root: "T".repeat(44), units_root: "U".repeat(44),
     units_set_root: "S".repeat(44), ops_root: "O".repeat(44), fills_root: "F".repeat(44),
     counts_root: "C".repeat(44), unit_count: 3, wit_count: 11, fill_count: 2,
-    assertion_version: 7, data_root: "d".repeat(64),
+    assertion_version: 8, data_root: "d".repeat(64),
   };
   const s = ["minuend-da-v1", "minuend-v2", "7", "01".repeat(32), "02".repeat(32), "a".repeat(64),
     "W".repeat(44), "T".repeat(44), "U".repeat(44), "S".repeat(44), "O".repeat(44), "F".repeat(44),
-    "C".repeat(44), "3", "11", "2", "7", "d".repeat(64)].join("|");
+    "C".repeat(44), "3", "11", "2", "8", "d".repeat(64)].join("|");
   assert.strictEqual(daBindHash(f), crypto.createHash("sha256").update(s).digest("hex"));
   assert.throws(() => daBindHash(Object.assign({}, f, { data_root: undefined })), /missing data_root/);
   // Round 2 routing: ghost/skip -> book AA, binding preds -> bind AA.
@@ -125,6 +125,11 @@ require("./test_frame_stamp");
   assert.strictEqual(targetForPred("claw"), "claw"); // round 6 P-claw
   for (const p of ["xframe", "tsize"]) assert.strictEqual(targetForPred(p), "xframe"); // round 7b
   assert.strictEqual(targetForPred("mframe"), "mframe"); // round 8
+  assert.strictEqual(targetForPred("wf"), "wf"); // round 10
+  const wf = disputeTarget("wf", { dispute_wf_aa_address: "W".repeat(32) });
+  assert.strictEqual(wf.address, "W".repeat(32));
+  assert.strictEqual(wf.rollupVar, "dispute_wf_aa");
+  assert.deepStrictEqual(wf.bind, { bind_wf: 1 });
   assert.strictEqual(targetForPred("noband"), "claw"); // round 9: P-noband on the claw AA
   assert.strictEqual(targetForPred("fill_math"), "fill");
   for (const p of ["wpin", "adr", "tip", "keep", "mirror", "frame"]) assert.strictEqual(targetForPred(p), "bind");

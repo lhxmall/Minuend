@@ -44,7 +44,7 @@ async function main() {
   // Round 2: ghost/skip live on the book dispute AA; with no explicit flag
   // the predicate name picks the AA (the watcher's devnet drill passes no
   // flag for book proofs).
-  const target = flag("bind") ? "bind" : flag("fill") ? "fill" : flag("book") ? "book" : flag("claw") ? "claw" : flag("xframe") ? "xframe" : flag("mframe") ? "mframe" : targetForPred(arg("pred", "deposit"));
+  const target = flag("bind") ? "bind" : flag("fill") ? "fill" : flag("book") ? "book" : flag("claw") ? "claw" : flag("xframe") ? "xframe" : flag("mframe") ? "mframe" : flag("wf") ? "wf" : targetForPred(arg("pred", "deposit"));
   const t = disputeTarget(target, deploy);
   const dispute = t.address;
   const rollup = deploy.rollup_aa_address || envCompat("MINUEND_ROLLUP_AA");
@@ -52,7 +52,7 @@ async function main() {
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");
   const proofFile = arg("proof");
-  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill|--bind|--book|--claw|--xframe|--mframe]");
+  if (!height || !proofFile) throw new Error("usage: node post_challenge.js --height N --pred deposit --proof proof.json [--fill|--bind|--book|--claw|--xframe|--mframe|--wf]");
   // #37-2: the proof path used to be stored and never read — the script
   // then referenced an undefined `proof` and threw ReferenceError before
   // sending anything. Read and shape-check it here.

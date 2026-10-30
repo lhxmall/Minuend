@@ -169,8 +169,12 @@
 							// leaf still in unit 0's post tree.
 							if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($Q[1]) == 64))
 								bounce('bad leaf');
-							$uq = json_parse($Q[2]);
-							$exp = $k == 0 AND length($Q[2]) <= 15 AND !starts_with($Q[2], '0') AND is_integer($uq) AND $uq <= $h - 1;
+							// R10-H1: no json_parse of an operator-written field
+							// (json_parse('1e400') is a fatal error that bounced
+							// the proof): split already yields a Decimal for a
+							// numeric field; anything else is not an expiring
+							// unlock here and is itself P-wf fraud.
+							$exp = $k == 0 AND is_integer($Q[2]) AND $Q[2] > 0 AND $Q[2] <= $h - 1;
 							if ($S.keep) {
 								if (!$exp OR !is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $pre_wit
 									OR !is_valid_merkle_proof($L, $S.keep_proof) OR $S.keep_proof.root != $post_wit)
@@ -189,11 +193,11 @@
 								// it does not reject a 0e, and the refund
 								// (+ORACLE_BOND_PERP) nets the 0e debit to 0.
 								$pob = $S.pob;
-								$pq = (typeof($pob) == 'string') ? substring($pob, 71, length($pob)) : '';
-								$pqv = json_parse($pq);
+								$PB = split((typeof($pob) == 'string') ? $pob : '-', ':');
+								$pqv = $PB[2];
 								$pobok = typeof($pob) == 'string' AND starts_with($pob, $bdlo)
 									AND is_valid_merkle_proof($pob, $S.pob_proof) AND $S.pob_proof.root == $pre_wit;
-								$pexp = $pobok AND $k == 0 AND length($pq) <= 15 AND !starts_with($pq, '0') AND is_integer($pqv) AND $pqv <= $h - 1;
+								$pexp = $pobok AND $k == 0 AND is_integer($pqv) AND $pqv > 0 AND $pqv <= $h - 1;
 								$alo = 'acct:' || $oa || ':';
 								$ahi = 'acct:' || $oa || ';';
 								$A0 = split(typeof($S.pa0) == 'string' ? $S.pa0 : '-', ':');
@@ -269,12 +273,15 @@
 								// still risk_params_ok (spot: fee never
 								// raised), or Delist 0 -> 1 — and never
 								// touches tick, usd, cap or the mark.
-								$im = json_parse($M1[3]);
-								$mm = json_parse($M1[4]);
-								$fee = json_parse($M1[5]);
-								$kp = json_parse($M1[6]);
-								$cap = json_parse($M1[10]);
-								$fee0 = json_parse($M0[5]);
+								// R10-C1: the split fields themselves (Decimal when
+								// numeric), never json_parse: a non-integer POST
+								// field ('1e400', 'x') is simply not legal (fraud).
+								$im = $M1[3];
+								$mm = $M1[4];
+								$fee = $M1[5];
+								$kp = $M1[6];
+								$cap = $M1[10];
+								$fee0 = $M0[5];
 								$legal = is_integer($im) AND is_integer($mm) AND is_integer($fee) AND is_integer($kp) AND is_integer($cap) AND is_integer($fee0)
 									AND $fee >= 1 AND $fee <= 200 AND $kp >= 1 AND $im > $mm
 									AND (($im == 10000) ? ($mm >= 500 AND $kp <= 500 AND $cap == 0 AND $fee <= $fee0)
@@ -295,26 +302,27 @@
 								// Regular markets (usd 0) move at most 10 %.
 								// R9-H2: the engine never writes a mark with
 								// |mark| >= MARK_CAP (1e15), where Oscript's 15
-								// significant digits compare exactly; a longer or
-								// exponent mark is OUT of band (fraud), and only a
-								// <= 16-char digit string is parsed (json_parse of
-								// '1e400' is a fatal error that would bounce the
-								// proof).
-								$sv = length($M0[8]) <= 16 AND length($M1[8]) <= 16 AND !contains($M0[8] || $M1[8], 'e') AND !contains($M0[8] || $M1[8], 'E');
-								$o8 = $sv ? json_parse($M0[8]) : false;
-								$n8 = $sv ? json_parse($M1[8]) : false;
-								$pi = is_integer($o8) AND is_integer($n8);
-								$band = $pi AND abs($o8) < 1000000000000000 AND abs($n8) < 1000000000000000
-									AND ($o8 == 0 OR abs($n8 - $o8) <= abs($o8) / 10 + 1);
+								// significant digits compare exactly; such a mark
+								// is OUT of band (fraud).
+								// R10-C1: the split fields (Decimal when numeric; a
+								// non-numeric or non-finite field stays a string and
+								// is_integer is false), no json_parse; |mark| < 1e15
+								// now gates the funding step as well.
+								$o8 = $M0[8];
+								$n8 = $M1[8];
+								$pi = is_integer($o8) AND is_integer($n8) AND abs($o8) < 1000000000000000 AND abs($n8) < 1000000000000000;
+								$band = $pi AND ($o8 == 0 OR abs($n8 - $o8) <= abs($o8) / 10 + 1);
 								// R9-L2: a funding-rate market's fill moves the mark
 								// only by the engine's step rule: the funding rate
 								// trunc((mark - 1e12) / 1e4) bps moves by at most
 								// max(|old rate| / 10, 1); a first mark (0) is
 								// anchored on the external index (not witnessed).
-								$rq = $pi ? ($o8 - 1000000000000) / 10000 : 0;
-								$rp = $pi ? ($n8 - 1000000000000) / 10000 : 0;
-								$ro = ($rq < 0) ? ceil($rq) : floor($rq);
-								$rn = ($rp < 0) ? ceil($rp) : floor($rp);
+								// R10-M1: trunc((m - 1e12) / 1e4) = trunc_toward_0 of
+								// m / 1e4 shifted by 1e8, computed on m / 1e4 (exact:
+								// |m| < 1e15 keeps 15 significant digits) — m - 1e12
+								// itself has 16 digits for m <= -9.99e14 and rounded.
+								$ro = $pi ? (($o8 < 1000000000000) ? ceil($o8 / 10000) : floor($o8 / 10000)) - 100000000 : 0;
+								$rn = $pi ? (($n8 < 1000000000000) ? ceil($n8 / 10000) : floor($n8 / 10000)) - 100000000 : 0;
 								// p: / L: of this market: the unit's fill (one
 								// per unit) is REQUIRED evidence — or the proof
 								// that unit k has none (its fills-tree
@@ -354,7 +362,7 @@
 								}
 								$okp = $plm AND $hasF AND $F[7] == $M0[1] AND $F[8] == $M1[8]
 									AND (($M0[9] != 0) ? ($pi AND ($o8 == 0 OR abs($rn - $ro) <= max(floor(abs($ro) / 10), 1))) : $band);
-								$mk = json_parse($M0[1]);
+								$mk = $M0[1];
 								$hx = '0123456789abcdef';
 								$ok6 = ($tag == '06' AND !$nobond AND $M0[9] == 0 AND $M0[3] != 10000 AND $band AND is_integer($mk))
 									? substring($pre, $tq + 66, 8) == (substring($hx, floor(($mk % 256) / 16), 1) || substring($hx, ($mk % 256) % 16, 1) || substring($hx, floor((floor($mk / 256) % 256) / 16), 1) || substring($hx, (floor($mk / 256) % 256) % 16, 1) || substring($hx, floor((floor($mk / 65536) % 256) / 16), 1) || substring($hx, (floor($mk / 65536) % 256) % 16, 1) || substring($hx, floor(floor($mk / 16777216) / 16), 1) || substring($hx, floor($mk / 16777216) % 16, 1))

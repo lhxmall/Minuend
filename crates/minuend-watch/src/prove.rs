@@ -46,6 +46,9 @@ impl BuiltProof {
         } else if self.pred == "mframe" {
             // Round 8: minuend_dispute_mframe.aa.
             "mframe"
+        } else if self.pred == "wf" {
+            // Round 10: minuend_dispute_wf.aa (malformed leaf / fill field).
+            "wf"
         } else if self.pred == "ghost"
             || self.pred == "skip"
             || self.pred == "mbind"
@@ -134,6 +137,12 @@ pub fn build_proof_with_prev(
     // Round 7b P-tsize: a committed tree whose size breaks the exact proof
     // depth every dispute AA now requires (provable before anything else).
     if let Some(p) = tsize_proof(batch) {
+        return Some(p);
+    }
+    // Round 10 P-wf: a posted witness leaf or fills-tree element whose
+    // layout is not exactly what the engine writes is fraud by itself (the
+    // other predicates bounce on such a field).
+    if let Some(p) = wf_proof(batch) {
         return Some(p);
     }
     let n = batch.units.len();
@@ -1037,6 +1046,115 @@ fn tsize_proof(batch: &Batch) -> Option<BuiltProof> {
             bind_aa: false,
             data: serde_json::json!({"tree": name, "el": tree[i], "el_proof": proof_json(tree, i)}),
         });
+    }
+    None
+}
+
+/// Round 10 mirror of `minuend_dispute_wf.aa`: true when `leaf` is NOT
+/// exactly a layout the engine writes (`fills` = an element of the fills
+/// tree, else a witness leaf). Field classes: `h` = 64 chars, `x` =
+/// non-empty, `u` = canonical integer >= 0, `s` = canonical integer;
+/// canonical = no '+', '.', exponent, leading zero or "-0", <= 39 digits
+/// (the engine's i128 / u128 never exceed that).
+pub fn wf_malformed(leaf: &str, fills: bool) -> bool {
+    let parts: Vec<&str> = leaf.split(':').collect();
+    let tag = parts[0];
+    let spec = if fills {
+        match tag {
+            "f" => "huhhhhusuuuus",
+            "n" => "u",
+            _ => "",
+        }
+    } else {
+        match tag {
+            "acct" => "hsus",
+            "pos" => "hussus",
+            "ord" => "huusuuhus",
+            "obond" => "hu",
+            "band" => "uss",
+            "meta" => "usuuuuusuu",
+            "adr" => "xh",
+            "adrx" => "hx",
+            "dep" => "x",
+            "~" if leaf == minuend_state::WIT_MAX_SENTINEL => "x",
+            _ => "",
+        }
+    };
+    if spec.is_empty() || parts.len() != spec.len() + 1 {
+        return true;
+    }
+    !spec
+        .chars()
+        .zip(parts[1..].iter())
+        .all(|(c, f)| wf_field_ok(f, c))
+}
+
+fn wf_field_ok(f: &str, c: char) -> bool {
+    match c {
+        'h' => f.encode_utf16().count() == 64,
+        'x' => !f.is_empty(),
+        _ => {
+            let neg = c == 's' && f.starts_with('-');
+            let d = if neg { &f[1..] } else { f };
+            !d.is_empty()
+                && d.len() <= 39
+                && d.bytes().all(|b| b.is_ascii_digit())
+                && (d == "0" || !d.starts_with('0'))
+                && !(neg && d == "0")
+        }
+    }
+}
+
+/// Round 10 P-wf: the first malformed posted witness leaf (a unit's post
+/// tree whose root is the committed trace entry) or fills-tree element.
+fn wf_proof(batch: &Batch) -> Option<BuiltProof> {
+    let c = &batch.checkpoint;
+    for (k, leaves) in batch.leaf_trace.iter().enumerate() {
+        let Some(post_wit) = batch.trace.get(k) else {
+            break;
+        };
+        if leaves.is_empty() || obyte_merkle::root(leaves) != *post_wit {
+            continue;
+        }
+        let end = index_of(leaves, minuend_state::WIT_MAX_SENTINEL);
+        for (i, l) in leaves.iter().enumerate() {
+            // A ':'-less element needs the sentinel's proof (same depth).
+            if !wf_malformed(l, false) || (!l.contains(':') && end.is_none()) {
+                continue;
+            }
+            let mut data = serde_json::json!({
+                "k": k,
+                "trace_root": c.trace_root,
+                "post_wit": post_wit,
+                "post_proof": proof_json(&batch.trace, k),
+                "leaf": l,
+                "leaf_proof": proof_json(leaves, i),
+            });
+            if let Some(e) = end {
+                data["end_proof"] = proof_json(leaves, e);
+            }
+            return Some(BuiltProof {
+                pred: "wf".into(),
+                fill_aa: false,
+                bind_aa: false,
+                data,
+            });
+        }
+    }
+    let tree = minuend_settle::fills_root_elements(&batch.fills);
+    if obyte_merkle::root(&tree) == c.fills_root {
+        if let Some(i) = tree.iter().position(|l| wf_malformed(l, true)) {
+            return Some(BuiltProof {
+                pred: "wf".into(),
+                fill_aa: false,
+                bind_aa: false,
+                data: serde_json::json!({
+                    "fills_root": c.fills_root,
+                    "leaf": tree[i],
+                    "leaf_proof": proof_json(&tree, i),
+                }),
+            });
+        }
     }
     None
 }
@@ -5270,6 +5388,118 @@ mod tests {
         replay
     }
 
+    /// Round 10 P-wf mirror: every leaf / fill the engine writes is
+    /// well-formed (extreme integer values included); the R10 PoC fields
+    /// ('1e400', 'x', '01', '1e3', '-0', ...) are malformed.
+    #[test]
+    fn r10_wf_engine_leaves_are_well_formed_and_garbage_is_not() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (b1, _, _) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let (b2, _, _) = honest_deposit_batch();
+        let mut all: Vec<String> = minuend_state::wit_leaves(&minuend_state::ChainState::new());
+        for b in [&b1, &b2] {
+            for t in &b.leaf_trace {
+                all.extend(t.iter().cloned());
+            }
+            for f in minuend_settle::fills_root_elements(&b.fills) {
+                assert!(!wf_malformed(&f, true), "{f}");
+                assert!(wf_malformed(&f, false), "fill tag in the witness tree: {f}");
+            }
+        }
+        assert!(
+            all.iter().any(|l| l.starts_with("ord:")) && all.iter().any(|l| l.starts_with("pos:"))
+        );
+        let h = "ab".repeat(32);
+        all.push(format!(
+            "acct:{h}:{}:{}:{}",
+            i128::MIN,
+            u128::MAX,
+            i128::MAX
+        ));
+        all.push(format!(
+            "pos:{h}:{}:{}:{}:1:{}",
+            u32::MAX,
+            i64::MIN,
+            i64::MAX,
+            i128::MIN
+        ));
+        all.push(format!(
+            "ord:{h}:1:1:{}:{}:{}:{h}:1:{}",
+            i64::MIN,
+            u64::MAX,
+            u64::MAX,
+            i128::MIN
+        ));
+        all.push(format!(
+            "meta:1:1:10000:500:5:100:1:{}:{}:500",
+            -(minuend_types::MARK_CAP - 1),
+            u64::MAX
+        ));
+        all.push(format!("obond:{h}:{}", u64::MAX));
+        for l in &all {
+            assert!(!wf_malformed(l, false), "honest leaf judged malformed: {l}");
+            assert!(wf_malformed(l, true), "witness tag in the fills tree: {l}");
+        }
+        for bad in [
+            format!("acct:{h}:x:0:0"),
+            format!("acct:{h}:1e400:0:0"),
+            format!("acct:{h}:01:0:0"),
+            format!("acct:{h}:1e3:0:0"),
+            format!("acct:{h}:1.0:0:0"),
+            format!("acct:{h}:+1:0:0"),
+            format!("acct:{h}:-0:0:0"),
+            format!("acct:{h}:0:-1:0"),
+            format!("acct:{h}:0:0"),
+            format!("acct:{h}:0:0:0:0"),
+            format!("acct:{h}:1{}:0:0", "0".repeat(39)),
+            "acct:abc:0:0:0".to_string(),
+            "meta:1:1:1e400:500:10:50:0:9000000000000000000:0:0".to_string(),
+            format!("obond:{h}:1e400"),
+            format!("obond:{h}:07"),
+            "~:foo".to_string(),
+            "zzz:1".to_string(),
+            "acct;zzz".to_string(),
+        ] {
+            assert!(wf_malformed(&bad, false), "{bad}");
+        }
+        assert!(wf_malformed("n:x", true));
+        assert!(wf_malformed(
+            &format!("f:{h}:0:{h}:{h}:{h}:{h}:1:9e12:1:1:0:0:0"),
+            true
+        ));
+    }
+
+    /// Round 10 P-wf proofs: a counterparty's collateral written as 'x'
+    /// (R10-H2) and a fill price written as '9e12' are proven by P-wf.
+    #[test]
+    fn r10_wf_proof_for_malformed_post_leaf_and_fill() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (mut batch, a, b) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let bob = hex::encode(b.0);
+        for l in batch.leaf_trace[1].iter_mut() {
+            if l.starts_with(&format!("acct:{bob}:")) {
+                let p: Vec<&str> = l.split(':').collect();
+                *l = format!("acct:{}:x:{}:{}", p[1], p[3], p[4]);
+            }
+        }
+        retrace(&mut batch, 1);
+        batch.checkpoint.wit_root = batch.trace[1].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(p.pred, "wf");
+        assert_eq!(p.target(), "wf");
+        assert_eq!(p.data["k"], 1);
+        assert_eq!(p.data["leaf"], format!("acct:{bob}:x:0:0"));
+        assert!(p.data.get("end_proof").is_some());
+        let (mut batch2, a2, b2) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        set_fill_field(&mut batch2, 0, 8, "9e12");
+        let mut replay2 = funded_replay(&[a2, b2]);
+        let p2 = build_proof(&batch2, &mut replay2, &[], 0).expect("proof");
+        assert_eq!(p2.pred, "wf");
+        assert!(p2.data["leaf"].as_str().unwrap().contains(":9e12:"));
+        assert_eq!(p2.data["fills_root"], batch2.checkpoint.fills_root);
+    }
+
     #[test]
     fn place_op_commits_order_type() {
         // #47 A3: p: ops carry tif AND typ (10 parts) so the AA can tell
@@ -5700,13 +5930,20 @@ mod tests {
     fn r5a3_mbind_numeric_qty_and_price() {
         let q = minuend_types::QTY_SCALE / 1000;
         let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
-        for v in ["1e30", "1e21", "-50000000", "0"] {
+        // Round 10: a non-canonical / negative qty is malformed (P-wf, which
+        // runs first); a canonical zero qty is still a P-mbind lie.
+        for (v, pred) in [
+            ("1e30", "wf"),
+            ("1e21", "wf"),
+            ("-50000000", "wf"),
+            ("0", "mbind"),
+        ] {
             let mut batch = honest.clone();
             set_fill_field(&mut batch, 0, 9, v);
             let mut replay = funded_replay(&[a, b]);
             let proof = build_proof(&batch, &mut replay, &[], 0)
                 .unwrap_or_else(|| panic!("qty {v}: no proof"));
-            assert_eq!(proof.pred, "mbind", "qty {v}");
+            assert_eq!(proof.pred, pred, "qty {v}");
         }
         let px: i64 = honest.fills[0].split(':').nth(8).unwrap().parse().unwrap();
         assert_eq!(px, 10_000_000_000_000, "test assumes px = 1e13");

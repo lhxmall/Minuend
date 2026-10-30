@@ -551,6 +551,11 @@ impl Engine {
                 {
                     return Err(RejectReason::NotFound);
                 }
+                // R10-L1: a report at / above MARK_CAP is rejected (it can
+                // never become the mark; R9-H2) rather than recorded.
+                if price.unsigned_abs() >= minuend_types::MARK_CAP.unsigned_abs() {
+                    return Err(RejectReason::Risk);
+                }
                 // Doc 06 §2.7: pass the pre-increment global seq so TWAP
                 // samples carry intra-height ordering without wall clocks.
                 let caller_seq = self.state.seq;
@@ -679,6 +684,15 @@ impl Engine {
         // price*qty product must fit i128 before signed notional math (blocks
         // u64::MAX-style inputs that would wrap notional_usd / bps).
         if qty > i64::MAX as u64 {
+            return Err(RejectReason::Risk);
+        }
+        // R10-L1: a limit price at / above MARK_CAP could never become the
+        // mark (R9-H2: the dispute AAs compare marks exactly only below
+        // 1e15), so such an order is REJECTED instead of trading while the
+        // mark silently freezes. Market orders (price 0) only fill against
+        // admitted limits; ADL prints at the (capped) mark.
+        if typ == OrderType::Limit && price.unsigned_abs() >= minuend_types::MARK_CAP.unsigned_abs()
+        {
             return Err(RejectReason::Risk);
         }
         let mark = *self.state.marks.get(&market).unwrap_or(&0);
@@ -3897,6 +3911,66 @@ mod tests {
         // Idempotent: promoting again is a no-op.
         assert_eq!(eng.promote_finalized(&[id1]), 0);
     }
+    /// R10-L1: a limit order or a ReportPrice at / above MARK_CAP is
+    /// rejected (it could never become the mark); one below it is admitted.
+    #[test]
+    fn r10_mark_cap_rejects_limit_and_report() {
+        let cap = minuend_types::MARK_CAP;
+        let mut eng = Engine::new();
+        allow_all(&mut eng);
+        let oa = acct_of(&sk(5));
+        eng.state
+            .oracle_bonds
+            .insert(oa, minuend_types::ORACLE_BOND_PERP);
+        let g = genesis_id();
+        let rep = |px: Price| {
+            sign_unit(
+                vec![g],
+                Op::ReportPrice {
+                    oracle: oa,
+                    market: BTC_USD,
+                    price: px,
+                },
+                &sk(5),
+            )
+        };
+        let rejected = |evs: &[ExecEvent]| {
+            evs.iter().any(|e| {
+                matches!(
+                    e,
+                    ExecEvent::Rejected {
+                        reason: RejectReason::Risk,
+                        ..
+                    }
+                )
+            })
+        };
+        for px in [cap, -cap, 2 * cap] {
+            let evs = eng.ingest(rep(px)).unwrap();
+            assert!(rejected(&evs), "report {px} must be rejected");
+        }
+        assert!(eng.state.oracle_reports.is_empty());
+        let evs = eng.ingest(rep(cap - 1)).unwrap();
+        assert!(!rejected(&evs));
+        assert_eq!(eng.state.oracle_reports.len(), 1);
+        // A rejected Place never advances the client_seq watermark, so each
+        // attempt is the account's first order (client_seq 1).
+        for px in [cap, -cap, cap + 1] {
+            let u = place(
+                vec![g],
+                &sk(1),
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                1,
+                1,
+            );
+            let evs = eng.ingest(u).unwrap();
+            assert!(rejected(&evs), "limit {px} must be rejected");
+        }
+    }
+
     #[test]
     fn unauthorized_oracle_rejected() {
         let mut eng = Engine::new();

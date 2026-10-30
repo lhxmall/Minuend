@@ -7,7 +7,7 @@
 	// path: {challenge:1} is not a case here and never freezes anything.
 // Constants mirror Rust (crates/minuend-types/src/lib.rs):
 //   'minuend-v2'      -> CHAIN_ID
-//   4               -> ASSERTION_VERSION (#47 B8: 2; round 6/6b: 3 — Reveal{Place|Liquidate} commits the inner p:/L:, QTY_CAP; round 7: 4 — text unit ids (P-opbind), one fill per unit); round 7b: 5; round 8: 6; round 9: 7 — genesis witness root, MARK_CAP
+//   4               -> ASSERTION_VERSION (#47 B8: 2; round 6/6b: 3 — Reveal{Place|Liquidate} commits the inner p:/L:, QTY_CAP; round 7: 4 — text unit ids (P-opbind), one fill per unit); round 7b: 5; round 8: 6; round 9: 7 — genesis witness root, MARK_CAP; round 10: 8 — P-wf AA, MARK_CAP rejects, exact funding step
 //   3600            -> CHALLENGE_SECS (finalize clean window from submit)
 //   604800          -> ESCAPE_STALL_SECS (escape hatch)
 //   1000000000000   -> SUBMIT_BOND_NET (standing pool floor, not per-height lock)
@@ -31,6 +31,7 @@
 	//   dispute_claw_aa (round 6: P-claw)
 	//   dispute_xframe_aa (round 7b: P-xframe; round 8 also P-tsize)
 	//   dispute_mframe_aa (round 8: P-mframe / P-noband)
+	//   dispute_wf_aa (round 10: P-wf, malformed leaf / fill field)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
@@ -44,87 +45,35 @@
 	messages: {
 		cases: [
 			{
-				// #13 anti-hijack: only the three addresses hardcoded into this
+				// #13 anti-hijack: only the eight addresses hardcoded into this
 				// definition may bind — first-come is irrelevant, nobody can
 				// squat the verdict channel. The dispute AAs carry this rollup
 				// address in their bind trigger data instead of their own
 				// definition (mutual hardcoding would be a chash cycle).
-				if: "{trigger.data.set_dispute}",
+				// Round 10: all eight binds share ONE case (the AA-wide
+				// complexity budget of 100: one var read + one assignment
+				// instead of eight of each). Dispute AAs: main (#13), fill,
+				// bind (#47 A2), book (round 2: ghost / skip), claw (round 6),
+				// xframe (round 7b: P-xframe / P-tsize), mframe (round 8:
+				// P-mframe), wf (round 10: P-wf, malformed leaf / fill field).
+				if: "{trigger.data.set_dispute OR trigger.data.set_dispute_fill OR trigger.data.set_dispute_bind OR trigger.data.set_dispute_book
+					OR trigger.data.set_dispute_claw OR trigger.data.set_dispute_xframe OR trigger.data.set_dispute_mframe OR trigger.data.set_dispute_wf}",
 				init: "{
-					if (trigger.address != 'DISPUTE_AA_HERE' OR var['dispute_aa'])
+					$D = trigger.data;
+					$xb = $D.set_dispute ? 'a' : ($D.set_dispute_fill ? 'f' : ($D.set_dispute_bind ? 'b' : ($D.set_dispute_book ? 'k'
+						: ($D.set_dispute_claw ? 'c' : ($D.set_dispute_xframe ? 'x' : ($D.set_dispute_mframe ? 'm' : 'w'))))));
+					$dkey = ($xb == 'a') ? 'dispute_aa' : (($xb == 'f') ? 'dispute_fill_aa' : (($xb == 'b') ? 'dispute_bind_aa' : (($xb == 'k') ? 'dispute_book_aa'
+						: (($xb == 'c') ? 'dispute_claw_aa' : (($xb == 'x') ? 'dispute_xframe_aa' : (($xb == 'm') ? 'dispute_mframe_aa' : 'dispute_wf_aa'))))));
+					$pin = ($xb == 'a') ? 'DISPUTE_AA_HERE' : (($xb == 'f') ? 'DISPUTE_FILL_AA_HERE' : (($xb == 'b') ? 'DISPUTE_BIND_AA_HERE' : (($xb == 'k') ? 'DISPUTE_BOOK_AA_HERE'
+						: (($xb == 'c') ? 'DISPUTE_CLAW_AA_HERE' : (($xb == 'x') ? 'DISPUTE_XFRAME_AA_HERE' : (($xb == 'm') ? 'DISPUTE_MFRAME_AA_HERE' : 'DISPUTE_WF_AA_HERE'))))));
+					if (trigger.address != $pin OR var[$dkey])
 						bounce('not authorized');
 				}",
 				messages: [
 					{
 						app: "state",
 						state: "{
-							var['dispute_aa'] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
-				if: "{trigger.data.set_dispute_fill}",
-				init: "{
-					if (trigger.address != 'DISPUTE_FILL_AA_HERE' OR var['dispute_fill_aa'])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var['dispute_fill_aa'] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
-				// #47 A2: the binding dispute AA (W / address-binding pins of
-				// the witness leaves the vault now pays against).
-				if: "{trigger.data.set_dispute_bind}",
-				init: "{
-					if (trigger.address != 'DISPUTE_BIND_AA_HERE' OR var['dispute_bind_aa'])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var['dispute_bind_aa'] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
-				// Round 2: ghost/skip moved to a fourth dispute AA (ops budget).
-				if: "{trigger.data.set_dispute_book}",
-				init: "{
-					if (trigger.address != 'DISPUTE_BOOK_AA_HERE' OR var['dispute_book_aa'])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var['dispute_book_aa'] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
-				// Round 6: P-claw (both legs of one fill: the claw paid by
-				// one party must be the claw the other received) lives in a
-				// fifth dispute AA (ops budget).
-				if: "{trigger.data.set_dispute_claw}",
-				init: "{
-					if (trigger.address != 'DISPUTE_CLAW_AA_HERE' OR var['dispute_claw_aa'])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var['dispute_claw_aa'] = trigger.address;
+							var[$dkey] = trigger.address;
 						}"
 					}
 				]
@@ -170,28 +119,6 @@
 				]
 			},
 			{
-				// Round 7b: P-xframe (bystander frame of `x:` units, + P-tsize
-				// since round 8) and round 8: P-mframe / P-noband (band: /
-				// obond: / meta: frame) live in a sixth and a seventh dispute
-				// AA (ops budget). One case for both binds (the AA-wide
-				// complexity budget of 100).
-				if: "{trigger.data.set_dispute_xframe OR trigger.data.set_dispute_mframe}",
-				init: "{
-					$xb = trigger.data.set_dispute_xframe ? true : false;
-					$dkey = $xb ? 'dispute_xframe_aa' : 'dispute_mframe_aa';
-					if (trigger.address != ($xb ? 'DISPUTE_XFRAME_AA_HERE' : 'DISPUTE_MFRAME_AA_HERE') OR var[$dkey])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var[$dkey] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
 				if: "{trigger.data.submit}",
 				init: "{
 					$h = trigger.data.height;
@@ -211,7 +138,7 @@
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
 						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
-						OR trigger.data.assertion_version != 7
+						OR trigger.data.assertion_version != 8
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
 						// #47 A2: the vault no longer pays from the forest —
@@ -394,8 +321,9 @@
 					$dc = (var['dispute_claw_aa'] otherwise 0);
 					$dx = (var['dispute_xframe_aa'] otherwise 0);
 					$dm = (var['dispute_mframe_aa'] otherwise 0);
+					$dw = (var['dispute_wf_aa'] otherwise 0);
 					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk
-						AND trigger.address != $dc AND trigger.address != $dx AND trigger.address != $dm)
+						AND trigger.address != $dc AND trigger.address != $dx AND trigger.address != $dm AND trigger.address != $dw)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');

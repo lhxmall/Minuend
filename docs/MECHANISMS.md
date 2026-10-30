@@ -1518,6 +1518,73 @@ trace 里任何一个 post 树缺 band 都是欺诈，所以这里不再要求 p
 dispute_fill 36 / 1995、dispute_bind 67 / 1982、dispute_book 71 / 1836、dispute_claw 43 / 1984、
 dispute_xframe 62 / 1928、dispute_mframe 59 / 1947（complexity / ops，上限 100 / 2000）。
 
+### 10.18 第 10 轮（#47 R10）：畸形字段即欺诈（P-wf）、资金费率步长精确、MARK_CAP 拒绝
+
+第 10 轮审查（`findings/round-10-review.md`）的 1 Critical / 2 High / 1 Medium / 2 Low / 2 Info。
+`ASSERTION_VERSION = 8`（新增 dispute AA、rollup 定义变化、`MARK_CAP` 由"不写入"改为"拒绝"；
+见证叶 / 成交描述 / 快照格式都不变）。
+
+**共同根因（R10-C1 / H1 / H2）**：dispute AA 读运营方写的叶字段（`split(leaf, ':')[i]`）后做
+算术、有序比较或 `json_parse`。字段不是规范整数（`x`、`1e400`、`01`、`1.0`、`+1`、`-0`）时
+Oscript 报致命错误，证明整体 bounce；于是任何谎言只要顺带写一个这样的字段就再也证明不了
+（C1：meta 参数 + 任意 mark；H1：`obond:Y:1e400` 假 bond → k = 0 每个高度 +50000 PERP；
+H2：成交对手方的 collateral / 仓位写成垃圾，资金从此提不出）。
+
+1. **新增第八个 dispute AA `minuend_dispute_wf.aa`（P-wf）**：畸形字段本身就是欺诈。
+   - 见证模式：`{k, post_wit, post_proof（trace_root，index k，精确深度）, leaf, leaf_proof}`：
+     unit k 的 **post** 见证树里任何一片叶，只要不是引擎写出的格式，就判 fraud。
+   - 成交模式：`{fills_root, leaf, leaf_proof（精确深度 fill_count + 1）}`：成交树里的 `f:` /
+     `n:` 元素同理。
+   - 每种叶的字段类别：`h` = 64 字符、`x` = 非空、`u` = 非负规范整数、`s` = 规范整数；规范 =
+     `0` 或不带前导 0 的十进制数字串（可带一个 `-`），不含 `+`、`.`、`e`/`E`，最多 39 位
+     （引擎的 i128 / u128 不会超过，所以诚实叶永远不畸形，几个字段的乘积也不会溢出 Oscript 的
+     double 范围）。字段数必须完全一致；未知标签、见证树里的 `f:` / `n:`、成交树里的见证标签、
+     不是 `~:end` 的 `~` 叶都算畸形。原始字段用 `split(replace(leaf, ':', ':Z'), ':')` 读出
+     （加 `Z` 前缀后 ocore 不会把它自动转成数字），整数判断用普通 `split` 的值做 `is_integer`。
+   - 内部节点不能冒充叶：base64 节点串不含 `:`；不含 `:` 的元素只在附带 `end_proof`
+     （同一棵树里 `~:end` 的证明，兄弟数相同 = 同在叶层）时才判，所以没有冒号的垃圾叶也能证明。
+   - rollup：8 个 bind case 合成一个（一次读 + 一次写，而不是 8 次），新占位
+     `DISPUTE_WF_AA_HERE`、变量 `dispute_wf_aa`、verdict 白名单 +1；complexity 从 100 降到 91。
+   - 部署脚本（mainnet / testnet）、`deployment.json`、CI complexity 列表、`targetForPred('wf') = 'wf'`、
+     `post_challenge*.js --wf`、watcher `--dispute-wf` / `BuiltProof::target() == "wf"` 同步。
+   - watcher：`prove::wf_malformed`（逐字节镜像 AA 规则）+ `wf_proof`（在 P-tsize 之后、重放之前
+     扫描每个 unit 的已发布见证叶和成交树）。Rust 测试
+     `r10_wf_engine_leaves_are_well_formed_and_garbage_is_not`（genesis、存款批次、隔离仓成交批次的
+     全部叶 + i128 / u128 / i64 / u64 极值叶都不畸形；审查里的 PoC 字段都畸形）、
+     `r10_wf_proof_for_malformed_post_leaf_and_fill`。
+2. **各 AA 内的加固（不再依赖 P-wf 也不崩）**：
+   - m-frame：`$pc` 分支的 im / mm / fee / keeper / cap / fee0、mark、市场号、obond unlock
+     （`$Q[2]`、`pob`）全部改用 `split` 已转换的值 + `is_integer`，不再 `json_parse`；post 字段
+     不是整数 → `$legal = false`（fraud）。|mark| < 1e15 现在也约束资金费率步长分支。
+   - x-frame（`$nob`）/ dispute（P-deposit `$nob`）：pre 里 X 的 obond unlock 同样不再
+     `json_parse`；不规范的 unlock 视为"不是即将到期的 bond"（不给 +50000）。x-frame 的 pre PERP
+     解析前先排除 `e`/`E`。
+   - fill_math：post collateral 不是整数 → 哨兵值，`$col_ok` 失败（fraud）；post 仓位的 qty
+     用相等比较、entry / bucket 先 `is_integer` 再算差（不是整数 → `$pos_ok = false`）。
+   - claw：两条腿的 post collateral 同上（哨兵值 → 不 bounce `no fraud`）；第三方账户 `$xok`
+     先 `is_integer`。
+   - pre 字段（上一棵 post 树的叶）不规范时仍可能 bounce：它在写入的那个 unit 就已经是 P-wf 欺诈。
+3. **R10-M1（诚实批次可判）**：资金费率 `trunc((m − 1e12) / 1e4)` 改为在 `m / 1e4` 上取整再减
+   1e8（`m < 1e12` 用 ceil，否则 floor）。|m| < 1e15 时 `m / 1e4` 只有 15 位有效数字，计算精确；
+   原式 `m − 1e12` 在 m ≤ −9.99e14 时是 16 位整数、被四舍五入，诚实的一步被判 fraud。引擎不变
+   （i64 截断本来就精确）。e2e 88、harness `sc_fund10.js`（FX 现在 `no fraud`）。
+4. **R10-L1**：`MARK_CAP` 不再只是"不写入"：|price| ≥ 1e15 的限价单和 ReportPrice 直接以 `Risk`
+   拒绝（市价单只成交已准入的限价单，ADL 按被钳制的 mark 打印），所以不会出现"照常成交、mark
+   静默冻结"。原来三处"不写入"保留为防御。Rust 测试 `r10_mark_cap_rejects_limit_and_report`。
+5. **R10-I1**：fill_math 的保险账户排除改为比较**原始**成交文本里的 64 个 0（`split` 会把它转成
+   数字 0），删掉了 `length($F[1]/[3]/[4]) != 64`（对保险账户永远成立的死代码；成交布局由 P-wf 判）。
+
+e2e 85–88：C1（四种 meta 谎言 + `1e400` 字段：P-mframe 与 P-wf 都 frozen；诚实 ReportPrice 的
+每片 post 叶 P-wf 都 `no fraud`）、H1（插入 `obond:K:1e400`：P-mframe 与 P-wf frozen；下一高度
+k = 0 拿假叶当证据 +50000 PERP：P-xframe frozen）、H2（maker collateral `x` / `1e400`：P-claw 与
+P-wf frozen；成交价 `9e12`：P-wf 成交模式 frozen；诚实 claw 与其每片叶 / 成交 `no fraud`）、
+M1（−9.99e14 处恰好一步 `no fraud`，多 1 bps frozen）。
+
+真实 ocore 的数字（第 10 轮）：vault 14 / 373、rollup **91** / 1061、dispute 72 / 1819、
+dispute_fill 36 / 1991、dispute_bind 67 / 1982、dispute_book 71 / 1836、dispute_claw 43 / 1994、
+dispute_xframe 61 / 1929、dispute_mframe 48 / 1891、dispute_wf 18 / 1177（complexity / ops，
+上限 100 / 2000）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**

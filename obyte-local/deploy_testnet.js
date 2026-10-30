@@ -37,7 +37,7 @@ function resolveAa(agentFile, subs, outName) {
   fs.writeFileSync(out, src);
   return out;
 }
-function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr) {
+function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr, wfAddr) {
   return resolveAa("minuend_rollup.aa", {
     DISPUTE_AA_HERE: disputeAddr,
     DISPUTE_FILL_AA_HERE: fillAddr,
@@ -46,6 +46,7 @@ function resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xf
     DISPUTE_CLAW_AA_HERE: clawAddr,
     DISPUTE_XFRAME_AA_HERE: xfAddr,
     DISPUTE_MFRAME_AA_HERE: mfAddr,
+    DISPUTE_WF_AA_HERE: wfAddr,
   }, ".minuend_rollup.resolved.aa");
 }
 function resolveBookAa() {
@@ -62,6 +63,10 @@ function resolveXframeAa() {
 // Round 8: P-mframe on a seventh dispute AA (P-noband: claw AA since round 9).
 function resolveMframeAa() {
   return resolveAa("minuend_dispute_mframe.aa", {}, ".minuend_dispute_mframe.resolved.aa");
+}
+// Round 10: P-wf (malformed leaf / fill field) on an eighth dispute AA.
+function resolveWfAa() {
+  return resolveAa("minuend_dispute_wf.aa", {}, ".minuend_dispute_wf.resolved.aa");
 }
 // R4-A-4: P-adr derives the vault from the base too (deposit ledger).
 function resolveBindAa(vaultBaseAddr) {
@@ -123,7 +128,9 @@ async function main() {
   const xfAddr = chashOf(xfPath);
   const mfPath = resolveMframeAa();
   const mfAddr = chashOf(mfPath);
-  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr);
+  const wfPath = resolveWfAa();
+  const wfAddr = chashOf(wfPath);
+  const rollupPath = resolveRollupAa(disputeAddr, fillAddr, bindAddr, bookAddr, clawAddr, xfAddr, mfAddr, wfAddr);
 
   const network = await Network.create()
     .with.agent({ vaultBase: vaultBasePath })
@@ -142,6 +149,7 @@ async function main() {
     .with.agent({ claw: clawPath })
     .with.agent({ xframe: xfPath })
     .with.agent({ mframe: mfPath })
+    .with.agent({ wf: wfPath })
     .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ operator: 1e14 })
     .run();
@@ -152,6 +160,7 @@ async function main() {
   const clawAa = network2.agent.claw;
   const xfAa = network2.agent.xframe;
   const mfAa = network2.agent.mframe;
+  const wfAa = network2.agent.wf;
   const vault = network2.agent.vault;
   console.log("dispute AA address:", dispute);
   console.log("fill AA address   :", fill);
@@ -215,6 +224,14 @@ async function main() {
   if (mb.error || !mb.unit) throw new Error("mframe-dispute bind failed: " + mb.error);
   await network2.witnessUntilStable(mb.unit);
   console.log("mframe dispute bound; unit =", mb.unit);
+  const wb = await op2.triggerAaWithData({
+    toAddress: wfAa,
+    amount: 20000,
+    data: { bind_wf: 1, rollup },
+  });
+  if (wb.error || !wb.unit) throw new Error("wf-dispute bind failed: " + wb.error);
+  await network2.witnessUntilStable(wb.unit);
+  console.log("wf dispute bound; unit =", wb.unit);
 
   const v = await operator.readAAStateVars(rollup);
   const vars_ = v.vars || v;
@@ -232,6 +249,8 @@ async function main() {
     throw new Error("dispute_xframe_aa not bound: " + JSON.stringify(vars_.dispute_xframe_aa));
   if (String(vars_.dispute_mframe_aa) !== String(mfAa))
     throw new Error("dispute_mframe_aa not bound: " + JSON.stringify(vars_.dispute_mframe_aa));
+  if (String(vars_.dispute_wf_aa) !== String(wfAa))
+    throw new Error("dispute_wf_aa not bound: " + JSON.stringify(vars_.dispute_wf_aa));
   if (Number(vars_.last_submitted || 0) !== 0)
     throw new Error("boot last_submitted wrong");
   if (Number(vars_.last_finalized || 0) !== 0)
@@ -248,12 +267,13 @@ async function main() {
     dispute_claw_aa_address: clawAa,
     dispute_xframe_aa_address: xfAa,
     dispute_mframe_aa_address: mfAa,
+    dispute_wf_aa_address: wfAa,
     vault_aa_address: vault,
     vault_base_aa_address: vaultBaseAddr,
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
-    assertion_version: 7,
+    assertion_version: 8,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };

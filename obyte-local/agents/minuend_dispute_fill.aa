@@ -130,7 +130,6 @@
 					if (array_length($F) != 14) bounce('bad fill');
 					if ($F[11] != '0' AND $F[11] != '1') bounce('bad fill');
 					if ($F[12] != '0' AND $F[12] != '1' AND $F[12] != '2' AND $F[12] != '3') bounce('bad fill');
-					if (length($F[1]) != 64 OR length($F[3]) != 64 OR length($F[4]) != 64) bounce('bad fill');
 					// Taker escrow share of this fill (USD_SCALE, 0 for a
 					// cross taker); non-numeric input bounces on coercion.
 					$tpost = $F[13] + 0;
@@ -160,7 +159,9 @@
 					$acct_hex = ($who == 'taker') ? $F[3] : $F[4];
 					// The insurance fund's own leaf moves via fee credits and
 					// OTHER parties' shortfalls — unmodelable here.
-					if ($acct_hex == '0000000000000000000000000000000000000000000000000000000000000000')
+					// R10-I1: compared on the RAW fill text (idx is '0' here):
+					// split turns the 64-zero hex into the number 0.
+					if (substring($fill, ($who == 'taker') ? 69 : 134, 64) == '0000000000000000000000000000000000000000000000000000000000000000')
 						bounce('no fraud');
 					// #37-10: kind 2 (ADL transfer, not a trade) runs the
 					// same collateral/position math arm as 0/1/3 — with fee
@@ -279,7 +280,9 @@
 						bounce('bad post acct proof');
 					$A1 = split($post_acct, ':');
 					if (array_length($A1) != 5 OR $A1[1] != $acct_hex) bounce('bad post acct');
-					$post_col = $A1[2] + 0;
+					// R10-H2: a non-integer POST collateral is fraud (never
+					// a fatal '+'); the sentinel fails $col_ok below.
+					$post_col = is_integer($A1[2]) ? $A1[2] : 1000000000000000000000000000000;
 					// #37-17: Place/fill never touches PERP balances or the
 					// cumulative-withdrawn ledger (fill path writes neither;
 					// only GovDeposit/GovWithdraw move perp, only Withdraw
@@ -528,8 +531,8 @@
 							// to the op margin <= pre collateral or to the
 							// maker's proven margin_left) instead.
 							$pos_ok = (array_length($PS) == 7 AND $PS[1] == $acct_hex AND $PS[2] == $market
-								AND ($big OR ($PS[3] + 0 == $exp_qty AND abs($PS[4] + 0 - $exp_entry) <= 1))
-								AND (!$chk_b OR abs($PS[6] + 0 - $exp_bucket) <= 1 + floor(($bucket + $post_any) / 1000000000000)));
+								AND ($big OR ($PS[3] == $exp_qty AND is_integer($PS[4]) AND abs($PS[4] - $exp_entry) <= 1))
+								AND (!$chk_b OR (is_integer($PS[6]) AND abs($PS[6] - $exp_bucket) <= 1 + floor(($bucket + $post_any) / 1000000000000))));
 							$pos_bail = false;
 						}
 					}

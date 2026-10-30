@@ -233,8 +233,8 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
-`assertion_version` 当前为 **7**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5；第 8 轮升到 6；第 9 轮升到 7，见 ROLLUP-UPGRADE §7），
-rollup AA 只接受等于 5 的提交。
+`assertion_version` 当前为 **8**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5；第 8 轮升到 6；第 9 轮升到 7；第 10 轮升到 8，见 ROLLUP-UPGRADE §7），
+rollup AA 只接受等于 8 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
 
@@ -447,6 +447,10 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
   第 9 轮：|mark| ≥ `MARK_CAP`（1e15）的 mark 引擎从不写入、AA 判为带宽外；0d 不得翻转 spot
   分类；资金费率市场的成交 mark 按费率步长规则判；k = 0 时预言机在自己的 bond 刚退回后重新
   Stake 不再被误判。
+- **P-wf**（第 10 轮，dispute_wf）：unit k 的 post 见证树里任何一片叶、或成交树里任何一个元素，
+  只要字段布局不是引擎写出的样子（字段数、64 字符 hex、规范整数：无 `+` / `.` / 指数 / 前导 0 /
+  `-0`、≤ 39 位），就是欺诈。其他谓词因此不必再为畸形字段兜底（它们遇到畸形 post 字段时也改为判
+  fraud 或不崩溃）。|price| ≥ `MARK_CAP` 的限价单 / ReportPrice 被拒绝（执行规则）。
 - **genesis pre 根**（第 9 轮）：h = 1、k = 0 的 pre 根是 `GENESIS_WIT_ROOT`
   （`root(wit_leaves(ChainState::new()))`），不再是 `root(["empty"])`。
 - **灰尘清算（执行规则）**：第一个会被吃的 maker 剩余量 × 10 < 目标仓位时，清算跳过簿、
@@ -555,10 +559,16 @@ dispute（P-deposit pre-absent gov）、dispute_bind（下标边界）、rollup�
 witness 叶格式变化（`obond:`、PERP-only `acct:`）是共识变化。op 预算见 MECHANISMS §10.16；
 当时 rollup 只接受 `assertion_version == 6`。
 
+第 10 轮部署变化：新增 dispute_wf（rollup 新占位 `DISPUTE_WF_AA_HERE`、变量 `dispute_wf_aa`、
+verdict 白名单；rollup 的 8 个 bind case 合并成一个，complexity 91）；dispute_mframe / dispute_xframe /
+dispute / dispute_fill / dispute_claw（不再 `json_parse` 运营方字段、畸形 post 字段判 fraud、
+资金费率步长精确）、rollup（版本门 8）定义变化；`MARK_CAP` 拒绝限价单 / ReportPrice 是执行规则变化。
+真实 ocore 的 complexity / ops 见 MECHANISMS §10.18；rollup 只接受 `assertion_version == 8`。
+
 第 9 轮部署变化：全部 7 个 dispute AA 的 h = 1 pre 根改为 genesis 见证根；dispute_mframe
 （R9-H1 / H2 / L1 / L2，P-noband 移走）、dispute_claw（新增 P-noband 分支）、dispute_xframe /
 dispute_bind（删除"空 pre 树"分支）、rollup（版本门 7）定义变化；`MARK_CAP` 是执行规则变化。
-真实 ocore 的 complexity / ops 见 MECHANISMS §10.17；rollup 只接受 `assertion_version == 7`。
+真实 ocore 的 complexity / ops 见 MECHANISMS §10.17；当时 rollup 只接受 `assertion_version == 7`。
 
 第 7b 轮部署变化：新增 dispute_xframe（rollup 新占位 `DISPUTE_XFRAME_AA_HERE`、新 case
 `set_dispute_xframe`、verdict 白名单）；dispute（P-opbind 深度门）、dispute_book（P-fsane 哨兵 /

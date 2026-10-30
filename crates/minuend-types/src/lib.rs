@@ -73,7 +73,7 @@ pub const CHAIN_ID: &str = "minuend-v2";
 /// - 6 (#47 round 8, with the m-frame rollup redeploy): the witness gives
 ///   every PERP / W holder an `acct:` leaf (R8-C3) and every bonded oracle
 ///   an `obond:{acct}:{unlock}` leaf (R8-H2).
-pub const ASSERTION_VERSION: u32 = 7;
+pub const ASSERTION_VERSION: u32 = 8;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

@@ -1,13 +1,13 @@
 "use strict";
 
-// MINUEND eight-AA deployment — Obyte MAINNET (GBYTE collateral).
+// MINUEND ten-AA deployment — Obyte MAINNET (GBYTE collateral).
 //
 // Posts the vault BASE, minuend_dispute.aa, minuend_dispute_fill.aa,
 // minuend_dispute_bind.aa, minuend_dispute_book.aa, minuend_dispute_claw.aa
 // (round 6), minuend_dispute_xframe.aa (round 7b), minuend_dispute_mframe.aa
-// (round 8), minuend_rollup.aa and
+// (round 8), minuend_dispute_wf.aa (round 10), minuend_rollup.aa and
 // the vault INSTANCE {base_aa, params:{rollup}} via a light headless wallet
-// (default mainnet hub), binds all six dispute AAs, smoke-triggers the
+// (default mainnet hub), binds all eight dispute AAs, smoke-triggers the
 // vault, and writes
 // obyte-local/deployment.json.
 //
@@ -135,6 +135,10 @@ async function main() {
   const mfSrc = readAa("minuend_dispute_mframe.aa");
   const mfDef = ["autonomous agent", await parseAa(mfSrc, "minuend_dispute_mframe.aa")];
   const mfAa = await postDefinition(mfDef, "mframe");
+  // Round 10: P-wf (malformed leaf / fill field = fraud) in the wf AA.
+  const wfSrc = readAa("minuend_dispute_wf.aa");
+  const wfDef = ["autonomous agent", await parseAa(wfSrc, "minuend_dispute_wf.aa")];
+  const wfAa = await postDefinition(wfDef, "wf");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
@@ -146,6 +150,7 @@ async function main() {
     DISPUTE_CLAW_AA_HERE: clawAa.address,
     DISPUTE_XFRAME_AA_HERE: xfAa.address,
     DISPUTE_MFRAME_AA_HERE: mfAa.address,
+    DISPUTE_WF_AA_HERE: wfAa.address,
   });
   const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
@@ -155,7 +160,7 @@ async function main() {
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 
-  // 3. Bind all seven dispute AAs (20000 each, rollup address in trigger data);
+  // 3. Bind all eight dispute AAs (20000 each, rollup address in trigger data);
   // assert via AA state.
   await triggerAa(
     { to: dispute.address, amount: 20000, data: { bind: 1, rollup: rollup.address } },
@@ -185,6 +190,10 @@ async function main() {
     { to: mfAa.address, amount: 20000, data: { bind_mframe: 1, rollup: rollup.address } },
     "mframe-dispute bind"
   );
+  await triggerAa(
+    { to: wfAa.address, amount: 20000, data: { bind_wf: 1, rollup: rollup.address } },
+    "wf-dispute bind"
+  );
   await waitBeat("binds", "bind");
   const state = await readAaState(rollup.address);
   if (String(state.dispute_aa) !== String(dispute.address))
@@ -201,7 +210,9 @@ async function main() {
     throw new Error("dispute_xframe_aa not bound: " + JSON.stringify(state.dispute_xframe_aa));
   if (String(state.dispute_mframe_aa) !== String(mfAa.address))
     throw new Error("dispute_mframe_aa not bound: " + JSON.stringify(state.dispute_mframe_aa));
-  console.log("all seven dispute AAs bound");
+  if (String(state.dispute_wf_aa) !== String(wfAa.address))
+    throw new Error("dispute_wf_aa not bound: " + JSON.stringify(state.dispute_wf_aa));
+  console.log("all eight dispute AAs bound");
 
   // 4. Write deployment.json.
   const info = {
@@ -214,11 +225,12 @@ async function main() {
     dispute_claw_aa_address: clawAa.address,
     dispute_xframe_aa_address: xfAa.address,
     dispute_mframe_aa_address: mfAa.address,
+    dispute_wf_aa_address: wfAa.address,
     vault_aa_address: vault.address,
     vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
-    assertion_version: 7,
+    assertion_version: 8,
     pool_fund_gross: POOL_FUND_GROSS,
     challenge_secs: CHALLENGE_SECS,
     deployed_at: new Date().toISOString(),
