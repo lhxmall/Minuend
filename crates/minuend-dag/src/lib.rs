@@ -1038,9 +1038,12 @@ impl Dag {
         self.units.get(&id).or_else(|| self.retained.get(&id))
     }
 
-    /// R3-R-5: `ids` were exported in a batch. Retained bodies among them
-    /// are dropped now; in-window ones are dropped (not retained) when they
-    /// leave the window.
+    /// R3-R-5: `ids` were cut into a batch (the producer calls this from
+    /// `Batch::from_applied`, i.e. at batch cut, before export / posting;
+    /// a validator after a successful validation). Retained bodies among
+    /// them are dropped now; in-window ones are dropped (not retained) when
+    /// they leave the window. I-2: a body released here cannot be served
+    /// again for a re-export; keep the batch itself if that may be needed.
     pub fn release_batched(&mut self, ids: &[UnitId]) {
         for id in ids {
             if self.retained.remove(id).is_none() && self.window_seq.contains_key(id) {

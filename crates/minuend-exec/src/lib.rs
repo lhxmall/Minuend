@@ -1302,9 +1302,12 @@ impl Engine {
     /// IM that the account's currently resting orders will demand once they
     /// fill and open (or add to) positions. `snapshot` cannot see these —
     /// booked positions only materialize at fill time — so `place` reserves
-    /// them on top. Per market, only the larger side can ultimately be
-    /// open (fills net the book against the position), so reserve
-    /// `max(bid_im, ask_im)`, not the sum.
+    /// them on top. On a perp market only the larger side is reserved
+    /// (`max(bid_im, ask_im)`): positions there are liquidatable, so a
+    /// both-sides-fill sequence has a bounded loss. R4-E-3: on a
+    /// `spot_only` market the two sides are SUMMED — a bid fill can be
+    /// closed by an IOC and the resting ask then opens a new short, and
+    /// spot positions are never liquidated.
     ///
     /// #37-19: the OPENING quantity is what costs margin, so the notional is
     /// priced on the open-only qty difference, not the whole resting side.
@@ -1401,7 +1404,19 @@ impl Engine {
                 };
                 let bid_im = side_im(sides[0], short);
                 let ask_im = side_im(sides[1], long);
-                total = total.saturating_add(bid_im.max(ask_im));
+                // R4-E-3: on a spot_only market BOTH sides can fill in
+                // turn — a bid fill closed out by an IOC (pure reduce, no
+                // gate) leaves the resting ask to open a fresh short — so
+                // `max` would let the second side open on cash already
+                // spent by the first. Spot positions are never liquidated,
+                // so reserve the sum. Perp markets keep `max`: a position
+                // opened there is liquidatable, so the loss is bounded.
+                let side_total = if params.spot_only {
+                    bid_im.saturating_add(ask_im)
+                } else {
+                    bid_im.max(ask_im)
+                };
+                total = total.saturating_add(side_total);
             }
         }
         total
@@ -10663,6 +10678,150 @@ mod tests {
             .ingest(withdraw_unit(vec![tip], &alice, col - want, 2))
             .unwrap();
         assert!(applied(&evs), "{evs:?}");
+    }
+
+    /// R4-E-3: a spot account resting a bid AND an ask reserves both sides.
+    /// With `max(bid, ask)` the account could withdraw down to the larger
+    /// side, get its bid filled, close the long with an IOC at the band
+    /// bottom (pure reduce, no gate), and have the resting ask open a short
+    /// backed by almost nothing. Now the reserve is the sum: the extra
+    /// order and the over-withdrawal are refused, and after the whole
+    /// bid-fill / IOC-close / ask-fill sequence the short is still backed.
+    #[test]
+    fn r4e3_spot_two_sided_resting_reserve_is_summed() {
+        let alice = sk(1);
+        let bob = sk(2);
+        let carol = sk(3);
+        let dave = sk(4);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask_px = 110_000 * PRICE_SCALE as i64;
+        let p = {
+            let (e, _, m) = spot_engine(&[]);
+            e.state.markets[&m]
+        };
+        let b = minuend_account::spot_order_requirement(Side::Bid, px, QTY_SCALE, &p).unwrap();
+        let a = minuend_account::spot_order_requirement(Side::Ask, ask_px, QTY_SCALE, &p).unwrap();
+        let extra = 10 * USD_SCALE as i128;
+        assert!(extra < b && extra < a);
+        let rich = 1_000_000 * USD_SCALE as i128;
+        let (mut eng, mut tip, meme) = spot_engine(&[
+            (&alice, b + a + extra),
+            (&bob, rich),
+            (&carol, rich),
+            (&dave, rich),
+        ]);
+        let al = acct_of(&alice);
+        for (side, at, n) in [(Side::Bid, px, 1), (Side::Ask, ask_px, 2)] {
+            let u = place_on(
+                vec![tip],
+                &alice,
+                meme,
+                side,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                at,
+                QTY_SCALE,
+                n,
+            );
+            tip = unit_id(&u);
+            assert!(applied(&eng.ingest(u).unwrap()));
+        }
+        // Both sides are reserved.
+        assert_eq!(eng.resting_open_im(al), b + a);
+        // Placement gate: a second bid needs b + a + b (it fit under the old
+        // max(b, a) + b = a + b when a ≥ b).
+        let evs = eng
+            .ingest(place_on(
+                vec![tip],
+                &alice,
+                meme,
+                Side::Bid,
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                px,
+                QTY_SCALE,
+                3,
+            ))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Risk), "{evs:?}");
+        // Withdraw gate: leaving only max(b, a) is refused …
+        let col = eng.state.accounts[&al].collateral;
+        let evs = eng
+            .ingest(withdraw_unit(vec![tip], &alice, col - b.max(a), 1))
+            .unwrap();
+        assert!(rejected_with(&evs, RejectReason::Insufficient), "{evs:?}");
+        // … only the surplus over b + a may leave.
+        let u = withdraw_unit(vec![tip], &alice, col - (b + a), 2);
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        // 1. Carol hits alice's bid: alice is long 1 @ px.
+        let u = place_on(
+            vec![tip],
+            &carol,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert_eq!(
+            eng.state.accounts[&al].positions[&meme].qty,
+            QTY_SCALE as i64
+        );
+        // 2. Alice closes the long with an IOC at the band bottom.
+        let u = place_on(
+            vec![tip],
+            &bob,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            p.min_price,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&u);
+        assert!(applied(&eng.ingest(u).unwrap()));
+        let u = place_on(
+            vec![tip],
+            &alice,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            p.min_price,
+            QTY_SCALE,
+            4,
+        );
+        tip = unit_id(&u);
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        assert!(!eng.state.accounts[&al].positions.contains_key(&meme));
+        // 3. Dave lifts the resting ask: alice opens a short 1 @ ask_px.
+        let u = place_on(
+            vec![tip],
+            &dave,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Ioc,
+            ask_px,
+            QTY_SCALE,
+            1,
+        );
+        assert!(applied_with_fills(&eng.ingest(u).unwrap()));
+        let acct = &eng.state.accounts[&al];
+        let pos = &acct.positions[&meme];
+        assert_eq!(pos.qty, -(QTY_SCALE as i64));
+        let need = minuend_account::spot_requirement(pos.qty, pos.entry_price, &p).unwrap();
+        assert!(
+            acct.collateral >= need,
+            "short backed by {} < band worst case {need}",
+            acct.collateral
+        );
     }
 
     /// R3-E-4: the R2-E-6 fee check must see the claws of earlier fills in
