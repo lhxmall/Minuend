@@ -5309,8 +5309,8 @@ mod tests {
         r.ingest(batch.units[0].clone()).unwrap();
         let post = minuend_state::wit_leaves(&r.state);
         let u = hex::encode(lie.checkpoint.unit_ids[0].0);
-        let proof = claw_proof(&lie, 0, &u, &batch.ops[0], &pre, &post, &batch.fills)
-            .expect("shape proof");
+        let proof =
+            claw_proof(&lie, 0, &u, &batch.ops[0], &pre, &post, &batch.fills).expect("shape proof");
         assert_eq!(proof.pred, "claw");
         assert!(
             proof.data.get("right").is_none(),
@@ -5653,6 +5653,10 @@ mod tests {
         let mut lie = batch.clone();
         bump_col(&mut lie, 0, &hex::encode(b.0), 500_000 * USD_SCALE as i128);
         let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
-        assert!(matches!(proof.pred.as_str(), "claw" | "fill_math"), "{}", proof.pred);
+        assert!(
+            matches!(proof.pred.as_str(), "claw" | "fill_math"),
+            "{}",
+            proof.pred
+        );
     }
 }
