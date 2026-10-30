@@ -286,7 +286,9 @@
 					// past the collateral identity is fraud — record the pin
 					// and fold it into $fraud below (never bounce here: a
 					// drifted leaf IS the fraud this predicate hunts).
-					$pin_ok = ($A1[3] == $A0[3] AND $A1[4] == $A0[4]);
+					// R7b-N2: k == 0 may carry an oracle bond returned at
+					// the batch boundary (+ORACLE_BOND_PERP).
+					$pin_ok = ($A1[3] == $A0[3] OR ($k == 0 AND $A1[3] == $A0[3] + 50000)) AND $A1[4] == $A0[4];
 					// R5-A-2 (ops budget): the account-wide empty-range arm is
 					// gone — a market-range straddle over the POST tree (always
 					// available: every tree ends with `~:end`) proves the same

@@ -683,25 +683,17 @@ fn frame_proof(
         Some(pl_frame_scope(batch, k, op, pre_leaves)?)
     };
     let posted = batch.leaf_trace.get(k)?;
-    // R5-A-1: acct leaves of accounts other than the op's are frozen too
-    // (the op account is op[2..66] for all five shapes).
-    let op_acct = op.get(2..66);
+    // R7b-N2: the R5-A-1 / R6-C2 `acct:` arm moved to P-xframe
+    // (`xframe_proof`), which compares the account's pre/post pair.
     let framed = |l: &str| {
         let n = l.split(':').count();
-        let is_acct = n == 5 && l.starts_with("acct:") && l.as_bytes().get(69) == Some(&b':');
         let is_pos = l.starts_with("pos:") && n == 7;
         let is_ord = l.starts_with("ord:") && n == 10;
         match &pl {
-            None => is_pos || is_ord || (is_acct && l.get(5..69) != op_acct),
+            None => is_pos || is_ord,
             Some((allowed, _)) => {
-                let owner = if is_acct {
-                    l.get(5..69)
-                } else if is_pos {
-                    l.get(4..68)
-                } else {
-                    None
-                };
-                (is_acct || is_pos || is_ord)
+                let owner = if is_pos { l.get(4..68) } else { None };
+                (is_pos || is_ord)
                     && !allowed.iter().any(|a| {
                         owner == Some(a.as_str()) || (is_ord && l.contains(&format!(":{a}:")))
                     })
@@ -1109,21 +1101,53 @@ pub fn xframe_acct_bad(
     post: &str,
     has_pos: bool,
 ) -> Option<bool> {
+    frame_acct_bad(tag, oa, None, k, pre, post, has_pos)
+}
+
+/// R7b-N2: the AA's `$p1 == $p0 + 50000` (with `length($p0) <= 14`): the
+/// post PERP column is the pre column plus exactly ORACLE_BOND_PERP.
+pub fn bond_release(p0: &str, p1: &str) -> bool {
+    let bond = minuend_types::ORACLE_BOND_PERP as i128;
+    p0.len() <= 14
+        && matches!((p0.parse::<i128>(), p1.parse::<i128>()), (Ok(a), Ok(b)) if b == a + bond)
+}
+
+/// Mirror of the P-xframe acct arm for any op. `nonx` = `Some((op tag
+/// letter, exempt accounts))` for a c:/d:/D:/w:/W:/p:/L: unit (R7b-N2,
+/// moved from P-frame): exempt[0] is the op account (its W is P-wpin's,
+/// its PERP moves under D:/W: only); the exempt accounts' collateral is
+/// judged elsewhere. `None` = an `x:` unit (tag / oa from its text).
+pub fn frame_acct_bad(
+    tag: &str,
+    oa: &str,
+    nonx: Option<(&str, &[String])>,
+    k: usize,
+    pre: Option<&str>,
+    post: &str,
+    has_pos: bool,
+) -> Option<bool> {
     let x = post.get(5..69)?;
     let (c1, p1, w1) = acct_cols(post)?;
     let (c0, p0, w0) = match pre {
         Some(l) => acct_cols(l)?,
         None => ("0".into(), "0".into(), "0".into()),
     };
-    let fund = tag == "06" || tag == "11";
-    let cb = c0 != c1 && !(fund && has_pos);
-    let wb = w0 != w1;
-    let bond = minuend_types::ORACLE_BOND_PERP as i128;
-    let release = k == 0
-        && p0.len() <= 14
-        && p1.len() <= 14
-        && matches!((p0.parse::<i128>(), p1.parse::<i128>()), (Ok(a), Ok(b)) if b - a == bond);
-    let pb = p0 != p1 && x != oa && !release;
+    let fund = nonx.is_none() && (tag == "06" || tag == "11");
+    let (zx, w_free, p_free) = match nonx {
+        None => (false, false, x == oa),
+        Some((zt, ex)) => {
+            let own = ex.first().is_some_and(|a| a == x);
+            (
+                ex.iter().any(|a| a == x),
+                own,
+                own && (zt == "D" || zt == "W"),
+            )
+        }
+    };
+    let cb = c0 != c1 && !(fund && has_pos) && !zx;
+    let wb = w0 != w1 && !w_free;
+    let release = k == 0 && bond_release(&p0, &p1);
+    let pb = p0 != p1 && !p_free && !release;
     Some(cb || wb || pb)
 }
 
@@ -1206,17 +1230,41 @@ fn xframe_proof(
     pre_leaves: &[String],
     post_leaves: &[String],
 ) -> Option<BuiltProof> {
-    if !op.starts_with("x:") {
-        return None;
-    }
+    let isx = op.starts_with("x:");
     let posted = batch.leaf_trace.get(k)?;
-    let (ufields, tag, oa) = xframe_unit_fields(batch, k, op, unit_hexes)?;
     let mut base = xframe_base(batch, k, op, pre_leaves)?;
-    merge(&mut base, ufields)?;
+    // R7b-N2: c:/d:/D:/w:/W:/p:/L: units get the acct arm only (P-frame's
+    // acct: part moved here), with the op's exempt accounts.
+    let o: Vec<&str> = op.split(':').collect();
+    let zt = o.first().copied().unwrap_or("");
+    let (tag, oa, exempt) = if isx {
+        let (ufields, tag, oa) = xframe_unit_fields(batch, k, op, unit_hexes)?;
+        merge(&mut base, ufields)?;
+        (tag, oa, Vec::new())
+    } else {
+        let shape = match zt {
+            "c" => o.len() == 3,
+            "d" | "D" => o.len() == 5,
+            "w" | "W" => o.len() == 4,
+            _ => false,
+        };
+        if shape {
+            (String::new(), String::new(), vec![op.get(2..66)?.to_string()])
+        } else {
+            let (allowed, ev) = pl_frame_scope(batch, k, op, pre_leaves)?;
+            merge(&mut base, ev)?;
+            (String::new(), String::new(), allowed)
+        }
+    };
+    let nonx = if isx {
+        None
+    } else {
+        Some((zt, exempt.as_slice()))
+    };
     let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
     let framed = |l: &str| {
         let n = l.split(':').count();
-        (l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10)
+        isx && ((l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10))
     };
     for l in pre_leaves.iter() {
         if framed(l) && !posted.contains(l) && post_leaves.contains(l) {
@@ -1254,7 +1302,7 @@ fn xframe_proof(
         let a0 = pre_leaves.iter().find(|l| l.starts_with(&key));
         let ppre = format!("pos:{x}:");
         let has_pos = pre_leaves.iter().any(|l| l.starts_with(&ppre));
-        if xframe_acct_bad(&tag, &oa, k, a0.map(String::as_str), a1, has_pos) != Some(true) {
+        if frame_acct_bad(&tag, &oa, nonx, k, a0.map(String::as_str), a1, has_pos) != Some(true) {
             continue;
         }
         let mut d = base.clone();
@@ -1643,8 +1691,23 @@ fn deposit_proof(
         .clone();
     let liar_col: i128 = liar_leaf.split(':').nth(2)?.parse().ok()?;
     let liar_perp: i128 = liar_leaf.split(':').nth(3)?.parse().ok()?;
+    // R7b-N2 (mirrors the AA's `$bk`): at k == 0 an oracle bond returned at
+    // the batch boundary (+ORACLE_BOND_PERP) may sit on top of a gov move.
+    let bond = minuend_types::ORACLE_BOND_PERP as i128;
+    let dperp = liar_perp - pre_perp as i128;
+    let bk = if is_gov
+        && k == 0
+        && pre_hit.is_some()
+        && liar_perp.to_string().len() <= 14
+        && parts[2].len() <= 14
+        && (dperp == bond || dperp == bond + if is_deposit { amount } else { -amount })
+    {
+        bond
+    } else {
+        0
+    };
     let (liar_val, col_pinned) = if is_gov {
-        (liar_perp, Some(liar_col))
+        (liar_perp - bk, Some(liar_col))
     } else {
         (liar_col, None)
     };
@@ -1678,7 +1741,9 @@ fn deposit_proof(
     // R3-A-1 (mirrors the AA): an ACCEPTED withdrawal never leaves the
     // moving column negative, and a pre-absent account can only have its
     // withdrawal REJECTED (col 0).
-    let wd_ok = is_deposit || unchanged || (pre_hit.is_some() && liar_val >= 0);
+    let wd_ok = is_deposit
+        || unchanged
+        || (pre_hit.is_some() && (if is_gov { liar_perp } else { liar_val }) >= 0);
     // R2-A-3 (mirrors the AA's credit arm): a credited collateral deposit
     // (R3-A-7: or PERP `D:` deposit) is also judged on its anchor marker
     // `dep:{aa_unit}` — already in the pre tree (re-credit) or missing from
@@ -2063,7 +2128,7 @@ fn aa_fill_verdict(
     tree: &[String],
     leg: &Leg,
     op_lie: bool,
-    pre_perp_w: Option<(&str, &str)>,
+    pre_perp_w: Option<(&str, &str, bool)>,
 ) -> bool {
     // Missing post acct leaf bounces the AA prelude — no verdict at all.
     let post_acct = match tree
@@ -2077,11 +2142,15 @@ fn aa_fill_verdict(
         Some(c) => c,
         None => return false,
     };
-    // #37-17 pin: post.perp == pre.perp and post.W == pre.W.
+    // #37-17 pin: post.perp == pre.perp and post.W == pre.W. R7b-N2: at
+    // k == 0 (third tuple field) the PERP column may also carry an oracle
+    // bond returned at the batch boundary (+ORACLE_BOND_PERP).
     let pin_ok = match pre_perp_w {
-        Some((pp, pw)) => {
+        Some((pp, pw, k0)) => {
             let mut it = post_acct.split(':');
-            it.nth(3) == Some(pp) && it.next() == Some(pw)
+            let p1 = it.nth(3);
+            let w1 = it.next();
+            (p1 == Some(pp) || (k0 && bond_release(pp, p1.unwrap_or("")))) && w1 == Some(pw)
         }
         None => true,
     };
@@ -2960,7 +3029,7 @@ fn fill_proof(
                 &posted_post,
                 &leg,
                 op_lie,
-                Some((pre_parts[3], pre_parts[4])),
+                Some((pre_parts[3], pre_parts[4], k == 0)),
             ) {
                 continue;
             }
@@ -5302,8 +5371,14 @@ mod tests {
         batch.checkpoint.wit_root = batch.trace[2].clone();
         let mut replay = funded_replay(&[a, b]);
         let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct proof");
-        assert_eq!(p.pred, "frame");
-        assert!(p.data["leaf"]
+        // R7b-N2: the acct: arm is P-xframe's now (pre/post pair).
+        assert_eq!(p.pred, "xframe");
+        assert_eq!(p.target(), "xframe");
+        assert!(p.data["post_acct"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("acct:{other}:")));
+        assert!(p.data["pre_acct"]
             .as_str()
             .unwrap()
             .starts_with(&format!("acct:{other}:")));
@@ -5316,9 +5391,10 @@ mod tests {
         batch.checkpoint.wit_root = batch.trace[2].clone();
         let mut replay = funded_replay(&[a, b]);
         let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct ins proof");
-        assert_eq!(p.pred, "frame");
-        assert_eq!(p.data["ins"], serde_json::json!(true));
-        assert_eq!(p.data["leaf"].as_str(), Some(fake.as_str()));
+        assert_eq!(p.pred, "xframe");
+        assert_eq!(p.data["post_acct"].as_str(), Some(fake.as_str()));
+        assert!(p.data.get("pre_acct").is_none());
+        assert!(p.data.get("left").is_some(), "pre absence straddle");
         // (c) the frame closure itself never frames the op account.
         let pre = &honest.leaf_trace[1];
         let post = &honest.leaf_trace[2];
@@ -6110,9 +6186,20 @@ mod tests {
         let mut lie = batch.clone();
         bump_col(&mut lie, 0, &carol, 1_000_000_000_000);
         let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
-        assert_eq!(proof.pred, "frame");
-        assert!(proof.bind_aa);
-        for key in ["unit", "pre_meta", "fright", "fill", "units_proof", "leaf"] {
+        // R7b-N2: the acct: arm moved from P-frame to P-xframe.
+        assert_eq!(proof.pred, "xframe");
+        assert!(!proof.bind_aa);
+        assert_eq!(proof.target(), "xframe");
+        for key in [
+            "unit",
+            "pre_meta",
+            "fright",
+            "fill",
+            "units_proof",
+            "post_acct",
+            "pre_acct",
+            "fills_root",
+        ] {
             assert!(proof.data.get(key).is_some(), "missing {key}");
         }
         assert!(proof.data["fill"].as_str().unwrap().contains(":0:"));
@@ -6141,7 +6228,7 @@ mod tests {
         let mut lie = zb.clone();
         bump_col(&mut lie, 0, &carol, 5);
         let proof = build_proof(&lie, &mut zr.clone(), &[], 0).expect("frame proof");
-        assert_eq!(proof.pred, "frame");
+        assert_eq!(proof.pred, "xframe");
         // fill_count 0: the AA reads it from the rollup, no fills leaves.
         assert!(proof.data.get("fright").is_none());
         assert!(proof.data.get("fill").is_none());
@@ -6149,7 +6236,11 @@ mod tests {
         let mut own = zb.clone();
         bump_col(&mut own, 0, &hex::encode(acct_of(&alice).0), 5);
         let p = build_proof(&own, &mut zr.clone(), &[], 0);
-        assert!(p.as_ref().is_none_or(|p| p.pred != "frame"), "{p:?}");
+        assert!(
+            p.as_ref()
+                .is_none_or(|p| p.pred != "frame" && p.pred != "xframe"),
+            "{p:?}"
+        );
     }
 
     /// Book-path liquidation of alice (long 1 @ 100k, 15k) at mark 86k into
@@ -6224,8 +6315,9 @@ mod tests {
         lie.leaf_trace[0].push(format!("acct:{ghost}:1000000000000:0:0"));
         retrace(&mut lie, 0);
         let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
-        assert_eq!(proof.pred, "frame");
-        assert_eq!(proof.data["ins"], true);
+        assert_eq!(proof.pred, "xframe");
+        assert!(proof.data["post_acct"].as_str().unwrap().contains(&ghost));
+        assert!(proof.data.get("pre_acct").is_none());
     }
 
     #[test]
@@ -6937,5 +7029,126 @@ mod tests {
         assert!(eng.state.books[&minuend_types::BTC_USD]
             .best_bid()
             .is_some());
+    }
+
+    /// R7b-N2: P-frame's acct: arm, moved into P-xframe, for the non-`x:`
+    /// ops — exempt accounts, the D:/W: PERP move, and the k == 0 bond.
+    #[test]
+    fn r7c_frame_acct_rule_non_x() {
+        let x = "11".repeat(32);
+        let op = "22".repeat(32);
+        let mk = "33".repeat(32);
+        let l = |a: &str, c: &str, p: &str, w: &str| format!("acct:{a}:{c}:{p}:{w}");
+        let bond = minuend_types::ORACLE_BOND_PERP;
+        let ex = vec![op.clone()];
+        let nx = |t: &'static str| Some((t, ex.as_slice()));
+        let pre = l(&x, "100", "5", "0");
+        // Bystander collateral / PERP / W under c: d: w: p: → fraud.
+        for t in ["c", "d", "w", "p", "L", "D", "W"] {
+            for post in [l(&x, "101", "5", "0"), l(&x, "100", "6", "0"), l(&x, "100", "5", "1")] {
+                assert_eq!(
+                    frame_acct_bad("", "", nx(t), 2, Some(&pre), &post, false),
+                    Some(true),
+                    "{t} {post}"
+                );
+            }
+            // Bond returned at the batch boundary: honest at k == 0 only.
+            let rel = l(&x, "100", &(5 + bond).to_string(), "0");
+            assert_eq!(frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel, false), Some(false), "{t}");
+            assert_eq!(frame_acct_bad("", "", nx(t), 1, Some(&pre), &rel, false), Some(true), "{t}");
+            // ... on top of nothing else.
+            let rel2 = l(&x, "101", &(5 + bond).to_string(), "0");
+            assert_eq!(frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel2, false), Some(true), "{t}");
+        }
+        // The op account: collateral and W free (judged elsewhere), PERP
+        // only under D: / W: (or the k == 0 bond).
+        let opre = l(&op, "100", "5", "0");
+        assert_eq!(frame_acct_bad("", "", nx("w"), 2, Some(&opre), &l(&op, "90", "5", "10"), false), Some(false));
+        assert_eq!(frame_acct_bad("", "", nx("d"), 2, Some(&opre), &l(&op, "100", "9", "0"), false), Some(true));
+        assert_eq!(frame_acct_bad("", "", nx("D"), 2, Some(&opre), &l(&op, "100", "9", "0"), false), Some(false));
+        assert_eq!(frame_acct_bad("", "", nx("W"), 2, Some(&opre), &l(&op, "100", "1", "0"), false), Some(false));
+        assert_eq!(
+            frame_acct_bad("", "", nx("c"), 0, Some(&opre), &l(&op, "100", &(5 + bond).to_string(), "0"), false),
+            Some(false)
+        );
+        // A single-fill p: exempts its maker's collateral, not its PERP / W.
+        let ex2 = vec![op.clone(), mk.clone(), CLAW_ZERO.to_string()];
+        let mpre = l(&mk, "100", "5", "0");
+        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "50", "5", "0"), false), Some(false));
+        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "100", "6", "0"), false), Some(true));
+        assert_eq!(frame_acct_bad("", "", Some(("p", ex2.as_slice())), 2, Some(&mpre), &l(&mk, "100", "5", "3"), false), Some(true));
+        // A fresh account with cash under c: → fraud; empty → honest.
+        assert_eq!(frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "7", "0", "0"), false), Some(true));
+        assert_eq!(frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "0", "0", "0"), false), Some(false));
+        // bond_release is the AA's `$p1 == $p0 + 50000` (length($p0) <= 14).
+        assert!(bond_release("7", &(7 + bond).to_string()));
+        assert!(!bond_release("7", "8"));
+        assert!(!bond_release("123456789012345", "123456789062345"));
+    }
+
+    /// R7b-N2 end to end: an oracle bond whose unbonding ends at batch 1's
+    /// commit is returned by `prune_oracle_unbonding` AFTER batch 1's last
+    /// trace leaf, so it first shows in batch 2's unit 0 post tree (judged
+    /// against wit_root_1). Unit 0 is a Place of another account: every
+    /// acct: leaf passes the moved frame arm, the bind AA's P-frame no
+    /// longer frames acct: leaves, and the honest batch builds no proof.
+    #[test]
+    fn r7c_n2_bond_returned_at_batch_boundary_is_not_frame_fraud() {
+        use minuend_types::{Side, TimeInForce, ORACLE_BOND_PERP, PRICE_SCALE, QTY_SCALE};
+        let a = sk(1);
+        let aa = acct_of(&a);
+        let o = acct_of(&sk(9));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, aa, 50_000);
+        claw_set_col(&mut eng, o, 5);
+        eng.state.perp_balances.insert(o, 7);
+        eng.state.oracle_bonds.insert(o, ORACLE_BOND_PERP);
+        eng.state.oracle_unbonding.insert(o, 1);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let q = QTY_SCALE / 1000;
+        let u1 = claw_place(vec![genesis_id()], &a, Side::Bid, TimeInForce::Gtc, px, q, 1, None);
+        let id1 = unit_id(&u1);
+        let prev1 = eng.state.clone();
+        eng.ingest(u1).unwrap();
+        let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
+        assert_eq!(eng.state.perp_balances[&o], 7 + ORACLE_BOND_PERP, "bond returned at commit");
+        let replay = eng.clone();
+        let prev2 = eng.state.clone();
+        let u2 = claw_place(vec![id1], &a, Side::Bid, TimeInForce::Gtc, px, q, 2, None);
+        let id2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let b2 = Batch::from_applied(&prev2, &mut eng, &[id2]).expect("batch 2");
+        assert!(b2.ops[0].starts_with("p:"), "{}", b2.ops[0]);
+        assert!(b2.fills.is_empty());
+        // The challenger's (h2, k = 0) pair: pre = wit_root_1's leaves.
+        let pre = b1.leaf_trace.last().unwrap().clone();
+        assert_eq!(obyte_merkle::root(&pre), b1.checkpoint.wit_root);
+        let post = &b2.leaf_trace[0];
+        let ok = format!("acct:{}:", hex::encode(o.0));
+        let o_pre = pre.iter().find(|l| l.starts_with(&ok)).unwrap();
+        let o_post = post.iter().find(|l| l.starts_with(&ok)).unwrap();
+        assert_ne!(o_pre, o_post, "the release lands in h2 unit 0");
+        let exempt = vec![hex::encode(aa.0)];
+        let nx = Some(("p", exempt.as_slice()));
+        for l in post.iter().filter(|l| l.starts_with("acct:")) {
+            let x = &l[5..69];
+            let p0 = pre.iter().find(|q| q.starts_with(&format!("acct:{x}:")));
+            assert_eq!(frame_acct_bad("", "", nx, 0, p0.map(String::as_str), l, false), Some(false), "{l}");
+        }
+        // Sensitivity: the same delta at k > 0, or one unit more, is fraud.
+        assert_eq!(frame_acct_bad("", "", nx, 1, Some(o_pre), o_post, false), Some(true));
+        let over = o_post.replace(
+            &format!(":{}:", 7 + ORACLE_BOND_PERP),
+            &format!(":{}:", 8 + ORACLE_BOND_PERP),
+        );
+        assert_ne!(&over, o_post);
+        assert_eq!(frame_acct_bad("", "", nx, 0, Some(o_pre), &over, false), Some(true));
+        // P-frame (bind) frames pos:/ord: only now.
+        assert!(frame_proof(&b2, 0, &b2.ops[0], &pre, post).is_none());
+        // And the honest batch replays clean.
+        assert!(build_proof(&b2, &mut replay.clone(), &[], 0).is_none());
     }
 }

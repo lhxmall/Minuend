@@ -30,7 +30,14 @@
 	//   a Reveal{Cancel} commits `c:` (minuend_dag::op_descriptor), so an
 	//   `x:` unit never cancels an order.
 	//
-	// pred 'xframe' (op must be `x:{unit}`):
+	// pred 'xframe', `post_acct` arm also for c:/d:/D:/w:/W:/p:/L: units
+	//   (R7b-N2, moved from P-frame in dispute_bind): the acct: leaf of any
+	//   account outside the op's exempt set (op account, L: target, the
+	//   single fill's maker and the insurance account; p:/L: carry P-frame's
+	//   fill evidence) is frozen; PERP of every account is frozen except the
+	//   op account of a D:/W:; at k == 0 any account may gain exactly
+	//   +ORACLE_BOND_PERP (bond returned at the batch boundary).
+	// pred 'xframe' with op `x:{unit}`:
 	//   * `leaf` pos:/ord: (+leaf_proof, ins, left/right): the leaf is a
 	//     member of the src tree (ins ? post : pre) and exactly absent from
 	//     the other one — no `x:` op writes a position or an order.
@@ -241,7 +248,61 @@
 						}
 						// Op tag of an `x:{unit}` op from the unit text.
 						$isx = starts_with($op, 'x:');
-						if ($pred == 'xframe' AND !$isx) bounce('no fraud');
+						// R7b-N2: P-frame's acct: arm (moved here from
+						// dispute_bind) for c:/d:/D:/w:/W:/p:/L: units. Exempt
+						// accounts (collateral and W free, judged elsewhere):
+						// the op account z1 (L: also the target z2) and, for a
+						// single-fill p:/L:, its maker z3 and the insurance
+						// account z4 (fill evidence as in P-frame; funding-rate
+						// markets bounce). pos:/ord: of these units stay with
+						// P-frame (dispute_bind).
+						$zO = split($op, ':');
+						$zt = $zO[0];
+						$zl = array_length($zO);
+						$zpl = ($zt == 'p' AND $zl == 10) OR ($zt == 'L' AND $zl == 4);
+						$z1 = substring($op, 2, 64);
+						$z2 = ($zt == 'L') ? substring($op, 67, 64) : $z1;
+						if ($pred == 'xframe' AND !$isx) {
+							if (!(($zt == 'c' AND $zl == 3) OR (($zt == 'd' OR $zt == 'D') AND $zl == 5) OR (($zt == 'w' OR $zt == 'W') AND $zl == 4) OR $zpl)
+								OR typeof($S.leaf) == 'string')
+								bounce('no fraud');
+							if ($zpl) {
+								if ($S.fills_root != var[$rollup]['fills_root_' || $h]) bounce('stale roots');
+								$pu = $S.unit;
+								if (typeof($pu) != 'string' OR length($pu) != 64 OR !$S.units_proof
+									OR $S.units_proof.index != $k OR $S.units_proof.root != trigger.data.units_root
+									OR !is_valid_merkle_proof($pu, $S.units_proof))
+									bounce('bad unit');
+								$zpm = $S.pre_meta;
+								if (typeof($zpm) != 'string' OR !is_valid_merkle_proof($zpm, $S.pre_meta_proof)
+									OR $S.pre_meta_proof.root != $pre_wit)
+									bounce('bad pre meta proof');
+								$zM = split($zpm, ':');
+								if (array_length($zM) != 11 OR $zM[0] != 'meta' OR $zM[1] != (($zt == 'p') ? $zO[2] : $zO[3])) bounce('bad pre meta');
+								if ($zM[9] != 0) bounce('no fraud');
+								$nf = (var[$rollup]['fill_count_' || $h] otherwise 0) == 0;
+								$rt = $S.fright;
+								$ri = $S.fright_proof.index;
+								if (!$nf AND !($rt AND is_integer($ri) AND $ri >= 0 AND $S.fright_proof.root == $S.fills_root
+									AND is_valid_merkle_proof($rt, $S.fright_proof)
+									AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND !starts_with($rt, 'f:' || $pu || ':')))))
+									bounce('no fraud');
+								$zfl = $S.fill;
+								if (!$nf AND $ri > 0 AND !($zfl AND $S.fill_proof.index == $ri - 1 AND $S.fill_proof.root == $S.fills_root
+									AND is_valid_merkle_proof($zfl, $S.fill_proof)))
+									bounce('no fraud');
+								$zone = !$nf AND $ri > 0 AND starts_with($zfl, 'f:' || $pu || ':0:');
+								if (!$nf AND !$zone AND !(($ri == 0 OR (starts_with($zfl, 'f:') AND $S.fill_up.index < $k
+										AND $S.fill_up.root == trigger.data.units_root
+										AND is_valid_merkle_proof(substring($zfl, 2, 64), $S.fill_up)))
+									AND (starts_with($rt, 'n:') OR ($S.fright_up.index > $k
+										AND $S.fright_up.root == trigger.data.units_root
+										AND is_valid_merkle_proof(substring($rt, 2, 64), $S.fright_up)))))
+									bounce('no fraud');
+							}
+						}
+						$z3 = $zone ? substring($zfl, 134, 64) : $z1;
+						$z4 = $zone ? '0000000000000000000000000000000000000000000000000000000000000000' : $z1;
 						if ($isx AND typeof($S.u_pre) == 'string') {
 							$u = $S.unit;
 							$pre = $S.u_pre;
@@ -265,7 +326,7 @@
 							$tag = '';
 							$oa = '';
 						}
-						if ($pred == 'xframe' AND $tag == '') bounce('bad unit text');
+						if ($pred == 'xframe' AND $isx AND $tag == '') bounce('bad unit text');
 						$L = $S.leaf;
 						if (typeof($L) == 'string') {
 							// Leaf frame: member of src, exactly absent from dst.
@@ -353,10 +414,17 @@
 							} else {
 								$nopos = true;
 							}
-							$cb = $c0 != $c1 AND $nopos;
-							$wb = $w0 != $w1;
-							$pb = $p0 != $p1 AND $X != $oa
-								AND !($k == 0 AND length($p0) <= 14 AND length($p1) <= 14 AND $p1 - $p0 == 50000);
+							// Non-x units: an exempt account's collateral is
+							// judged by P-deposit / P-escrow / P-claw / fill_math
+							// and the op account's W by P-wpin; PERP moves only
+							// for the op account of a D: / W:. Every unit at
+							// k == 0 may carry +ORACLE_BOND_PERP for any account
+							// (prune_oracle_unbonding at the batch boundary).
+							$zx = !$isx AND ($X == $z1 OR $X == $z2 OR $X == $z3 OR $X == $z4);
+							$cb = $c0 != $c1 AND $nopos AND !$zx;
+							$wb = $w0 != $w1 AND ($isx OR $X != $z1);
+							$pb = $p0 != $p1 AND ($isx ? $X != $oa : !($X == $z1 AND ($zt == 'D' OR $zt == 'W')))
+								AND !($k == 0 AND length($p0) <= 14 AND $p1 == $p0 + 50000);
 							if (!$cb AND !$wb AND !$pb) bounce('no fraud');
 						} else {
 							// mframe meta arms.

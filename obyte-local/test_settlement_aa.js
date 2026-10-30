@@ -2595,6 +2595,22 @@ async function main() {
           right: tree[i], right_proof: merkle.getMerkleProof(tree, i),
         };
   };
+  // R7b-N2: P-frame's acct: arm lives in the x-frame AA (P-xframe) for
+  // c:/d:/D:/w:/W:/p:/L: units — pre/post pair of one account.
+  const xfNx = (h, u, preTree, preWit, a, extra) => {
+    const post = u.post.find((l) => l.startsWith(`acct:${a}:`));
+    if (!post) throw new Error("fixture: no post acct leaf of " + a);
+    const pre = preTree.find((l) => l.startsWith(`acct:${a}:`));
+    const d = {
+      pred: "xframe", height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot, ops_root: u.opsRoot,
+      units_root: u.unitsRoot || UNITS_SET_ROOT, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      pre_wit: preWit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      post_acct: post, post_acct_proof: u.leafProof(post),
+    };
+    if (pre) Object.assign(d, { pre_acct: pre, pre_acct_proof: merkle.getMerkleProof(preTree, preTree.indexOf(pre)) });
+    else Object.assign(d, absentIn(preTree, `acct:${a}:`));
+    return Object.assign(d, extra || {});
+  };
   const opA4 = await operator.getAddress();
 
   // ---- 52. R4-A-1: a fill must be its maker order (P-mbind, book AA) ------
@@ -2814,8 +2830,9 @@ async function main() {
   }
 
   // ===================== ROUND 5 (fix/47-r5-aa) =========================
-  // ---- 57. R5-A-1: foreign acct leaves frozen across c:/d:/w: (P-frame) --
+  // ---- 57. R5-A-1: foreign acct leaves frozen across c:/d:/w: (P-xframe since R7b-N2) --
   {
+    const xframe57 = network.agent.xframe;
     const frPayload5 = (u, leaf, ins) => Object.assign({
       pred: "frame", height: 61, rollup: ROLLUP_ADDR, k: 0,
       trace_root: u.traceRoot, ops_root: u.opsRoot, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
@@ -2828,7 +2845,8 @@ async function main() {
     const cOp = `c:${DEP_ACCT}:${"6a".repeat(32)}`;
     const a = oneUnit("r5-fr-col", cOp, keep.concat([DEP_PRE, `acct:${FILL_TAKER}:777:0:0`]));
     await submitAt(61, a);
-    await triggerVerdict(challenger, bindAa, frPayload5(a, FILL_TAKER_PRE, false), 20000, "R5-A-1 foreign collateral under c:");
+    await triggerBounce(challenger, bindAa, frPayload5(a, FILL_TAKER_PRE, false), 20000, "bad leaf");
+    await triggerVerdict(challenger, xframe57, xfNx(61, a, GENESIS_LEAVES, WIT_ROOT, FILL_TAKER), 20000, "R5-A-1 foreign collateral under c: (P-xframe)");
     st = await vars(rollup);
     if (Number(st.frozen_61) !== 2) throw new Error("R5-A-1: foreign collateral change under c: did not freeze h61");
     // (b) d: — a third party's PERP column changed.
@@ -2836,7 +2854,7 @@ async function main() {
     const pLeaf = `acct:${FILL_TAKER}:0:5:0`;
     const b = oneUnit("r5-fr-perp", dOp, keep.concat([`acct:${DEP_ACCT}:1050000:0:0`, pLeaf]));
     await submitAt(61, b);
-    await triggerVerdict(challenger, bindAa, frPayload5(b, pLeaf, true), 20000, "R5-A-1 foreign PERP under d:");
+    await triggerVerdict(challenger, xframe57, xfNx(61, b, GENESIS_LEAVES, WIT_ROOT, FILL_TAKER), 20000, "R5-A-1 foreign PERP under d: (P-xframe)");
     st = await vars(rollup);
     if (Number(st.frozen_61) !== 2) throw new Error("R5-A-1: foreign PERP change under d: did not freeze h61");
     // (c) w: — a fabricated third account credited (before-min absence).
@@ -2844,7 +2862,7 @@ async function main() {
     const fake = `acct:${"8f".repeat(32)}:5000:0:0`;
     const c = oneUnit("r5-fr-ins", wOp, GENESIS_LEAVES.concat([fake]));
     await submitAt(61, c);
-    await triggerVerdict(challenger, bindAa, frPayload5(c, fake, true), 20000, "R5-A-1 fabricated account under w:");
+    await triggerVerdict(challenger, xframe57, xfNx(61, c, GENESIS_LEAVES, WIT_ROOT, "8f".repeat(32)), 20000, "R5-A-1 fabricated account under w: (P-xframe)");
     st = await vars(rollup);
     if (Number(st.frozen_61) !== 2) throw new Error("R5-A-1: fabricated account under w: did not freeze h61");
     // Honest: the op account's OWN leaf may change (P-deposit / P-escrow
@@ -2852,8 +2870,8 @@ async function main() {
     const ownLeaf = `acct:${DEP_ACCT}:1000001:0:0`;
     const ok = oneUnit("r5-fr-ok", cOp, keep.concat([ownLeaf, FILL_TAKER_PRE]));
     await submitAt(61, ok);
-    await triggerBounce(challenger, bindAa, frPayload5(ok, DEP_PRE, false), 20000, "no fraud");
-    await triggerBounce(challenger, bindAa, frPayload5(ok, ownLeaf, true), 20000, "no fraud");
+    await triggerBounce(challenger, xframe57, xfNx(61, ok, GENESIS_LEAVES, WIT_ROOT, DEP_ACCT), 20000, "no fraud");
+    await triggerBounce(challenger, xframe57, xfNx(61, ok, GENESIS_LEAVES, WIT_ROOT, FILL_TAKER), 20000, "no fraud");
     st = await vars(rollup);
     if (Number(st.frozen_61 || 0) !== 0) throw new Error("R5-A-1: honest own-account change froze h61!");
     console.log("57. R5-A-1: foreign collateral (c:) / foreign PERP (d:) / fabricated account (w:) → frozen; own account → 'no fraud'");
@@ -3257,6 +3275,18 @@ async function main() {
         absentIn(ins ? P.pre : u.post, leaf));
     };
 
+    // R7b-N2: the acct: frame of a Place / Liquidate unit (P-xframe), with
+    // P-frame's fill-count evidence.
+    const pxPayload = (P, h, u, a) => {
+      const tree = u.tree;
+      const ri = u.fill ? 1 : 0;
+      return xfNx(h, u, P.pre, P.wit, a, Object.assign({
+        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF,
+        pre_meta: META1, pre_meta_proof: P.proof(META1),
+      }, tree.length > 1 ? { fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri) } : {},
+        u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {}));
+    };
+
     // ---- 62/63a. R6-C1 relabels + R6-C2 third-party credit (kind 0) ------
     // The (a) kind-0 claw tree plus a bystander C (7000 USD).
     const P5 = await clawSetup(76, "r6b-p5", [
@@ -3291,14 +3321,16 @@ async function main() {
     const tp3 = clawUnit(P5, "r6b-3p", op1, [f1], post5(40955000000, 0, 1007000000000));
     await submitAt(77, tp3);
     await triggerBounce(challenger, claw, clawPayload(P5, 77, tp3, MORD), 20000, "no fraud");
-    await triggerVerdict(challenger, bindAa, pfPayload(P5, 77, tp3, acct(C, 1007000000000), true), 20000, "R6-C2 third-party credit (single-fill Place)");
+    await triggerBounce(challenger, bindAa, pfPayload(P5, 77, tp3, acct(C, 1007000000000), true), 20000, "bad leaf");
+    await triggerVerdict(challenger, xframe, pxPayload(P5, 77, tp3, C), 20000, "R6-C2 third-party credit (single-fill Place, P-xframe)");
     await frozen(77, "third-party credit in a Place unit");
     // Honest: the claw bounces, and P-frame bounces on the maker's leaf
     // (an allowed account) and cannot prove C's untouched leaf absent.
     const ok5 = clawUnit(P5, "r6b-ok5", op1, [f1], post5(40955000000, 0, 7000000000));
     await submitAt(77, ok5);
     await triggerBounce(challenger, claw, clawPayload(P5, 77, ok5, MORD), 20000, "no fraud");
-    await triggerBounce(challenger, bindAa, pfPayload(P5, 77, ok5, acct(M, 1000000000), false), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, pxPayload(P5, 77, ok5, M), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, pxPayload(P5, 77, ok5, C), 20000, "no fraud");
     await live(77, "honest kind-0 Place (shape + frame)");
     // (b) zero-fill Place (a cross bid rests): only T may change. The
     // height has fill_count 0, so no fills evidence is needed (the one-leaf
@@ -3308,8 +3340,8 @@ async function main() {
     const zpost = (cc) => P5.pre.filter((l) => l !== acct(C, 7000000000)).concat([acct(C, cc), tOrd]);
     const z3p = clawUnit(P5, "r6b-z3p", restOp, [], zpost(7000000005));
     await submitAt(78, z3p);
-    await triggerVerdict(challenger, bindAa, pfPayload(P5, 78, z3p, acct(C, 7000000005), true), 20000, "R6-C2 third-party credit (zero-fill Place)");
-    if (pfPayload(P5, 78, z3p, acct(C, 7000000005), true).fright) throw new Error("fixture: one-leaf fills tree");
+    await triggerVerdict(challenger, xframe, pxPayload(P5, 78, z3p, C), 20000, "R6-C2 third-party credit (zero-fill Place, P-xframe)");
+    if (pxPayload(P5, 78, z3p, C).fright) throw new Error("fixture: one-leaf fills tree");
     await frozen(78, "third-party credit in a zero-fill Place");
     const zok = clawUnit(P5, "r6b-zok", restOp, [], zpost(7000000000));
     await submitAt(78, zok);
@@ -3366,13 +3398,13 @@ async function main() {
     const GH = acct("5e".repeat(32), 1000000000000);
     const ghost = clawUnit(P6, "r6b-ghost", op6, [f6], post6(4055000000, 1045000000, 900000000, [GH]));
     await submitAt(80, ghost);
-    await triggerVerdict(challenger, bindAa, pfPayload(P6, 80, ghost, GH, true), 20000, "R6-C2 ghost account (Liquidate)");
+    await triggerVerdict(challenger, xframe, pxPayload(P6, 80, ghost, "5e".repeat(32)), 20000, "R6-C2 ghost account (Liquidate, P-xframe)");
     await frozen(80, "ghost account in a Liquidate unit");
     const ok6 = clawUnit(P6, "r6b-ok6", op6, [f6], post6(4055000000, 1045000000, 900000000));
     await submitAt(80, ok6);
     await triggerBounce(challenger, claw, Object.assign(clawPayload(P6, 80, ok6, MORD3), xFields(P6, ok6, "c", K)), 20000, "no fraud");
     await triggerBounce(challenger, claw, Object.assign(clawPayload(P6, 80, ok6, MORD3), xFields(P6, ok6, "i", Z)), 20000, "no fraud");
-    await triggerBounce(challenger, bindAa, pfPayload(P6, 80, ok6, acct(K, 900000000), true), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, pxPayload(P6, 80, ok6, K), 20000, "no fraud");
     await live(80, "honest liquidation with a third-party keeper");
     console.log("63. R6-C1 kind 3→0; R6-C2 bystander credit (single- and zero-fill Place), keeper 10x credit, insurance inflation, ghost account → frozen; honest Place / resting bid / keeper liquidation → 'no fraud'");
 
@@ -3689,6 +3721,56 @@ async function main() {
     await triggerBounce(challenger, xframe, metaPair(95, markOk), 20000, "no fraud");
     await live(95, "honest mark update by ReportPrice");
     console.log("71. R7-H2: band rewritten / band deleted / mark moved by a Stake → frozen (P-mframe / P-noband); mark moved by ReportPrice → 'no fraud'");
+
+    // ---- 72. R7b-N2: oracle bond returned at the batch boundary ---------
+    // prune_oracle_unbonding runs at batch commit, after the batch's last
+    // trace leaf, so the returned bond (+ORACLE_BOND_PERP = 50000) first
+    // shows in the NEXT batch's unit 0 post tree, judged against
+    // wit_root_{h-1} (here P9: T holds 60000 PERP). Honest whatever op unit
+    // 0 carries: the acct: frame is P-xframe's now (P-frame on dispute_bind
+    // refuses acct: leaves), which allows exactly +50000 at k == 0.
+    const n2 = (name, op, post, extra) => Object.assign(oneUnit(name, op, post), { witRoot: P9.wit }, extra || {});
+    const tRel = (c, w) => `acct:${T}:${c}:110000:${w || 0}`;
+    const cOp72 = `c:${M}:${"6c".repeat(32)}`;
+    const keep72 = [mA(2000000000), META1, BAND1, posM9, END];
+    // (a) lies at h96: T credited one PERP unit past the bond (c:), and the
+    // op account's own PERP moved by a w: (only D:/W: move PERP).
+    const over72 = n2("r7c-over", cOp72, [`acct:${T}:1000000000:110001:0`].concat(keep72));
+    await submitAt(96, over72);
+    await triggerVerdict(challenger, xframe, xfNx(96, over72, P9.pre, P9.wit, T), 20000, "R7b-N2: bystander PERP past the bond (c:)");
+    await frozen(96, "bystander PERP past the bond");
+    const wOp72 = `w:${T}:100:1`;
+    const wLie = n2("r7c-wlie", wOp72, [`acct:${T}:999999900:120000:100`].concat(keep72));
+    await submitAt(96, wLie);
+    await triggerVerdict(challenger, xframe, xfNx(96, wLie, P9.pre, P9.wit, T), 20000, "R7b-N2: op account PERP moved by a w:");
+    await frozen(96, "op account PERP under w:");
+    // (b) honest c: of M at h96 with T's bond returned.
+    const cOk = n2("r7c-cok", cOp72, [tRel(1000000000)].concat(keep72));
+    await submitAt(96, cOk);
+    await triggerBounce(challenger, xframe, xfNx(96, cOk, P9.pre, P9.wit, T), 20000, "no fraud");
+    await triggerBounce(challenger, xframe, xfNx(96, cOk, P9.pre, P9.wit, M), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, Object.assign({
+      pred: "frame", height: 96, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: cOk.traceRoot, ops_root: cOk.opsRoot, op: cOk.op, ops_proof: merkle.getMerkleProof(cOk.ops, 0),
+      pre_wit: P9.wit, post_wit: cOk.wit, post_proof: merkle.getMerkleProof(cOk.trace, 0),
+      leaf: tA(1000000000, 60000), ins: false, leaf_proof: P9.proof(tA(1000000000, 60000)),
+    }, absentIn(cOk.post, tA(1000000000, 60000))), 20000, "bad leaf");
+    await live(96, "honest c: with the bond returned at unit 0");
+    // (c) honest zero-fill Place of M at h97 (fill_count 0) with the bond.
+    const pOp72 = `p:${M}:1:0:8000000000000:100000000:0:0:0:0`;
+    const mOrd72 = `ord:${"ec".repeat(32)}:1:0:8000000000000:9:100000000:${M}:0:0`;
+    const pOk = n2("r7c-pok", pOp72, [tRel(1000000000), mOrd72].concat(keep72), { unitsRoot: ISO_UNITS_ROOT });
+    await submitAt(97, pOk);
+    const pEv = { units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: FILLS_ROOT,
+      pre_meta: META1, pre_meta_proof: P9.proof(META1) };
+    await triggerBounce(challenger, xframe, xfNx(97, pOk, P9.pre, P9.wit, T, pEv), 20000, "no fraud");
+    await live(97, "honest zero-fill Place with the bond returned at unit 0");
+    // (d) honest w: by the oracle T itself at h98 (bond + its withdrawal).
+    const wOk = n2("r7c-wok", wOp72, [tRel(999999900, 100)].concat(keep72));
+    await submitAt(98, wOk);
+    await triggerBounce(challenger, xframe, xfNx(98, wOk, P9.pre, P9.wit, T), 20000, "no fraud");
+    await live(98, "honest w: by the oracle with its bond returned at unit 0");
+    console.log("72. R7b-N2: bond returned at unit 0 under c: / p: / w: → 'no fraud' (P-xframe; P-frame refuses acct: leaves); PERP past the bond, op-account PERP under w: → frozen");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

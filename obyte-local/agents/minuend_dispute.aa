@@ -231,9 +231,13 @@
 						// can only be a rejected op's unchanged column.
 						if ($gov AND length($perp0) > 14) bounce('no fraud');
 						$pnum = length($perp1) <= 14 AND length($amount) <= 14;
-						$match = $gov ? (($perp0 == $perp1 OR ($pnum AND ($deposit ? ($perp0 + $amount == $perp1) : ($perp0 - $amount == $perp1 AND !starts_with($perp1, '-'))))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
+						// R7b-N2: at k == 0 an oracle's returned bond
+						// (+ORACLE_BOND_PERP, prune_oracle_unbonding at the
+						// batch boundary) may sit on top of the gov move.
+						$bk = ($k == 0 AND $pnum AND ($perp1 - $perp0 == 50000 OR $perp1 - $perp0 == 50000 + ($deposit ? $amount : 0 - $amount))) ? 50000 : 0;
+						$match = $gov ? (($perp0 + $bk == $perp1 OR ($pnum AND ($deposit ? ($perp0 + $bk + $amount == $perp1) : ($perp0 + $bk - $amount == $perp1 AND !starts_with($perp1, '-'))))) AND $col0 == $col1) : ($col0 == $col1 OR ($deposit ? ($col0 + $amount == $col1) : ($col0 - $amount == $col1 AND !starts_with($col1, '-'))));
 						// R3-A-7: a credited PERP deposit (D:) is backed like d:.
-						$cred = $deposit AND ($gov ? ($pnum AND $perp0 != $perp1 AND $perp0 + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));
+						$cred = $deposit AND ($gov ? ($pnum AND $perp0 + $bk != $perp1 AND $perp0 + $bk + $amount == $perp1 AND $col0 == $col1) : ($col0 != $col1 AND $col0 + $amount == $col1));
 					}
 					// R2-A-3: a credited collateral (d:) or PERP (D:, R3-A-7)
 					// deposit must be BACKED by the rollup's genuine vault
