@@ -3213,6 +3213,20 @@ async function main() {
     await live(75, "honest ADL with keeper = maker");
     console.log("61. P-claw: kind-0 / kind-3 money print and burn, doubled ADL keeper credit → frozen; honest isolated-taker claw, honest ADL keeper, multi-fill → 'no fraud' (fill_math alone: 'no fraud' on the print)");
 
+    // Pool occupancy gate (ls - lf < 50): heights 29..75 were never
+    // finalized, so 6b's heights 76..82 would bounce 'pool occupancy'.
+    // Finalize the live drill heights in order first.
+    {
+      await network.timetravel({ shift: "3600s" });
+      let s0 = await vars(rollup);
+      for (let fh = Number(s0.last_finalized) + 1; fh <= 60; fh++) {
+        await trigger(operator, rollup, { finalize: 1, height: fh }, 20000);
+        s0 = await vars(rollup);
+        if (Number(s0.last_finalized) !== fh) break;
+      }
+      console.log(`6b prep: ls=${s0.last_submitted} lf=${s0.last_finalized}`);
+      if (Number(s0.last_finalized) < 40) throw new Error("6b prep: finalize stalled at " + s0.last_finalized);
+    }
     // ===================== ROUND 6b (fix/47-r6b) ==========================
     const C = "e9".repeat(32);
     const Z = "0".repeat(64);
