@@ -46,7 +46,9 @@ impl BuiltProof {
         } else if self.pred == "mframe" {
             // Round 8: minuend_dispute_mframe.aa.
             "mframe"
-        } else if self.pred == "wf" {
+        } else if matches!(self.pred.as_str(), "wf" | "open" | "answer" | "expire") {
+            // Round 11: the open-element challenge (R11-C2) lives on the
+            // wf AA too.
             // Round 10: minuend_dispute_wf.aa (malformed leaf / fill field).
             "wf"
         } else if self.pred == "ghost"
@@ -142,7 +144,11 @@ pub fn build_proof_with_prev(
     // Round 10 P-wf: a posted witness leaf or fills-tree element whose
     // layout is not exactly what the engine writes is fraud by itself (the
     // other predicates bounce on such a field).
-    if let Some(p) = wf_proof(batch) {
+    if let Some(p) = wf_proof(batch, prev_final) {
+        return Some(p);
+    }
+    // Round 11 (R11-C2): an element no AA can read is opened instead.
+    if let Some(p) = open_proof(batch) {
         return Some(p);
     }
     let n = batch.units.len();
@@ -622,7 +628,7 @@ fn pl_frame_scope(
         let data = serde_json::json!({
             "fills_root": batch.checkpoint.fills_root,
             "units_root": batch.checkpoint.units_root,
-            "unit": u,
+            "unit": format!("Z{u}"),
             "units_proof": proof_json(&unit_hexes, k),
             "pre_meta": meta,
             "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
@@ -657,7 +663,7 @@ fn pl_frame_scope(
     let mut data = serde_json::json!({
         "fills_root": batch.checkpoint.fills_root,
         "units_root": batch.checkpoint.units_root,
-        "unit": u,
+        "unit": format!("Z{u}"),
         "units_proof": proof_json(&unit_hexes, k),
         "pre_meta": meta,
         "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
@@ -1083,15 +1089,29 @@ pub fn wf_malformed(leaf: &str, fills: bool) -> bool {
     if spec.is_empty() || parts.len() != spec.len() + 1 {
         return true;
     }
-    !spec
-        .chars()
-        .zip(parts[1..].iter())
-        .all(|(c, f)| wf_field_ok(f, c))
+    // R11-L1: per-tag `x` classes (the AA also checks the address checksum;
+    // the watcher's charset test flags a subset, never a false proof).
+    let x_ok = match tag {
+        "adr" => minuend_types::valid_obyte_addr(parts[1]),
+        "adrx" => minuend_types::valid_obyte_addr(parts[2]),
+        "dep" => parts[1].len() == 44 && parts[1].ends_with('='),
+        _ => true,
+    };
+    !x_ok
+        || !spec
+            .chars()
+            .zip(parts[1..].iter())
+            .all(|(c, f)| wf_field_ok(f, c))
 }
 
 fn wf_field_ok(f: &str, c: char) -> bool {
     match c {
-        'h' => f.encode_utf16().count() == 64,
+        // R11-L1: 64 lowercase hex chars.
+        'h' => {
+            f.len() == 64
+                && f.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
         'x' => !f.is_empty(),
         _ => {
             let neg = c == 's' && f.starts_with('-');
@@ -1107,8 +1127,13 @@ fn wf_field_ok(f: &str, c: char) -> bool {
 
 /// Round 10 P-wf: the first malformed posted witness leaf (a unit's post
 /// tree whose root is the committed trace entry) or fills-tree element.
-fn wf_proof(batch: &Batch) -> Option<BuiltProof> {
+fn wf_proof(batch: &Batch, prev_final: Option<&[String]>) -> Option<BuiltProof> {
     let c = &batch.checkpoint;
+    let genesis = if c.height == 1 {
+        minuend_state::wit_leaves(&minuend_state::ChainState::new())
+    } else {
+        Vec::new()
+    };
     for (k, leaves) in batch.leaf_trace.iter().enumerate() {
         let Some(post_wit) = batch.trace.get(k) else {
             break;
@@ -1116,12 +1141,37 @@ fn wf_proof(batch: &Batch) -> Option<BuiltProof> {
         if leaves.is_empty() || obyte_merkle::root(leaves) != *post_wit {
             continue;
         }
+        // R11-M1: unit k's PRE tree (k == 0: the committed tree of h - 1 or
+        // the genesis tree at h == 1); only a leaf absent from it is judged.
+        let pre: &[String] = if k > 0 {
+            match batch.leaf_trace.get(k - 1) {
+                Some(p)
+                    if batch
+                        .trace
+                        .get(k - 1)
+                        .is_some_and(|r| obyte_merkle::root(p) == *r) =>
+                {
+                    p
+                }
+                _ => continue,
+            }
+        } else if c.height == 1 {
+            &genesis
+        } else {
+            match prev_final {
+                Some(p) => p,
+                None => continue,
+            }
+        };
         let end = index_of(leaves, minuend_state::WIT_MAX_SENTINEL);
         for (i, l) in leaves.iter().enumerate() {
             // A ':'-less element needs the sentinel's proof (same depth).
             if !wf_malformed(l, false) || (!l.contains(':') && end.is_none()) {
                 continue;
             }
+            let Some(absent) = wf_absence(pre, l) else {
+                continue; // carried over from pre: finalized state (R11-M1)
+            };
             let mut data = serde_json::json!({
                 "k": k,
                 "trace_root": c.trace_root,
@@ -1132,6 +1182,17 @@ fn wf_proof(batch: &Batch) -> Option<BuiltProof> {
             });
             if let Some(e) = end {
                 data["end_proof"] = proof_json(leaves, e);
+            }
+            for (key, v) in absent {
+                data[key] = v;
+            }
+            if k > 0 {
+                data["pre_wit"] = batch.trace[k - 1].clone().into();
+                data["pre_proof"] = proof_json(&batch.trace, k - 1);
+                if data.get("pright").is_none() && batch.counts.get(k - 1).is_some() {
+                    data["pre_count"] = batch.counts[k - 1].parse::<u64>().ok()?.into();
+                    data["pre_count_proof"] = proof_json(&batch.counts, k - 1);
+                }
             }
             return Some(BuiltProof {
                 pred: "wf".into(),
@@ -1157,6 +1218,134 @@ fn wf_proof(batch: &Batch) -> Option<BuiltProof> {
         }
     }
     None
+}
+
+/// R11-M1: proof that `leaf` is NOT in the sorted `pre` tree: the adjacent
+/// straddle (`pleft` < leaf < `pright`), before-min (`pleft` at index 0) or
+/// after-max (`pleft` = the last leaf; the AA pins its index by the pre
+/// leaf count). `None` when the leaf is in `pre` (carried over).
+fn wf_absence(pre: &[String], leaf: &str) -> Option<Vec<(&'static str, serde_json::Value)>> {
+    if pre.is_empty() || pre.iter().any(|p| p == leaf) {
+        return None;
+    }
+    let j = pre.iter().position(|p| p.as_str() > leaf);
+    Some(match j {
+        Some(0) => vec![
+            ("pleft", pre[0].clone().into()),
+            ("pleft_proof", proof_json(pre, 0)),
+        ],
+        Some(j) => vec![
+            ("pleft", pre[j - 1].clone().into()),
+            ("pleft_proof", proof_json(pre, j - 1)),
+            ("pright", pre[j].clone().into()),
+            ("pright_proof", proof_json(pre, j)),
+        ],
+        None => vec![
+            ("pleft", pre[pre.len() - 1].clone().into()),
+            ("pleft_proof", proof_json(pre, pre.len() - 1)),
+        ],
+    })
+}
+
+/// R11-C2: the first committed element no dispute AA can read — longer
+/// than [`minuend_types::MAX_ELEMENT_LEN`] or not of its tree's shape (unit
+/// id 64 chars, witness root 44, every other element ':'-bearing) — as an
+/// open-element challenge for the wf AA (`{open:1, tree, k, index, ...}`,
+/// paid with the bond). The operator cannot answer it with a readable
+/// element, so it expires into a fraud verdict.
+pub fn open_proof(batch: &Batch) -> Option<BuiltProof> {
+    let cap = minuend_types::MAX_ELEMENT_LEN;
+    let c = &batch.checkpoint;
+    let bad = |e: &str, tree: &str| match tree {
+        "units" => e.len() != 64,
+        "trace" => e.len() != 44,
+        _ => e.len() > cap || !e.contains(':'),
+    };
+    let mk = |tree: &str, k: usize, index: usize, extra: serde_json::Value| {
+        let mut data = serde_json::json!({"open": 1, "tree": tree, "k": k, "index": index});
+        if let (Some(o), Some(e)) = (data.as_object_mut(), extra.as_object()) {
+            for (key, v) in e {
+                o.insert(key.clone(), v.clone());
+            }
+        }
+        BuiltProof {
+            pred: "open".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data,
+        }
+    };
+    if obyte_merkle::root(&batch.ops) == c.ops_root {
+        if let Some(i) = batch.ops.iter().position(|e| bad(e, "ops")) {
+            return Some(mk("ops", 0, i, serde_json::json!({})));
+        }
+    }
+    if obyte_merkle::root(&batch.trace) == c.trace_root {
+        if let Some(i) = batch.trace.iter().position(|e| bad(e, "trace")) {
+            return Some(mk("trace", 0, i, serde_json::json!({})));
+        }
+    }
+    let fills = minuend_settle::fills_root_elements(&batch.fills);
+    if obyte_merkle::root(&fills) == c.fills_root {
+        if let Some(i) = fills.iter().position(|e| bad(e, "fills")) {
+            return Some(mk("fills", 0, i, serde_json::json!({})));
+        }
+    }
+    for (k, leaves) in batch.leaf_trace.iter().enumerate() {
+        let (Some(post_wit), Some(cnt)) = (batch.trace.get(k), batch.counts.get(k)) else {
+            break;
+        };
+        if leaves.is_empty()
+            || obyte_merkle::root(leaves) != *post_wit
+            || cnt.parse::<usize>().ok() != Some(leaves.len())
+        {
+            continue;
+        }
+        if let Some(i) = leaves.iter().position(|e| bad(e, "wit")) {
+            return Some(mk(
+                "wit",
+                k,
+                i,
+                serde_json::json!({
+                    "post_wit": post_wit,
+                    "post_proof": proof_json(&batch.trace, k),
+                    "count": leaves.len(),
+                    "count_proof": proof_json(&batch.counts, k),
+                }),
+            ));
+        }
+    }
+    None
+}
+
+/// R11-C2: the answer to an open-element challenge on an honest batch:
+/// `{answer:1, tree, k, index, element: 'Z' || element, proof}` (the 'Z'
+/// keeps a digit-only unit id a string in trigger.data). `None` when the
+/// named element is not a readable element of this batch's trees.
+pub fn open_answer(batch: &Batch, tree: &str, k: usize, index: usize) -> Option<serde_json::Value> {
+    let c = &batch.checkpoint;
+    let unit_hexes: Vec<String> = c.unit_ids.iter().map(|id| hex::encode(id.0)).collect();
+    let fills = minuend_settle::fills_root_elements(&batch.fills);
+    let elems: &[String] = match tree {
+        "ops" => &batch.ops,
+        "units" => &unit_hexes,
+        "trace" => &batch.trace,
+        "fills" => &fills,
+        "wit" => batch.leaf_trace.get(k)?,
+        _ => return None,
+    };
+    let e = elems.get(index)?;
+    if e.len() > minuend_types::MAX_ELEMENT_LEN {
+        return None;
+    }
+    Some(serde_json::json!({
+        "answer": 1,
+        "tree": tree,
+        "k": if tree == "wit" { k } else { 0 },
+        "index": index,
+        "element": format!("Z{e}"),
+        "proof": proof_json(elems, index),
+    }))
 }
 
 /// R7-L1 P-fsane: two adjacent idx-0 fills of unit `k` in the fills tree.
@@ -1389,7 +1578,7 @@ fn xframe_unit_fields(
     let (tag, oa) = xframe_tag(&u_pre)?;
     Some((
         serde_json::json!({
-            "unit": uh,
+            "unit": format!("Z{uh}"),
             "units_proof": proof_json(unit_hexes, k),
             "u_pre": u_pre,
         }),
@@ -1747,7 +1936,7 @@ fn unit_fill_evidence(batch: &Batch, k: usize) -> Option<(Option<String>, serde_
     let u = unit_hexes.get(k)?;
     let mut data = serde_json::json!({
         "fills_root": batch.checkpoint.fills_root,
-        "unit": u,
+        "unit": format!("Z{u}"),
         "units_proof": proof_json(&unit_hexes, k),
     });
     let tree = minuend_settle::fills_root_elements(&batch.fills);
@@ -5491,6 +5680,9 @@ mod tests {
         assert_eq!(p.data["k"], 1);
         assert_eq!(p.data["leaf"], format!("acct:{bob}:x:0:0"));
         assert!(p.data.get("end_proof").is_some());
+        // R11-M1: the payload proves the leaf absent from unit 0's tree.
+        assert!(p.data.get("pleft").is_some());
+        assert_eq!(p.data["pre_wit"], batch.trace[0]);
         let (mut batch2, a2, b2) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
         set_fill_field(&mut batch2, 0, 8, "9e12");
         let mut replay2 = funded_replay(&[a2, b2]);
@@ -5498,6 +5690,102 @@ mod tests {
         assert_eq!(p2.pred, "wf");
         assert!(p2.data["leaf"].as_str().unwrap().contains(":9e12:"));
         assert_eq!(p2.data["fills_root"], batch2.checkpoint.fills_root);
+    }
+
+    /// Round 11: P-wf newness (M1), field classes (L1), the open-element
+    /// challenge (C2) and the ingest caps.
+    #[test]
+    fn r11_wf_newness_classes_open_challenge_and_caps() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let h = "d".repeat(64);
+        // L1: uppercase / non-hex ids, bad dep anchors and addresses.
+        for bad in [
+            format!("acct:{}:0:0:0", "D".repeat(64)),
+            format!("acct:{}:0:0:0", "g".repeat(64)),
+            "dep:Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0".to_string(),
+            format!("adr:mxmekgn37h5qo2awht7xrg6lhjvvtawu:{h}"),
+            format!("adrx:{h}:SHORT"),
+        ] {
+            assert!(wf_malformed(&bad, false), "{bad}");
+        }
+        for ok in [
+            format!("acct:{}:0:0:0", "1".repeat(64)),
+            "dep:Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=".to_string(),
+            format!("adr:MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU:{h}"),
+        ] {
+            assert!(!wf_malformed(&ok, false), "{ok}");
+        }
+        // M1: a malformed leaf carried over from unit 0 is not judged at 1.
+        let (mut batch, _a, b) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let bob = hex::encode(b.0);
+        for k in 0..2 {
+            for l in batch.leaf_trace[k].iter_mut() {
+                if l.starts_with(&format!("acct:{bob}:")) {
+                    let p: Vec<&str> = l.split(':').collect();
+                    *l = format!("acct:{}:x:{}:{}", p[1], p[3], p[4]);
+                }
+            }
+            retrace(&mut batch, k);
+        }
+        // (unit 0 wrote it: judged at k == 0 at most; never again at k == 1)
+        assert!(wf_proof(&batch, None).is_none_or(|p| p.data["k"] == 0));
+        let carried = batch.leaf_trace[1]
+            .iter()
+            .find(|l| l.starts_with(&format!("acct:{bob}:x:")))
+            .expect("bob leaf")
+            .clone();
+        if batch.leaf_trace[0].contains(&carried) {
+            assert!(wf_absence(&batch.leaf_trace[0], &carried).is_none());
+        }
+        // C2: an oversized ops element is opened (wf AA, tree ops, index 1).
+        let (honest, a2, b2) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let mut big = honest.clone();
+        big.ops[1] = format!("x:{}", "0".repeat(minuend_types::MAX_ELEMENT_LEN + 1));
+        big.checkpoint.ops_root = obyte_merkle::root(&big.ops);
+        let mut replay = funded_replay(&[a2, b2]);
+        let p = build_proof(&big, &mut replay, &[], 0).expect("open");
+        assert_eq!(p.pred, "open");
+        assert_eq!(p.target(), "wf");
+        assert_eq!(p.data["tree"], "ops");
+        assert_eq!(p.data["index"], 1);
+        assert!(
+            open_answer(&big, "ops", 0, 1).is_none(),
+            "oversized: unanswerable"
+        );
+        // An honest batch answers every open, digit-free or not.
+        assert!(open_proof(&honest).is_none());
+        for (tree, k, i) in [
+            ("ops", 0, 1),
+            ("units", 0, 0),
+            ("trace", 0, 1),
+            ("fills", 0, 0),
+            ("wit", 1, 0),
+        ] {
+            let ans = open_answer(&honest, tree, k, i).expect(tree);
+            let el = ans["element"].as_str().unwrap();
+            assert!(el.starts_with('Z') && el.len() <= minuend_types::MAX_ELEMENT_LEN + 1);
+            assert_eq!(ans["proof"]["index"], i);
+        }
+        let ans = open_answer(&honest, "ops", 0, 1).unwrap();
+        assert_eq!(ans["proof"]["root"], honest.checkpoint.ops_root);
+        // Ingest refuses a unit whose text breaks the caps (a 3000-char
+        // deposit address would be an unreadable ops element).
+        let secret = sk(7);
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&secret),
+                addr: "A".repeat(3000),
+                amount: 1,
+                aa_unit: [3u8; 32],
+            },
+            &secret,
+        );
+        assert!(!minuend_exec::unit_text_within_caps(&u));
+        assert!(matches!(
+            Engine::new().ingest(u),
+            Err(minuend_exec::ExecError::TooLong)
+        ));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 	// path: {challenge:1} is not a case here and never freezes anything.
 // Constants mirror Rust (crates/minuend-types/src/lib.rs):
 //   'minuend-v2'      -> CHAIN_ID
-//   4               -> ASSERTION_VERSION (#47 B8: 2; round 6/6b: 3 — Reveal{Place|Liquidate} commits the inner p:/L:, QTY_CAP; round 7: 4 — text unit ids (P-opbind), one fill per unit); round 7b: 5; round 8: 6; round 9: 7 — genesis witness root, MARK_CAP; round 10: 8 — P-wf AA, MARK_CAP rejects, exact funding step
+//   4               -> ASSERTION_VERSION (#47 B8: 2; round 6/6b: 3 — Reveal{Place|Liquidate} commits the inner p:/L:, QTY_CAP; round 7: 4 — text unit ids (P-opbind), one fill per unit); round 7b: 5; round 8: 6; round 9: 7 — genesis witness root, MARK_CAP; round 10: 8 — P-wf AA, MARK_CAP rejects, exact funding step; round 11: 9 — element caps + open-element challenge, raw ids, P-wf newness
 //   3600            -> CHALLENGE_SECS (finalize clean window from submit)
 //   604800          -> ESCAPE_STALL_SECS (escape hatch)
 //   1000000000000   -> SUBMIT_BOND_NET (standing pool floor, not per-height lock)
@@ -140,7 +140,7 @@
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
 						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
-						OR trigger.data.assertion_version != 8
+						OR trigger.data.assertion_version != 9
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
 						// #47 A2: the vault no longer pays from the forest —

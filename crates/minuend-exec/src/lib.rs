@@ -124,6 +124,10 @@ pub enum ExecError {
     /// R2-R-3: an amount the batch frame encoder cannot represent.
     #[error("amount out of encodable range")]
     AmountOutOfRange,
+    /// R11-C2: a unit whose text (or committed ops descriptor) exceeds the
+    /// element caps — the dispute AAs could not read it on chain.
+    #[error("unit text too long")]
+    TooLong,
 }
 
 /// R2-R-3: whether every 128-bit amount in `op` fits the batch frame's JSON
@@ -143,6 +147,15 @@ pub fn op_amounts_encodable(op: &Op) -> bool {
         Op::Reveal { op, .. } => op_amounts_encodable(op),
         _ => true,
     }
+}
+
+/// R11-C2: the unit text and its committed ops descriptor fit the caps
+/// every dispute AA can read ([`minuend_types::MAX_UNIT_TEXT_LEN`],
+/// [`minuend_types::MAX_ELEMENT_LEN`]). Checked at ingest, before the DAG.
+pub fn unit_text_within_caps(unit: &Unit) -> bool {
+    minuend_dag::unit_text(unit).len() <= minuend_types::MAX_UNIT_TEXT_LEN
+        && minuend_dag::op_descriptor(&unit.op)
+            .is_none_or(|d| d.len() <= minuend_types::MAX_ELEMENT_LEN)
 }
 
 impl Default for Engine {
@@ -374,6 +387,9 @@ impl Engine {
         // the same id is handed to the DAG, skipping its recomputation.
         if !op_amounts_encodable(&unit.op) {
             return Err(ExecError::AmountOutOfRange);
+        }
+        if !unit_text_within_caps(&unit) {
+            return Err(ExecError::TooLong);
         }
         let id = unit_id(&unit);
         if !self.sig_verifier.verify_by_id(&unit, &id) {

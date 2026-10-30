@@ -414,7 +414,10 @@
 								bounce('bad ops proof');
 							$OP = split($op, ':');
 							$isp = array_length($OP) == 10 AND $OP[0] == 'p' AND is_integer($OP[7]);
-							$cbad = $isp AND $OP[6] == '0' AND $OP[7] != 0;
+							// R11-L3: a limit Place (typ 0) at |price| >= MARK_CAP
+							// (1e15) is rejected by the engine (R10-L1): no fill.
+							$cbad = $isp AND (($OP[6] == '0' AND $OP[7] != 0)
+								OR ($OP[9] == '0' AND is_integer($OP[4]) AND abs($OP[4]) >= 1000000000000000));
 							$ibad = $isp AND $OP[6] == '1' AND $OP[7] > 0;
 							$pa = trigger.data.pre_acct;
 							if ($ibad AND typeof($pa) == 'string') {

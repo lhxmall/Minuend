@@ -199,6 +199,9 @@ pub enum SettleError {
     FrameEncode,
     #[error("too many units")]
     TooManyUnits,
+    /// R11-C2: a committed element longer than `MAX_ELEMENT_LEN`.
+    #[error("element too long")]
+    ElementTooLong,
     #[error("chain id mismatch")]
     ChainMismatch,
     #[error("prev root mismatch")]
@@ -437,6 +440,17 @@ impl Batch {
             .map(|(u, h)| ops_element(h, &u.op))
             .collect();
         let wit_leaves = minuend_state::wit_leaves(&engine.state);
+        // R11-C2: never commit an element a dispute AA could not read (the
+        // engine's typed fields keep every leaf far below the cap; ops are
+        // capped at ingest). Defensive: a batch that would break the cap is
+        // refused here rather than posted.
+        let cap = minuend_types::MAX_ELEMENT_LEN;
+        if ops.iter().any(|e| e.len() > cap)
+            || fill_elements.iter().any(|e| e.len() > cap)
+            || wit_leaves.iter().any(|e| e.len() > cap)
+        {
+            return Err(SettleError::ElementTooLong);
+        }
         let trace_root = obyte_merkle::root(&trace);
         let units_root = obyte_merkle::root(&unit_hexes);
         let units_set_root = obyte_merkle::root(&units_set_sorted);
@@ -3364,7 +3378,7 @@ mod tests {
             perp_burned: None,
         };
         let s = format!(
-            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|8|{}",
+            "minuend-da-v1|minuend-v2|7|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|3|11|2|9|{}",
             hex::encode([1u8; 32]),
             hex::encode([2u8; 32]),
             "a".repeat(64),

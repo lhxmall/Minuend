@@ -254,7 +254,7 @@ function submitDataBase(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 8,
+    assertion_version: 9,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -355,6 +355,7 @@ async function sendCombinedSubmit(wallet, height, stateRoot, prev, over) {
 }
 
 async function main() {
+  const PRE_AT = {}; // round 11: committed pre leaves by height (P-wf newness)
   console.log("rollup address (precomputed):", ROLLUP_ADDR);
   console.log("dispute address (precomputed):", DISPUTE_ADDR);
   console.log("fill address (precomputed):", FILL_ADDR);
@@ -1973,6 +1974,7 @@ async function main() {
     sd.unit_count = o.unitCount || 1; // round 7b: multi-unit trees (exact proof depth)
     sd.wit_root = o.witRoot || WIT_ROOT; // k=0 drills anchor on the genesis tree unless a drill commits its own pre tree
     sd.wit_count = GEN_WIT_COUNT;
+    if (o.countsRoot) sd.counts_root = o.countsRoot; // round 11: P-wf after-max newness
     const header = headerFromSubmit(sd);
     const r = await operator.sendMulti({
       messages: [tempDataMsg(header), { app: "data", payload: sd }],
@@ -3137,6 +3139,7 @@ async function main() {
     const acct = (a, c) => `acct:${a}:${c}:0:0`;
     const clawSetup = async (hCommit, tag, leaves) => {
       const pre = leaves.slice().sort();
+      PRE_AT[hCommit] = pre;
       const wit = merkle.getMerkleRoot(pre);
       await submitAt(hCommit, Object.assign(oneUnit(tag + "-commit", "x:" + sha256Hex(tag), [DEP_PRE]), { witRoot: wit }));
       return { pre, wit, proof: (l) => merkle.getMerkleProof(pre, pre.indexOf(l)) };
@@ -3337,7 +3340,7 @@ async function main() {
         trace_root: u.traceRoot, ops_root: u.opsRoot, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
         pre_wit: P.wit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
         leaf, ins, leaf_proof: ins ? u.leafProof(leaf) : P.proof(leaf),
-        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF,
+        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: "Z" + isoUnit, units_proof: ISO_UNITS_PROOF,
         pre_meta: META1, pre_meta_proof: P.proof(META1),
       }, tree.length > 1 ? { fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri) } : {},
         u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {},
@@ -3350,7 +3353,7 @@ async function main() {
       const tree = u.tree;
       const ri = u.fill ? 1 : 0;
       return xfNx(h, u, P.pre, P.wit, a, Object.assign({
-        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF,
+        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: "Z" + isoUnit, units_proof: ISO_UNITS_PROOF,
         pre_meta: META1, pre_meta_proof: P.proof(META1),
       }, tree.length > 1 ? { fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri) } : {},
         u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {}));
@@ -3842,7 +3845,7 @@ async function main() {
     const mOrd72 = `ord:${"ec".repeat(32)}:1:0:8000000000000:9:100000000:${M}:0:0`;
     const pOk = n2("r7c-pok", pOp72, [tRel(1000000000), mOrd72].concat(keep72), { unitsRoot: ISO_UNITS_ROOT });
     await submitAt(97, pOk);
-    const pEv = { units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: FILLS_ROOT,
+    const pEv = { units_root: ISO_UNITS_ROOT, unit: "Z" + isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: FILLS_ROOT,
       pre_meta: META1, pre_meta_proof: P9.proof(META1) };
     await triggerBounce(challenger, xframe, xfNx(97, pOk, P9.pre, P9.wit, T, pEv), 20000, "no fraud");
     await live(97, "honest zero-fill Place with the bond returned at unit 0");
@@ -4057,7 +4060,7 @@ async function main() {
       const fu = merkle.getMerkleProof(U, 0);
       const common = { height: 110, rollup: ROLLUP_ADDR, k: 1, trace_root: A.traceRoot, ops_root: A.opsRoot, units_root: A.unitsRoot,
         fills_root: A.fillsRoot, op: ops[1], ops_proof: merkle.getMerkleProof(ops, 1), post_wit: roots[2], post_proof: merkle.getMerkleProof(trace, 1),
-        pre_wit: roots[1], pre_proof: merkle.getMerkleProof(trace, 0), unit: U[1], units_proof: merkle.getMerkleProof(U, 1),
+        pre_wit: roots[1], pre_proof: merkle.getMerkleProof(trace, 0), unit: "Z" + U[1], units_proof: merkle.getMerkleProof(U, 1),
         pre_meta: META1, pre_meta_proof: pf(w1, META1), fright: fills[0], fright_proof: merkle.getMerkleProof(fills, 0) };
       const xa = Object.assign({ pred: "xframe" }, common, { post_acct: ac(M1, 1020), post_acct_proof: pf(w2, ac(M1, 1020)),
         pre_acct: ac(M1, 1000), pre_acct_proof: pf(w1, ac(M1, 1000)) });
@@ -4206,11 +4209,22 @@ async function main() {
     // ===================== ROUND 10 (fix/47-r10) ============================
     // P-wf (minuend_dispute_wf.aa): a malformed field of a POST witness leaf
     // or of a fills-tree element is fraud by itself.
-    const wfLeaf = (h, u, L) => ({
+    // R11-M1: P-wf judges only a leaf NEWLY written by unit k: the payload
+    // carries its absence from the pre tree (wit_root_{h-1}, committed by
+    // clawSetup at h - 1); a leaf carried over from pre bounces 'not new'.
+    const wfAbsent = (pre, L) => {
+      const j = pre.findIndex((x) => x > L);
+      if (pre.includes(L)) return {};
+      if (j === 0) return { pleft: pre[0], pleft_proof: merkle.getMerkleProof(pre, 0) };
+      if (j < 0) return { pleft: pre[pre.length - 1], pleft_proof: merkle.getMerkleProof(pre, pre.length - 1) };
+      return { pleft: pre[j - 1], pleft_proof: merkle.getMerkleProof(pre, j - 1), pright: pre[j], pright_proof: merkle.getMerkleProof(pre, j) };
+    };
+    const wfLeaf = (h, u, L) => Object.assign({
       pred: "wf", height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot,
       post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
       leaf: L, leaf_proof: u.leafProof(L), end_proof: u.leafProof(END),
-    });
+    }, wfAbsent(PRE_AT[h - 1], L));
+    const wfOk = (h, L) => (PRE_AT[h - 1].includes(L) ? "not new" : "no fraud");
     const wfFill = (h, u, L) => ({
       pred: "wf", height: h, rollup: ROLLUP_ADDR, fills_root: u.fillsRoot,
       leaf: L, leaf_proof: merkle.getMerkleProof(u.tree, u.tree.indexOf(L)),
@@ -4240,7 +4254,7 @@ async function main() {
       await submitAt(124, ok);
       await triggerBounce(challenger, mframe, metaP(124, P17, ok, META1, okM), 20000, "no fraud");
       for (const L of [okM].concat(keep17))
-        await triggerBounce(challenger, wf, wfLeaf(124, ok, L), 20000, "no fraud");
+        await triggerBounce(challenger, wf, wfLeaf(124, ok, L), 20000, wfOk(124, L));
       await live(124, "honest ReportPrice (every leaf well-formed)");
     }
     console.log("85. R10-C1: meta lie + im/cap/keeper/mm '1e400' → frozen (P-mframe and P-wf); honest ReportPrice: every post leaf → 'no fraud' (P-wf)");
@@ -4261,7 +4275,7 @@ async function main() {
       await frozen(126, "fake obond (P-wf)");
       const ok = xUnitP(P18, "06", T, rp(1, 100), "r10-h1-ok", keep18);
       await submitAt(126, ok);
-      await triggerBounce(challenger, wf, wfLeaf(126, ok, OBT), 20000, "no fraud");
+      await triggerBounce(challenger, wf, wfLeaf(126, ok, OBT), 20000, wfOk(126, OBT));
       await live(126, "honest unit (no obond change)");
       // Next height, unit 0, with the fake leaf in pre: K +50000 PERP. The
       // fake leaf as evidence now reads as "no expiring bond" (P-xframe).
@@ -4308,7 +4322,7 @@ async function main() {
       await triggerBounce(challenger, wf, wfFill(130, ok, f20), 20000, "no fraud");
       await triggerBounce(challenger, wf, wfFill(130, ok, "n:1"), 20000, "no fraud");
       for (const L of post20(40955000000, 0))
-        await triggerBounce(challenger, wf, wfLeaf(130, ok, L), 20000, "no fraud");
+        await triggerBounce(challenger, wf, wfLeaf(130, ok, L), 20000, wfOk(130, L));
       await live(130, "honest kind-0 claw (every leaf / fill well-formed)");
     }
     console.log("87. R10-H2: maker collateral 'x' / '1e400' → frozen (P-claw and P-wf); fill price '9e12' → frozen (P-wf fills mode); honest claw → 'no fraud'");
@@ -4323,7 +4337,7 @@ async function main() {
         return clawUnit(P21, name, `p:${T}:1:0:${mark}:1:0:0:1:1`, [f], [tA(1000000000, 60000), mA(2000000000), fm(mark), BAND1, END]);
       };
       const mfFund = (h, u, mark) => Object.assign(xfB("mframe", h, P21, u, true), {
-        unit: isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: u.fillsRoot,
+        unit: "Z" + isoUnit, units_proof: ISO_UNITS_PROOF, fills_root: u.fillsRoot,
         fill: u.fill, fill_proof: merkle.getMerkleProof(u.tree, 0),
         pre_meta: fm(O88), pre_meta_proof: P21.proof(fm(O88)), post_meta: fm(mark), post_meta_proof: u.leafProof(fm(mark)),
       });
@@ -4340,6 +4354,161 @@ async function main() {
       await live(132, "honest funding step at mark -9.99e14");
     }
     console.log("88. R10-M1: funding-rate step at mark -999123456789999: exactly one step → 'no fraud' (was fraud); one step + 1 bps → frozen (P-mframe)");
+
+    // ===================== ROUND 11 (fix/47-r11) ============================
+    // ---- 89. R11-C3/C4: digit-only ids (a 64-hex of decimal digits is a
+    // Decimal out of split() / trigger.data, '1.23456789012346e+63' once
+    // concatenated). Every AA now reads ids raw. Honest fill with a digit-only
+    // unit, maker account and maker order id → 'no fraud' (P-ghost and
+    // P-fsane over the mangled prefix were verdicts); a price lie in that
+    // digit-only unit → frozen (P-mbind bounced 'bad unit') ----------------
+    {
+      const OIDd = "1234567890".repeat(6) + "1234";
+      const ACd = "5".repeat(63) + "1";
+      const Ud = "9876543210".repeat(6) + "9876";
+      const TOd = "e4".repeat(32);
+      const dec = (s) => Number(s).toPrecision(15); // ocore Decimal toString (15 digits)
+      const ORDd = `ord:${OIDd}:1:1:100000000:1:5:${ACd}:0:0`;
+      const PRE89 = [acct(T, 100000000000), acct(ACd, 100000000000), ORDd, META1, END];
+      const P89 = await clawSetup(133, "r11-p89", PRE89);
+      const U89 = [Ud, sha256Hex("r11-u89-pad")];
+      const U89_ROOT = merkle.getMerkleRoot(U89);
+      const fillAt = (price) => `f:${Ud}:0:${T}:${ACd}:${TOd}:${OIDd}:1:${price}:5:7:0:0:0`;
+      const unit89 = (tag, price) => Object.assign(clawUnit(P89, tag, `p:${T}:1:0:${price}:5:0:0:0:0`, [fillAt(price)], PRE89), { unitsRoot: U89_ROOT });
+      const st = (lo) => {
+        const L = P89.pre;
+        const j = L.findIndex((x) => x >= lo);
+        return j <= 0 ? { left: L[0], left_proof: P89.proof(L[0]) }
+          : { left: L[j - 1], left_proof: P89.proof(L[j - 1]), right: L[j], right_proof: P89.proof(L[j]) };
+      };
+      const bookBase = (h, u) => ({
+        height: h, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot,
+        units_root: U89_ROOT, units_proof: merkle.getMerkleProof(U89, 0), fill: u.fill, fill_proof: merkle.getMerkleProof(u.tree, 0), pre_wit: P89.wit,
+      });
+      const ok = unit89("r11-c3-ok", 100000000);
+      await submitAt(134, ok);
+      await triggerBounce(challenger, book, Object.assign({ pred: "ghost", maker_ord: ORDd }, bookBase(134, ok), st(`ord:${dec(OIDd)}:`)), 20000, "no fraud");
+      await triggerBounce(challenger, book, Object.assign({ pred: "fsane", who: "maker" }, bookBase(134, ok), st(`acct:${dec(ACd)}:`)), 20000, "no fraud");
+      await triggerBounce(challenger, book, Object.assign({ pred: "mbind", maker_ord: ORDd, maker_ord_proof: P89.proof(ORDd) }, bookBase(134, ok)), 20000, "no fraud");
+      await live(134, "R11-C3: honest fill, digit-only unit / maker account / maker order");
+      const lie = unit89("r11-c4-lie", 999900000000);
+      await submitAt(135, lie);
+      await triggerVerdict(challenger, book, Object.assign({ pred: "mbind", maker_ord: ORDd, maker_ord_proof: P89.proof(ORDd) }, bookBase(135, lie)), 20000, "R11-C4: price lie in a digit-only unit (P-mbind)");
+      await frozen(135, "R11-C4: price lie, digit-only unit");
+    }
+    console.log("89. R11-C3/C4: digit-only unit / account / order ids: honest → 'no fraud' (P-ghost, P-fsane, P-mbind); price lie in a digit-only unit → frozen (P-mbind)");
+
+    // ---- 90. R11-C1: protocol-max proofs (200000 units, depth 18; witness
+    // depth 24; a 2000-char unit text): the x-frame and P-wf proofs are far
+    // above ocore's 4096-char local-object cap and still verdict ------------
+    {
+      const H64 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("base64");
+      const path = (el, index, depth, seed, sib0) => {
+        const siblings = [];
+        let hh = H64(el);
+        for (let i = 0; i < depth; i++) {
+          const s = i === 0 && sib0 ? sib0 : H64(seed + ":" + i);
+          siblings.push(s);
+          hh = (Math.floor(index / 2 ** i) % 2) ? H64(s + hh) : H64(hh + s);
+        }
+        return { root: hh, siblings, index };
+      };
+      const N = 200000, k = N - 1, DW = 24;
+      const O = "e5".repeat(32), X = "e6".repeat(32);
+      const salt = "ab".repeat(950);
+      const uPre = "mnu3|" + "4f445831" + "01" + "f".repeat(64) + "07" + O + salt + "|";
+      const uId = sha256Hex(uPre + "x");
+      const op = "x:" + uId;
+      const preA = acct(X, 100), postA = acct(X, 999999);
+      const preW = path(preA, 7, DW, "r11-pre"), postW = path(postA, 7, DW, "r11-post");
+      const preProof = path(preW.root, k - 1, 18, "r11-trace", H64(postW.root));
+      const postProof = path(postW.root, k, 18, "r11-trace", H64(preW.root));
+      const opsP = path(op, k, 18, "r11-ops"), unitsP = path(uId, k, 18, "r11-units");
+      const sub = { opsRoot: opsP.root, traceRoot: postProof.root, unitsRoot: unitsP.root, unitCount: N };
+      if (preProof.root !== postProof.root) throw new Error("fixture: deep trace");
+      await submitAt(135, sub);
+      const xd = {
+        pred: "xframe", height: 135, rollup: ROLLUP_ADDR, k, trace_root: postProof.root, ops_root: opsP.root, units_root: unitsP.root,
+        op, ops_proof: opsP, post_wit: postW.root, post_proof: postProof, pre_wit: preW.root, pre_proof: preProof,
+        units_proof: unitsP, u_pre: uPre, post_acct: postA, post_acct_proof: postW, pre_acct: preA, pre_acct_proof: preW,
+      };
+      const size = JSON.stringify(xd).length;
+      if (size < 6000) throw new Error("fixture: deep x-frame proof only " + size + " chars");
+      await triggerVerdict(challenger, xframe, xd, 20000, `R11-C1: x-frame third-party lie at 200000 units / witness depth 24 (${size} chars)`);
+      await frozen(135, "R11-C1: deep x-frame lie");
+      // P-wf at the same depths: a malformed post leaf absent from pre —
+      // after-max arm (synthetic deep trees have no adjacent right
+      // neighbour): pleft is the LAST pre leaf, its index pinned by the
+      // committed pre leaf count (counts_root, index k - 1).
+      const bad = acct(X, "x"), prev = acct(X, 100);
+      const postW2 = path(bad, 6, DW, "r11-wf-post");
+      const preW3 = path(prev, 2 ** DW - 1, DW, "r11-wf-pre3");
+      const tr3 = path(postW2.root, k, 18, "r11-wf-trace3", H64(preW3.root)), trPre3 = path(preW3.root, k - 1, 18, "r11-wf-trace3", H64(postW2.root));
+      const counts = path(String(2 ** DW), k - 1, 18, "r11-wf-counts");
+      await submitAt(135, { opsRoot: opsP.root, traceRoot: tr3.root, unitsRoot: unitsP.root, unitCount: N, countsRoot: counts.root });
+      const wd3 = {
+        pred: "wf", height: 135, rollup: ROLLUP_ADDR, k, trace_root: tr3.root, post_wit: postW2.root, post_proof: tr3,
+        leaf: bad, leaf_proof: postW2, pre_wit: preW3.root, pre_proof: trPre3,
+        pleft: prev, pleft_proof: preW3, pre_count: 2 ** DW, pre_count_proof: counts,
+      };
+      await triggerVerdict(challenger, wf, wd3, 20000, `R11-C1: P-wf at 200000 units / witness depth 24 (${JSON.stringify(wd3).length} chars)`);
+      await frozen(135, "R11-C1: deep P-wf");
+    }
+    console.log("90. R11-C1: protocol-max proofs (200000 units, witness depth 24, 2000-char unit text) → frozen (P-xframe, P-wf); no $S = trigger.data object cap");
+
+    // ---- 91. R11-C2: open-element challenge (wf AA). An ops element of
+    // 4200 chars is unreadable on chain: open → unanswerable → expire →
+    // frozen. Honest batch: open → answered (bond to the answerer) → live --
+    {
+      const big = "x:" + sha256Hex("r11-big") + ":" + "0".repeat(4200);
+      const small = "x:" + sha256Hex("r11-small");
+      const mk = (tag, el) => {
+        const ops = [`x:${sha256Hex(tag + "-0")}`, el];
+        const u = oneUnit(tag, ops[0], [DEP_PRE]);
+        return Object.assign(u, { ops, opsRoot: merkle.getMerkleRoot(ops), unitCount: 2, unitsRoot: merkle.getMerkleRoot([sha256Hex(tag + "-u0"), sha256Hex(tag + "-u1")]),
+          trace: [u.wit, u.wit], traceRoot: merkle.getMerkleRoot([u.wit, u.wit]) });
+      };
+      const openD = (h) => ({ pred: "open", open: 1, height: h, rollup: ROLLUP_ADDR, tree: "ops", index: 1 });
+      const key = (h) => `open_${ROLLUP_ADDR}_${h}_ops_0_1`;
+      const lie = mk("r11-open-lie", big);
+      await submitAt(135, lie);
+      await trigger(challenger, wf, openD(135), 110000);
+      if (!(await vars(wf))[key(135)]) throw new Error("R11-C2: open not recorded");
+      await triggerBounce(challenger, wf, { pred: "answer", answer: 1, height: 135, rollup: ROLLUP_ADDR, tree: "ops", index: 1, element: "Z" + big,
+        proof: merkle.getMerkleProof(lie.ops, 1) }, 20000, "too long");
+      await triggerBounce(challenger, wf, { pred: "expire", expire: 1, height: 135, rollup: ROLLUP_ADDR, tree: "ops", index: 1 }, 20000, "not expired");
+      await network.timetravel({ shift: "1201s" });
+      await triggerVerdict(challenger, wf, { pred: "expire", expire: 1, height: 135, rollup: ROLLUP_ADDR, tree: "ops", index: 1 }, 20000, "R11-C2: unanswered open (4200-char ops element)");
+      await frozen(135, "R11-C2: unreadable ops element");
+      const ok = mk("r11-open-ok", small);
+      await submitAt(135, ok);
+      await trigger(challenger, wf, openD(135), 110000);
+      await trigger(operator, wf, { pred: "answer", answer: 1, height: 135, rollup: ROLLUP_ADDR, tree: "ops", index: 1, element: "Z" + small,
+        proof: merkle.getMerkleProof(ok.ops, 1) }, 20000);
+      if ((await vars(wf))[key(135)]) throw new Error("R11-C2: honest answer did not close the open");
+      await network.timetravel({ shift: "1201s" });
+      await triggerBounce(challenger, wf, { pred: "expire", expire: 1, height: 135, rollup: ROLLUP_ADDR, tree: "ops", index: 1 }, 20000, "no open");
+      await live(135, "R11-C2: answered open");
+    }
+    console.log("91. R11-C2: open-element challenge: 4200-char ops element unanswerable → expire → frozen; honest element answered → open closed, live");
+
+    // ---- 92. R11-L3: a fill in a unit whose op is a LIMIT Place at
+    // |price| >= MARK_CAP (1e15, rejected by the engine) → frozen (P-fsane) -
+    {
+      const PX = "1000000000000000";
+      const opL = `p:${FILL_TAKER}:1:0:${PX}:100000000:0:0:0:0`;
+      const f = `f:${isoUnit}:0:${FILL_TAKER}:${"c".repeat(64)}:${"7".repeat(64)}:${"8".repeat(64)}:1:${PX}:100000000:9:0:0:0`;
+      const t = fillsTree([f]);
+      const u = Object.assign(oneUnit("r11-l3", opL, [DEP_PRE, META1]), { unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(t), fillCount: 1 });
+      await submitAt(136, u);
+      await triggerVerdict(challenger, book, {
+        pred: "fsane", height: 136, rollup: ROLLUP_ADDR, k: 0, trace_root: u.traceRoot, fills_root: u.fillsRoot, ops_root: u.opsRoot, units_root: ISO_UNITS_ROOT,
+        units_proof: ISO_UNITS_PROOF, fill: f, fill_proof: merkle.getMerkleProof(t, 0), pre_wit: WIT_ROOT,
+        op: opL, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      }, 20000, "R11-L3: fill of a rejected MARK_CAP limit Place (P-fsane)");
+      await frozen(136, "R11-L3: MARK_CAP limit Place filled");
+    }
+    console.log("92. R11-L3: fill of a limit Place at price 1e15 (rejected by MARK_CAP) → frozen (P-fsane)");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

@@ -131,7 +131,7 @@ async function main() {
     // the rollup credits slash_reward_<trigger.address> and only that
     // address can {claim:'slash'} it.
     w.wallet.sendMultiPayment(
-      { paying_addresses: [w.address], change_address: w.address, to_address: disputeAddress, amount: 20000, messages },
+      { paying_addresses: [w.address], change_address: w.address, to_address: disputeAddress, amount: require("./script_helpers").challengeAmount(data.pred), messages },
       (err, u) => (err ? reject(new Error("send failed: " + err)) : resolve(u)),
     );
   });

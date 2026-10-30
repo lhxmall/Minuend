@@ -2065,6 +2065,9 @@ pub fn wit_root(state: &ChainState) -> String {
 /// as an EMPTY pre tree and so judged an honest height 1 as fraud. Pinned by
 /// `genesis_wit_root_is_pinned_in_every_dispute_aa`.
 pub const GENESIS_WIT_ROOT: &str = "eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=";
+/// R11-M1: leaf count of the genesis witness tree — the wf AA's after-max
+/// newness proof at height 1, unit 0 (pinned in `minuend_dispute_wf.aa`).
+pub const GENESIS_WIT_COUNT: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -2074,6 +2077,17 @@ mod tests {
     /// R9-C1: the genesis witness root is the literal every dispute AA uses
     /// for the height-1 k == 0 pre tree, and no AA still carries the
     /// `root(["empty"])` sentinel.
+    #[test]
+    fn genesis_wit_count_is_pinned_in_the_wf_aa() {
+        assert_eq!(wit_leaves(&ChainState::new()).len(), GENESIS_WIT_COUNT);
+        let p = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../obyte-local/agents/minuend_dispute_wf.aa"
+        );
+        let src = std::fs::read_to_string(p).expect("wf aa");
+        assert!(src.contains(&format!("(($h == 1) ? {GENESIS_WIT_COUNT} :")));
+    }
+
     #[test]
     fn genesis_wit_root_is_pinned_in_every_dispute_aa() {
         assert_eq!(wit_root(&ChainState::new()), GENESIS_WIT_ROOT);

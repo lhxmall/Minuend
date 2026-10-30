@@ -73,7 +73,28 @@ pub const CHAIN_ID: &str = "minuend-v2";
 /// - 6 (#47 round 8, with the m-frame rollup redeploy): the witness gives
 ///   every PERP / W holder an `acct:` leaf (R8-C3) and every bonded oracle
 ///   an `obond:{acct}:{unlock}` leaf (R8-H2).
-pub const ASSERTION_VERSION: u32 = 8;
+/// - 9 (#47 round 11): every committed element (ops / fills / witness
+///   leaf / trace / unit id) is at most [`MAX_ELEMENT_LEN`] chars and a unit
+///   text at most [`MAX_UNIT_TEXT_LEN`] (longer units are refused at
+///   ingest); an element the operator does not reveal within the window is
+///   fraud via the open-element challenge (wf AA); ids are read raw.
+pub const ASSERTION_VERSION: u32 = 9;
+/// R11-C2: hard cap on any committed Merkle element (ops descriptor, fills
+/// element, witness leaf). ocore cannot read a `trigger.data` string above
+/// 4096 chars, so an element longer than that is unprovable; the engine
+/// never writes one above this cap and the wf AA's open-element challenge
+/// only accepts an answer of at most this length.
+pub const MAX_ELEMENT_LEN: usize = 1024;
+/// R11-C2: cap on a unit's text (`mnu3|hex(canonical)|descriptor`), the
+/// `u_pre` + descriptor every unit-bound predicate reads from trigger.data.
+pub const MAX_UNIT_TEXT_LEN: usize = 2048;
+/// R11-C2: open-element challenge parameters (wf AA): opens are accepted
+/// during the first `OPEN_WINDOW_SECS` of a height's challenge window with a
+/// bond of at least `OPEN_BOND`; an open unanswered for
+/// `OPEN_RESPONSE_SECS` expires into a fraud verdict.
+pub const OPEN_WINDOW_SECS: u64 = 1800;
+pub const OPEN_RESPONSE_SECS: u64 = 1200;
+pub const OPEN_BOND: u64 = 100_000;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

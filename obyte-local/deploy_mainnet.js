@@ -230,7 +230,7 @@ async function main() {
     vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
-    assertion_version: 8,
+    assertion_version: 9,
     pool_fund_gross: POOL_FUND_GROSS,
     challenge_secs: CHALLENGE_SECS,
     deployed_at: new Date().toISOString(),

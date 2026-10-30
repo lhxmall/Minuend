@@ -110,7 +110,7 @@ require("./test_frame_stamp");
     wit_root: "W".repeat(44), trace_root: "T".repeat(44), units_root: "U".repeat(44),
     units_set_root: "S".repeat(44), ops_root: "O".repeat(44), fills_root: "F".repeat(44),
     counts_root: "C".repeat(44), unit_count: 3, wit_count: 11, fill_count: 2,
-    assertion_version: 8, data_root: "d".repeat(64),
+    assertion_version: 9, data_root: "d".repeat(64),
   };
   const s = ["minuend-da-v1", "minuend-v2", "7", "01".repeat(32), "02".repeat(32), "a".repeat(64),
     "W".repeat(44), "T".repeat(44), "U".repeat(44), "S".repeat(44), "O".repeat(44), "F".repeat(44),
@@ -119,6 +119,10 @@ require("./test_frame_stamp");
   assert.throws(() => daBindHash(Object.assign({}, f, { data_root: undefined })), /missing data_root/);
   // Round 2 routing: ghost/skip -> book AA, binding preds -> bind AA.
   assert.strictEqual(targetForPred("ghost"), "book");
+  // Round 11: the open-element challenge rides the wf AA, with its bond.
+  for (const p of ["open", "answer", "expire"]) assert.strictEqual(targetForPred(p), "wf");
+  assert.strictEqual(require("./script_helpers").challengeAmount("open"), 110000);
+  assert.strictEqual(require("./script_helpers").challengeAmount("wf"), 20000);
   assert.strictEqual(targetForPred("skip"), "book");
   assert.strictEqual(targetForPred("mbind"), "book"); // R4-A-1
   assert.strictEqual(targetForPred("fsane"), "book"); // R5-A-2

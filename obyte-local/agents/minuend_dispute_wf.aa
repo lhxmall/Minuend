@@ -118,6 +118,36 @@
 							AND array_length(trigger.data.end_proof.siblings) == $sib
 							AND is_valid_merkle_proof('~:end', trigger.data.end_proof)))
 							bounce('not a leaf');
+						// R11-M1: only a NEWLY written leaf is judged — $L is
+						// absent from unit k's PRE tree (adjacent straddle,
+						// before-min, or after-max: the last pre leaf, its
+						// index pinned by the pre leaf count). A malformed leaf
+						// that outlived its window is finalized state: honest
+						// continuations carry it verbatim and P-wf never
+						// judges it again (MECHANISMS § P-wf recovery).
+						$pre_wit = ($k == 0) ? (($h == 1) ? 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=' : var[$rollup]['wit_root_' || ($h - 1)]) : trigger.data.pre_wit;
+						if ($k > 0 AND (!trigger.data.pre_proof OR trigger.data.pre_proof.index != $k - 1 OR trigger.data.pre_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($pre_wit, trigger.data.pre_proof)))
+							bounce('bad pre proof');
+						$pl = trigger.data.pleft;
+						$pr = trigger.data.pright;
+						if (typeof($pl) != 'string' OR !contains($pl, ':') OR !trigger.data.pleft_proof OR trigger.data.pleft_proof.root != $pre_wit
+							OR !is_integer(trigger.data.pleft_proof.index) OR trigger.data.pleft_proof.index < 0
+							OR !is_valid_merkle_proof($pl, trigger.data.pleft_proof))
+							bounce('not new');
+						$pi = trigger.data.pleft_proof.index;
+						if ($L > $pl AND typeof($pr) != 'string') {
+							// after-max: pleft is the LAST pre leaf
+							$pc = ($k == 0) ? (($h == 1) ? 4 : var[$rollup]['wit_count_' || ($h - 1)]) : trigger.data.pre_count;
+							if ($k > 0 AND (!trigger.data.pre_count_proof OR trigger.data.pre_count_proof.index != $k - 1
+								OR trigger.data.pre_count_proof.root != var[$rollup]['counts_root_' || $h]
+								OR !is_valid_merkle_proof($pc, trigger.data.pre_count_proof)))
+								bounce('bad pre count');
+							if ($pi != $pc - 1) bounce('not new');
+						} else if (!(($pi == 0 AND $L < $pl) OR (typeof($pr) == 'string' AND contains($pr, ':') AND $pl < $L AND $L < $pr
+							AND trigger.data.pright_proof AND trigger.data.pright_proof.root == $pre_wit AND trigger.data.pright_proof.index == $pi + 1
+							AND is_valid_merkle_proof($pr, trigger.data.pright_proof))))
+							bounce('not new');
 					}
 					// One field of class $c: $v = the split value (numeric
 					// strings arrive as Decimal), $r = 'Z' || the raw field.
@@ -143,6 +173,14 @@
 						: (($t == 'dep') ? 'x'
 						: (($t == '~' AND $L == '~:end') ? 'x' : ''))))))))));
 					$ln = length($sp);
+					// R11-L1: hex fields are lowercase hex; an address is a
+					// valid Obyte address (an engine binding is written only
+					// for a deposit backed by the vault's record of its PAYER,
+					// a real Obyte address); a dep anchor is 44-char base64
+					// ending in '='.
+					$ad = ($t == 'adr') ? $R[1] : (($t == 'adrx') ? $R[2] : '');
+					$hs = ($t == 'f') ? ($R[1] || $R[3] || $R[4] || $R[5] || $R[6])
+						: (($t == 'ord') ? ($R[1] || $R[7]) : (($t == 'adr') ? $R[2] : (($t == 'dep' OR $t == '~' OR $t == 'band' OR $t == 'meta' OR $t == 'n') ? '' : $R[1])));
 					$ok = $ln > 0 AND array_length($Q) == $ln + 1
 						AND $fok($Q[1], $R[1], substring($sp, 0, 1))
 						AND ($ln < 2 OR $fok($Q[2], $R[2], substring($sp, 1, 1)))
@@ -156,7 +194,11 @@
 						AND ($ln < 10 OR $fok($Q[10], $R[10], substring($sp, 9, 1)))
 						AND ($ln < 11 OR $fok($Q[11], $R[11], substring($sp, 10, 1)))
 						AND ($ln < 12 OR $fok($Q[12], $R[12], substring($sp, 11, 1)))
-						AND ($ln < 13 OR $fok($Q[13], $R[13], substring($sp, 12, 1)));
+						AND ($ln < 13 OR $fok($Q[13], $R[13], substring($sp, 12, 1)))
+						AND length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($hs,
+							'Z', ''), '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) == 0
+						AND (($t == 'adr' OR $t == 'adrx') ? (length($ad) == 33 AND is_valid_address(substring($ad, 1)))
+							: (($t == 'dep') ? (length($R[1]) == 45 AND ends_with($R[1], '=')) : true));
 					if ($ok) bounce('no fraud');
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 				}",
@@ -185,6 +227,173 @@
 						app: "state",
 						state: "{
 							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
+				// R11-C2 open-element challenge (data availability of ONE
+				// committed element). ocore cannot read a trigger.data
+				// string above 4096 chars, so no predicate can judge an
+				// element the operator made oversized (or never published).
+				// Anyone names an element by (tree, k, index) of a submitted,
+				// unfrozen height during the first 1800 s of its window,
+				// with a bond >= 100000 bytes; anyone may answer it with the
+				// element ('Z' || element, at most 1024 chars, a ':'-bearing
+				// leaf / 64-char unit id / 44-char witness root) and its
+				// exact-depth proof (the bond goes to the answerer). An open
+				// still unanswered 1200 s after it was opened expires into a
+				// fraud verdict (the bond is refunded to the challenger).
+				// tree: ops / units / trace (index < unit_count), fills
+				// (index < fill_count + 1), wit (unit k's POST witness tree:
+				// post_wit + post_proof at trace index k, its leaf count from
+				// counts_root (count + count_proof at index k), index < count).
+				if: "{trigger.data.open}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					$sa = var[$rollup]['submitted_at_' || $h] otherwise 0;
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= $sa + 1800) bounce('open window closed');
+					if (trigger.output[[asset=base]] < 100000) bounce('need bond');
+					$tr = trigger.data.tree;
+					$j = trigger.data.index;
+					$wt = $tr == 'wit';
+					$k = $wt ? trigger.data.k : 0;
+					if (!is_integer($j) OR $j < 0 OR !is_integer($k) OR $k < 0 OR $k >= $n) bounce('bad index');
+					if ($wt) {
+						$root = trigger.data.post_wit;
+						if (typeof($root) != 'string' OR length($root) != 44 OR !trigger.data.post_proof OR trigger.data.post_proof.index != $k
+							OR trigger.data.post_proof.root != var[$rollup]['trace_root_' || $h] OR !is_valid_merkle_proof($root, trigger.data.post_proof)
+							OR 2 ^ array_length(trigger.data.post_proof.siblings) < $n OR 2 ^ array_length(trigger.data.post_proof.siblings) >= 2 * $n)
+							bounce('bad post proof');
+						$c = trigger.data.count;
+						if (!is_integer($c) OR $c < 1 OR !trigger.data.count_proof OR trigger.data.count_proof.index != $k
+							OR trigger.data.count_proof.root != var[$rollup]['counts_root_' || $h] OR !is_valid_merkle_proof($c, trigger.data.count_proof))
+							bounce('bad count');
+					} else {
+						if (!($tr == 'ops' OR $tr == 'units' OR $tr == 'trace' OR $tr == 'fills')) bounce('bad tree');
+						$root = var[$rollup][$tr || '_root_' || $h];
+						$c = ($tr == 'fills') ? (var[$rollup]['fill_count_' || $h] otherwise 0) + 1 : $n;
+					}
+					if (!$root OR $j >= $c) bounce('bad index');
+					$key = 'open_' || $rollup || '_' || $h || '_' || $tr || '_' || $k || '_' || $j;
+					if (var[$key]) bounce('already open');
+				}",
+				messages: [
+					{
+						app: "state",
+						state: "{
+							var[$key] = trigger.address;
+							var[$key || '_t'] = timestamp + 1200;
+							var[$key || '_r'] = $root;
+							var[$key || '_c'] = $c;
+							var[$key || '_s'] = $sa;
+							var[$key || '_b'] = trigger.output[[asset=base]];
+						}"
+					}
+				]
+			},
+			{
+				if: "{trigger.data.answer}",
+				init: "{
+					$tr = trigger.data.tree;
+					$key = 'open_' || trigger.data.rollup || '_' || trigger.data.height || '_' || $tr || '_' || (($tr == 'wit') ? trigger.data.k : 0) || '_' || trigger.data.index;
+					if (!var[$key]) bounce('no open');
+					$x = trigger.data.element;
+					$e = substring((typeof($x) == 'string') ? $x : '', 1);
+					$c = var[$key || '_c'];
+					$sib = array_length(trigger.data.proof.siblings);
+					if (typeof($x) != 'string' OR !starts_with($x, 'Z') OR length($e) > 1024
+						OR (($tr == 'units') ? length($e) != 64 : (($tr == 'trace') ? length($e) != 44 : !contains($e, ':')))
+						OR trigger.data.proof.root != var[$key || '_r'] OR trigger.data.proof.index != trigger.data.index
+						OR 2 ^ $sib < $c OR 2 ^ $sib >= 2 * $c
+						OR !is_valid_merkle_proof($e, trigger.data.proof))
+						bounce('bad answer');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.address}",
+									amount: "{var[$key || '_b']}"
+								}
+							]
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var[$key] = false;
+							var[$key || '_t'] = false;
+							var[$key || '_r'] = false;
+							var[$key || '_c'] = false;
+							var[$key || '_s'] = false;
+							var[$key || '_b'] = false;
+						}"
+					}
+				]
+			},
+			{
+				// Expiry: verdict when the height is still challengeable and
+				// is the SAME submission the open named; otherwise (frozen,
+				// window over, resubmitted) only the bond is refunded.
+				if: "{trigger.data.expire}",
+				init: "{
+					$tr = trigger.data.tree;
+					$rollup = trigger.data.rollup;
+					$h = trigger.data.height;
+					$key = 'open_' || $rollup || '_' || $h || '_' || $tr || '_' || (($tr == 'wit') ? trigger.data.k : 0) || '_' || trigger.data.index;
+					$ch = var[$key];
+					if (!$ch) bounce('no open');
+					if (timestamp < var[$key || '_t']) bounce('not expired');
+					$sa = var[$rollup]['submitted_at_' || $h] otherwise 0;
+					$live = !var[$rollup]['frozen_' || $h] AND var[$rollup]['state_root_' || $h] AND $sa == var[$key || '_s'] AND timestamp < $sa + 3600;
+					if ($live AND trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{$rollup}",
+									amount: "{$live ? 10000 : 0}"
+								},
+								{
+									address: "{$ch}",
+									amount: "{var[$key || '_b']}"
+								}
+							]
+						}
+					},
+					{
+						if: "{$live}",
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{$h}",
+							challenger: "{$ch}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							if ($live)
+								var['fraud_' || $h] = $ch;
+							var[$key] = false;
+							var[$key || '_t'] = false;
+							var[$key || '_r'] = false;
+							var[$key || '_c'] = false;
+							var[$key || '_s'] = false;
+							var[$key || '_b'] = false;
 						}"
 					}
 				]

@@ -153,8 +153,9 @@ function targetForPred(pred) {
   // leaf on the m-frame AA.
   if (pred === "xframe" || pred === "tsize") return "xframe";
   if (pred === "mframe") return "mframe";
-  // Round 10: P-wf (malformed leaf / fill field) on the wf AA.
-  if (pred === "wf") return "wf";
+  // Round 10: P-wf (malformed leaf / fill field) on the wf AA; round 11:
+  // the open-element challenge (open / answer / expire) lives there too.
+  if (pred === "wf" || pred === "open" || pred === "answer" || pred === "expire") return "wf";
   // Round 9: P-noband moved to the claw AA (m-frame ops budget).
   if (pred === "noband") return "claw";
   // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA;
@@ -164,6 +165,12 @@ function targetForPred(pred) {
   // Round 7: P-opbind (ops leaf vs unit text) lives on the main dispute AA,
   // with deposit / withdraw / escrow.
   return "main";
+}
+
+// R11-C2: an open-element challenge carries its bond (>= 100000 bytes on the
+// wf AA); every other predicate (and answer / expire) pays the 20000 fee.
+function challengeAmount(pred) {
+  return pred === "open" ? 110000 : 20000;
 }
 
 // Default light hubs per network (override with MINUEND_WATCH_HUB).
@@ -185,6 +192,7 @@ module.exports = {
   hubFor,
   daBindHash,
   targetForPred,
+  challengeAmount,
   DA_BIND_FIELDS,
   CHALLENGE_WINDOW_SECS,
   CHALLENGE_SAFETY_MARGIN_SECS,

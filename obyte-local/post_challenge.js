@@ -16,7 +16,7 @@
 
 const path = require("path");
 const fs = require("fs");
-const { envCompat, disputeTarget, targetForPred } = require("./script_helpers");
+const { envCompat, disputeTarget, targetForPred, challengeAmount } = require("./script_helpers");
 
 const aaRoot = path.join(__dirname, "..", "vendor", "aa-testkit");
 const nm = path.join(aaRoot, "node_modules");
@@ -108,7 +108,7 @@ async function main() {
   const data = Object.assign({ height, pred, rollup }, proof);
   const r = await challenger.triggerAaWithData({
     toAddress: dispute,
-    amount: 20000,
+    amount: challengeAmount(pred),
     data,
   });
   if (r.error) throw new Error("challenge failed: " + r.error);

@@ -273,7 +273,7 @@ async function main() {
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
-    assertion_version: 8,
+    assertion_version: 9,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };
