@@ -35,6 +35,13 @@ pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
 /// shrink positions, so no fill can ever lift a position to `QTY_CAP`.
 /// A Place breaking it is rejected (`RejectReason::Risk`).
 pub const QTY_CAP: u64 = 1_000_000_000_000_000;
+/// R9-H2 (round 9 of #47): every mark stays below 1e15 in magnitude
+/// (<= 15 digits), the range in which the m-frame dispute AA compares old
+/// and new marks exactly (+-10 % band, funding-rate step). A ReportPrice
+/// median or a fill price at / above the cap never becomes the mark (the
+/// previous mark is kept), and the AA judges a mark at / above it as out of
+/// band.
+pub const MARK_CAP: i64 = 1_000_000_000_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
 /// Dispute-predicate / execution-rules version committed in every batch.
 /// Pinned by the rollup AA (`assertion_version != 5` bounces), so it can
@@ -66,7 +73,7 @@ pub const CHAIN_ID: &str = "minuend-v2";
 /// - 6 (#47 round 8, with the m-frame rollup redeploy): the witness gives
 ///   every PERP / W holder an `acct:` leaf (R8-C3) and every bonded oracle
 ///   an `obond:{acct}:{unlock}` leaf (R8-H2).
-pub const ASSERTION_VERSION: u32 = 6;
+pub const ASSERTION_VERSION: u32 = 7;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;

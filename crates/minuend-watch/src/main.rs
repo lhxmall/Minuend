@@ -390,8 +390,8 @@ struct ChallengeCtx {
     /// Round 7b: P-xframe (+ P-tsize since round 8) lives on
     /// `minuend_dispute_xframe.aa` (rollup var `dispute_xframe_aa`).
     dispute_xframe: Option<String>,
-    /// Round 8: P-mframe / P-noband live on `minuend_dispute_mframe.aa`
-    /// (rollup var `dispute_mframe_aa`).
+    /// Round 8: P-mframe lives on `minuend_dispute_mframe.aa` (rollup var
+    /// `dispute_mframe_aa`); P-noband moved to the claw AA in round 9.
     dispute_mframe: Option<String>,
     proof_dir: PathBuf,
 }
@@ -1479,6 +1479,12 @@ fn main() -> anyhow::Result<()> {
     let mut known_lf: u64 = 0;
     // R4-R-8: the frozen tip already announced as awaiting re-submission.
     let mut announced_frozen: Option<u64> = None;
+    // R9-M1: the last validated height's committed final witness leaves
+    // (the k == 0 pre tree of the next height) survive across poll rounds —
+    // in steady state each round sees ONE new height, so a per-round value
+    // was always empty and every k == 0 proof after a bond release bounced
+    // 'bad pre wit'. Cleared on every rewind (keyed by height anyway).
+    let mut prev_final: Option<(u64, Vec<String>)> = None;
 
     loop {
         if stop_requested() {
@@ -1487,7 +1493,6 @@ fn main() -> anyhow::Result<()> {
         }
         // R5-R-2: vault reads (failures included) are cached for one round.
         let mut vault_cache = VaultReadCache::new();
-        let mut prev_final: Option<(u64, Vec<String>)> = None;
         // R2-R-11: report background challenge posters that finished.
         for line in with_tracker(|t| t.poll()) {
             eprintln!("{line}");
@@ -1583,6 +1588,7 @@ fn main() -> anyhow::Result<()> {
                                 cap_store(&state_dir, temp_mode, lf);
                                 engine = eng;
                                 cursor.rewind_to(at);
+                                prev_final = None;
                                 accepted.retain(|h, _| *h <= at);
                                 if at < t {
                                     println!(
@@ -1634,6 +1640,7 @@ fn main() -> anyhow::Result<()> {
                                 cap_store(&state_dir, temp_mode, lf);
                                 engine = eng;
                                 cursor.rewind_to(at);
+                                prev_final = None;
                                 accepted.retain(|k, _| *k <= at);
                                 println!("WATCH ALERT: rewound the replay to h={at}");
                             }
@@ -1966,7 +1973,7 @@ mod tests {
             ("xframe", "xframe", "Q"),
             ("tsize", "xframe", "Q"),
             ("mframe", "mframe", "R"),
-            ("noband", "mframe", "R"),
+            ("noband", "claw", "C"),
         ] {
             let xf = minuend_watch::prove::BuiltProof {
                 pred: pred.into(),

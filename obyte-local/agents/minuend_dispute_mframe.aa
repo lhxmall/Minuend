@@ -27,13 +27,9 @@
 	//     (regular, non-spot; oracle bonded unless bleft/bright prove
 	//     otherwise), regular markets within +-10 % (R8-H1); pre only + the
 	//     [meta:m:, meta:m;) straddle in post -> deleted (fraud); post only +
-	//     the straddle in pre (or the empty pre tree) -> created outside
+	//     the straddle in pre -> created outside
 	//     CreateMarket (fraud).
-	// pred 'tsize': a committed ops / units / trace / fills tree whose size
-	//   is not its committed count (see the case below).
-	// pred 'noband': `meta` (+meta_proof) in post_wit and the
-	//   [band:m:, band:m;) straddle left/right in post_wit: a market without
-	//   its band leaf (the ADL price of P-claw needs it) is fraud.
+	// pred 'noband' moved to minuend_dispute_claw.aa in round 9 (ops budget).
 	// Witness layout (minuend-state wit_leaves): band:{m}:{min}:{max},
 	// obond:{X}:{unlock}, meta: 11 fields
 	// (meta:{m}:{tick}:{im}:{mm}:{fee}:{keeper}:{delisted}:{mark}:{usd}:{cap}).
@@ -75,7 +71,7 @@
 				]
 			},
 			{
-				if: "{trigger.data.pred == 'mframe' OR trigger.data.pred == 'noband'}",
+				if: "{trigger.data.pred == 'mframe'}",
 				init: "{
 					$h = trigger.data.height;
 					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
@@ -92,7 +88,6 @@
 					$k = trigger.data.k;
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
-					$E = 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=';
 					$S = trigger.data;
 					$post_wit = $S.post_wit;
 					if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !$S.post_proof OR $S.post_proof.index != $k
@@ -100,286 +95,292 @@
 						OR !is_valid_merkle_proof($post_wit, $S.post_proof)
 						OR ($n > 1 AND (2 ^ array_length($S.post_proof.siblings) < $n OR 2 ^ array_length($S.post_proof.siblings) >= 2 * $n)))
 						bounce('bad post proof');
-					// One-sided straddle: [lo, hi) holds no leaf of tree T.
-					// R8-C2: indices compared here live in the sorted witness
-					// tree, where an aliased right index can only wrap to
-					// (max leaf `~:end`, min leaf), which never straddles.
-					if ($S.pred == 'noband') {
-						$pm = $S.meta;
-						if (typeof($pm) != 'string') bounce('bad meta');
-						$M = split($pm, ':');
-						if (array_length($M) != 11 OR $M[0] != 'meta'
-							OR !is_valid_merkle_proof($pm, $S.meta_proof) OR $S.meta_proof.root != $post_wit)
-							bounce('bad meta');
-						$blo = 'band:' || $M[1] || ':';
-						$bhi = 'band:' || $M[1] || ';';
-						$nb1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
-							AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-							AND $S.left_proof.index + 1 == $S.right_proof.index
-							AND $S.left_proof.root == $post_wit AND $S.right_proof.root == $post_wit
-							AND $S.left < $blo AND $bhi <= $S.right
-							AND is_valid_merkle_proof($S.left, $S.left_proof)
-							AND is_valid_merkle_proof($S.right, $S.right_proof);
-						$nb2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
-							AND $S.left_proof.root == $post_wit AND $bhi <= $S.left
-							AND is_valid_merkle_proof($S.left, $S.left_proof);
-						if (!$nb1 AND !$nb2) bounce('no fraud');
+					// R8-C2: indices compared in the sorted witness tree can only
+					// wrap to (max leaf `~:end`, min leaf), which never straddles.
+					$op = $S.op;
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !$S.ops_proof OR $S.ops_proof.index != $k
+						OR $S.ops_proof.root != $S.ops_root
+						OR !is_valid_merkle_proof($op, $S.ops_proof)
+						OR ($n > 1 AND (2 ^ array_length($S.ops_proof.siblings) < $n OR 2 ^ array_length($S.ops_proof.siblings) >= 2 * $n)))
+						bounce('bad ops proof');
+					$pre_wit = $S.pre_wit;
+					if ($k == 0){
+						if ($pre_wit != (($h == 1) ? 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=' : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
 					} else {
-						$op = $S.op;
-						if (typeof($op) != 'string' OR !contains($op, ':') OR !$S.ops_proof OR $S.ops_proof.index != $k
-							OR $S.ops_proof.root != $S.ops_root
-							OR !is_valid_merkle_proof($op, $S.ops_proof)
-							OR ($n > 1 AND (2 ^ array_length($S.ops_proof.siblings) < $n OR 2 ^ array_length($S.ops_proof.siblings) >= 2 * $n)))
-							bounce('bad ops proof');
-						$pre_wit = $S.pre_wit;
-						if ($k == 0){
-							if ($pre_wit != (($h == 1) ? $E : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
+						if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !$S.pre_proof OR $S.pre_proof.index != $k - 1 OR $S.pre_proof.root != $S.trace_root
+							OR !is_valid_merkle_proof($pre_wit, $S.pre_proof))
+							bounce('bad pre proof');
+					}
+					$isx = starts_with($op, 'x:');
+					// R8-C1: every allowance below depends on the op tag,
+					// so an `x:` op is judged only with its unit text (a
+					// challenger can no longer hide an honest tag by
+					// leaving `u_pre` out).
+					$u = $S.unit;
+					if ($isx) {
+						$pre = $S.u_pre;
+						if (typeof($u) != 'string' OR length($u) != 64 OR $op != ('x:' || $u) OR !$S.units_proof
+							OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root
+							OR !is_valid_merkle_proof($u, $S.units_proof)
+							OR ($n > 1 AND array_length($S.units_proof.siblings) != array_length($S.ops_proof.siblings)))
+							bounce('bad unit');
+						if (typeof($pre) != 'string' OR !starts_with($pre, 'mnu3|') OR !ends_with($pre, '|') OR array_length(split($pre, '|')) != 3
+							OR sha256($pre || 'x', 'hex') != $u)
+							bounce('bad unit text');
+						$np = substring($pre, 13, 2);
+						if ($np != '00' AND $np != '01' AND $np != '02') bounce('bad unit text');
+						$tp = 15 + (($np == '02') ? 128 : (($np == '01') ? 64 : 0));
+						$tq = (substring($pre, $tp, 2) == '13') ? $tp + 130 : $tp;
+						$tag = substring($pre, $tq, 2);
+						$oa = substring($pre, $tq + 2, 64);
+					} else {
+						$tag = '';
+						$oa = '';
+					}
+					// Straddle of the bond prefix of the op account in pre:
+					// the oracle holds no bond, so a ReportPrice is ignored.
+					$bdlo = 'obond:' || $oa || ':';
+					$bdhi = 'obond:' || $oa || ';';
+					$nobond = $isx AND $S.bleft AND contains($S.bleft, ':') AND $S.bleft_proof.root == $pre_wit
+						AND is_valid_merkle_proof($S.bleft, $S.bleft_proof)
+						AND (($S.bright AND contains($S.bright, ':')
+							AND is_integer($S.bleft_proof.index) AND $S.bleft_proof.index >= 0
+							AND $S.bleft_proof.index + 1 == $S.bright_proof.index
+							AND $S.bright_proof.root == $pre_wit
+							AND $S.bleft < $bdlo AND $bdhi <= $S.bright
+							AND is_valid_merkle_proof($S.bright, $S.bright_proof))
+						OR ($S.bleft_proof.index == 0 AND $bdhi <= $S.bleft));
+					$L = $S.leaf;
+					if (typeof($L) == 'string') {
+						$Q = split($L, ':');
+						$ins = $S.ins ? true : false;
+						if ($Q[0] == 'band' AND array_length($Q) == 4) {
+							if ($S.keep) bounce('bad leaf');
+							// A band appears only with its CreateMarket.
+							if ($ins AND $tag == '0a') bounce('no fraud');
 						} else {
-							if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !$S.pre_proof OR $S.pre_proof.index != $k - 1 OR $S.pre_proof.root != $S.trace_root
-								OR !is_valid_merkle_proof($pre_wit, $S.pre_proof))
-								bounce('bad pre proof');
-						}
-						$isx = starts_with($op, 'x:');
-						// R8-C1: every allowance below depends on the op tag,
-						// so an `x:` op is judged only with its unit text (a
-						// challenger can no longer hide an honest tag by
-						// leaving `u_pre` out).
-						$u = $S.unit;
-						if ($isx) {
-							$pre = $S.u_pre;
-							if (typeof($u) != 'string' OR length($u) != 64 OR $op != ('x:' || $u) OR !$S.units_proof
-								OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root
-								OR !is_valid_merkle_proof($u, $S.units_proof)
-								OR ($n > 1 AND array_length($S.units_proof.siblings) != array_length($S.ops_proof.siblings)))
-								bounce('bad unit');
-							if (typeof($pre) != 'string' OR !starts_with($pre, 'mnu3|') OR !ends_with($pre, '|') OR array_length(split($pre, '|')) != 3
-								OR sha256($pre || 'x', 'hex') != $u)
-								bounce('bad unit text');
-							$np = substring($pre, 13, 2);
-							if ($np != '00' AND $np != '01' AND $np != '02') bounce('bad unit text');
-							$tp = 15 + (($np == '02') ? 128 : (($np == '01') ? 64 : 0));
-							$tq = (substring($pre, $tp, 2) == '13') ? $tp + 130 : $tp;
-							$tag = substring($pre, $tq, 2);
-							$oa = substring($pre, $tq + 2, 64);
-						} else {
-							$tag = '';
-							$oa = '';
-						}
-						// Straddle of the bond prefix of the op account in pre:
-						// the oracle holds no bond, so a ReportPrice is ignored.
-						$bdlo = 'obond:' || $oa || ':';
-						$bdhi = 'obond:' || $oa || ';';
-						$nobond = $isx AND $S.bleft AND contains($S.bleft, ':') AND $S.bleft_proof.root == $pre_wit
-							AND is_valid_merkle_proof($S.bleft, $S.bleft_proof)
-							AND (($S.bright AND contains($S.bright, ':')
-								AND is_integer($S.bleft_proof.index) AND $S.bleft_proof.index >= 0
-								AND $S.bleft_proof.index + 1 == $S.bright_proof.index
-								AND $S.bright_proof.root == $pre_wit
-								AND $S.bleft < $bdlo AND $bdhi <= $S.bright
-								AND is_valid_merkle_proof($S.bright, $S.bright_proof))
-							OR ($S.bleft_proof.index == 0 AND $bdhi <= $S.bleft));
-						$L = $S.leaf;
-						if (typeof($L) == 'string') {
-							$Q = split($L, ':');
-							$ins = $S.ins ? true : false;
-							if ($Q[0] == 'band' AND array_length($Q) == 4) {
-								if ($S.keep) bounce('bad leaf');
-								// A band appears only with its CreateMarket.
-								if ($ins AND $tag == '0a') bounce('no fraud');
+							// R8-H2: `obond:{X}:{unlock}` frame. Created by
+							// StakeOracle (unlock 0) or UnstakeOracle (unlock
+							// = the batch's execution height h - 1 +
+							// ORACLE_UNBOND_HEIGHTS) of X; removed by
+							// UnstakeOracle (the unlock-0 leaf), SlashOracle
+							// of target X, or the batch boundary (k == 0,
+							// 0 < unlock <= h - 1). `keep`: such an expired
+							// leaf still in unit 0's post tree.
+							if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($Q[1]) == 64))
+								bounce('bad leaf');
+							$uq = json_parse($Q[2]);
+							$exp = $k == 0 AND length($Q[2]) <= 15 AND !starts_with($Q[2], '0') AND is_integer($uq) AND $uq <= $h - 1;
+							if ($S.keep) {
+								if (!$exp OR !is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $pre_wit
+									OR !is_valid_merkle_proof($L, $S.keep_proof) OR $S.keep_proof.root != $post_wit)
+									bounce('no fraud');
 							} else {
-								// R8-H2: `obond:{X}:{unlock}` frame. Created by
-								// StakeOracle (unlock 0) or UnstakeOracle (unlock
-								// = the batch's execution height h - 1 +
-								// ORACLE_UNBOND_HEIGHTS) of X; removed by
-								// UnstakeOracle (the unlock-0 leaf), SlashOracle
-								// of target X, or the batch boundary (k == 0,
-								// 0 < unlock <= h - 1). `keep`: such an expired
-								// leaf still in unit 0's post tree.
-								if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($Q[1]) == 64))
-									bounce('bad leaf');
-								$uq = json_parse($Q[2]);
-								$exp = $k == 0 AND length($Q[2]) <= 15 AND !starts_with($Q[2], '0') AND is_integer($uq) AND $uq <= $h - 1;
-								if ($S.keep) {
-									if (!$exp OR !is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $pre_wit
-										OR !is_valid_merkle_proof($L, $S.keep_proof) OR $S.keep_proof.root != $post_wit)
-										bounce('no fraud');
-								} else {
-									// A rejected 0e / 0f writes nothing: the
-									// challenger may show oa already holds a bond
-									// leaf (pob) — a 0e is then rejected, a 0f
-									// needs it at unlock 0 — that oa holds no bond
-									// (bleft/bright: 0f rejected), or that oa's
-									// PERP was not debited by the 0e (pa0 / pa1
-									// with equal PERP, or no pre acct leaf of oa:
-									// aleft/aright).
-									$pob = $S.pob;
-									$pobok = typeof($pob) == 'string' AND starts_with($pob, $bdlo)
-										AND is_valid_merkle_proof($pob, $S.pob_proof) AND $S.pob_proof.root == $pre_wit;
-									$alo = 'acct:' || $oa || ':';
-									$ahi = 'acct:' || $oa || ';';
-									$A0 = split(typeof($S.pa0) == 'string' ? $S.pa0 : '-', ':');
-									$A1 = split(typeof($S.pa1) == 'string' ? $S.pa1 : '-', ':');
-									$nodebit = (array_length($A0) == 5 AND array_length($A1) == 5 AND starts_with($S.pa0, $alo) AND starts_with($S.pa1, $alo)
-											AND $A0[3] == $A1[3]
-											AND is_valid_merkle_proof($S.pa0, $S.pa0_proof) AND $S.pa0_proof.root == $pre_wit
-											AND is_valid_merkle_proof($S.pa1, $S.pa1_proof) AND $S.pa1_proof.root == $post_wit)
-										OR ($S.aleft AND contains($S.aleft, ':') AND $S.aleft_proof.root == $pre_wit
-											AND is_valid_merkle_proof($S.aleft, $S.aleft_proof)
-											AND (($S.aright AND contains($S.aright, ':')
-												AND is_integer($S.aleft_proof.index) AND $S.aleft_proof.index >= 0
-												AND $S.aleft_proof.index + 1 == $S.aright_proof.index
-												AND $S.aright_proof.root == $pre_wit
-												AND $S.aleft < $alo AND $ahi <= $S.aright
-												AND is_valid_merkle_proof($S.aright, $S.aright_proof))
-											OR ($S.aleft_proof.index == 0 AND $ahi <= $S.aleft)));
-									if ($ins ? ($Q[1] == $oa AND (($tag == '0e' AND $Q[2] == '0' AND !$pobok AND !$nodebit)
-											OR ($tag == '0f' AND $Q[2] == $h + 255 AND !$nobond AND !($pobok AND $pob != ($bdlo || '0')))))
-										: (($Q[1] == $oa AND $tag == '0f' AND $Q[2] == '0') OR ($tag == '10' AND $Q[1] == substring($pre, $tq + 66, 64)) OR $exp))
-										bounce('no fraud');
-								}
+								// A rejected 0e / 0f writes nothing: the
+								// challenger may show oa already holds a bond
+								// leaf (pob) — a 0e is then rejected, a 0f
+								// needs it at unlock 0 — that oa holds no bond
+								// (bleft/bright: 0f rejected), or that oa's
+								// PERP was not debited by the 0e (pa0 / pa1
+								// with equal PERP, or no pre acct leaf of oa:
+								// aleft/aright).
+								// R9-H1: at k == 0 an EXPIRED leaf of oa (0 < unlock
+								// <= h - 1) was released at the commit of h - 1, so
+								// it does not reject a 0e, and the refund
+								// (+ORACLE_BOND_PERP) nets the 0e debit to 0.
+								$pob = $S.pob;
+								$pq = (typeof($pob) == 'string') ? substring($pob, 71, length($pob)) : '';
+								$pqv = json_parse($pq);
+								$pobok = typeof($pob) == 'string' AND starts_with($pob, $bdlo)
+									AND is_valid_merkle_proof($pob, $S.pob_proof) AND $S.pob_proof.root == $pre_wit;
+								$pexp = $pobok AND $k == 0 AND length($pq) <= 15 AND !starts_with($pq, '0') AND is_integer($pqv) AND $pqv <= $h - 1;
+								$alo = 'acct:' || $oa || ':';
+								$ahi = 'acct:' || $oa || ';';
+								$A0 = split(typeof($S.pa0) == 'string' ? $S.pa0 : '-', ':');
+								$A1 = split(typeof($S.pa1) == 'string' ? $S.pa1 : '-', ':');
+								// Not debited: equal PERP (at k == 0 only with
+								// bleft/bright proving oa held no bond, else the
+								// refund may have paid the 0e), or +50000 at k == 0.
+								$nodebit = (array_length($A0) == 5 AND array_length($A1) == 5 AND starts_with($S.pa0, $alo) AND starts_with($S.pa1, $alo)
+										AND (($A0[3] == $A1[3]) ? ($k > 0 OR $nobond) : ($k == 0 AND length($A0[3]) <= 14 AND $A1[3] == $A0[3] + 50000))
+										AND is_valid_merkle_proof($S.pa0, $S.pa0_proof) AND $S.pa0_proof.root == $pre_wit
+										AND is_valid_merkle_proof($S.pa1, $S.pa1_proof) AND $S.pa1_proof.root == $post_wit)
+									OR ($S.aleft AND contains($S.aleft, ':') AND $S.aleft_proof.root == $pre_wit
+										AND is_valid_merkle_proof($S.aleft, $S.aleft_proof)
+										AND (($S.aright AND contains($S.aright, ':')
+											AND is_integer($S.aleft_proof.index) AND $S.aleft_proof.index >= 0
+											AND $S.aleft_proof.index + 1 == $S.aright_proof.index
+											AND $S.aright_proof.root == $pre_wit
+											AND $S.aleft < $alo AND $ahi <= $S.aright
+											AND is_valid_merkle_proof($S.aright, $S.aright_proof))
+										OR ($S.aleft_proof.index == 0 AND $ahi <= $S.aleft)));
+								if ($ins ? ($Q[1] == $oa AND (($tag == '0e' AND $Q[2] == '0' AND !($pobok AND !$pexp) AND !$nodebit)
+										OR ($tag == '0f' AND $Q[2] == $h + 255 AND !$nobond AND !($pobok AND $pob != ($bdlo || '0')))))
+									: (($Q[1] == $oa AND $tag == '0f' AND $Q[2] == '0') OR ($tag == '10' AND $Q[1] == substring($pre, $tq + 66, 64)) OR $exp))
+									bounce('no fraud');
 							}
-							if (!$S.keep) {
-								// Leaf frame: member of src, exactly absent from dst.
-								$src = $ins ? $post_wit : $pre_wit;
-								$dst = $ins ? $pre_wit : $post_wit;
-								if (!is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $src)
-									bounce('bad leaf proof');
-								$m1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
-									AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-									AND $S.left_proof.index + 1 == $S.right_proof.index
-									AND $S.left_proof.root == $dst AND $S.right_proof.root == $dst
-									AND $S.left < $L AND $L < $S.right
-									AND is_valid_merkle_proof($S.left, $S.left_proof)
-									AND is_valid_merkle_proof($S.right, $S.right_proof);
-								$m2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
-									AND $S.left_proof.root == $dst AND $L < $S.left
-									AND is_valid_merkle_proof($S.left, $S.left_proof);
-								if (!$m1 AND !$m2 AND !($ins AND $dst == $E)) bounce('no fraud');
-							}
-						} else {
-							// meta arms.
-							$m0 = $S.pre_meta;
-							$m1x = $S.post_meta;
-							$g0 = typeof($m0) == 'string';
-							$g1 = typeof($m1x) == 'string';
-							if (!$g0 AND !$g1) bounce('bad meta');
-							$M0 = split($g0 ? $m0 : '-', ':');
-							$M1 = split($g1 ? $m1x : '-', ':');
-							if ($g0 AND (array_length($M0) != 11 OR $M0[0] != 'meta'
-								OR !is_valid_merkle_proof($m0, $S.pre_meta_proof) OR $S.pre_meta_proof.root != $pre_wit))
-								bounce('bad pre meta');
-							if ($g1 AND (array_length($M1) != 11 OR $M1[0] != 'meta'
-								OR !is_valid_merkle_proof($m1x, $S.post_meta_proof) OR $S.post_meta_proof.root != $post_wit))
-								bounce('bad post meta');
-							if ($g0 AND $g1) {
-								if ($M0[1] != $M1[1]) bounce('bad meta');
-								if ($m0 == $m1x) bounce('no fraud');
-								$d3 = $M0[3] != $M1[3];
-								$d4 = $M0[4] != $M1[4];
-								$d5 = $M0[5] != $M1[5];
-								$d6 = $M0[6] != $M1[6];
-								$d7 = $M0[7] != $M1[7];
-								$pc = $d3 OR $d4 OR $d5 OR $d6 OR $d7 OR $M0[2] != $M1[2] OR $M0[9] != $M1[9] OR $M0[10] != $M1[10];
-								if ($pc) {
-									// R8-C5 (interim, the proposal is not in the
-									// witness): FinalizeProposal (0d) applies ONE
-									// key — im / mm / fee / keeper with the new set
-									// still risk_params_ok (spot: fee never
-									// raised), or Delist 0 -> 1 — and never
-									// touches tick, usd, cap or the mark.
-									$im = json_parse($M1[3]);
-									$mm = json_parse($M1[4]);
-									$fee = json_parse($M1[5]);
-									$kp = json_parse($M1[6]);
-									$cap = json_parse($M1[10]);
-									$fee0 = json_parse($M0[5]);
-									$legal = is_integer($im) AND is_integer($mm) AND is_integer($fee) AND is_integer($kp) AND is_integer($cap) AND is_integer($fee0)
-										AND $fee >= 1 AND $fee <= 200 AND $kp >= 1 AND $im > $mm
-										AND (($im == 10000) ? ($mm >= 500 AND $kp <= 500 AND $cap == 0 AND $fee <= $fee0)
-											: ($im <= 5000 AND (($cap == 0) ? ($mm >= 500 AND $kp <= 500 AND $im >= 500)
-												: ($mm >= 50 AND $im >= 100 AND $cap <= 500 AND $im >= 10 * $cap AND $kp * 10 <= $im))));
-									if ($tag == '0d' AND $M0[8] == $M1[8] AND $M0[2] == $M1[2] AND $M0[9] == $M1[9] AND $M0[10] == $M1[10]
-										AND ($d3 ? 1 : 0) + ($d4 ? 1 : 0) + ($d5 ? 1 : 0) + ($d6 ? 1 : 0) + ($d7 ? 1 : 0) == 1
-										AND ($d7 ? ($M0[7] == '0' AND $M1[7] == '1') : $legal))
-										bounce('no fraud');
-								} else {
-									// R8-H1: only the mark moved. Allowed only in
-									// the op's own market: a Place / Liquidate to
-									// its unit's fill price (one fill per unit),
-									// an accepted ReportPrice (bonded oracle,
-									// regular non-spot market) within +-10 % of
-									// the old mark; UpdateExternalPrice never.
-									// Regular markets (usd 0) move at most 10 %.
-									$o8 = json_parse($M0[8]);
-									$n8 = json_parse($M1[8]);
-									$band = length($M0[8]) > 15 OR length($M1[8]) > 15
-										OR (is_integer($o8) AND is_integer($n8) AND ($o8 == 0 OR abs($n8 - $o8) <= abs($o8) / 10 + 1));
-									// p: / L: of this market: the unit's fill (one
-									// per unit) is REQUIRED evidence — or the proof
-									// that unit k has none (its fills-tree
-									// neighbours belong to an earlier / a later
-									// unit, every compared index inside its tree;
-									// R8-C2) — so leaving it out cannot hide an
-									// honest move.
-									$zO = split($op, ':');
-									$plm = ($zO[0] == 'p' AND array_length($zO) == 10 AND $zO[2] == $M0[1]) OR ($zO[0] == 'L' AND array_length($zO) == 4 AND $zO[3] == $M0[1]);
-									if ($plm) {
-										if ($S.fills_root != var[$rollup]['fills_root_' || $h] OR typeof($u) != 'string' OR length($u) != 64 OR !$S.units_proof
-											OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root OR !is_valid_merkle_proof($u, $S.units_proof))
-											bounce('bad unit');
-										$fl = $S.fill;
-										$F = split(typeof($fl) == 'string' ? $fl : '-', ':');
-										$hasF = array_length($F) == 14 AND $F[0] == 'f' AND $F[1] == $u AND $F[2] == '0'
-											AND $S.fill_proof.root == $S.fills_root AND is_valid_merkle_proof($fl, $S.fill_proof);
-										if (!$hasF) {
-											$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
-											$rt = $S.fright;
-											$ri = $S.fright_proof.index;
-											$pv = $S.fprev;
-											if ($fc > 1 AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND $S.fright_proof.root == $S.fills_root
-												AND 2 ^ array_length($S.fright_proof.siblings) >= $fc AND 2 ^ array_length($S.fright_proof.siblings) < 2 * $fc
-												AND is_valid_merkle_proof($rt, $S.fright_proof)
-												AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND is_integer($S.fright_up.index) AND $S.fright_up.index > $k
-													AND $S.fright_up.index < $n AND $S.fright_up.root == $S.units_root
-													AND is_valid_merkle_proof(substring($rt, 2, 64), $S.fright_up)))
-												AND ($ri == 0 OR ($pv AND starts_with($pv, 'f:') AND $S.fprev_proof.index == $ri - 1 AND $S.fprev_proof.root == $S.fills_root
-													AND array_length($S.fprev_proof.siblings) == array_length($S.fright_proof.siblings)
-													AND is_valid_merkle_proof($pv, $S.fprev_proof)
-													AND is_integer($S.fprev_up.index) AND $S.fprev_up.index >= 0 AND $S.fprev_up.index < $k
-													AND $S.fprev_up.root == $S.units_root
-													AND is_valid_merkle_proof(substring($pv, 2, 64), $S.fprev_up)))))
-												bounce('no fraud');
-										}
+						}
+						if (!$S.keep) {
+							// Leaf frame: member of src, exactly absent from dst.
+							$src = $ins ? $post_wit : $pre_wit;
+							$dst = $ins ? $pre_wit : $post_wit;
+							if (!is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $src)
+								bounce('bad leaf proof');
+							$m1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+								AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+								AND $S.left_proof.index + 1 == $S.right_proof.index
+								AND $S.left_proof.root == $dst AND $S.right_proof.root == $dst
+								AND $S.left < $L AND $L < $S.right
+								AND is_valid_merkle_proof($S.left, $S.left_proof)
+								AND is_valid_merkle_proof($S.right, $S.right_proof);
+							$m2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+								AND $S.left_proof.root == $dst AND $L < $S.left
+								AND is_valid_merkle_proof($S.left, $S.left_proof);
+							if (!$m1 AND !$m2) bounce('no fraud');
+						}
+					} else {
+						// meta arms.
+						$m0 = $S.pre_meta;
+						$m1x = $S.post_meta;
+						$g0 = typeof($m0) == 'string';
+						$g1 = typeof($m1x) == 'string';
+						if (!$g0 AND !$g1) bounce('bad meta');
+						$M0 = split($g0 ? $m0 : '-', ':');
+						$M1 = split($g1 ? $m1x : '-', ':');
+						if ($g0 AND (array_length($M0) != 11 OR $M0[0] != 'meta'
+							OR !is_valid_merkle_proof($m0, $S.pre_meta_proof) OR $S.pre_meta_proof.root != $pre_wit))
+							bounce('bad pre meta');
+						if ($g1 AND (array_length($M1) != 11 OR $M1[0] != 'meta'
+							OR !is_valid_merkle_proof($m1x, $S.post_meta_proof) OR $S.post_meta_proof.root != $post_wit))
+							bounce('bad post meta');
+						if ($g0 AND $g1) {
+							if ($M0[1] != $M1[1]) bounce('bad meta');
+							if ($m0 == $m1x) bounce('no fraud');
+							$d3 = $M0[3] != $M1[3];
+							$d4 = $M0[4] != $M1[4];
+							$d5 = $M0[5] != $M1[5];
+							$d6 = $M0[6] != $M1[6];
+							$d7 = $M0[7] != $M1[7];
+							$pc = $d3 OR $d4 OR $d5 OR $d6 OR $d7 OR $M0[2] != $M1[2] OR $M0[9] != $M1[9] OR $M0[10] != $M1[10];
+							if ($pc) {
+								// R8-C5 (interim, the proposal is not in the
+								// witness): FinalizeProposal (0d) applies ONE
+								// key — im / mm / fee / keeper with the new set
+								// still risk_params_ok (spot: fee never
+								// raised), or Delist 0 -> 1 — and never
+								// touches tick, usd, cap or the mark.
+								$im = json_parse($M1[3]);
+								$mm = json_parse($M1[4]);
+								$fee = json_parse($M1[5]);
+								$kp = json_parse($M1[6]);
+								$cap = json_parse($M1[10]);
+								$fee0 = json_parse($M0[5]);
+								$legal = is_integer($im) AND is_integer($mm) AND is_integer($fee) AND is_integer($kp) AND is_integer($cap) AND is_integer($fee0)
+									AND $fee >= 1 AND $fee <= 200 AND $kp >= 1 AND $im > $mm
+									AND (($im == 10000) ? ($mm >= 500 AND $kp <= 500 AND $cap == 0 AND $fee <= $fee0)
+										: ($im <= 5000 AND (($cap == 0) ? ($mm >= 500 AND $kp <= 500 AND $im >= 500)
+											: ($mm >= 50 AND $im >= 100 AND $cap <= 500 AND $im >= 10 * $cap AND $kp * 10 <= $im))));
+								if ($tag == '0d' AND $M0[8] == $M1[8] AND $M0[2] == $M1[2] AND $M0[9] == $M1[9] AND $M0[10] == $M1[10]
+									AND ($d3 ? 1 : 0) + ($d4 ? 1 : 0) + ($d5 ? 1 : 0) + ($d6 ? 1 : 0) + ($d7 ? 1 : 0) == 1
+									AND ($d7 ? ($M0[7] == '0' AND $M1[7] == '1') : $legal)
+									AND (($M0[3] == 10000) ? $im == 10000 : $im != 10000))
+									bounce('no fraud');
+							} else {
+								// R8-H1: only the mark moved. Allowed only in
+								// the op's own market: a Place / Liquidate to
+								// its unit's fill price (one fill per unit),
+								// an accepted ReportPrice (bonded oracle,
+								// regular non-spot market) within +-10 % of
+								// the old mark; UpdateExternalPrice never.
+								// Regular markets (usd 0) move at most 10 %.
+								// R9-H2: the engine never writes a mark with
+								// |mark| >= MARK_CAP (1e15), where Oscript's 15
+								// significant digits compare exactly; a longer or
+								// exponent mark is OUT of band (fraud), and only a
+								// <= 16-char digit string is parsed (json_parse of
+								// '1e400' is a fatal error that would bounce the
+								// proof).
+								$sv = length($M0[8]) <= 16 AND length($M1[8]) <= 16 AND !contains($M0[8] || $M1[8], 'e') AND !contains($M0[8] || $M1[8], 'E');
+								$o8 = $sv ? json_parse($M0[8]) : false;
+								$n8 = $sv ? json_parse($M1[8]) : false;
+								$pi = is_integer($o8) AND is_integer($n8);
+								$band = $pi AND abs($o8) < 1000000000000000 AND abs($n8) < 1000000000000000
+									AND ($o8 == 0 OR abs($n8 - $o8) <= abs($o8) / 10 + 1);
+								// R9-L2: a funding-rate market's fill moves the mark
+								// only by the engine's step rule: the funding rate
+								// trunc((mark - 1e12) / 1e4) bps moves by at most
+								// max(|old rate| / 10, 1); a first mark (0) is
+								// anchored on the external index (not witnessed).
+								$rq = $pi ? ($o8 - 1000000000000) / 10000 : 0;
+								$rp = $pi ? ($n8 - 1000000000000) / 10000 : 0;
+								$ro = ($rq < 0) ? ceil($rq) : floor($rq);
+								$rn = ($rp < 0) ? ceil($rp) : floor($rp);
+								// p: / L: of this market: the unit's fill (one
+								// per unit) is REQUIRED evidence — or the proof
+								// that unit k has none (its fills-tree
+								// neighbours belong to an earlier / a later
+								// unit, every compared index inside its tree;
+								// R8-C2) — so leaving it out cannot hide an
+								// honest move.
+								$zO = split($op, ':');
+								$plm = ($zO[0] == 'p' AND array_length($zO) == 10 AND $zO[2] == $M0[1]) OR ($zO[0] == 'L' AND array_length($zO) == 4 AND $zO[3] == $M0[1]);
+								if ($plm) {
+									if ($S.fills_root != var[$rollup]['fills_root_' || $h] OR typeof($u) != 'string' OR length($u) != 64 OR !$S.units_proof
+										OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root OR !is_valid_merkle_proof($u, $S.units_proof))
+										bounce('bad unit');
+									$fl = $S.fill;
+									$F = split(typeof($fl) == 'string' ? $fl : '-', ':');
+									$hasF = array_length($F) == 14 AND $F[0] == 'f' AND $F[1] == $u AND $F[2] == '0'
+										AND $S.fill_proof.root == $S.fills_root AND is_valid_merkle_proof($fl, $S.fill_proof);
+									if (!$hasF) {
+										$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+										$rt = $S.fright;
+										$ri = $S.fright_proof.index;
+										$pv = $S.fprev;
+										if ($fc > 1 AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND $S.fright_proof.root == $S.fills_root
+											AND 2 ^ array_length($S.fright_proof.siblings) >= $fc AND 2 ^ array_length($S.fright_proof.siblings) < 2 * $fc
+											AND is_valid_merkle_proof($rt, $S.fright_proof)
+											AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND is_integer($S.fright_up.index) AND $S.fright_up.index > $k
+												AND $S.fright_up.index < $n AND $S.fright_up.root == $S.units_root
+												AND is_valid_merkle_proof(substring($rt, 2, 64), $S.fright_up)))
+											AND ($ri == 0 OR ($pv AND starts_with($pv, 'f:') AND $S.fprev_proof.index == $ri - 1 AND $S.fprev_proof.root == $S.fills_root
+												AND array_length($S.fprev_proof.siblings) == array_length($S.fright_proof.siblings)
+												AND is_valid_merkle_proof($pv, $S.fprev_proof)
+												AND is_integer($S.fprev_up.index) AND $S.fprev_up.index >= 0 AND $S.fprev_up.index < $k
+												AND $S.fprev_up.root == $S.units_root
+												AND is_valid_merkle_proof(substring($pv, 2, 64), $S.fprev_up)))))
+											bounce('no fraud');
 									}
-									$okp = $plm AND $hasF AND $F[7] == $M0[1] AND $F[8] == $M1[8] AND ($M0[9] != 0 OR $band);
-									$mk = json_parse($M0[1]);
-									$hx = '0123456789abcdef';
-									$ok6 = ($tag == '06' AND !$nobond AND $M0[9] == 0 AND $M0[3] != 10000 AND $band AND is_integer($mk))
-										? substring($pre, $tq + 66, 8) == (substring($hx, floor(($mk % 256) / 16), 1) || substring($hx, ($mk % 256) % 16, 1) || substring($hx, floor((floor($mk / 256) % 256) / 16), 1) || substring($hx, (floor($mk / 256) % 256) % 16, 1) || substring($hx, floor((floor($mk / 65536) % 256) / 16), 1) || substring($hx, (floor($mk / 65536) % 256) % 16, 1) || substring($hx, floor(floor($mk / 16777216) / 16), 1) || substring($hx, floor($mk / 16777216) % 16, 1))
-										: false;
-									if ($okp OR $ok6) bounce('no fraud');
 								}
-							} else {
-								// One side only: the market's whole prefix is
-								// absent from the other tree.
-								$mk = $g0 ? $M0[1] : $M1[1];
-								$T = $g0 ? $post_wit : $pre_wit;
-								$lo = 'meta:' || $mk || ':';
-								$hi = 'meta:' || $mk || ';';
-								$q1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
-									AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-									AND $S.left_proof.index + 1 == $S.right_proof.index
-									AND $S.left_proof.root == $T AND $S.right_proof.root == $T
-									AND $S.left < $lo AND $hi <= $S.right
-									AND is_valid_merkle_proof($S.left, $S.left_proof)
-									AND is_valid_merkle_proof($S.right, $S.right_proof);
-								$q2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
-									AND $S.left_proof.root == $T AND $hi <= $S.left
-									AND is_valid_merkle_proof($S.left, $S.left_proof);
-								if (!$q1 AND !$q2 AND !(!$g0 AND $pre_wit == $E)) bounce('no fraud');
-								// A market is created only by CreateMarket.
-								if (!$g0 AND $tag == '0a') bounce('no fraud');
+								$okp = $plm AND $hasF AND $F[7] == $M0[1] AND $F[8] == $M1[8]
+									AND (($M0[9] != 0) ? ($pi AND ($o8 == 0 OR abs($rn - $ro) <= max(floor(abs($ro) / 10), 1))) : $band);
+								$mk = json_parse($M0[1]);
+								$hx = '0123456789abcdef';
+								$ok6 = ($tag == '06' AND !$nobond AND $M0[9] == 0 AND $M0[3] != 10000 AND $band AND is_integer($mk))
+									? substring($pre, $tq + 66, 8) == (substring($hx, floor(($mk % 256) / 16), 1) || substring($hx, ($mk % 256) % 16, 1) || substring($hx, floor((floor($mk / 256) % 256) / 16), 1) || substring($hx, (floor($mk / 256) % 256) % 16, 1) || substring($hx, floor((floor($mk / 65536) % 256) / 16), 1) || substring($hx, (floor($mk / 65536) % 256) % 16, 1) || substring($hx, floor(floor($mk / 16777216) / 16), 1) || substring($hx, floor($mk / 16777216) % 16, 1))
+									: false;
+								if ($okp OR $ok6) bounce('no fraud');
 							}
+						} else {
+							// One side only: the market's whole prefix is
+							// absent from the other tree.
+							$mk = $g0 ? $M0[1] : $M1[1];
+							$T = $g0 ? $post_wit : $pre_wit;
+							$lo = 'meta:' || $mk || ':';
+							$hi = 'meta:' || $mk || ';';
+							$q1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
+								AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+								AND $S.left_proof.index + 1 == $S.right_proof.index
+								AND $S.left_proof.root == $T AND $S.right_proof.root == $T
+								AND $S.left < $lo AND $hi <= $S.right
+								AND is_valid_merkle_proof($S.left, $S.left_proof)
+								AND is_valid_merkle_proof($S.right, $S.right_proof);
+							$q2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
+								AND $S.left_proof.root == $T AND $hi <= $S.left
+								AND is_valid_merkle_proof($S.left, $S.left_proof);
+							if (!$q1 AND !$q2) bounce('no fraud');
+							// A market is created only by CreateMarket.
+							if (!$g0 AND $tag == '0a') bounce('no fraud');
 						}
 					}
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');

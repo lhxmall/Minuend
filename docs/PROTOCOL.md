@@ -233,7 +233,7 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 
 `aa_root` 是 16 个 shard 根拼接的 1024-hex `aa_forest` 的森林哈希
 （`aa_forest_hash`）；`validity_proof_hash` 为可选透传字段（AA 不作门）。
-`assertion_version` 当前为 **6**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5；第 8 轮升到 6，见 ROLLUP-UPGRADE §7），
+`assertion_version` 当前为 **7**（#47 B8 升到 2；第 6/6b 轮升到 3；第 7 轮升到 4；第 7b 轮升到 5；第 8 轮升到 6；第 9 轮升到 7，见 ROLLUP-UPGRADE §7），
 rollup AA 只接受等于 5 的提交。
 
 ### 3.1 state_root（字节域 Merkle 树）
@@ -443,7 +443,12 @@ R3-A-4，挑战者可用 `aleft/aright` 证明其不存在）。
   op tag 与 op 账户从 `u_pre`（unit 文本前缀）读出。`Reveal{Cancel}` 提交内层 `c:`。
 - **P-mframe / P-noband**：`band:` 只在 CreateMarket 出现、永不删除 / 改写；`meta:` 参数只在
   FinalizeProposal 变化、mark 只在 `p:` / `L:` / 价格 op 变化、meta 永不删除、只在 CreateMarket
-  新建；每个 `meta:{m}` 都必须有 `band:{m}`。
+  新建；每个 `meta:{m}` 都必须有 `band:{m}`（P-noband，第 9 轮起在 dispute_claw）。
+  第 9 轮：|mark| ≥ `MARK_CAP`（1e15）的 mark 引擎从不写入、AA 判为带宽外；0d 不得翻转 spot
+  分类；资金费率市场的成交 mark 按费率步长规则判；k = 0 时预言机在自己的 bond 刚退回后重新
+  Stake 不再被误判。
+- **genesis pre 根**（第 9 轮）：h = 1、k = 0 的 pre 根是 `GENESIS_WIT_ROOT`
+  （`root(wit_leaves(ChainState::new()))`），不再是 `root(["empty"])`。
 - **灰尘清算（执行规则）**：第一个会被吃的 maker 剩余量 × 10 < 目标仓位时，清算跳过簿、
   本 unit 直接 ADL（一个对手方）。
 
@@ -548,7 +553,12 @@ fill_math 容差 ±6（R3-A-3）的代价：每条成交腿最多 6 个最小单
 `set_dispute_mframe`、verdict 白名单）；dispute_xframe（P-mframe / P-noband 移走，P-tsize 留下）、
 dispute（P-deposit pre-absent gov）、dispute_bind（下标边界）、rollup（版本门 6）定义变化；
 witness 叶格式变化（`obond:`、PERP-only `acct:`）是共识变化。op 预算见 MECHANISMS §10.16；
-rollup 只接受 `assertion_version == 6`。
+当时 rollup 只接受 `assertion_version == 6`。
+
+第 9 轮部署变化：全部 7 个 dispute AA 的 h = 1 pre 根改为 genesis 见证根；dispute_mframe
+（R9-H1 / H2 / L1 / L2，P-noband 移走）、dispute_claw（新增 P-noband 分支）、dispute_xframe /
+dispute_bind（删除"空 pre 树"分支）、rollup（版本门 7）定义变化；`MARK_CAP` 是执行规则变化。
+真实 ocore 的 complexity / ops 见 MECHANISMS §10.17；rollup 只接受 `assertion_version == 7`。
 
 第 7b 轮部署变化：新增 dispute_xframe（rollup 新占位 `DISPUTE_XFRAME_AA_HERE`、新 case
 `set_dispute_xframe`、verdict 白名单）；dispute（P-opbind 深度门）、dispute_book（P-fsane 哨兵 /

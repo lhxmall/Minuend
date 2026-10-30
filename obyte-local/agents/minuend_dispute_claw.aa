@@ -60,6 +60,8 @@
 	// Place / Liquidate unit is frozen by P-frame (binding AA).
 	// Lies in what is still a gate are fraud for another predicate: a fill
 	// off its maker order (P-mbind), kind 0 on a funding market (P-fsane).
+	// pred 'noband' (round 9, moved from minuend_dispute_mframe.aa): see the
+	// branch below; same header (k, trace / fills / ops / units roots).
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
@@ -98,7 +100,7 @@
 				]
 			},
 			{
-				if: "{trigger.data.pred == 'claw'}",
+				if: "{trigger.data.pred == 'claw' OR trigger.data.pred == 'noband'}",
 				init: "{
 					$h = trigger.data.height;
 					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
@@ -116,6 +118,42 @@
 					$k = trigger.data.k;
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
+					if (trigger.data.pred == 'noband') {
+						// P-noband (round 7b R7-H2; moved here from the m-frame
+						// AA in round 9 for its ops budget): `meta` (+meta_proof)
+						// in post_wit (trace[k]) and the
+						// [band:m:, band:m;) straddle left/right in post_wit:
+						// a market without its band leaf (the ADL price below
+						// needs it) is fraud. Indices compared here live in the
+						// sorted witness tree: an aliased right index can only
+						// wrap to (max leaf `~:end`, min leaf), never a straddle.
+						$S = trigger.data;
+						$post_wit = $S.post_wit;
+						// Any committed trace leaf (unit post tree) lacking a band
+						// is fraud whatever its k, so a short-depth (aliased)
+						// index cannot hide anything: an inner node is no meta
+						// tree. Non-string leaves bounce on the comparisons below.
+						if ($S.post_proof.index != $k OR $S.post_proof.root != $S.trace_root
+							OR !is_valid_merkle_proof($post_wit, $S.post_proof))
+							bounce('bad post proof');
+						$pm = $S.meta;
+						$M = split($pm, ':');
+						if (array_length($M) != 11 OR $M[0] != 'meta'
+							OR !is_valid_merkle_proof($pm, $S.meta_proof) OR $S.meta_proof.root != $post_wit)
+							bounce('bad meta');
+						$blo = 'band:' || $M[1] || ':';
+						$bhi = 'band:' || $M[1] || ';';
+						$nb1 = $S.right AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
+							AND $S.left_proof.index + 1 == $S.right_proof.index
+							AND $S.left_proof.root == $post_wit AND $S.right_proof.root == $post_wit
+							AND $S.left < $blo AND $bhi <= $S.right
+							AND is_valid_merkle_proof($S.left, $S.left_proof)
+							AND is_valid_merkle_proof($S.right, $S.right_proof);
+						$nb2 = $S.left_proof.index == 0
+							AND $S.left_proof.root == $post_wit AND $bhi <= $S.left
+							AND is_valid_merkle_proof($S.left, $S.left_proof);
+						if (!$nb1 AND !$nb2) bounce('no fraud');
+					} else {
 					$fill = trigger.data.fill;
 					if (typeof($fill) == 'boolean'
 						OR !is_valid_merkle_proof($fill, trigger.data.fill_proof)
@@ -202,7 +240,7 @@
 						$pre_wit = trigger.data.pre_wit;
 						if ($k == 0){
 							if ($h == 1){
-								if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+								if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 							} else {
 								if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 							}
@@ -466,6 +504,7 @@
 							if (!$fr1 AND $xok AND abs($tc1 - $et) <= $slack AND abs($mc1 - $em) <= $slack)
 								bounce('no fraud');
 						}
+					}
 					}
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 				}",

@@ -32,17 +32,18 @@ impl BuiltProof {
     /// and P-skip moved to `minuend_dispute_book.aa`), `fill`, `bind` or
     /// `claw` (round 6: `minuend_dispute_claw.aa`).
     pub fn target(&self) -> &'static str {
-        // `xframe` (round 7b): P-xframe / P-mframe / P-noband / P-tsize.
+        // `xframe` (round 7b): P-xframe / P-tsize; `mframe` (round 8):
+        // P-mframe; `claw` also takes P-noband since round 9 (ops budget).
         if self.bind_aa {
             "bind"
         } else if self.fill_aa {
             "fill"
-        } else if self.pred == "claw" {
+        } else if self.pred == "claw" || self.pred == "noband" {
             "claw"
         } else if matches!(self.pred.as_str(), "xframe" | "tsize") {
             // Round 7b: minuend_dispute_xframe.aa (P-tsize since round 8).
             "xframe"
-        } else if matches!(self.pred.as_str(), "mframe" | "noband") {
+        } else if self.pred == "mframe" {
             // Round 8: minuend_dispute_mframe.aa.
             "mframe"
         } else if self.pred == "ghost"
@@ -767,20 +768,18 @@ fn frame_proof(
             data,
         });
     }
-    // Insertion / rewrite: a posted leaf the pre tree never held.
-    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
+    // Insertion / rewrite: a posted leaf the pre tree never held (R9-C1:
+    // the height-1 pre tree is the real genesis tree, never empty).
     for l in posted.iter() {
         if !framed(l) || pre_leaves.contains(l) || post_leaves.contains(l) {
             continue;
         }
         let mut data = base(l, true, posted)?;
-        if !empty_pre {
-            data.as_object_mut()?.extend(
-                exact_absence(pre_leaves, l, "left", "right")?
-                    .as_object()?
-                    .clone(),
-            );
-        }
+        data.as_object_mut()?.extend(
+            exact_absence(pre_leaves, l, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
         return Some(BuiltProof {
             pred: "frame".into(),
             fill_aa: false,
@@ -1365,7 +1364,6 @@ fn xframe_proof(
     } else {
         Some((zt, exempt.as_slice()))
     };
-    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
     let framed = |l: &str| {
         let n = l.split(':').count();
         isx && ((l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10))
@@ -1388,9 +1386,7 @@ fn xframe_proof(
                 &mut d,
                 serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
             )?;
-            if !empty_pre {
-                merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
-            }
+            merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
             return Some(xf_built("xframe", d));
         }
     }
@@ -1415,20 +1411,17 @@ fn xframe_proof(
         // the prefix absence.
         let okey = format!("obond:{x}:");
         let ob = pre_leaves.iter().find(|l| l.starts_with(&okey));
-        let bond_ok = !empty_pre
-            && ob.is_some_and(|l| {
-                let u = &l[okey.len()..];
-                u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
-            });
+        let bond_ok = ob.is_some_and(|l| {
+            let u = &l[okey.len()..];
+            u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
+        });
         // R8-C6: a 06 / 11 funding disqualifier for X, with its evidence.
         let mut fund_ev: Option<serde_json::Value> = None;
         if isx && (tag == "06" || tag == "11") && c0 != c1 {
             let m = u_pre_market(&u_pre);
             if let Some(m) = m {
                 let pk = format!("pos:{x}:{m}:");
-                if empty_pre {
-                    fund_ev = Some(serde_json::json!({"fmkt": m}));
-                } else if let Some(abs) = prefix_absence(pre_leaves, &pk) {
+                if let Some(abs) = prefix_absence(pre_leaves, &pk) {
                     let o = abs.as_object()?;
                     let mut e = serde_json::json!({"fmkt": m, "pleft": o.get("left")?, "pleft_proof": o.get("left_proof")?});
                     if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
@@ -1452,7 +1445,7 @@ fn xframe_proof(
                     }
                 }
             }
-            if fund_ev.is_none() && tag == "06" && !empty_pre {
+            if fund_ev.is_none() && tag == "06" {
                 if let Some(abs) = prefix_absence(pre_leaves, &format!("obond:{oa}:")) {
                     let o = abs.as_object()?;
                     let mut e = serde_json::json!({"bleft": o.get("left")?, "bleft_proof": o.get("left_proof")?});
@@ -1486,13 +1479,12 @@ fn xframe_proof(
                 &mut d,
                 serde_json::json!({"pre_acct": l, "pre_acct_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
             )?,
-            None if !empty_pre => merge(&mut d, prefix_absence(pre_leaves, &key)?)?,
-            None => {}
+            None => merge(&mut d, prefix_absence(pre_leaves, &key)?)?,
         }
         if let Some(e) = fund_ev {
             merge(&mut d, e)?;
         }
-        if k == 0 && !bond_ok && !empty_pre {
+        if k == 0 && !bond_ok {
             match ob {
                 Some(l) => merge(
                     &mut d,
@@ -1584,12 +1576,25 @@ pub fn mframe_meta_bad(c: &MetaCtx, m0: &str, m1: &str) -> Option<bool> {
                 a[7] == "0" && b[7] == "1"
             } else {
                 legal
-            };
+            }
+            // R9-L1: the spot class (im 10000 <=> spot_only, the
+            // risk_params_ok invariant) is read from the PRE meta and kept.
+            && ((a[3] == "10000") == (n(3) == Some(10_000)));
         return Some(!ok);
     }
-    let band = a[8].len() > 15
-        || b[8].len() > 15
-        || matches!((json_int(a[8]), json_int(b[8])), (Some(o), Some(n)) if o == 0 || 10 * (n - o).abs() <= o.abs() + 10);
+    // R9-H2: |mark| < MARK_CAP (1e15) on both sides, then +-10 %; a longer
+    // (or unparsable) mark is out of band.
+    let cap = i128::from(minuend_types::MARK_CAP);
+    let (o8, n8) = (json_int(a[8]), json_int(b[8]));
+    let band = matches!((o8, n8), (Some(o), Some(n)) if o.abs() < cap && n.abs() < cap
+        && (o == 0 || 10 * (n - o).abs() <= o.abs() + 10));
+    // R9-L2: a funding-rate market's mark steps by the engine rule (the
+    // rate trunc((mark - 1e12) / 1e4) bps moves <= max(|old| / 10, 1); a
+    // first mark is index-anchored and not witnessed).
+    let fstep = matches!((o8, n8), (Some(o), Some(n)) if o == 0 || {
+        let r = |p: i128| (p - i128::from(minuend_types::FUNDING_PRICE_OFFSET)) / i128::from(minuend_types::FUNDING_BPS_UNIT);
+        (r(n) - r(o)).abs() <= (r(o).abs() / 10).max(1)
+    });
     let z: Vec<&str> = c.op.split(':').collect();
     let plm = (z.first() == Some(&"p") && z.len() == 10 && z[2] == a[1])
         || (z.first() == Some(&"L") && z.len() == 4 && z[3] == a[1]);
@@ -1602,7 +1607,7 @@ pub fn mframe_meta_bad(c: &MetaCtx, m0: &str, m1: &str) -> Option<bool> {
                 && q[2] == "0"
                 && q[7] == a[1]
                 && q[8] == b[8]
-        }) && (a[9] != "0" || band);
+        }) && if a[9] != "0" { fstep } else { band };
     let ok6 = c.tag == "06"
         && c.bonded
         && a[9] == "0"
@@ -1737,12 +1742,11 @@ fn mframe_proof(
         tag = t;
         oa = a;
     }
-    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
     let bkey = format!("obond:{oa}:");
     let pob = pre_leaves
         .iter()
         .find(|l| !oa.is_empty() && l.starts_with(&bkey));
-    let nobond_ev = if !oa.is_empty() && pob.is_none() && !empty_pre {
+    let nobond_ev = if !oa.is_empty() && pob.is_none() {
         prefix_absence(pre_leaves, &bkey).and_then(|v| renamed(v, "bleft", "bright"))
     } else {
         None
@@ -1791,9 +1795,13 @@ fn mframe_proof(
             }
         }
     }
-    // Inserted leaves.
+    // Inserted leaves. R9-H1: an `obond:` leaf the honest replay also
+    // inserts is still judged by its disqualifier evidence — a 0e that kept
+    // the +50000 refund instead of paying the bond posts the same leaf but a
+    // different PERP (the evidence never exists for the honest tree).
     for l in posted.iter() {
-        if pre_leaves.contains(l) || post_leaves.contains(l) {
+        let honest_has = post_leaves.contains(l);
+        if pre_leaves.contains(l) || (honest_has && !is_ob(l)) {
             continue;
         }
         let mut extra = serde_json::json!({});
@@ -1802,31 +1810,59 @@ fn mframe_proof(
                 continue;
             }
         } else if is_ob(l) {
+            if !obond_frame_ok(l, true, &tag, &oa, &target, k, h) && honest_has {
+                continue;
+            }
             if obond_frame_ok(l, true, &tag, &oa, &target, k, h) {
                 // Allowed unless a disqualifier is provable.
                 let ev = if tag == "0e" {
-                    if let Some(pb) = pob {
-                        Some(
+                    // R9-H1: at k == 0 an expired leaf of oa was released at
+                    // the commit of h - 1: it neither rejects the 0e nor
+                    // proves "not debited" by equal PERP (the refund paid
+                    // the debit); only +ORACLE_BOND_PERP does.
+                    let expired = pob.is_some_and(|pb| {
+                        let u = &pb[bkey.len()..];
+                        k == 0
+                            && u.len() <= 15
+                            && !u.starts_with('0')
+                            && json_int(u).is_some_and(|v| v < h as i128)
+                    });
+                    match pob {
+                        Some(pb) if !expired => Some(
                             serde_json::json!({"pob": pb, "pob_proof": proof_json(pre_leaves, index_of(pre_leaves, pb)?)}),
-                        )
-                    } else {
-                        let ak = format!("acct:{oa}:");
-                        let a0 = pre_leaves.iter().find(|x| x.starts_with(&ak));
-                        let a1 = posted.iter().find(|x| x.starts_with(&ak));
-                        match (a0, a1) {
-                            (Some(x0), Some(x1))
-                                if x0.split(':').count() == 5
-                                    && x1.split(':').count() == 5
-                                    && x0.split(':').nth(3) == x1.split(':').nth(3) =>
-                            {
-                                Some(serde_json::json!({
-                                    "pa0": x0, "pa0_proof": proof_json(pre_leaves, index_of(pre_leaves, x0)?),
-                                    "pa1": x1, "pa1_proof": proof_json(posted, index_of(posted, x1)?),
-                                }))
+                        ),
+                        _ => {
+                            let ak = format!("acct:{oa}:");
+                            let a0 = pre_leaves.iter().find(|x| x.starts_with(&ak));
+                            let a1 = posted.iter().find(|x| x.starts_with(&ak));
+                            match (a0, a1) {
+                                (Some(x0), Some(x1))
+                                    if x0.split(':').count() == 5 && x1.split(':').count() == 5 =>
+                                {
+                                    let (s0, s1) = (x0.split(':').nth(3)?, x1.split(':').nth(3)?);
+                                    let pa = serde_json::json!({
+                                        "pa0": x0, "pa0_proof": proof_json(pre_leaves, index_of(pre_leaves, x0)?),
+                                        "pa1": x1, "pa1_proof": proof_json(posted, index_of(posted, x1)?),
+                                    });
+                                    let refund_kept = k == 0
+                                        && s0.len() <= 14
+                                        && matches!((json_int(s0), json_int(s1)), (Some(p0), Some(p1)) if p1 == p0 + minuend_types::ORACLE_BOND_PERP as i128);
+                                    if (s0 == s1 && k > 0) || refund_kept {
+                                        Some(pa)
+                                    } else if s0 == s1 && pob.is_none() {
+                                        // k == 0: equal PERP is "not debited"
+                                        // only with oa shown bond-less.
+                                        nobond_ev
+                                            .clone()
+                                            .and_then(|mut e| merge(&mut e, pa).map(|_| e))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                (None, _) => prefix_absence(pre_leaves, &ak)
+                                    .and_then(|v| renamed(v, "aleft", "aright")),
+                                _ => None,
                             }
-                            (None, _) if !empty_pre => prefix_absence(pre_leaves, &ak)
-                                .and_then(|v| renamed(v, "aleft", "aright")),
-                            _ => None,
                         }
                     }
                 } else if let Some(pb) = pob {
@@ -1850,9 +1886,7 @@ fn mframe_proof(
             serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
         )?;
         merge(&mut d, extra)?;
-        if !empty_pre {
-            merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
-        }
+        merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
         return Some(xf_built("mframe", d));
     }
     let meta_of = |tree: &[String], m: &str| {
@@ -1896,7 +1930,7 @@ fn mframe_proof(
                     u_pre: &u_pre,
                     unit: unit_hexes.get(k).map(String::as_str).unwrap_or(""),
                     fill: fill.as_deref(),
-                    bonded: pob.is_some() || empty_pre,
+                    bonded: pob.is_some(),
                 };
                 if mframe_meta_bad(&ctx, a, b) != Some(true) {
                     continue;
@@ -1930,9 +1964,7 @@ fn mframe_proof(
                     &mut d,
                     serde_json::json!({"post_meta": b, "post_meta_proof": proof_json(posted, index_of(posted, b)?)}),
                 )?;
-                if !empty_pre {
-                    merge(&mut d, prefix_absence(pre_leaves, &key)?)?;
-                }
+                merge(&mut d, prefix_absence(pre_leaves, &key)?)?;
             }
             (None, None) => continue,
         }
@@ -1956,10 +1988,13 @@ fn noband_proof(batch: &Batch, k: usize, op: &str, post_leaves: &[String]) -> Op
         {
             continue;
         }
+        // Round 9: P-noband lives on the claw AA, whose header also
+        // stale-checks fills_root.
         let mut d = serde_json::json!({
             "trace_root": batch.checkpoint.trace_root,
             "ops_root": batch.checkpoint.ops_root,
             "units_root": batch.checkpoint.units_root,
+            "fills_root": batch.checkpoint.fills_root,
             "k": k,
             "op": op,
             "post_wit": batch.trace.get(k)?.clone(),
@@ -2174,15 +2209,13 @@ fn deposit_proof(
     // R8-H2 residue (mirrors the AA's `$nob`): the allowance needs an
     // EXPIRING bond of the op account in pre (`obond:X:{u}`, 0 < u <= h - 1);
     // otherwise the proof carries that leaf or the prefix absence.
-    let empty_pre = pre_leaves.len() == 1 && pre_leaves[0] == minuend_types::WIT_EMPTY_ELEMENT;
     let okey = format!("obond:{acct_hex}:");
     let ob = pre_leaves.iter().find(|l| l.starts_with(&okey));
     let h = batch.checkpoint.height;
-    let bond_ok = !empty_pre
-        && ob.is_some_and(|l| {
-            let u = &l[okey.len()..];
-            u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
-        });
+    let bond_ok = ob.is_some_and(|l| {
+        let u = &l[okey.len()..];
+        u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
+    });
     let bk = if is_gov
         && k == 0
         && bond_ok
@@ -2306,7 +2339,7 @@ fn deposit_proof(
     obj.insert("post_leaf".into(), liar_leaf.into());
     obj.insert("post_leaf_proof".into(), post_leaf_proof);
     obj.extend(dep_extra);
-    if is_gov && k == 0 && pre_hit.is_some() && !bond_ok && !empty_pre {
+    if is_gov && k == 0 && pre_hit.is_some() && !bond_ok {
         match ob {
             Some(l) => {
                 obj.insert("obond".into(), l.clone().into());
@@ -7494,6 +7527,97 @@ mod tests {
         );
     }
 
+    /// R9-H2 / R9-L1 / R9-L2 mirrors of the m-frame AA's meta rule.
+    #[test]
+    fn r9_mframe_meta_rule() {
+        let ctx = |op: &'static str, tag: &'static str| MetaCtx {
+            op,
+            tag,
+            ..Default::default()
+        };
+        // R9-L1: a 0d never flips the spot class (im 10000 <=> spot).
+        let reg = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        let reg2 = "meta:1:1:2000:500:5:100:0:8600:0:0";
+        let reg_spot = "meta:1:1:10000:500:5:100:0:8600:0:0";
+        let spot = "meta:2:1:10000:500:5:100:0:8600:0:0";
+        let spot_lev = "meta:2:1:1000:500:5:100:0:8600:0:0";
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), reg, reg2), Some(false));
+        assert_eq!(
+            mframe_meta_bad(&ctx("x:u", "0d"), reg, reg_spot),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&ctx("x:u", "0d"), spot, spot_lev),
+            Some(true)
+        );
+        // R9-H2: a mark of 16+ digits is out of band (was: always in band).
+        let oracle = "22".repeat(32);
+        let u_pre = format!(
+            "mnu3|4f44583100{}{}01000000{}|",
+            "06",
+            oracle,
+            "00".repeat(8)
+        );
+        let r = MetaCtx {
+            op: "x:u",
+            tag: "06",
+            u_pre: &u_pre,
+            bonded: true,
+            ..Default::default()
+        };
+        let m = |mark: &str| format!("meta:1:1:1000:500:5:100:0:{mark}:0:0");
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("105000000")),
+            Some(false)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("1000000000000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("9000000000000000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("1000000000000000"), &m("100000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("1e400")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("-100000000"), &m("-105000000")),
+            Some(false)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("999999999999999"), &m("909999999999999")),
+            Some(false)
+        );
+        // R9-L2: a funding-rate market's p: mark steps by the rate rule.
+        let a = "11".repeat(32);
+        let u = "ab".repeat(32);
+        let fm = |mark: &str| format!("meta:1:1:1000:500:10:50:0:{mark}:100:100");
+        let pc = |px: &str, old: &str| {
+            let op = format!("p:{a}:1:0:{px}:1:0:0:1:1");
+            let fill = format!("f:{u}:0:{a}:{a}:{a}:{a}:1:{px}:1:1:0:0:0");
+            let c = MetaCtx {
+                op: &op,
+                unit: &u,
+                fill: Some(&fill),
+                ..Default::default()
+            };
+            mframe_meta_bad(&c, &fm(old), &fm(px))
+        };
+        assert_eq!(pc("1000000550000", "1000000500000"), Some(false));
+        assert_eq!(pc("1000000560000", "1000000500000"), Some(true));
+        assert_eq!(pc("999999450000", "999999500000"), Some(false));
+        assert_eq!(pc("1000000040000", "1000000030000"), Some(false));
+        assert_eq!(pc("1000000050000", "1000000030000"), Some(true));
+        assert_eq!(pc("1000000990000", "0"), Some(false));
+        assert_eq!(pc("1000000559999", "1000000505000"), Some(false));
+    }
+
     #[test]
     fn r8_obond_frame_rule() {
         let o = "11".repeat(32);
@@ -7578,7 +7702,8 @@ mod tests {
         r.ingest(batch.units[0].clone()).unwrap();
         let post = minuend_state::wit_leaves(&r.state);
         let p = noband_proof(&lie, 0, &lie.ops[0], &post).expect("noband");
-        assert_eq!(p.pred, "noband");
+        assert_eq!((p.pred.as_str(), p.target()), ("noband", "claw"));
+        assert_eq!(p.data["fills_root"], lie.checkpoint.fills_root);
         assert!(p.data["meta"].as_str().unwrap().starts_with("meta:1:"));
         // (d) the mark moved by a Commit.
         let mut lie = batch.clone();
@@ -7984,6 +8109,106 @@ mod tests {
             frame_acct_bad_ev("", "", nx2, 0, Some(a_pre), &a_lie, false, true),
             Some(false)
         );
+    }
+
+    /// R9-H1 + R9-M1: oracle `o` whose unbond expires at the commit of
+    /// h - 1 re-stakes in unit 0 of h (refund +50000, Stake -50000: PERP net
+    /// 0, `obond:o:1` -> `obond:o:0`). The honest batch builds NOTHING —
+    /// neither the expired leaf (`pob`) nor equal PERP (`pa0`/`pa1`) is
+    /// evidence at k == 0 — while "Stake not debited" (+50000 kept) is
+    /// P-mframe fraud. Through `build_proof_with_prev` the k == 0 pre tree is
+    /// the committed (pre-prune) tail of h - 1, i.e. `wit_root_{h-1}`; the
+    /// replay engine's own (post-prune) tree would bounce 'bad pre wit'.
+    #[test]
+    fn r9_restake_after_own_bond_release_is_honest_and_prev_final_pre() {
+        use minuend_types::{Side, TimeInForce, ORACLE_BOND_PERP, PRICE_SCALE, QTY_SCALE};
+        let a = sk(1);
+        let aa = acct_of(&a);
+        let os = sk(9);
+        let o = acct_of(&os);
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, aa, 50_000);
+        claw_set_col(&mut eng, o, 5);
+        eng.state.perp_balances.insert(o, 7);
+        eng.state.oracle_bonds.insert(o, ORACLE_BOND_PERP);
+        eng.state.oracle_unbonding.insert(o, 1);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let u1 = claw_place(
+            vec![genesis_id()],
+            &a,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE / 1000,
+            1,
+            None,
+        );
+        let id1 = unit_id(&u1);
+        let prev1 = eng.state.clone();
+        eng.ingest(u1).unwrap();
+        let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
+        let replay = eng.clone();
+        let prev2 = eng.state.clone();
+        let u2 = sign_unit(vec![id1], Op::StakeOracle { account: o }, &os);
+        let id2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let b2 = Batch::from_applied(&prev2, &mut eng, &[id2]).expect("batch 2");
+        let pre = b1.leaf_trace.last().unwrap().clone();
+        let post = b2.leaf_trace[0].clone();
+        let oh = hex::encode(o.0);
+        assert!(pre.contains(&format!("obond:{oh}:1")));
+        assert!(
+            post.contains(&format!("obond:{oh}:0")),
+            "re-staked: {post:?}"
+        );
+        let ak = format!("acct:{oh}:");
+        let p0 = pre.iter().find(|l| l.starts_with(&ak)).unwrap();
+        let p1 = post.iter().find(|l| l.starts_with(&ak)).unwrap();
+        assert_eq!(p0.split(':').nth(3), p1.split(':').nth(3), "PERP net 0");
+        let u = hexes(&b2);
+        assert!(
+            mframe_proof(&b2, 0, &b2.ops[0], &u, &pre, &post).is_none(),
+            "R9-H1: honest re-stake"
+        );
+        let vault = VaultLedger::new();
+        assert!(
+            build_proof_with_prev(&b2, &mut replay.clone(), &[], 0, &vault, Some(&pre)).is_none(),
+            "honest batch"
+        );
+        // "Stake not debited": the refund kept (+50000), still bonded.
+        let mut lie = b2.clone();
+        let p_lie = json_int(p1.split(':').nth(3).unwrap()).unwrap() + ORACLE_BOND_PERP as i128;
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with(&ak) {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[3] = p_lie.to_string();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = mframe_proof(&lie, 0, &lie.ops[0], &u, &pre, &post).expect("not debited");
+        assert_eq!(p.target(), "mframe");
+        assert!(p.data.get("pob").is_none());
+        assert_eq!(
+            p.data["pa1"].as_str().unwrap().split(':').nth(3),
+            Some(p_lie.to_string().as_str())
+        );
+        // R9-M1: with prev_final the k == 0 pre_wit is wit_root_{h-1} (the
+        // committed tail of h - 1); the replay's post-prune tree differs.
+        let wit_prev = obyte_merkle::root(&pre);
+        assert_eq!(&wit_prev, b1.trace.last().unwrap());
+        assert_ne!(
+            wit_prev,
+            obyte_merkle::root(&minuend_state::wit_leaves(&replay.state))
+        );
+        let p = build_proof_with_prev(&lie, &mut replay.clone(), &[], 0, &vault, Some(&pre))
+            .expect("fraud through build_proof_with_prev");
+        assert_eq!(p.data["pre_wit"].as_str(), Some(wit_prev.as_str()));
+        let q = build_proof_with_vault(&lie, &mut replay.clone(), &[], 0, &vault);
+        assert!(!matches!(q, Some(q) if q.data["pre_wit"].as_str() == Some(wit_prev.as_str())));
     }
 
     /// R8-C4: inside an `x:` op the op account's own PERP moves only by the

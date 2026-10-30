@@ -11,8 +11,9 @@
 	// The rollup address rides every trigger (bind, challenge) instead of
 	// living in this definition: the rollup hardcodes THIS address (#13),
 	// and mutual hardcoding would be a chash cycle.
-	// Empty-sentinel wit root (obyte_merkle::root(["empty"]), pinned by the
-	// Rust unit test): Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=
+	// Genesis witness root (R9-C1: obyte_merkle::root(wit_leaves(ChainState::new())),
+	// minuend_state::GENESIS_WIT_ROOT, pinned by the Rust unit test that also
+	// checks every AA): eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=
 	//
 	// Fill string (crates/minuend-settle/src/lib.rs fills_element):
 	//   f:{unit_hex}:{idx}:{taker_hex}:{maker_hex}:{taker_order_hex}:
@@ -174,7 +175,7 @@
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}

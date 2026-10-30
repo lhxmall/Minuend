@@ -54,7 +54,7 @@
 	// Ops (crates/minuend-settle/src/lib.rs ops_element):
 	//   d:{acct}:{amount}:{addr}:{aa_unit_b64}   D:{acct}:{amount}:{addr}:{aa_unit_b64}
 	//   w:{acct}:{amount}:{nonce}
-	// Empty-sentinel wit root: Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=
+	// Genesis witness root (R9-C1, minuend_state::GENESIS_WIT_ROOT): eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
@@ -172,11 +172,11 @@
 						bounce('bad ops proof');
 					$O = split($op, ':');
 					// Pre state of unit k: previous height's committed root
-					// (k == 0; height 1 -> empty sentinel) or trace[k-1].
+					// (k == 0; height 1 -> the genesis witness root, R9-C1) or trace[k-1].
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}
@@ -359,7 +359,7 @@
 						$pre_wit = trigger.data.pre_wit;
 						if ($k == 0){
 							if ($h == 1){
-								if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+								if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 							} else {
 								if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 							}
@@ -475,7 +475,7 @@
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}
@@ -577,9 +577,9 @@
 					if (!$ins AND $t == 'c' AND $Q[0] == 'ord' AND $Q[1] == $O[2] AND $Q[7] == $O[1])
 						bounce('no fraud');
 					// Exact non-membership of $L in the other tree: adjacent
-					// straddle or before-min (every non-empty tree ends with
-					// the `~:end` sentinel); the empty-sentinel pre tree holds
-					// no pos:/ord: leaf at all.
+					// straddle or before-min (every tree ends with the `~:end`
+					// sentinel; R9-C1: the height-1 pre tree is the real genesis
+					// tree, never an empty one).
 					$m1 = trigger.data.left AND trigger.data.right
 						AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
 						AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
@@ -594,8 +594,7 @@
 						AND trigger.data.left_proof.root == $dst
 						AND $L < trigger.data.left
 						AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
-					$m3 = $ins AND $dst == 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=';
-					if (!$m1 AND !$m2 AND !$m3) bounce('no fraud');
+					if (!$m1 AND !$m2) bounce('no fraud');
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
 				}",
 				messages: [

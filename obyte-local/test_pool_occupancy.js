@@ -65,7 +65,7 @@ function submitData(h, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 6,
+    assertion_version: 7,
     height: h,
     state_root: sha256Hex("state-" + h),
     prev_state_hash: prev,

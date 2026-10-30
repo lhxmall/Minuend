@@ -806,7 +806,10 @@ impl ChainState {
                 .filter(|p| *p != 0)
                 .unwrap_or(index);
         }
-        self.marks.insert(market, capped);
+        // R9-H2: a mark at / above MARK_CAP is never written.
+        if capped.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+            self.marks.insert(market, capped);
+        }
         // Record TWAP sample after median update
         self.record_twap_sample(market, median, caller_seq);
         // Funding: once at least two valid reports exist, every report tick
@@ -1292,7 +1295,8 @@ impl ChainState {
                     _ => false,
                 }
             };
-            if step_ok {
+            // R9-H2: a print at / above MARK_CAP never becomes the mark.
+            if step_ok && fill.price.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
                 self.marks.insert(fill.market, fill.price);
                 // The mark just moved: re-evaluate the peg so its interval
                 // clock arms as soon as index + mark + fresh reports exist.
@@ -1332,7 +1336,10 @@ impl ChainState {
                     }
                     _ => fill.price,
                 };
-                self.marks.insert(fill.market, capped);
+                // R9-H2: a mark at / above MARK_CAP is never written.
+                if capped.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+                    self.marks.insert(fill.market, capped);
+                }
             }
         }
         Ok(())
@@ -2050,11 +2057,67 @@ pub const WIT_MAX_SENTINEL: &str = "~:end";
 pub fn wit_root(state: &ChainState) -> String {
     obyte_merkle::root(&wit_leaves(state))
 }
+/// R9-C1 (round 9 of #47): the witness root of the GENESIS state
+/// (`wit_root(&ChainState::new())`: the seeded insurance account, the
+/// BTC_USD `band:` / `meta:` leaves and the `~:end` sentinel). Every dispute
+/// AA anchors the k == 0 pre tree of height 1 on this literal (there is no
+/// `wit_root_0`); it replaced `root(["empty"])`, which the x-/m-frame AAs read
+/// as an EMPTY pre tree and so judged an honest height 1 as fraud. Pinned by
+/// `genesis_wit_root_is_pinned_in_every_dispute_aa`.
+pub const GENESIS_WIT_ROOT: &str = "eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use minuend_types::USD_SCALE;
+
+    /// R9-C1: the genesis witness root is the literal every dispute AA uses
+    /// for the height-1 k == 0 pre tree, and no AA still carries the
+    /// `root(["empty"])` sentinel.
+    #[test]
+    fn genesis_wit_root_is_pinned_in_every_dispute_aa() {
+        assert_eq!(wit_root(&ChainState::new()), GENESIS_WIT_ROOT);
+        let empty = obyte_merkle::root(&[]);
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../obyte-local/agents");
+        for f in [
+            "minuend_dispute.aa",
+            "minuend_dispute_fill.aa",
+            "minuend_dispute_bind.aa",
+            "minuend_dispute_book.aa",
+            "minuend_dispute_claw.aa",
+            "minuend_dispute_xframe.aa",
+            "minuend_dispute_mframe.aa",
+            "minuend_rollup.aa",
+            "minuend_vault.aa",
+        ] {
+            let src = std::fs::read_to_string(format!("{dir}/{f}")).unwrap();
+            assert!(!src.contains(&empty), "{f} still uses the empty sentinel");
+            if src.contains("'bad pre wit'") {
+                assert!(src.contains(GENESIS_WIT_ROOT), "{f} lacks the genesis root");
+            }
+        }
+    }
+
+    /// R9-H2: a ReportPrice median or a fill price at / above MARK_CAP never
+    /// becomes the mark (the AA compares marks exactly only below 1e15).
+    #[test]
+    fn marks_stay_below_mark_cap() {
+        let cap = minuend_types::MARK_CAP;
+        assert_eq!(cap.to_string().len(), 16);
+        assert_eq!((cap - 1).to_string().len(), 15);
+        let mut s = ChainState::new();
+        s.marks.remove(&BTC_USD);
+        let oa = AccountId([5; 32]);
+        s.oracle_bonds.insert(oa, minuend_types::ORACLE_BOND_PERP);
+        // A first median at / above the cap is not written ...
+        s.apply_report(oa, BTC_USD, 2 * cap, 1).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), None);
+        s.apply_report(oa, BTC_USD, -cap, 2).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), None);
+        // ... one below it is.
+        s.apply_report(oa, BTC_USD, cap - 1, 3).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), Some(&(cap - 1)));
+    }
 
     #[test]
     fn mean_price_signed_samples_do_not_overflow() {

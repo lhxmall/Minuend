@@ -131,7 +131,7 @@ async function main() {
   const xfSrc = readAa("minuend_dispute_xframe.aa");
   const xfDef = ["autonomous agent", await parseAa(xfSrc, "minuend_dispute_xframe.aa")];
   const xfAa = await postDefinition(xfDef, "xframe");
-  // Round 8: P-mframe / P-noband in the m-frame AA.
+  // Round 8: P-mframe in the m-frame AA (P-noband: claw AA since round 9).
   const mfSrc = readAa("minuend_dispute_mframe.aa");
   const mfDef = ["autonomous agent", await parseAa(mfSrc, "minuend_dispute_mframe.aa")];
   const mfAa = await postDefinition(mfDef, "mframe");
@@ -218,7 +218,7 @@ async function main() {
     vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
-    assertion_version: 6,
+    assertion_version: 7,
     pool_fund_gross: POOL_FUND_GROSS,
     challenge_secs: CHALLENGE_SECS,
     deployed_at: new Date().toISOString(),

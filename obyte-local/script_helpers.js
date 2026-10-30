@@ -73,7 +73,7 @@ const TARGETS = {
   claw: { deployKey: "dispute_claw_aa_address", env: "MINUEND_DISPUTE_CLAW_AA", bind: { bind_claw: 1 }, rollupVar: "dispute_claw_aa" },
   // Round 7b: P-xframe on the x-frame AA (round 8: also P-tsize).
   xframe: { deployKey: "dispute_xframe_aa_address", env: "MINUEND_DISPUTE_XFRAME_AA", bind: { bind_xframe: 1 }, rollupVar: "dispute_xframe_aa" },
-  // Round 8: P-mframe / P-noband on the m-frame AA.
+  // Round 8: P-mframe on the m-frame AA (P-noband: claw AA since round 9).
   mframe: { deployKey: "dispute_mframe_aa_address", env: "MINUEND_DISPUTE_MFRAME_AA", bind: { bind_mframe: 1 }, rollupVar: "dispute_mframe_aa" },
 };
 function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
@@ -150,7 +150,9 @@ function targetForPred(pred) {
   // x-frame AA; round 8: band: / obond: / meta: frame and the missing band
   // leaf on the m-frame AA.
   if (pred === "xframe" || pred === "tsize") return "xframe";
-  if (pred === "mframe" || pred === "noband") return "mframe";
+  if (pred === "mframe") return "mframe";
+  // Round 9: P-noband moved to the claw AA (m-frame ops budget).
+  if (pred === "noband") return "claw";
   // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA;
   // R5-A-2: P-fsane on the book AA.
   if (pred === "ghost" || pred === "skip" || pred === "mbind" || pred === "fsane") return "book";

@@ -1460,6 +1460,64 @@ watcher（R8b 修复）：k == 0 的证明原先用重放引擎的 pre 状态（
 （提交前的见证叶），h 的 k == 0 证明以它为 pre（`build_proof_with_prev`）；没有上一高度
 （watcher 从中途启动、或超大批次无 leaf_trace）时退回旧行为。
 
+### 10.17 第 9 轮（#47 R9）：genesis 见证根、重新质押、mark 上限、noband 移到 claw AA
+
+第 9 轮审查（`findings/round-9-review.md`）的 1 Critical / 2 High / 1 Medium / 3 Low。
+`ASSERTION_VERSION = 7`（genesis pre 根与 `MARK_CAP` 改变了谓词与执行规则；快照格式不变）。
+
+1. **R9-C1（诚实批次必被判）**：所有 dispute AA 对 h = 1、k = 0 的 pre 根原先硬编码
+   `root(["empty"])`，x-frame / m-frame AA 把它当成"空的 pre 树"放行或当证据，而引擎的
+   genesis 状态已经有保险账户 `acct:` 叶与 BTC_USD 的 `band:` / `meta:` 叶，于是诚实的
+   高度 1 unit 0 被判"凭空出现"。修法：h = 1 的 pre 根改为真实的 genesis 见证根
+   `minuend_state::GENESIS_WIT_ROOT = root(wit_leaves(ChainState::new()))`
+   （`eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=`），作为字面量写进全部 7 个 dispute AA
+   （rollup 没有 `wit_root_0`，也不需要改：rollup complexity 仍是 100/100）；
+   单测 `genesis_wit_root_is_pinned_in_every_dispute_aa` 同时钉住引擎的值与每个 AA 里的
+   字面量，并断言不再有 `["empty"]` 根。所有"E = 空树"的放行 / 证据都删掉了
+   （x-frame 的 pos/ord 插入、`bad pre acct`、R8-C6 `fdq`、R8-H2 `$nob`；m-frame 的 band 插入、
+   meta 新建；dispute_bind P-frame 的 `$m3`），h = 1 与其他高度一样要给 genesis 树里的
+   成员 / 夹逼证明。顺带关闭了"高度 1 的 unit 0 不可挑战"这个检测缺口（§15）。
+   watcher 的 `empty_pre` 分支同步删除。e2e 3b：对诚实的 h = 1 unit 0（首次 `d:`）发
+   保险账户 / genesis meta / genesis band 三种挑战都 bounce `no fraud`，旧的空根 bounce
+   `bad pre wit`。若以后改动 genesis 状态（市场、保险种子、见证叶格式），必须同步改这个
+   字面量并升 `ASSERTION_VERSION`。
+2. **R9-H1（诚实批次可判）**：预言机 X 的解押在 h − 1 提交时到期，X 在 h 的 unit 0 重新
+   Stake（引擎：先退 50000 再扣 50000，PERP 净变化 0）。m-frame 的 0e 取消资格证据原先把
+   X 的过期 `obond:` 叶（`pob`）和"PERP 相等"（`pa0`/`pa1`）都算数。修法：k = 0 时
+   0 < unlock ≤ h − 1 的 `pob` 不再取消 0e（0f 仍然取消：退押后没有 bond 可解押）；
+   "没扣款"在 k = 0 时只认 `A1 = A0 + 50000`（退款到了、扣款没发生），或 PERP 相等**且**
+   `bleft`/`bright` 证明 X 在 pre 里没有任何 bond；k > 0 仍是 PERP 相等。watcher
+   `mframe_proof` 同步；Rust 测试 `r9_restake_after_own_bond_release_is_honest_and_prev_final_pre`、
+   e2e 82。
+3. **R9-H2（运营方任意改 mark）**：`$band` 原先在新 / 旧 mark 字符串长度 > 15 时直接成立。
+   修法（引擎 + AA）：新增 `MARK_CAP = 1e15`，引擎在 ReportPrice、普通市场成交、资金费率
+   市场成交三处都**不写** |mark| ≥ 1e15 的 mark（保持旧值）；AA 只解析 ≤ 16 字符、不含
+   `e`/`E` 的 mark（`json_parse('1e400')` 是致命错误，会让证明 bounce），|mark| ≥ 1e15 或
+   无法解析一律视为带宽外（欺诈）。|mark| < 1e15 时 Oscript 15 位有效数字的比较是精确的。
+   e2e 83（1e2 → 1e15 / 9e18 / `1e400`、1e15 → 1e2 全部 frozen，+5% 不判）。
+4. **R9-M1（watcher）**：`prev_final` 原先声明在轮询循环里，每轮清空，稳态下 k = 0 证明
+   永远退回重放引擎的（prune 之后的）pre 树而 bounce `bad pre wit`。修法：移到循环外，
+   两种回滚（`rewind_engine` / `rewind_to_chain_root`）时清空；仍按高度匹配（`ph + 1 == h`）。
+   watcher 中途启动后的第一个高度仍用重放的 pre（剩余项）。
+5. **R9-L1**：0d 不得翻转 spot 分类：AA 以 **pre** meta 的 im（引擎不变式：spot_only ⇔
+   im == 10000，`risk_params_ok`）为 spot 标志，要求新 im 保持同一类。没有给 meta 加新字段
+   （所有 AA 都按 11 段解析 meta）；CreateMarket（0a）写入的 meta 内容仍不与 op 绑定（既有剩余项）。
+6. **R9-L2**：资金费率市场（usd ≠ 0）的 `p:` / `L:` mark 现在按引擎的步长规则判：资金费率
+   `trunc((mark − 1e12) / 1e4)` bps 每步最多 `max(|旧费率| / 10, 1)`；旧 mark 为 0（首次，按外部
+   指数锚定，见证里没有）时放行；名义价值 ≥ 100 USD 不判（宽于引擎，只会漏判不会误判）。
+7. **R9-L3（工具）**：`check_aa_complexity.js` 改为直接调用 ocore 的
+   `aa_validation.validateAADefinition`（部署时的同一个校验器），报告的 complexity / ops 就是部署数字。
+
+P-noband 搬家（op 预算）：m-frame AA 加上 H1 / H2 / L1 / L2 后超过 2000 ops，P-noband 移到
+claw AA（同一 case，共用 claw 的头部检查，所以 noband 的挑战数据要带 `fills_root`）。
+`targetForPred('noband') = 'claw'`，watcher `BuiltProof::target` 同步。noband 不依赖 k，
+trace 里任何一个 post 树缺 band 都是欺诈，所以这里不再要求 post_proof 的精确深度
+（内部节点不可能是一棵 meta 树）。
+
+真实 ocore 的数字（第 9 轮）：vault 14 / 373、rollup **100** / 1041、dispute 73 / 1826、
+dispute_fill 36 / 1995、dispute_bind 67 / 1982、dispute_book 71 / 1836、dispute_claw 43 / 1984、
+dispute_xframe 62 / 1928、dispute_mframe 59 / 1947（complexity / ops，上限 100 / 2000）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
@@ -1698,9 +1756,9 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
 - 独立 watcher 已可组谓词 proof；须以与 poster 分离的密钥部署后，
   互相牵制才算跑通
 - 第 2 轮仍未解决：header ↔ 链上根的一致性只能由 watcher 检测（DA 问题，
-  需交互式挑战才能链上化）；高度 1 的 unit 0 不可挑战（四个 dispute AA 硬编码
-  的 genesis pre 根是 `["empty"]` 的根，而真实 genesis witness 树含 BTC_USD 的
-  `meta:` 叶，仅为检测缺口、不会误罚诚实批次）；watcher 重放成本为
+  需交互式挑战才能链上化）；（第 9 轮起高度 1 的 unit 0 可以挑战：所有 dispute AA
+  的 h = 1、k = 0 pre 根是真实 genesis 见证根 `GENESIS_WIT_ROOT`，见 §10.17 R9-C1；
+  此前用 `["empty"]` 的根，x-frame / m-frame AA 把它当成空树，诚实的高度 1 必被判）；watcher 重放成本为
   O(units × state)；settle 解码器对其他调用方无长度上限；`post_challenge_live.js`
   未在真实 hub 上联调
 - 第 4 轮取舍（§10.10）：P-frame 只覆盖 `c:`/`d:`/`w:`/`D:`/`W:` 单元；P-mbind 对同位数、

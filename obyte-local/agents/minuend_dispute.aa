@@ -30,8 +30,9 @@
 	//   {taker_order}:{maker_order}:{market}:{price}:{qty}:{seq}:{side}:
 	//   {kind}:{taker_post}
 	// kind 0=book 1=funding-cash 2=ADL-no-fee 3=liquidation(+keeper)
-	// Empty-sentinel wit root (obyte_merkle::root(["empty"]), pinned by the
-	// Rust unit test): Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=
+	// Genesis witness root (R9-C1: obyte_merkle::root(wit_leaves(ChainState::new())),
+	// minuend_state::GENESIS_WIT_ROOT, pinned by the Rust unit test that also
+	// checks every AA): eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=
 	bounce_fees: { base: 10000 },
 	messages: {
 		cases: [
@@ -115,12 +116,12 @@
 					// the PERP column instead, and pin collateral unchanged.
 					$gov = starts_with($op, 'D:') OR starts_with($op, 'W:');
 					// Pre-wit anchor: k==0 -> previous height's committed root
-					// (height 1 -> empty sentinel); k>0 -> trace membership at
+					// (height 1 -> the genesis witness root, R9-C1); k>0 -> trace membership at
 					// k-1 proves the pre state.
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}
@@ -388,7 +389,7 @@
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
-							if ($pre_wit != 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=') bounce('bad pre wit');
+							if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
 						} else {
 							if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
 						}

@@ -59,7 +59,7 @@ function resolveClawAa() {
 function resolveXframeAa() {
   return resolveAa("minuend_dispute_xframe.aa", {}, ".minuend_dispute_xframe.resolved.aa");
 }
-// Round 8: P-mframe / P-noband on a seventh dispute AA.
+// Round 8: P-mframe on a seventh dispute AA (P-noband: claw AA since round 9).
 function resolveMframeAa() {
   return resolveAa("minuend_dispute_mframe.aa", {}, ".minuend_dispute_mframe.resolved.aa");
 }
@@ -253,7 +253,7 @@ async function main() {
     perp_asset_id: PERP_ASSET_ID,
     challenge_secs: 3600,
     chain_id: CHAIN_ID,
-    assertion_version: 6,
+    assertion_version: 7,
     pool_fund_gross: 10000000010000,
     deployed_at: new Date().toISOString(),
   };

@@ -171,7 +171,6 @@
 					$k = trigger.data.k;
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
-					$E = 'Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=';
 					$S = trigger.data;
 					// Exact proof depth for the unit_count-leaf trees (ops,
 					// units, trace): ceil(log2(n)) siblings (R7-C1).
@@ -189,7 +188,7 @@
 						bounce('bad ops proof');
 					$pre_wit = $S.pre_wit;
 					if ($k == 0){
-						if ($pre_wit != (($h == 1) ? $E : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
+						if ($pre_wit != (($h == 1) ? 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=' : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
 					} else {
 						if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !$S.pre_proof OR $S.pre_proof.index != $k - 1 OR $S.pre_proof.root != $S.trace_root
 							OR !is_valid_merkle_proof($pre_wit, $S.pre_proof))
@@ -309,7 +308,7 @@
 						$m2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
 							AND $S.left_proof.root == $dst AND $L < $S.left
 							AND is_valid_merkle_proof($S.left, $S.left_proof);
-						if (!$m1 AND !$m2 AND !($ins AND $dst == $E)) bounce('no fraud');
+						if (!$m1 AND !$m2) bounce('no fraud');
 					} else {
 						// acct pair of account X across the unit.
 						$a1 = $S.post_acct;
@@ -341,7 +340,7 @@
 							$s2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
 								AND $S.left_proof.root == $pre_wit AND $hi <= $S.left
 								AND is_valid_merkle_proof($S.left, $S.left_proof);
-							if (!$s1 AND !$s2 AND $pre_wit != $E) bounce('bad pre acct');
+							if (!$s1 AND !$s2) bounce('bad pre acct');
 							$c0 = '0';
 							$p0 = '0';
 							$w0 = '0';
@@ -379,7 +378,6 @@
 								AND $S.pleft < $plo AND $phi <= $S.pright
 								AND is_valid_merkle_proof($S.pleft, $S.pleft_proof)
 								AND is_valid_merkle_proof($S.pright, $S.pright_proof))
-							OR $pre_wit == $E
 							OR (array_length($fmeta) == 11 AND $fmeta[0] == 'meta' AND $fmeta[1] == $fm
 								AND $S.fmeta_proof.root == $pre_wit AND is_valid_merkle_proof($S.fmeta, $S.fmeta_proof)
 								AND ($fmeta[3] == 10000 OR ($tag == '11' AND $fmeta[9] == 0)))))
@@ -419,7 +417,6 @@
 						$nob = (typeof($ob) == 'string' AND starts_with($ob, $olo)
 								AND is_valid_merkle_proof($ob, $S.obond_proof) AND $S.obond_proof.root == $pre_wit
 								AND !(length($ou) <= 15 AND !starts_with($ou, '0') AND is_integer($ouq) AND $ouq <= $h - 1))
-							OR $pre_wit == $E
 							OR ($S.oleft AND contains($S.oleft, ':') AND $S.oleft_proof.root == $pre_wit
 								AND is_valid_merkle_proof($S.oleft, $S.oleft_proof)
 								AND (($S.oright AND contains($S.oright, ':')

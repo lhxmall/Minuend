@@ -195,6 +195,26 @@ const META1 = `meta:1:1:1000:500:5:100:0:100:0:0`;
 const META2 = `meta:2:1:1000:500:5:100:0:100:0:0`;
 const POS2 = `pos:${FILL_TAKER}:2:50000000:90000000:0:0`;
 const GENESIS_LEAVES = [DEP_PRE, FILL_TAKER_PRE, META1, META2, POS2].sort();
+// R9-C1: the REAL engine genesis witness tree (wit_leaves(ChainState::new()),
+// minuend_state::GENESIS_WIT_ROOT) — the height-1 k == 0 pre tree every
+// dispute AA anchors on. (GENESIS_LEAVES above is this suite's synthetic
+// wit_root_1, the pre tree of height 2.)
+const GENESIS_WIT_ROOT = "eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=";
+const EMPTY_SENTINEL = "Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=";
+const G_INS = `acct:${"0".repeat(64)}:10000000000:0:0`;
+const G_BAND = "band:1:0:0";
+const G_META = "meta:1:1:1000:500:5:100:0:10000000000000:0:0";
+const G_LEAVES = [G_INS, G_BAND, G_META, "~:end"].sort();
+if (merkle.getMerkleRoot(G_LEAVES) !== GENESIS_WIT_ROOT) throw new Error("genesis witness root drifted from minuend_state::GENESIS_WIT_ROOT");
+const G_U0 = (() => {
+  const a = "a1".repeat(32), addr = "GENESISADDRGENESISADDRGENESISADD", anchor = b6444("r9-genesis-anchor");
+  const op = `d:${a}:5000000:${addr}:${anchor}`;
+  const post = G_LEAVES.concat([`acct:${a}:5000000:0:0`, `adr:${addr}:${a}`, `adrx:${a}:${addr}`, `dep:${anchor}`]).sort();
+  const wit = merkle.getMerkleRoot(post);
+  const ops = pad2([op], "r9g-ops"), trace = pad2([wit], "r9g-trace"), units = pad2([sha256Hex("r9-genesis-unit0")], "r9g-units");
+  return { op, ops, post, wit, trace, units, opsRoot: merkle.getMerkleRoot(ops), traceRoot: merkle.getMerkleRoot(trace),
+    unitsRoot: merkle.getMerkleRoot(units), leafProof: (l) => merkle.getMerkleProof(post, post.indexOf(l)) };
+})();
 const WIT_ROOT = merkle.getMerkleRoot(GENESIS_LEAVES);
 const GEN_WIT_COUNT = GENESIS_LEAVES.length;
 // ocore canonical JSON bans empty arrays: a single-leaf merkle proof has
@@ -230,7 +250,7 @@ function submitDataBase(height, stateRoot, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 6,
+    assertion_version: 7,
     height,
     state_root: stateRoot,
     prev_state_hash: prev,
@@ -308,8 +328,8 @@ function tempDataMsg(data) {
     },
   };
 }
-async function sendCombinedSubmit(wallet, height, stateRoot, prev) {
-  const sd = submitData(height, stateRoot, prev);
+async function sendCombinedSubmit(wallet, height, stateRoot, prev, over) {
+  const sd = Object.assign(submitData(height, stateRoot, prev), over || {});
   const header = headerFromSubmit(sd);
   const r = await wallet.sendMulti({
     messages: [
@@ -409,7 +429,12 @@ async function main() {
   console.log("2. pool gate ok — funded standing pool");
 
   // ---- 3. combined submit height 1 --------------------------------------
-  await sendCombinedSubmit(operator, 1, STATE_ROOT, PREV_ROOT);
+  // R9-C1: height 1 commits ONE honest unit run from the real genesis state
+  // (G_LEAVES = wit_leaves(ChainState::new()), root GENESIS_WIT_ROOT): a
+  // first collateral deposit `d:` (binds the address, consumes the anchor).
+  await sendCombinedSubmit(operator, 1, STATE_ROOT, PREV_ROOT, {
+    trace_root: G_U0.traceRoot, ops_root: G_U0.opsRoot, units_root: G_U0.unitsRoot,
+  });
   st = await vars(rollup);
   if (Number(st.last_submitted) !== 1) throw new Error("last_submitted != 1: " + st.last_submitted);
   if (st.state_root_1 !== STATE_ROOT) throw new Error("state_root_1 mismatch");
@@ -418,6 +443,30 @@ async function main() {
   // 'height taken' gate only applies to a fresh h == last_submitted+1)
   await triggerBounce(operator, rollup, submitData(1, STATE_ROOT, PREV_ROOT), SUBMIT_FEE, "bad submit");
   console.log("3. combined submit ok, resubmit rejected");
+
+  // ---- 3b. R9-C1: the honest height-1 unit 0 is NOT fraud ----------------
+  // Every dispute AA anchors the k == 0 pre tree of height 1 on the real
+  // genesis witness root; the old root(["empty"]) sentinel made the x-/m-
+  // frame AAs read the genesis insurance account / BTC meta / band leaves
+  // as "appearing" in unit 0 (fraud on every honest height 1).
+  {
+    const g = (pred, extra) => Object.assign({
+      pred, height: 1, rollup: ROLLUP_ADDR, k: 0, trace_root: G_U0.traceRoot, ops_root: G_U0.opsRoot,
+      units_root: G_U0.unitsRoot, op: G_U0.op, ops_proof: merkle.getMerkleProof(G_U0.ops, 0),
+      post_wit: G_U0.wit, post_proof: merkle.getMerkleProof(G_U0.trace, 0), pre_wit: GENESIS_WIT_ROOT,
+    }, extra);
+    const gp = (l) => merkle.getMerkleProof(G_LEAVES, G_LEAVES.indexOf(l));
+    const xf = network.agent.xframe, mf = network.agent.mframe;
+    await triggerBounce(challenger, xf, g("xframe", { pre_wit: EMPTY_SENTINEL, post_acct: G_INS, post_acct_proof: G_U0.leafProof(G_INS) }), 20000, "bad pre wit");
+    await triggerBounce(challenger, xf, g("xframe", { post_acct: G_INS, post_acct_proof: G_U0.leafProof(G_INS) }), 20000, "bad pre acct");
+    await triggerBounce(challenger, xf, g("xframe", { post_acct: G_INS, post_acct_proof: G_U0.leafProof(G_INS), pre_acct: G_INS, pre_acct_proof: gp(G_INS) }), 20000, "no fraud");
+    await triggerBounce(challenger, mf, g("mframe", { post_meta: G_META, post_meta_proof: G_U0.leafProof(G_META) }), 20000, "no fraud");
+    await triggerBounce(challenger, mf, g("mframe", { pre_meta: G_META, pre_meta_proof: gp(G_META), post_meta: G_META, post_meta_proof: G_U0.leafProof(G_META) }), 20000, "no fraud");
+    await triggerBounce(challenger, mf, g("mframe", { leaf: G_BAND, ins: true, leaf_proof: G_U0.leafProof(G_BAND) }), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_1 || 0) !== 0) throw new Error("R9-C1: honest height 1 frozen!");
+  }
+  console.log("3b. R9-C1: honest h=1 unit 0 vs the genesis insurance acct / BTC meta / band → 'no fraud' (old empty sentinel → 'bad pre wit')");
 
   // ---- 4. lock/challenge are dead paths ---------------------------------
   await triggerBounce(operator, rollup, { lock: 1, height: 1 }, 20000, "neither case is true in messages");
@@ -3713,8 +3762,9 @@ async function main() {
     const noBand = xUnit("0e", "r7b-noband", [tA(1000000000, 10000), mA(2000000000), META1, posM9, END]);
     await submitAt(95, noBand);
     const nbi = noBand.post.findIndex((l) => l > "band:1:");
-    await triggerVerdict(challenger, mframe, Object.assign(xfBase("noband", 95, noBand), {
-      meta: META1, meta_proof: noBand.leafProof(META1),
+    // Round 9: P-noband lives on the claw AA (its header also checks fills_root).
+    await triggerVerdict(challenger, claw, Object.assign(xfBase("noband", 95, noBand), {
+      fills_root: FILLS_ROOT, meta: META1, meta_proof: noBand.leafProof(META1),
       left: noBand.post[nbi - 1], left_proof: noBand.leafProof(noBand.post[nbi - 1]),
       right: noBand.post[nbi], right_proof: noBand.leafProof(noBand.post[nbi]),
     }), 20000, "P-noband: market without its band");
@@ -3741,7 +3791,7 @@ async function main() {
     await submitAt(95, markOk);
     await triggerBounce(challenger, mframe, metaPair(95, markOk), 20000, "no fraud");
     await live(95, "honest mark update by ReportPrice");
-    console.log("71. R7-H2: band rewritten / band deleted / mark moved by a Stake → frozen (P-mframe / P-noband); mark moved by ReportPrice → 'no fraud'");
+    console.log("71. R7-H2: band rewritten / band deleted / mark moved by a Stake → frozen (P-mframe / P-noband on the claw AA); mark moved by ReportPrice → 'no fraud'");
 
     // ---- 72. R7b-N2: oracle bond returned at the batch boundary ---------
     // prune_oracle_unbonding runs at batch commit, after the batch's last
@@ -4061,6 +4111,87 @@ async function main() {
       await live(114, "honest W: by an oracle with its bond returned at unit 0");
     }
     console.log("81. R8-H2 residue: P-deposit +50000 at k == 0 needs an expiring bond: W: account without one + gap evidence → frozen; oracle with its expiring bond → 'no fraud'");
+
+    // ===================== ROUND 9 (fix/47-r9) =============================
+    // ---- 82. R9-H1: re-Stake in unit 0 right after the own bond's release --
+    // T unstaked earlier (obond:T:100, released at the commit of h - 1 =
+    // 115): the engine refunds +50000 at the boundary, then T's Stake in
+    // unit 0 debits 50000 (PERP net 0) and writes obond:T:0.
+    {
+      const OB0 = `obond:${T}:0`;
+      const P13 = await clawSetup(115, "r9-p13", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBU, END]);
+      const keep13 = [mA(2000000000), META1, BAND1, posM9, END];
+      const stake = (name, post) => xUnitP(P13, "0e", T, "", name, post);
+      const ins0 = (u, extra) => Object.assign(xfB("mframe", 116, P13, u), {
+        leaf: OB0, ins: true, leaf_proof: u.leafProof(OB0),
+      }, absentIn(P13.pre, OB0), extra || {});
+      const pa = (u) => ({ pa0: tA(1000000000, 60000), pa0_proof: P13.proof(tA(1000000000, 60000)),
+        pa1: u.post.find((l) => l.startsWith(`acct:${T}:`)), pa1_proof: u.leafProof(u.post.find((l) => l.startsWith(`acct:${T}:`))) });
+      // (a) lie: Stake applied but not debited (refund kept: +50000).
+      const lie = stake("r9-h1-lie", [tA(1000000000, 110000), OB0].concat(keep13));
+      await submitAt(116, lie);
+      await triggerBounce(challenger, xframe, xfA8(116, P13, lie, T, { obond: OBU, obond_proof: P13.proof(OBU) }), 20000, "no fraud");
+      await triggerVerdict(challenger, mframe, ins0(lie, pa(lie)), 20000, "R9-H1: re-Stake not debited (+50000 kept)");
+      await frozen(116, "re-Stake not debited");
+      // (b) honest re-Stake: neither the expired leaf (pob) nor equal PERP
+      // (pa0 / pa1) is evidence at k == 0.
+      const ok = stake("r9-h1-ok", [tA(1000000000, 60000), OB0].concat(keep13));
+      await submitAt(116, ok);
+      await triggerBounce(challenger, mframe, ins0(ok, { pob: OBU, pob_proof: P13.proof(OBU) }), 20000, "no fraud");
+      await triggerBounce(challenger, mframe, ins0(ok, pa(ok)), 20000, "no fraud");
+      await triggerBounce(challenger, mframe, Object.assign(xfB("mframe", 116, P13, ok), {
+        leaf: OBU, ins: false, leaf_proof: P13.proof(OBU),
+      }, absentIn(ok.post, OBU)), 20000, "no fraud");
+      await triggerBounce(challenger, xframe, xfA8(116, P13, ok, T, { obond: OBU, obond_proof: P13.proof(OBU) }), 20000, "no fraud");
+      await live(116, "honest re-Stake after the own bond's release");
+    }
+    console.log("82. R9-H1: re-Stake in unit 0 after the own bond's release: expired obond (pob) / equal PERP (pa0/pa1) → 'no fraud'; Stake not debited (+50000) → frozen (P-mframe)");
+
+    // ---- 83. R9-H2: a mark of 16+ digits is never inside the +-10 % band --
+    {
+      const P14 = await clawSetup(117, "r9-p14", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBT, END]);
+      const keep14 = [tA(1000000000, 60000), mA(2000000000), BAND1, posM9, OBT, END];
+      const mk = (mark) => `meta:1:1:1000:500:5:100:0:${mark}:0:0`;
+      const rpU = (P, name, mark, keep) => xUnitP(P, "06", T, rp(1, 105), name, [mk(mark)].concat(keep));
+      for (const [mark, what] of [["1000000000000000", "1e2 -> 1e15 (16 digits)"], ["9000000000000000000", "1e2 -> 9e18"], ["1e400", "1e2 -> '1e400'"]]) {
+        const u = rpU(P14, "r9-h2-" + mark.length, mark, keep14);
+        await submitAt(118, u);
+        await triggerVerdict(challenger, mframe, metaP(118, P14, u, META1, mk(mark)), 20000, "R9-H2: ReportPrice mark " + what);
+        await frozen(118, "mark " + what);
+      }
+      const ok = rpU(P14, "r9-h2-ok", "105", keep14);
+      await submitAt(118, ok);
+      await triggerBounce(challenger, mframe, metaP(118, P14, ok, META1, mk("105")), 20000, "no fraud");
+      await live(118, "honest ReportPrice +5 %");
+      // H1d: an (impossible) 16-digit pre mark no longer waves any new mark through.
+      const BIG = mk("1000000000000000");
+      const P15 = await clawSetup(119, "r9-p15", [tA(1000000000, 60000), mA(2000000000), BIG, BAND1, posM9, OBT, END]);
+      const down = rpU(P15, "r9-h2-down", "100", keep14);
+      await submitAt(120, down);
+      await triggerVerdict(challenger, mframe, metaP(120, P15, down, BIG, mk("100")), 20000, "R9-H2: ReportPrice mark 1e15 -> 1e2");
+      await frozen(120, "mark 1e15 -> 1e2");
+      const same = xUnitP(P15, "12", T, "cd".repeat(32) + leHex(5, 8), "r9-h2-same", [BIG].concat(keep14));
+      await submitAt(120, same);
+      await live(120, "honest resubmit");
+    }
+    console.log("83. R9-H2: ReportPrice mark 1e2 -> 1e15 / 9e18 / '1e400', 1e15 -> 1e2 → frozen (P-mframe); +5 % → 'no fraud'");
+
+    // ---- 84. R9-L1: a FinalizeProposal never flips the spot class --------
+    {
+      const P16 = await clawSetup(121, "r9-p16", [tA(1000000000, 60000), mA(2000000000), META1, BAND1, posM9, OBT, END]);
+      const keep16 = [tA(1000000000, 60000), mA(2000000000), BAND1, posM9, OBT, END];
+      const META1s = "meta:1:1:10000:500:5:100:0:100:0:0";
+      const flip = xUnitP(P16, "0d", T, leHex(9, 8), "r9-l1-flip", [META1s].concat(keep16));
+      await submitAt(122, flip);
+      await triggerVerdict(challenger, mframe, metaP(122, P16, flip, META1, META1s), 20000, "R9-L1: 0d made a regular market spot (im 10000)");
+      await frozen(122, "spot flip");
+      const META1i = "meta:1:1:2000:500:5:100:0:100:0:0";
+      const okP = xUnitP(P16, "0d", T, leHex(10, 8), "r9-l1-ok", [META1i].concat(keep16));
+      await submitAt(122, okP);
+      await triggerBounce(challenger, mframe, metaP(122, P16, okP, META1, META1i), 20000, "no fraud");
+      await live(122, "honest FinalizeProposal im 1000 -> 2000");
+    }
+    console.log("84. R9-L1: FinalizeProposal im 1000 -> 10000 (spot flip) → frozen; im 1000 -> 2000 → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
