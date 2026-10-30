@@ -10795,7 +10795,7 @@ mod tests {
             TimeInForce::Ioc,
             p.min_price,
             QTY_SCALE,
-            4,
+            3, // the rejected seq-3 order above did not consume it
         );
         tip = unit_id(&u);
         let evs = eng.ingest(u).unwrap();
