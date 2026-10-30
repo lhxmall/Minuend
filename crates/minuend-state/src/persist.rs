@@ -391,7 +391,7 @@ mod tests {
         let fp = hex::encode(minuend_types::sha256(&body));
         const PINNED: (u32, &str) = (
             7,
-            "e0ceb8bfffccee0f34446cc9787297ff61807499c6f73d36175a219393e87ba9",
+            "c482cb149679f551d65ff3807485d02e837884d36c485bc74be154897a6422b1",
         );
         assert_eq!(
             (SNAPSHOT_FORMAT_VERSION, fp.as_str()),

@@ -798,10 +798,8 @@ impl Batch {
                     amount,
                     addr,
                     ..
-                } => {
-                    if !replay.state.deposit_backing.contains_key(&(*aa_unit, true)) {
-                        replay.state.allow_deposit(*aa_unit, true, *amount, addr);
-                    }
+                } if !replay.state.deposit_backing.contains_key(&(*aa_unit, true)) => {
+                    replay.state.allow_deposit(*aa_unit, true, *amount, addr);
                 }
                 _ => {}
             }

@@ -5259,27 +5259,68 @@ mod tests {
         )));
         // A 50% adverse close for Alice at half the open price: PnL is
         // exactly half the notional, which the full collateral covers.
+        // R3-E-2: a resting (GTC) spot order is reserved on its full qty,
+        // so both closes are IOC takers against fresh, fully funded makers
+        // (carol bids, dave offers) — Alice and Bob keep exactly the
+        // collateral they opened with.
         let close_px = px / 2;
+        let carol = sk(4);
+        let dave = sk(5);
+        let req = |side| {
+            minuend_account::spot_order_requirement(side, close_px, QTY_SCALE, &p).unwrap()
+        };
+        let d3 = deposit(vec![tip], &carol, req(Side::Bid), 3);
+        tip = unit_id(&d3);
+        assert!(applied(&eng.ingest(d3).unwrap()));
+        let d4 = deposit(vec![tip], &dave, req(Side::Ask), 4);
+        tip = unit_id(&d4);
+        assert!(applied(&eng.ingest(d4).unwrap()));
+        let carol_bid = place_on(
+            vec![tip],
+            &carol,
+            meme,
+            Side::Bid,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&carol_bid);
+        assert!(applied(&eng.ingest(carol_bid).unwrap()));
         let ask2 = place_on(
             vec![tip],
             &alice,
             meme,
             Side::Ask,
             OrderType::Limit,
-            TimeInForce::Gtc,
+            TimeInForce::Ioc,
             close_px,
             QTY_SCALE,
             2,
         );
         tip = unit_id(&ask2);
-        eng.ingest(ask2).unwrap();
+        assert!(applied_with_fills(&eng.ingest(ask2).unwrap()));
+        let dave_ask = place_on(
+            vec![tip],
+            &dave,
+            meme,
+            Side::Ask,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            close_px,
+            QTY_SCALE,
+            1,
+        );
+        tip = unit_id(&dave_ask);
+        assert!(applied(&eng.ingest(dave_ask).unwrap()));
         let bid2 = place_on(
             vec![tip],
             &bob,
             meme,
             Side::Bid,
             OrderType::Limit,
-            TimeInForce::Gtc,
+            TimeInForce::Ioc,
             close_px,
             QTY_SCALE,
             2,
@@ -9160,13 +9201,14 @@ mod tests {
         );
         tip = unit_id(&ask2);
         assert!(applied(&eng.ingest(ask2).unwrap()));
+        // (IOC: a GTC spot order is reserved on its full qty — R3-E-2.)
         let cover = place_on(
             vec![tip],
             &bob,
             meme,
             Side::Bid,
             OrderType::Limit,
-            TimeInForce::Gtc,
+            TimeInForce::Ioc,
             max,
             QTY_SCALE,
             2,
