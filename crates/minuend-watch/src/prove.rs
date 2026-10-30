@@ -158,7 +158,7 @@ fn binding_violation(
     op: &str,
     pre: &[String],
     post_leaf: &str,
-    evs: &[minuend_settle::DepositEvidence],
+    evs: Option<&[minuend_settle::DepositEvidence]>,
 ) -> Option<()> {
     let p: Vec<&str> = post_leaf.split(':').collect();
     let o: Vec<&str> = op.split(':').collect();
@@ -218,7 +218,7 @@ fn binding_violation(
                     && shape
                     && o[1] == p[2]
                     && o[3] == p[1]
-                    && anchor_backed(evs, o[0] == "D", o[4], o[3], o[1]);
+                    && evs.is_none_or(|e| anchor_backed(e, o[0] == "D", o[4], o[3], o[1]));
                 if ok {
                     None
                 } else {
@@ -547,12 +547,14 @@ fn binding_proof(
 ) -> Option<BuiltProof> {
     let posted_post = batch.leaf_trace.get(k)?;
     let liar = posted_post.iter().find(|l| {
-        binding_violation(op, pre_leaves, l, &batch.deposit_evidences).is_some()
+        binding_violation(op, pre_leaves, l, Some(&batch.deposit_evidences)).is_some()
             && !post_leaves.iter().any(|h| h == *l)
     })?;
     if post_leaves
         .iter()
-        .any(|l| binding_violation(op, pre_leaves, l, &batch.deposit_evidences).is_some())
+        // The honest replay binds only on a credited, evidence-backed
+        // deposit: judge its leaves without the offline backing lookup.
+        .any(|l| binding_violation(op, pre_leaves, l, None).is_some())
     {
         return None;
     }
@@ -2221,14 +2223,14 @@ mod tests {
             &format!("w:{}:1000:1", hex::encode(acct.0)),
             &pre,
             &format!("acct:{}:-900:0:1000", hex::encode(acct.0)),
-            &[]
+            Some(&[])
         )
         .is_some());
         assert!(binding_violation(
             &format!("w:{}:100:1", hex::encode(acct.0)),
             &pre,
             &format!("acct:{}:0:0:100", hex::encode(acct.0)),
-            &[]
+            Some(&[])
         )
         .is_none());
     }
@@ -2325,7 +2327,7 @@ mod tests {
         let a = "aa".repeat(32);
         let pre = vec![format!("acct:{a}:1000:0:0")];
         let op = format!("w:{a}:100:1");
-        let v = |leaf: String| binding_violation(&op, &pre, &leaf, &[]);
+        let v = |leaf: String| binding_violation(&op, &pre, &leaf, Some(&[]));
         assert!(v(format!("acct:{a}:900:0:100")).is_none(), "accepted");
         assert!(v(format!("acct:{a}:1000:0:0")).is_none(), "rejected");
         assert!(
@@ -2339,7 +2341,7 @@ mod tests {
                 &format!("w:{f}:100:1"),
                 &pre,
                 &format!("acct:{f}:0:0:100"),
-                &[]
+                Some(&[])
             )
             .is_some(),
             "W minted on a rejected (fresh) withdraw"
@@ -2359,26 +2361,26 @@ mod tests {
         let d = d.replace(&"A".repeat(44), &format!("{}=", "A".repeat(43)));
         let good = [ev(false, &addr, &a)];
         let bound = vec![format!("adrx:{a}:{}", "R".repeat(32))];
-        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}"), &good).is_some());
-        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &good).is_none());
+        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}"), Some(&good)).is_some());
+        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&good)).is_none());
         // R4-A-4: no vault-backed deposit of that anchor by that payer for
         // that account → the new binding is fraud.
-        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[]).is_some());
+        assert!(binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&[])).is_some());
         let other = "bb".repeat(32);
         assert!(binding_violation(
             &d,
             &[],
             &format!("adr:{addr}:{a}"),
-            &[ev(false, &addr, &other)]
+            Some(&[ev(false, &addr, &other)])
         )
         .is_some());
         assert!(
-            binding_violation(&d, &[], &format!("adr:{addr}:{a}"), &[ev(true, &addr, &a)])
+            binding_violation(&d, &[], &format!("adr:{addr}:{a}"), Some(&[ev(true, &addr, &a)]))
                 .is_some()
         );
         // round-2 d: carries the anchor: the old 4-part shape is refused
         let d4 = format!("d:{a}:5:{addr}");
-        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), &good).is_some());
+        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), Some(&good)).is_some());
     }
 
     /// R2-A-8: a posted binding without its adrx: mirror → P-mirror.
