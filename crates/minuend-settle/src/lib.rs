@@ -2092,7 +2092,7 @@ mod tests {
             "front-run must be rejected: {evs:?}"
         );
         assert!(!eng.state.accounts.contains_key(&acct_of(&thief)));
-        assert!(eng.state.aa_address_owners.get(&test_addr(4)).is_none());
+        assert!(!eng.state.aa_address_owners.contains_key(&test_addr(4)));
         let own = sign_unit(
             vec![sid],
             Op::Deposit {

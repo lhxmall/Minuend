@@ -157,12 +157,22 @@ async function buildDepositEvidences(batchData, vaultAddress) {
         `deposit payer ${payer} != sidechain op addr ${dep.addr}: ` + aaUnit.slice(0, 16)
       );
     }
+    // R3-A-5 / R3-E-3: the payer-designated sidechain account, read from
+    // the vault trigger's data message (the vault bounces a deposit without
+    // one). A sidechain op of ANOTHER account citing this anchor is still a
+    // valid batch member — the engine rejects it — so no throw here.
+    const dataMsgs = (joint.unit.messages || []).filter((m) => m.app === "data");
+    const account = dataMsgs.length === 1 && dataMsgs[0].payload && dataMsgs[0].payload.account;
+    if (typeof account !== "string" || !/^[0-9a-f]{64}$/.test(account)) {
+      throw new Error("deposit joint has no payer-designated account: " + aaUnit.slice(0, 16));
+    }
     evidences.push({
       aa_unit: aaUnit,
       is_perp: isPerp,
       amount: String(dep.amount),
       vault_address: vaultAddress,
       payer,
+      account,
       joint: joint.unit,
     });
   }

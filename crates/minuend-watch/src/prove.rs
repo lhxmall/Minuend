@@ -1937,6 +1937,96 @@ mod tests {
         assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
     }
 
+    /// R3-A-1: the honestly REJECTED overdraft (balance 100, withdraw 1000)
+    /// posted as ACCEPTED — W += 1000, collateral -900 — must be a proof
+    /// (pre-fix both the withdraw and the wpin mirrors accepted it).
+    #[test]
+    fn overdraft_withdraw_posted_as_accepted_builds_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let dep = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let d_id = unit_id(&dep);
+        let wd = sign_unit(
+            vec![d_id],
+            Op::Withdraw {
+                account: acct,
+                amount: 1_000,
+                nonce: 1,
+            },
+            &secret,
+        );
+        let w_id = unit_id(&wd);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(dep).unwrap();
+        eng.ingest(wd).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let mut eng2 = eng.clone();
+        let mut batch = Batch::from_applied(&prev, &mut eng2, &[d_id, w_id]).expect("batch");
+        let key = format!("acct:{}:", hex::encode(acct.0));
+        for l in batch.leaf_trace[1].iter_mut() {
+            if l.starts_with(&key) {
+                *l = format!("acct:{}:-900:0:1000", hex::encode(acct.0));
+            }
+        }
+        batch.leaf_trace[1].sort();
+        batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
+        batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+        batch.checkpoint.wit_root = batch.trace[1].clone();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "withdraw");
+        // The binding AA mirror rejects the same leaf on its own.
+        let pre = vec![format!("acct:{}:100:0:0", hex::encode(acct.0))];
+        assert!(binding_violation(
+            &format!("w:{}:1000:1", hex::encode(acct.0)),
+            &pre,
+            &format!("acct:{}:-900:0:1000", hex::encode(acct.0))
+        )
+        .is_some());
+        assert!(binding_violation(
+            &format!("w:{}:100:1", hex::encode(acct.0)),
+            &pre,
+            &format!("acct:{}:0:0:100", hex::encode(acct.0))
+        )
+        .is_none());
+    }
+
+    /// R3-A-6: an account leaf vanishing from the posted post tree is a
+    /// P-keep proof over the account's prefix range.
+    #[test]
+    fn dropped_account_leaf_builds_keep_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        // A second (non-deposit) unit would be ideal; dropping the account
+        // in the deposit unit's own post tree is caught by P-deposit first,
+        // so judge keep_mirror_proof directly on a synthetic pre/post pair.
+        let key = format!("acct:{}:", hex::encode(acct.0));
+        let pre: Vec<String> = batch.leaf_trace[0].clone();
+        let honest_post = pre.clone();
+        let mut posted = pre.clone();
+        posted.retain(|l| !l.starts_with(&key));
+        batch.leaf_trace[0] = posted;
+        let _ = aa;
+        let p = keep_mirror_proof(&batch, 0, &pre, &honest_post).expect("keep proof");
+        assert_eq!(p.pred, "keep");
+        assert!(p.data["leaf"].as_str().unwrap().starts_with(&key));
+        assert!(p.data.get("left").is_some());
+        // Honest (account kept) → nothing.
+        batch.leaf_trace[0] = pre.clone();
+        assert!(keep_mirror_proof(&batch, 0, &pre, &honest_post).is_none());
+    }
+
     fn honest_deposit_batch() -> (Batch, AccountId, [u8; 32]) {
         let secret = sk(7);
         let acct = acct_of(&secret);
@@ -2070,8 +2160,12 @@ mod tests {
         let mut replay = Engine::new();
         replay.state.deposits_allowed.insert((aa, false));
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
-        assert_eq!(proof.pred, "adr");
-        assert!(proof.bind_aa && !proof.fill_aa);
+        // R3-A-4: the credited deposit's own binding adr:{addr}:{acct} is
+        // missing from the posted post tree — P-deposit fires first (the
+        // re-pointed leaf would also fail P-adr).
+        assert_eq!(proof.pred, "deposit");
+        assert!(proof.data.get("aleft").is_some());
+        assert!(!proof.bind_aa && !proof.fill_aa);
     }
 
     #[test]
@@ -2336,7 +2430,9 @@ mod tests {
     fn fill_math_isolated_taker_emits_op_and_ord_proofs() {
         // Bob rests a cross ask; alice crosses it with an ISOLATED bid that
         // fully fills (her taker order leaves no post ord leaf). The liar
-        // inflates alice's posted collateral by 1 unit. The payload must
+        // inflates alice's posted collateral by 1000 units (R3-A-3: a
+        // +-FILL_TOL rounding band is never a verdict, and the mirror needs
+        // > 2*FILL_TOL to be certain). The payload must
         // carry the p: op proof (isolated flag) plus the taker-ord absence
         // straddle; as the batch's only fill its right neighbor is the
         // fills_root length sentinel.
@@ -2404,19 +2500,32 @@ mod tests {
         let mut batch = Batch::from_applied(&prev, &mut eng2, &[id1, id2]).expect("batch");
         assert_eq!(batch.fills.len(), 1, "one fill, the batch's last element");
         assert_eq!(batch.checkpoint.fill_count, 1);
-        // Liar: alice's posted collateral inflated by 1 USD unit.
         let alice_hex = hex::encode(alice_id.0);
-        if let Some(leaves) = batch.leaf_trace.get_mut(1) {
-            for l in leaves.iter_mut() {
-                if l.starts_with(&format!("acct:{alice_hex}:")) {
-                    let p: Vec<&str> = l.split(':').collect();
-                    let col: i128 = p[2].parse().unwrap();
-                    *l = format!("acct:{}:{}:{}:{}", p[1], col + 1, p[3], p[4]);
+        let bump = |batch: &mut Batch, by: i128| {
+            if let Some(leaves) = batch.leaf_trace.get_mut(1) {
+                for l in leaves.iter_mut() {
+                    if l.starts_with(&format!("acct:{alice_hex}:")) {
+                        let p: Vec<&str> = l.split(':').collect();
+                        let col: i128 = p[2].parse().unwrap();
+                        *l = format!("acct:{}:{}:{}:{}", p[1], col + by, p[3], p[4]);
+                    }
                 }
             }
-        }
-        batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
-        batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+            batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
+            batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+        };
+        // R3-A-3: inside the rounding band (+1 .. +2*FILL_TOL) — the AA may
+        // read it as its own rounding, so the mirror stays silent.
+        let mut near = batch.clone();
+        bump(&mut near, 2 * FILL_TOL);
+        let mut replay = Engine::new();
+        fund(&mut replay);
+        assert!(
+            build_proof(&near, &mut replay, &[], 0).is_none(),
+            "a sub-tolerance collateral drift is never a certain verdict"
+        );
+        // Liar: alice's posted collateral inflated by 1000 units.
+        bump(&mut batch, 1_000);
         let mut replay = Engine::new();
         fund(&mut replay);
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");

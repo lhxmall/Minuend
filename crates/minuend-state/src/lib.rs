@@ -75,8 +75,10 @@ pub struct ChainState {
     /// deposit anchor (vault `trigger.data.account`, installed from verified
     /// evidence like `deposits_allowed`; transient, never committed). A
     /// Deposit/GovDeposit of any other account is rejected, so nobody can
-    /// front-run a payment to credit or bind it to themselves.
-    #[serde(default)]
+    /// front-run a payment to credit or bind it to themselves. Skipped by
+    /// serde: not part of the snapshot layout (re-installed from evidence
+    /// on every validated batch).
+    #[serde(skip)]
     pub deposit_accounts: HashMap<[u8; 32], AccountId>,
     /// Highest consumed GovWithdraw nonce per account: strict watermark —
     /// nonces must be strictly increasing per account (`nonce <= watermark`

@@ -416,9 +416,10 @@ async function main() {
   // the operator pays the vault 100000 (+10000 bounce fee) and the op
   // carries that unit as its anchor.
   const opAddr0 = await operator.getAddress();
-  const depUnit = (await trigger(operator, vault, { deposit: 1 }, 110000)).unit;
+  // R3-A-5: the payer names the credited sidechain account.
+  const depUnit = (await trigger(operator, vault, { deposit: 1, account: acct }, 110000)).unit;
   st = await vars(vault);
-  if (st["dep_" + depUnit] !== opAddr0 + ":100000") throw new Error("vault dep_ ledger wrong: " + JSON.stringify(st["dep_" + depUnit]));
+  if (st["dep_" + depUnit] !== opAddr0 + ":100000:" + acct) throw new Error("vault dep_ ledger wrong: " + JSON.stringify(st["dep_" + depUnit]));
   const opD = `d:${acct}:100000:${opAddr0}:${depUnit}`;
   const preLeaf = DEP_PRE;
   const postLeaf = `acct:${acct}:1100000:0:0`;
@@ -1020,7 +1021,7 @@ async function main() {
   const ISO_POST_WIT = merkle.getMerkleRoot(ISO_POST);
   const ISO_TRACE = pad2([ISO_POST_WIT], "isotrace");
   const ISO_TRACE_ROOT = merkle.getMerkleRoot(ISO_TRACE);
-  const ISO_LIAR = isoPostTree(499501);
+  const ISO_LIAR = isoPostTree(499507);
   const ISO_LIAR_WIT = merkle.getMerkleRoot(ISO_LIAR);
   const ISO_LIAR_TRACE = pad2([ISO_LIAR_WIT], "isoliartrace");
   const ISO_LIAR_TRACE_ROOT = merkle.getMerkleRoot(ISO_LIAR_TRACE);
@@ -1092,14 +1093,14 @@ async function main() {
     if (res && res.response && res.response.bounced)
       throw new Error("h9 submit bounced: " + bounceDetail(res));
   }
-  // 19a. LIAR isolated open: col 499501 (identity + 1) -> verdict.
+  // 19a. LIAR isolated open: col 499507 (identity + 7: R3-A-3 tolerance is +-6) -> verdict.
   await submitIsoH(ISO_LIAR_TRACE_ROOT, ISO_FILLS_ROOT, ISO_OPS_ROOT, 4);
   await triggerVerdict(
     challenger,
     fill,
     Object.assign(
       { pred: "fill_math", height: 9 },
-      isoFillPayload(ISO_LIAR_TRACE_ROOT, ISO_LIAR_TRACE, ISO_LIAR_WIT, ISO_LIAR, 499501)
+      isoFillPayload(ISO_LIAR_TRACE_ROOT, ISO_LIAR_TRACE, ISO_LIAR_WIT, ISO_LIAR, 499507)
     ),
     20000,
     "isolated exact-identity predicate"
@@ -1108,7 +1109,7 @@ async function main() {
   if (Number(st.frozen_9) !== 2) throw new Error("inflated isolated post col did not freeze h9");
   console.log("19a. isolated escrow identity: inflated post col -> frozen=9");
 
-  // 19b. Cross taker, empty range, post col = exp + 1 -> verdict.
+  // 19b. Cross taker, empty range, post col = exp + 7 (> R3-A-3 +-6) -> verdict.
   const crossFill = `f:${isoUnit}:0:${DEP_ACCT}:${"c".repeat(64)}:${"8".repeat(64)}:${isoMOrd}:1:100000000:100000000:9:0:0:0`;
   const CROSS_FILLS = [crossFill];
   const CROSS_FILLS_TREE = fillsTree(CROSS_FILLS);
@@ -1116,7 +1117,7 @@ async function main() {
   const crossOp = `p:${DEP_ACCT}:1:0:100000000:100000000:0:0:0:0`;
   const CROSS_OPS = pad2([crossOp], "crossops");
   const CROSS_OPS_ROOT = merkle.getMerkleRoot(CROSS_OPS);
-  const CROSS_POST = [`acct:${DEP_ACCT}:999501:0:0`, CP_LEAF, META1].sort();
+  const CROSS_POST = [`acct:${DEP_ACCT}:999507:0:0`, CP_LEAF, META1].sort();
   const CROSS_POST_WIT = merkle.getMerkleRoot(CROSS_POST);
   const CROSS_TRACE = pad2([CROSS_POST_WIT], "crosstrace");
   const CROSS_TRACE_ROOT = merkle.getMerkleRoot(CROSS_TRACE);
@@ -1140,8 +1141,8 @@ async function main() {
     post_proof: merkle.getMerkleProof(CROSS_TRACE, 0),
     pre_acct: DEP_PRE,
     pre_acct_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(DEP_PRE)),
-    post_acct: `acct:${DEP_ACCT}:999501:0:0`,
-    post_acct_proof: merkle.getMerkleProof(CROSS_POST, CROSS_POST.indexOf(`acct:${DEP_ACCT}:999501:0:0`)),
+    post_acct: `acct:${DEP_ACCT}:999507:0:0`,
+    post_acct_proof: merkle.getMerkleProof(CROSS_POST, CROSS_POST.indexOf(`acct:${DEP_ACCT}:999507:0:0`)),
     pre_meta: META1,
     pre_meta_proof: merkle.getMerkleProof(GENESIS_LEAVES, GENESIS_LEAVES.indexOf(META1)),
     pos_absent: true,
@@ -1359,7 +1360,16 @@ async function main() {
   // LIAR first (verdict freezes h16), honest second (frozen-branch
   // resubmit, then 'no fraud'): a live height cannot be submitted twice.
   const govAcct = DEP_ACCT;
-  const govOp = "D:" + govAcct + ":50000";
+  // R3-A-7: D: carries its vault anchor; the vault records the PERP
+  // deposit (devnet PERP = base) as depp_<unit> = payer:amount:account.
+  const govPayer = await operator.getAddress();
+  const govUnit = (await trigger(operator, vault, { deposit_perp: 1, account: govAcct }, 50000)).unit;
+  {
+    const vs = await vars(vault);
+    if (vs["depp_" + govUnit] !== govPayer + ":50000:" + govAcct)
+      throw new Error("R3-A-7: vault depp_ ledger wrong: " + JSON.stringify(vs["depp_" + govUnit]));
+  }
+  const govOp = `D:${govAcct}:50000:${govPayer}:${govUnit}`;
   const GOV_OPS = pad2([govOp], "govops");
   const GOV_OPS_ROOT = merkle.getMerkleRoot(GOV_OPS);
   const GOV_POST = pad2([`acct:${govAcct}:1000000:50000:0`], "govpost");
@@ -2095,7 +2105,7 @@ async function main() {
   }
 
   // ---- 40. R2-A-3: a credited deposit must be backed by the vault ledger --
-  const dep2 = (await trigger(operator, vault, { deposit: 1 }, 60000)).unit; // records 50000
+  const dep2 = (await trigger(operator, vault, { deposit: 1, account: DEP_ACCT }, 60000)).unit; // records 50000 for DEP_ACCT
   const MARK2 = "dep:" + dep2;
   {
     const credited = `acct:${DEP_ACCT}:1050000:0:0`;
@@ -2315,6 +2325,227 @@ async function main() {
     if (Number(st.frozen_43 || 0) !== 0) throw new Error("R2-A-1: honest tip froze h43!");
     if (Number(st.slash_burned || 0) <= 0) throw new Error("R2-A-9: slash_burned not accounted");
     console.log("38. R2-A-1: P-tip — wit_root off the trace tip → frozen; honest tip → 'no fraud'");
+  }
+
+  // ===================== ROUND 3 (fix/47-r3-aa) =========================
+  // h44 re-anchors the k=0 pre tree on the genesis WIT_ROOT (h43 committed
+  // its own post tree as wit_root).
+  await submitAt(44, oneUnit("r3-commit", "x:" + sha256Hex("r3c"), [DEP_PRE]));
+  const opA3 = await operator.getAddress();
+
+  // ---- 46. R3-A-1: an ACCEPTED withdrawal never overdraws ----------------
+  {
+    const opW = `w:${DEP_ACCT}:2000000:1`;
+    const over = `acct:${DEP_ACCT}:-1000000:0:2000000`; // balance 1000000
+    const u = oneUnit("r3-over", opW, [over]);
+    await submitAt(45, u);
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "withdraw", height: 45 }, depositPayload(u, over)), 20000, "R3-A-1 overdraft P-withdraw predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_45) !== 2) throw new Error("R3-A-1: overdraft withdraw (P-withdraw) did not freeze h45");
+    await submitAt(45, u);
+    await triggerVerdict(challenger, bindAa, Object.assign({ pred: "wpin", height: 45 }, wpinPayload(u, over, {
+      pre_leaf: DEP_PRE, pre_leaf_proof: genProof(DEP_PRE),
+    })), 20000, "R3-A-1 overdraft P-wpin predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_45) !== 2) throw new Error("R3-A-1: overdraft withdraw (P-wpin) did not freeze h45");
+    // Honest: withdrawing the WHOLE balance (col 0) is accepted by both.
+    const fullOp = `w:${DEP_ACCT}:1000000:1`;
+    const full = `acct:${DEP_ACCT}:0:0:1000000`;
+    const ok = oneUnit("r3-full", fullOp, [full]);
+    await submitAt(45, ok);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "withdraw", height: 45 }, depositPayload(ok, full)), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, Object.assign({ pred: "wpin", height: 45 }, wpinPayload(ok, full, {
+      pre_leaf: DEP_PRE, pre_leaf_proof: genProof(DEP_PRE),
+    })), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_45 || 0) !== 0) throw new Error("R3-A-1: honest full-balance withdraw froze h45!");
+    // A pre-absent account can only have its withdrawal REJECTED.
+    const F = "1f".repeat(32);
+    const fOp = `w:${F}:100:1`;
+    const fLeaf = `acct:${F}:-100:0:100`;
+    const fu = oneUnit("r3-absent-w", fOp, [fLeaf]);
+    await submitAt(46, fu);
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "withdraw", height: 46 }, depositPayload(fu, fLeaf), {
+      pre_absent: true, left: GENESIS_LEAVES[0], left_proof: genProof(GENESIS_LEAVES[0]),
+    }), 20000, "R3-A-1 pre-absent withdraw predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_46) !== 2) throw new Error("R3-A-1: accepted withdraw on a pre-absent account did not freeze h46");
+    await submitAt(46, oneUnit("r3-absent-ok", fOp, [DEP_PRE]));
+    console.log("46. R3-A-1: overdraft (P-withdraw + P-wpin) and pre-absent accepted withdraw → frozen; full-balance withdraw → 'no fraud'");
+  }
+
+  // ---- 47. R3-A-2: P-escrow judges only `acct:` leaves --------------------
+  {
+    const OID = "9".repeat(63) + "e";
+    const PAYEE = "Q".repeat(32);
+    const ESC_ORD = `ord:${OID}:1:0:100000000:3:5:${DEP_ACCT}:1:20`;
+    const ADR = `adr:${PAYEE}:${DEP_ACCT}`;
+    const ADRX = `adrx:${DEP_ACCT}:${PAYEE}`;
+    const ESC_PRE = [DEP_PRE, ESC_ORD, ADR, ADRX, META1].sort();
+    const ESC_WIT = merkle.getMerkleRoot(ESC_PRE);
+    await submitAt(47, Object.assign(oneUnit("r3-esc-commit", "x:" + sha256Hex("escc"), [DEP_PRE]), { witRoot: ESC_WIT }));
+    const cOp = `c:${DEP_ACCT}:${OID}`;
+    const escPayload = (u, postLeaf) => ({
+      rollup: ROLLUP_ADDR, k: 0, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+      trace_root: u.traceRoot, ops_root: u.opsRoot, units_root: UNITS_SET_ROOT,
+      units_set_root: SET_ROOT1, fills_root: FILLS_ROOT,
+      pre_wit: ESC_WIT, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+      pre_leaf: DEP_PRE, pre_leaf_proof: merkle.getMerkleProof(ESC_PRE, ESC_PRE.indexOf(DEP_PRE)),
+      post_leaf: postLeaf, post_leaf_proof: u.leafProof(postLeaf),
+      pre_ord: ESC_ORD, pre_ord_proof: merkle.getMerkleProof(ESC_PRE, ESC_PRE.indexOf(ESC_ORD)),
+    });
+    const refunded = `acct:${DEP_ACCT}:1000020:0:0`;
+    const liarLeaf = `acct:${DEP_ACCT}:1000021:0:0`;
+    const liar = oneUnit("r3-esc-liar", cOp, [liarLeaf, ADR, ADRX, META1]);
+    await submitAt(48, liar);
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "escrow", height: 48 }, escPayload(liar, liarLeaf)), 20000, "escrow liar predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_48) !== 2) throw new Error("escrow: wrong refund did not freeze h48");
+    const honest = oneUnit("r3-esc", cOp, [refunded, ADR, ADRX, META1]);
+    await submitAt(48, honest);
+    // Pre-fix: adrx:{acct}:{addr} as post_leaf parsed col1 = '' → verdict.
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "escrow", height: 48 }, escPayload(honest, ADRX)), 20000, "bad leaf");
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "escrow", height: 48 }, escPayload(honest, refunded)), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_48 || 0) !== 0) throw new Error("R3-A-2: honest cancel slashed via adrx leaf!");
+    console.log("47. R3-A-2: adrx post leaf on an honest cancel bounces 'bad leaf'; wrong refund → frozen");
+  }
+
+  // ---- 48. R3-A-4/5: a credit must go to the payer's account + binding ----
+  {
+    const dep3 = (await trigger(operator, vault, { deposit: 1, account: DEP_ACCT }, 60000)).unit; // 50000 for DEP_ACCT
+    const MARK3 = "dep:" + dep3;
+    // (a) the operator credits the payment to ANOTHER account (FILL_TAKER).
+    const thiefLeaf = `acct:${FILL_TAKER}:50000:0:0`;
+    const tOp = `d:${FILL_TAKER}:50000:${opA3}:${dep3}`;
+    const tU = oneUnit("r3-thief", tOp, [thiefLeaf, MARK3, `adr:${opA3}:${FILL_TAKER}`, `adrx:${FILL_TAKER}:${opA3}`]);
+    await submitAt(49, tU);
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 49 }, depositPayload(tU, thiefLeaf), {
+      pre_leaf: FILL_TAKER_PRE, pre_leaf_proof: genProof(FILL_TAKER_PRE),
+    }), 20000, "R3-A-4/5 foreign-account credit predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_49) !== 2) throw new Error("R3-A-4/5: credit to a non-designated account did not freeze h49");
+    // (b) backed + marked, but the payer is not bound to the account.
+    const credited = `acct:${DEP_ACCT}:1050000:0:0`;
+    const gOp = `d:${DEP_ACCT}:50000:${opA3}:${dep3}`;
+    const ak = `adr:${opA3}:${DEP_ACCT}`;
+    const nb = oneUnit("r3-noadr", gOp, [credited, MARK3]);
+    await submitAt(49, nb);
+    if (!(nb.post[0] < ak && ak < nb.post[1])) throw new Error("fixture: noadr straddle");
+    await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 49 }, depositPayload(nb, credited), {
+      aleft: nb.post[0], aleft_proof: nb.leafProof(nb.post[0]),
+      aright: nb.post[1], aright_proof: nb.leafProof(nb.post[1]),
+    }), 20000, "R3-A-4 unbound-address credit predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_49) !== 2) throw new Error("R3-A-4: credit without the adr binding did not freeze h49");
+    // (c) honest: designated account, binding present → no fake absence.
+    const good = oneUnit("r3-good", gOp, [credited, MARK3, ak, `adrx:${DEP_ACCT}:${opA3}`]);
+    await submitAt(49, good);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "deposit", height: 49 }, depositPayload(good, credited), {
+      aleft: credited, aleft_proof: good.leafProof(credited),
+      aright: ak, aright_proof: good.leafProof(ak),
+    }), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_49 || 0) !== 0) throw new Error("R3-A-4/5: honest designated credit froze h49!");
+    console.log("48. R3-A-4/5: foreign-account credit / unbound payer → frozen; designated + bound → 'no fraud'");
+  }
+
+  // ---- 49. R3-A-7: a credited PERP deposit (D:) must be vault-backed ------
+  {
+    const leaf = `acct:${DEP_ACCT}:1000000:50000:0`;
+    const ghost = b6444("never-paid-perp");
+    const cases = [
+      ["unbacked", `D:${DEP_ACCT}:50000:${opA3}:${ghost}`, ghost],
+      ["cross-kind", `D:${DEP_ACCT}:50000:${opA3}:${dep2}`, dep2], // a BASE anchor (dep_, no depp_)
+    ];
+    for (const [tag, op, anchor] of cases) {
+      const u = oneUnit("r3-perp-" + tag, op, [leaf, "dep:" + anchor, `adr:${opA3}:${DEP_ACCT}`, `adrx:${DEP_ACCT}:${opA3}`]);
+      await submitAt(50, u);
+      await triggerVerdict(challenger, dispute, Object.assign({ pred: "deposit", height: 50 }, depositPayload(u, leaf)), 20000, "R3-A-7 " + tag + " predicate");
+      st = await vars(rollup);
+      if (Number(st.frozen_50) !== 2) throw new Error("R3-A-7: " + tag + " PERP credit did not freeze h50");
+    }
+    const okU = oneUnit("r3-perp-ok", govOp, [leaf, "dep:" + govUnit, `adr:${opA3}:${DEP_ACCT}`, `adrx:${DEP_ACCT}:${opA3}`]);
+    await submitAt(50, okU);
+    await triggerBounce(challenger, dispute, Object.assign({ pred: "deposit", height: 50 }, depositPayload(okU, leaf)), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_50 || 0) !== 0) throw new Error("R3-A-7: honest backed PERP deposit froze h50!");
+    console.log("49. R3-A-7: unbacked / cross-kind D: credit → frozen; depp_-backed D: → 'no fraud'");
+  }
+
+  // ---- 50. R3-A-6: an account leaf never vanishes (P-keep acct:) ---------
+  {
+    const drop = oneUnit("r3-keep-acct", "x:" + sha256Hex("keepacct"), [FILL_TAKER_PRE, META1]);
+    await submitAt(51, drop);
+    const hi = `acct:${DEP_ACCT};`;
+    if (!(hi <= drop.post[0])) throw new Error("fixture: keep-acct before-min");
+    const keepPayload = (u, left) => ({
+      pred: "keep", height: 51, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: u.traceRoot, pre_wit: WIT_ROOT, post_wit: u.wit,
+      post_proof: merkle.getMerkleProof(u.trace, 0),
+      leaf: DEP_PRE, leaf_proof: genProof(DEP_PRE),
+      left, left_proof: u.leafProof(left),
+    });
+    await triggerVerdict(challenger, bindAa, keepPayload(drop, drop.post[0]), 20000, "R3-A-6 P-keep acct predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_51) !== 2) throw new Error("R3-A-6: dropped account leaf did not freeze h51");
+    // Honest: the account changed but is still there → no absence proof.
+    const keptLeaf = `acct:${DEP_ACCT}:999:0:0`;
+    const kept = oneUnit("r3-keep-ok", "x:" + sha256Hex("keepok"), [keptLeaf, FILL_TAKER_PRE, META1]);
+    await submitAt(51, kept);
+    await triggerBounce(challenger, bindAa, keepPayload(kept, kept.post[0]), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_51 || 0) !== 0) throw new Error("R3-A-6: honest changed account froze h51!");
+    console.log("50. R3-A-6: account leaf dropped from the post tree → frozen; changed-but-present → 'no fraud'");
+  }
+
+  // ---- 51. R3-A-3: an honest fill whose Oscript math rounds 1 off --------
+  // qty 10001 x price 999900009999 = 2e16*500 - 1 exactly: ocore's
+  // 15-digit product rounds it UP, so the AA's notional/fee is 500 where
+  // the engine's exact i128 fee is 499 (honest post col 1000000 - 499).
+  // Pre-fix the exact identity verdicted this honest height.
+  {
+    const Q = 10001;
+    const P = 999900009999;
+    const rFill = `f:${isoUnit}:0:${DEP_ACCT}:${"c".repeat(64)}:${"6".repeat(64)}:${isoMOrd}:1:${P}:${Q}:9:0:0:0`;
+    const R_TREE = fillsTree([rFill]);
+    const rOp = `p:${DEP_ACCT}:1:0:${P}:${Q}:0:0:0:0`;
+    const rPos = `pos:${DEP_ACCT}:1:${Q}:${P}:0:0`;
+    const rPayload = (u, col) => {
+      const acctLeaf = `acct:${DEP_ACCT}:${col}:0:0`;
+      return {
+        pred: "fill_math", height: 52, rollup: ROLLUP_ADDR, k: 0,
+        trace_root: u.traceRoot, fills_root: merkle.getMerkleRoot(R_TREE), ops_root: u.opsRoot,
+        units_root: ISO_UNITS_ROOT, units_proof: ISO_UNITS_PROOF,
+        fill: rFill, fill_proof: merkle.getMerkleProof(R_TREE, 0),
+        right: R_TREE[1], right_proof: merkle.getMerkleProof(R_TREE, 1),
+        op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+        pre_wit: WIT_ROOT, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+        pre_acct: DEP_PRE, pre_acct_proof: genProof(DEP_PRE),
+        post_acct: acctLeaf, post_acct_proof: u.leafProof(acctLeaf),
+        post_pos: rPos, post_pos_proof: u.leafProof(rPos),
+        pre_meta: META1, pre_meta_proof: genProof(META1),
+        pos_absent: true,
+        pleft: META2, pleft_proof: genProof(META2),
+        pright: POS2, pright_proof: genProof(POS2),
+        cp_acct: CP_LEAF, cp_acct_proof: u.leafProof(CP_LEAF),
+        who: "taker",
+      };
+    };
+    const mk = (tag, col) => Object.assign(oneUnit(tag, rOp, [`acct:${DEP_ACCT}:${col}:0:0`, CP_LEAF, META1, rPos]), {
+      unitsRoot: ISO_UNITS_ROOT, fillsRoot: merkle.getMerkleRoot(R_TREE), fillCount: 1,
+    });
+    const liar = mk("r3-round-liar", 999401); // 100 below the identity
+    await submitAt(52, liar);
+    await triggerVerdict(challenger, fill, rPayload(liar, 999401), 20000, "R3-A-3 liar fill predicate");
+    st = await vars(rollup);
+    if (Number(st.frozen_52) !== 2) throw new Error("R3-A-3: a real collateral lie on the crafted fill did not freeze h52");
+    const honest = mk("r3-round", 999501);
+    await submitAt(52, honest);
+    await triggerBounce(challenger, fill, rPayload(honest, 999501), 20000, "no fraud");
+    st = await vars(rollup);
+    if (Number(st.frozen_52 || 0) !== 0) throw new Error("R3-A-3: honest fill slashed on Oscript rounding!");
+    console.log("51. R3-A-3: honest fill with a 15-digit rounding (AA fee 500, engine 499) → 'no fraud'; real lie → frozen");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone
