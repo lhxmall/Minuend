@@ -20,11 +20,10 @@ use minuend_watch::{
     create_private_temp_dir, fetch_da_unit, load_checkpoint, load_checkpoint_at, lock_temp_dir,
     pick_root_verified_checkpoint, prove, read_vault_ledger_bounded, regressed_tip_contradictory,
     resolve_start_height, rewind_target, root_diverged, sane_chain_readings,
-    save_checkpoint_retaining, sweep_stale_temp_dirs, tip_awaiting_resubmission,
-    vault_keys_needed, verify_da_binding, write_private_proof, ChainView, HubClient,
-    VaultReadCache, WatchConfig, WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS,
-    MAX_VAULT_READS_PER_HEIGHT, TEMP_DIR_OWNER_FILE, VAULT_READ_BUDGET_SECS,
-    VAULT_READ_DEADLINE_RESERVE_SECS,
+    save_checkpoint_retaining, sweep_stale_temp_dirs, tip_awaiting_resubmission, vault_keys_needed,
+    verify_da_binding, write_private_proof, ChainView, HubClient, VaultReadCache, WatchConfig,
+    WatchError, CHALLENGE_BOND_GROSS, DEFAULT_POLL_INTERVAL_SECS, MAX_VAULT_READS_PER_HEIGHT,
+    TEMP_DIR_OWNER_FILE, VAULT_READ_BUDGET_SECS, VAULT_READ_DEADLINE_RESERVE_SECS,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -1350,7 +1349,10 @@ fn main() -> anyhow::Result<()> {
     // for its whole life; sweeps of other runs (any PID namespace) skip it.
     let temp_lock = if temp_mode {
         Some(lock_temp_dir(&state_dir).map_err(|e| {
-            anyhow::anyhow!("cannot lock the private temp dir {}: {e}", state_dir.display())
+            anyhow::anyhow!(
+                "cannot lock the private temp dir {}: {e}",
+                state_dir.display()
+            )
         })?)
     } else {
         None
@@ -1627,7 +1629,14 @@ fn main() -> anyhow::Result<()> {
             if stop_requested() {
                 break;
             }
-            match check_height(&hub, &config, &mut engine, h, &mut advanced, &mut vault_cache) {
+            match check_height(
+                &hub,
+                &config,
+                &mut engine,
+                h,
+                &mut advanced,
+                &mut vault_cache,
+            ) {
                 Ok(None) => {}
                 Ok(Some(msg)) => println!("WATCH ALERT: {msg}"),
                 Err(e) => println!("WATCH ERROR at h={h}: {e}"),

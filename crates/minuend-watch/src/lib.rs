@@ -2445,7 +2445,11 @@ mod tests {
         // Stale: lock file left behind by a killed run (nobody holds it),
         // even though its recorded pid (ours) is "running".
         drop(lock_temp_dir(&stale).unwrap());
-        std::fs::write(stale.join(TEMP_DIR_OWNER_FILE), std::process::id().to_string()).unwrap();
+        std::fs::write(
+            stale.join(TEMP_DIR_OWNER_FILE),
+            std::process::id().to_string(),
+        )
+        .unwrap();
         std::fs::create_dir_all(stale.join("proofs")).unwrap();
         std::fs::write(stale.join("proofs").join("p.json"), b"{}").unwrap();
         // Legacy: pid file of a dead process but no lock file.
@@ -2602,7 +2606,8 @@ mod tests {
         assert_eq!(l.get("dep_y_absent"), Some(&None));
         assert!(!l.contains_key("dep_z_err"));
         // Same round: cached keys (failed one included) are not re-read.
-        let l2 = read_vault_ledger_bounded(&hub, "V", &keys[..64], &mut cache, 64, 1000, &mut clock);
+        let l2 =
+            read_vault_ledger_bounded(&hub, "V", &keys[..64], &mut cache, 64, 1000, &mut clock);
         assert_eq!(hub.reads.get(), 64);
         assert_eq!(l2.len(), 63);
         // Deadline passed: no further reads at all.
@@ -2615,7 +2620,9 @@ mod tests {
         read_vault_ledger_bounded(&hub, "V", &keys[..1], &mut fresh, 64, 1000, &mut clock);
         assert_eq!(hub.reads.get(), 65);
         // No vault configured: nothing read.
-        assert!(read_vault_ledger_bounded(&hub, "", &keys, &mut fresh, 64, 1000, &mut clock).is_empty());
+        assert!(
+            read_vault_ledger_bounded(&hub, "", &keys, &mut fresh, 64, 1000, &mut clock).is_empty()
+        );
     }
 
     /// R3-R-6: the no-`--state-dir` proof directory is created fresh at an

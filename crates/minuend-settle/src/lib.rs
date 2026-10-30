@@ -685,10 +685,9 @@ impl Batch {
     /// R5-E-1: total serialized size of the stamped evidence (the measure
     /// the watcher's batch cap uses).
     pub fn deposit_evidence_bytes(&self) -> usize {
-        self.unit_evidences
-            .iter()
-            .flatten()
-            .fold(0usize, |t, e| t.saturating_add(deposit_verify::evidence_len(e)))
+        self.unit_evidences.iter().flatten().fold(0usize, |t, e| {
+            t.saturating_add(deposit_verify::evidence_len(e))
+        })
     }
     /// R5-E-1: producer self-check after [`Batch::attach_deposit_evidences`]:
     /// every stamped evidence and the batch total are within the producer's
@@ -696,12 +695,9 @@ impl Batch {
     /// what watchers accept). A producer that admits through
     /// [`deposit_verify::DepositEvidenceBudget`] always passes.
     pub fn check_evidence_admission_limits(&self) -> Result<(), SettleError> {
-        if self
-            .unit_evidences
-            .iter()
-            .flatten()
-            .any(|e| deposit_verify::evidence_len(e) > deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES)
-        {
+        if self.unit_evidences.iter().flatten().any(|e| {
+            deposit_verify::evidence_len(e) > deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES
+        }) {
             return Err(SettleError::DepositEvidenceTooLarge);
         }
         if self.deposit_evidence_bytes() > deposit_verify::DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES {
@@ -4053,7 +4049,6 @@ mod tests {
         .is_err());
     }
 
-
     // -----------------------------------------------------------------------
     // Round 5 (R5-E-1 / R5-R-1): one shared set of evidence size limits.
 
@@ -4101,8 +4096,14 @@ mod tests {
                 .map(|f| f.trim().parse::<usize>().unwrap())
                 .product()
         };
-        assert_eq!(num("DEPOSIT_EVIDENCE_UNIT_MAX_BYTES"), DEPOSIT_EVIDENCE_UNIT_MAX_BYTES);
-        assert_eq!(num("DEPOSIT_EVIDENCE_BATCH_MAX_BYTES"), DEPOSIT_EVIDENCE_BATCH_MAX_BYTES);
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_UNIT_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_UNIT_MAX_BYTES
+        );
+        assert_eq!(
+            num("DEPOSIT_EVIDENCE_BATCH_MAX_BYTES"),
+            DEPOSIT_EVIDENCE_BATCH_MAX_BYTES
+        );
         assert_eq!(
             num("DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES"),
             DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES
@@ -4152,12 +4153,11 @@ mod tests {
             Err(SettleError::DepositEvidenceTooLarge)
         );
         assert!(target > deposit_verify::DEPOSIT_EVIDENCE_POST_UNIT_MAX_BYTES);
-        let (ev, rec) = r5_sized_evidence(
-            2,
-            7,
-            deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES,
+        let (ev, rec) =
+            r5_sized_evidence(2, 7, deposit_verify::DEPOSIT_EVIDENCE_ADMIT_UNIT_MAX_BYTES);
+        assert!(
+            deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec).is_ok()
         );
-        assert!(deposit_verify::admit_deposit(&ev, R4_VAULT, &minuend_types::PERP_ASSET, &rec).is_ok());
         let (ev, rec) = r5_sized_evidence(
             3,
             7,
@@ -4216,13 +4216,17 @@ mod tests {
         let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, bad)
             .unwrap()
             .expect("ingested");
-        assert!(!evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+        assert!(!evs
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
         assert_eq!(budget.used(), 0, "rejected deposit released its bytes");
         for u in &units[..4] {
             let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, u.clone())
                 .unwrap()
                 .expect("fits");
-            assert!(evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+            assert!(evs
+                .iter()
+                .any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
         }
         assert_eq!(budget.used(), 4 * each);
         assert!(budget.used() <= deposit_verify::DEPOSIT_EVIDENCE_ADMIT_BATCH_MAX_BYTES);
@@ -4241,7 +4245,9 @@ mod tests {
         let evs = deposit_verify::ingest_within_budget(&mut eng, &mut budget, units[4].clone())
             .unwrap()
             .expect("fits after the cut");
-        assert!(evs.iter().any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Applied { .. })));
         assert_eq!(budget.used(), each);
     }
 

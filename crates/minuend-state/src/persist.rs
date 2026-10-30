@@ -305,7 +305,11 @@ pub fn cap_snapshots_keep_floor(
     let mut total: u64 = kept.iter().map(|(_, p)| size(p)).sum();
     // Middle (strictly between newest and floor), oldest first.
     let last = kept.len().saturating_sub(1);
-    let middle_hi = if floor_idx.is_some() { last } else { kept.len() };
+    let middle_hi = if floor_idx.is_some() {
+        last
+    } else {
+        kept.len()
+    };
     for i in (1..middle_hi).rev() {
         if total <= max_bytes {
             break;
@@ -492,7 +496,10 @@ mod tests {
         // lf = 5: 1..=4 go (below the floor), 5..=20 (16 > 8) all fit.
         let removed = cap_snapshots_keep_floor(&dir, 5, u64::MAX).unwrap();
         assert_eq!(removed, vec![4, 3, 2, 1]);
-        assert_eq!(snapshot_heights(&dir).unwrap(), (5..=20).rev().collect::<Vec<_>>());
+        assert_eq!(
+            snapshot_heights(&dir).unwrap(),
+            (5..=20).rev().collect::<Vec<_>>()
+        );
         // Budget of 4 files: newest (20) + floor (5) + the 2 newest middles.
         cap_snapshots_keep_floor(&dir, 5, 4 * one).unwrap();
         assert_eq!(snapshot_heights(&dir).unwrap(), vec![20, 19, 18, 5]);

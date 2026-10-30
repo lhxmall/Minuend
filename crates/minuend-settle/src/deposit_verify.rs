@@ -594,9 +594,9 @@ pub fn ingest_within_budget(
     let uid = minuend_dag::unit_id(&unit);
     match engine.ingest(unit) {
         Ok(events) => {
-            let applied = events.iter().any(|e| {
-                matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == uid)
-            });
+            let applied = events.iter().any(
+                |e| matches!(e, minuend_exec::ExecEvent::Applied { unit, .. } if *unit == uid),
+            );
             if !applied {
                 budget.release(&op);
             }
