@@ -5019,8 +5019,14 @@ mod tests {
         // Round 7: an honest ADL print is clamp(pre mark, band).
         if kind == "2" {
             let mk = batch.fills[0].split(':').nth(7).unwrap();
-            let meta = pre.iter().find(|l| l.starts_with(&format!("meta:{mk}:"))).unwrap();
-            let band = pre.iter().find(|l| l.starts_with(&format!("band:{mk}:"))).unwrap();
+            let meta = pre
+                .iter()
+                .find(|l| l.starts_with(&format!("meta:{mk}:")))
+                .unwrap();
+            let band = pre
+                .iter()
+                .find(|l| l.starts_with(&format!("band:{mk}:")))
+                .unwrap();
             assert_eq!(adl_price_bad(&batch.fills[0], meta, band), Some(false));
         }
         let c = claw_eval(&batch.fills[0], &batch.ops[0], &pre, &batch.leaf_trace[0])
@@ -5965,12 +5971,21 @@ mod tests {
         assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:0"), Some(false));
         assert_eq!(adl_price_bad(&f("9000"), meta, "band:1:0:0"), Some(true));
         // Ceiling 8000 < mark: the honest print is 8000.
-        assert_eq!(adl_price_bad(&f("8000"), meta, "band:1:0:8000"), Some(false));
+        assert_eq!(
+            adl_price_bad(&f("8000"), meta, "band:1:0:8000"),
+            Some(false)
+        );
         assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:8000"), Some(true));
         // Floor 9000 > mark (negative grid allowed).
-        assert_eq!(adl_price_bad(&f("9000"), meta, "band:1:9000:0"), Some(false));
+        assert_eq!(
+            adl_price_bad(&f("9000"), meta, "band:1:9000:0"),
+            Some(false)
+        );
         assert_eq!(adl_price_bad(&f("-5"), meta, "band:1:-10:0"), Some(true));
-        assert_eq!(adl_price_bad(&f("1000000000000000"), meta, "band:1:0:0"), None);
+        assert_eq!(
+            adl_price_bad(&f("1000000000000000"), meta, "band:1:0:0"),
+            None
+        );
         // The genesis market carries its band leaf.
         let leaves = minuend_state::wit_leaves(&Engine::new().state);
         assert!(leaves.iter().any(|l| l.starts_with("band:1:")));
