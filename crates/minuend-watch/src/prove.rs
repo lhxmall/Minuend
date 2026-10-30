@@ -1704,6 +1704,7 @@ fn deposit_proof(
         && pre_hit.is_some()
         && liar_perp.to_string().len() <= 14
         && parts[2].len() <= 14
+        && !(is_deposit && dperp == amount)
         && (dperp == bond || dperp == bond + if is_deposit { amount } else { -amount })
     {
         bond
