@@ -29,12 +29,15 @@ pub struct BuiltProof {
 
 impl BuiltProof {
     /// Which dispute AA takes this proof: `main`, `book` (round 2: P-ghost
-    /// and P-skip moved to `minuend_dispute_book.aa`), `fill` or `bind`.
+    /// and P-skip moved to `minuend_dispute_book.aa`), `fill`, `bind` or
+    /// `claw` (round 6: `minuend_dispute_claw.aa`).
     pub fn target(&self) -> &'static str {
         if self.bind_aa {
             "bind"
         } else if self.fill_aa {
             "fill"
+        } else if self.pred == "claw" {
+            "claw"
         } else if self.pred == "ghost"
             || self.pred == "skip"
             || self.pred == "mbind"
@@ -185,6 +188,13 @@ pub fn build_proof_with_vault(
             // Fill-bearing unit: check fills of this unit against post state.
             if let Some(p) =
                 fill_proof(batch, k, unit_hex, &pre_leaves, &post_leaves, &honest_fills)
+            {
+                return Some(p);
+            }
+            // Round 6: both legs of a single-fill unit against the
+            // engine's two-party claw (P-claw).
+            if let Some(p) =
+                claw_proof(batch, k, unit_hex, &pre_leaves, &post_leaves, &honest_fills)
             {
                 return Some(p);
             }
@@ -2437,6 +2447,330 @@ fn fill_proof(
     None
 }
 
+/// Round 6 P-claw (`minuend_dispute_claw.aa`): one fill party's PRE state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClawPre {
+    col: i128,
+    qty: i128,
+    entry: i128,
+    iso: bool,
+    bucket: i128,
+}
+
+/// Realized pieces of one party's `Account::apply_fill` (minuend-account):
+/// isolated release, price-diff PnL and the escrow share returned to
+/// collateral on a pure reduce (`share` = the fill's post for this party).
+fn claw_leg(pre: &ClawPre, delta: i128, price: i128, share: i128) -> (i128, i128, i128) {
+    let same = pre.qty == 0 || (pre.qty > 0 && delta > 0) || (pre.qty < 0 && delta < 0);
+    if same {
+        return (0, 0, 0);
+    }
+    let aq = pre.qty.abs();
+    let close = aq.min(delta.abs());
+    let rel = if !pre.iso {
+        0
+    } else if close == aq {
+        pre.bucket
+    } else {
+        pre.bucket * close / aq
+    };
+    let signed = if pre.qty > 0 {
+        price - pre.entry
+    } else {
+        pre.entry - price
+    };
+    let pnl = signed * close * 1_000_000 / 100_000_000 / 100_000_000;
+    let back = if close == aq && delta.abs() > close {
+        0
+    } else {
+        share
+    };
+    (rel, pnl, back)
+}
+
+/// The claw AA's verdict inputs for one fill, recomputed exactly (i128,
+/// truncating like the engine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClawOut {
+    /// post_t - expected_t
+    dt: i128,
+    /// post_m - expected_m
+    dm: i128,
+    /// The AA's rounding slack (4 x (16 + S / 1e12)).
+    slack: i128,
+    /// Claw moved to the taker (negative: to the maker).
+    x: i128,
+    /// Keeper reward seized from the target.
+    kpay: i128,
+}
+
+/// `None` = the AA bounces before judging (a gate or a missing / malformed
+/// leaf), or a value sits where Oscript's 15-digit comparisons are not
+/// exact (the mirror then stays silent).
+fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<ClawOut> {
+    const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const EXACT: i128 = 1_000_000_000_000_000;
+    let f: Vec<&str> = fill.split(':').collect();
+    if f.len() != 14 || f[0] != "f" || f[2] != "0" {
+        return None;
+    }
+    let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if !f[1..7].iter().enumerate().all(|(i, s)| i == 1 || hex64(s)) {
+        return None;
+    }
+    let (tk, mk, mo, market, side) = (f[3], f[4], f[6], f[7], f[11]);
+    if side != "0" && side != "1" {
+        return None;
+    }
+    let kind: i64 = f[12].parse().ok()?;
+    if !matches!(kind, 0 | 2 | 3) || tk == mk || tk == ZERO || mk == ZERO {
+        return None;
+    }
+    let price: i128 = f[8].parse().ok()?;
+    let qty: i128 = f[9].parse().ok()?;
+    if qty <= 0 || qty >= EXACT || price.abs() >= EXACT {
+        return None;
+    }
+    let meta = pre.iter().find(|l| l.starts_with(&format!("meta:{market}:")))?;
+    let m: Vec<&str> = meta.split(':').collect();
+    if m.len() != 11 || m[9].parse::<i128>().ok()? != 0 {
+        return None;
+    }
+    let fee_bps: i128 = m[5].parse().ok()?;
+    let keeper_bps: i128 = m[6].parse().ok()?;
+    let o: Vec<&str> = op.split(':').collect();
+    let (margin, tp, refund, keeper_m) = if kind == 0 {
+        if o.len() != 10 || o[0] != "p" || o[1] != tk || o[2] != market || o[3] != side {
+            return None;
+        }
+        if o[6] != "0" && o[6] != "1" {
+            return None;
+        }
+        let oqty: i128 = o[5].parse().ok()?;
+        let om: i128 = o[7].parse().ok()?;
+        if qty > oqty || om < 0 || oqty >= EXACT || om >= EXACT {
+            return None;
+        }
+        let margin = if o[6] == "1" { om } else { 0 };
+        let tp = if qty >= oqty {
+            margin
+        } else {
+            margin * qty / oqty
+        };
+        let rests = o[9] == "0" && o[8] == "0" && qty < oqty;
+        (margin, tp, if rests { 0 } else { margin - tp }, false)
+    } else {
+        if o.len() != 4 || o[0] != "L" || o[2] != tk || o[3] != market {
+            return None;
+        }
+        (0, 0, 0, o[1] == mk)
+    };
+    let (mml, mp) = if kind != 2 {
+        let mord = pre.iter().find(|l| l.starts_with(&format!("ord:{mo}:")))?;
+        let mo_: Vec<&str> = mord.split(':').collect();
+        if mo_.len() != 10 || mo == mk || mo_[7] != mk {
+            return None;
+        }
+        let mprice: i128 = mo_[4].parse().ok()?;
+        let mrem: i128 = mo_[6].parse().ok()?;
+        let mml: i128 = mo_[9].parse().ok()?;
+        if mprice != price || qty > mrem || mrem >= EXACT {
+            return None;
+        }
+        (mml, if qty >= mrem { mml } else { mml * qty / mrem })
+    } else {
+        (0, 0)
+    };
+    let t2 = (qty * price / 100_000_000 * 1_000_000 / 100_000_000).abs();
+    let fee = if kind == 2 { 0 } else { t2 * fee_bps / 10_000 };
+    let reward = if kind == 0 { 0 } else { t2 * keeper_bps / 10_000 };
+    let col_of = |tree: &[String], a: &str| -> Option<i128> {
+        tree.iter()
+            .find(|l| l.starts_with(&format!("acct:{a}:")))?
+            .split(':')
+            .nth(2)?
+            .parse()
+            .ok()
+    };
+    let pre_of = |a: &str| -> Option<ClawPre> {
+        let col = col_of(pre, a)?;
+        match pre
+            .iter()
+            .find(|l| l.starts_with(&format!("pos:{a}:{market}:")))
+        {
+            None => Some(ClawPre {
+                col,
+                ..Default::default()
+            }),
+            Some(p) => {
+                let q: Vec<&str> = p.split(':').collect();
+                if q.len() != 7 || (q[5] != "0" && q[5] != "1") {
+                    return None;
+                }
+                Some(ClawPre {
+                    col,
+                    qty: q[3].parse().ok()?,
+                    entry: q[4].parse().ok()?,
+                    iso: q[5] == "1",
+                    bucket: q[6].parse().ok()?,
+                })
+            }
+        }
+    };
+    let t = pre_of(tk)?;
+    let mm_ = pre_of(mk)?;
+    if kind != 0 && t.iso {
+        return None;
+    }
+    let td = if side == "0" { qty } else { -qty };
+    let (trel, tpnl, tback) = claw_leg(&t, td, price, tp);
+    let (mrel, mpnl, mback) = claw_leg(&mm_, -td, price, mp);
+    // Fill stages, then the engine's claw (taker first, then maker).
+    let mt = t.col - margin + trel + tpnl + tback - fee;
+    let mm = mm_.col + mrel + mpnl + mback;
+    let x = if mt < 0 {
+        (-mt).min(mm.max(0))
+    } else if mm < 0 {
+        -((-mm).min(mt.max(0)))
+    } else {
+        0
+    };
+    let kpay = reward.min((mt + x).max(0));
+    let et = mt + x + refund - kpay;
+    let em = mm - x + if keeper_m { kpay } else { 0 };
+    let s = t.col.abs()
+        + mm_.col.abs()
+        + 2 * t2
+        + tpnl.abs()
+        + mpnl.abs()
+        + t.bucket
+        + mm_.bucket
+        + mml
+        + margin
+        + (t.qty.abs() * t.entry.abs() + mm_.qty.abs() * mm_.entry.abs()) / 10_000_000_000;
+    let slack = 4 * (16 + s / FILL_REL);
+    Some(ClawOut {
+        dt: col_of(post, tk)? - et,
+        dm: col_of(post, mk)? - em,
+        slack,
+        x,
+        kpay,
+    })
+}
+
+/// Round 6 P-claw builder: the unit's ONLY fill, judged on BOTH legs at
+/// once (the claw one party paid must be the claw the other received, the
+/// keeper seize and the isolated refund on top). Emitted only when the AA's
+/// verdict is certain (a deviation beyond twice its slack) and — for a fill
+/// the honest replay produced — the honest tree passes the same model.
+fn claw_proof(
+    batch: &Batch,
+    k: usize,
+    unit_hex: &str,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+    honest_fills: &[String],
+) -> Option<BuiltProof> {
+    let prefix = format!("f:{unit_hex}:");
+    let fills_tree = minuend_settle::fills_root_elements(&batch.fills);
+    let gidx = batch
+        .fills
+        .iter()
+        .position(|f| f.starts_with(&format!("f:{unit_hex}:0:")))?;
+    let right = fills_tree.get(gidx + 1)?;
+    if right.starts_with(&prefix) {
+        return None; // multi-fill unit: not judged
+    }
+    let f = batch.fills[gidx].clone();
+    let op = batch.ops.get(k)?.clone();
+    let posted: Vec<String> = batch
+        .leaf_trace
+        .get(k)
+        .cloned()
+        .unwrap_or_else(|| post_leaves.to_vec());
+    let c = claw_eval(&f, &op, pre_leaves, &posted)?;
+    if c.dt.abs() <= 2 * c.slack && c.dm.abs() <= 2 * c.slack {
+        return None;
+    }
+    if honest_fills.iter().any(|h| *h == f) {
+        match claw_eval(&f, &op, pre_leaves, post_leaves) {
+            Some(h) if h.dt.abs() <= h.slack && h.dm.abs() <= h.slack => {}
+            _ => return None, // the model does not reproduce the replay
+        }
+    }
+    let parts: Vec<&str> = f.split(':').collect();
+    let (tk, mk, market, kind) = (parts[3], parts[4], parts[7], parts[12]);
+    let unit_hexes: Vec<String> = batch
+        .checkpoint
+        .unit_ids
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(&fills_tree, gidx),
+        "units_proof": proof_json(&unit_hexes, k),
+        "right": right,
+        "right_proof": proof_json(&fills_tree, gidx + 1),
+        "post_wit": batch.trace.get(k)?,
+        "post_proof": proof_json(&batch.trace, k),
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+    });
+    let obj = data.as_object_mut()?;
+    obj.extend(
+        pre_wit_fields(batch, k, pre_leaves)
+            .as_object()?
+            .clone(),
+    );
+    let mut put = |key: &str, tree: &[String], leaf: &String| -> Option<()> {
+        let i = index_of(tree, leaf)?;
+        obj.insert(key.into(), leaf.clone().into());
+        obj.insert(format!("{key}_proof"), proof_json(tree, i));
+        Some(())
+    };
+    let meta = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{market}:")))?;
+    put("pre_meta", pre_leaves, meta)?;
+    if kind != "2" {
+        let mord = pre_leaves
+            .iter()
+            .find(|l| l.starts_with(&format!("ord:{}:", parts[6])))?;
+        put("maker_ord", pre_leaves, mord)?;
+    }
+    for (x, a) in [("t", tk), ("m", mk)] {
+        let key = format!("acct:{a}:");
+        let pre_acct = pre_leaves.iter().find(|l| l.starts_with(&key))?;
+        put(&format!("{x}_pre_acct"), pre_leaves, pre_acct)?;
+        let post_acct = posted.iter().find(|l| l.starts_with(&key))?;
+        put(&format!("{x}_post_acct"), &posted, post_acct)?;
+        let pkey = format!("pos:{a}:{market}:");
+        match pre_leaves.iter().find(|l| l.starts_with(&pkey)) {
+            Some(pp) => put(&format!("{x}_pre_pos"), pre_leaves, pp)?,
+            None => {
+                // The AA proves absence by an adjacent straddle only (a
+                // meta: leaf sorts before any pos:, `~:end` after it).
+                let (li, rj) = mkt_pos_range(pre_leaves, a, market, false)?;
+                let rj = rj?;
+                put(&format!("{x}_pleft"), pre_leaves, &pre_leaves[li])?;
+                put(&format!("{x}_pright"), pre_leaves, &pre_leaves[rj])?;
+            }
+        }
+    }
+    Some(BuiltProof {
+        pred: "claw".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4222,5 +4556,339 @@ mod tests {
         let mut t3 = vec![format!("acct:{a}:0:0:0"), format!("acct:{c}:5:0:0")];
         t3.sort();
         assert!(!aa_fill_verdict(&t3, &small, false, None));
+    }
+
+    // ---- Round 6: P-claw (both legs of one fill) ------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn claw_place(
+        parents: Vec<UnitId>,
+        secret: &[u8; 32],
+        side: minuend_types::Side,
+        tif: minuend_types::TimeInForce,
+        price: i64,
+        qty: u64,
+        client_seq: u64,
+        margin: Option<u64>,
+    ) -> minuend_dag::Unit {
+        sign_unit(
+            parents,
+            Op::Place {
+                account: acct_of(secret),
+                market: minuend_types::BTC_USD,
+                side,
+                typ: minuend_types::OrderType::Limit,
+                tif,
+                price,
+                qty,
+                client_seq,
+                isolated: margin.is_some(),
+                margin: margin.unwrap_or(0),
+            },
+            secret,
+        )
+    }
+
+    fn claw_set_pos(eng: &mut Engine, id: AccountId, qty: i64, entry: i64) {
+        eng.state.account_mut(id).positions.insert(
+            minuend_types::BTC_USD,
+            minuend_account::Position {
+                market: minuend_types::BTC_USD,
+                qty,
+                entry_price: entry,
+                isolated: false,
+            },
+        );
+    }
+
+    fn claw_set_col(eng: &mut Engine, id: AccountId, usd: i128) {
+        eng.state.account_mut(id).collateral = usd * minuend_types::USD_SCALE as i128;
+    }
+
+    /// Batch the single unit `u` on top of `eng`; returns the batch and a
+    /// replay engine at the batch's prev state.
+    fn claw_batch(eng: &mut Engine, u: minuend_dag::Unit) -> (Batch, Engine) {
+        let prev = eng.state.clone();
+        let replay = eng.clone();
+        let id = unit_id(&u);
+        eng.ingest(u).unwrap();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[id]).expect("batch");
+        (batch, replay)
+    }
+
+    /// The honest batch: one fill, the model reproduces BOTH legs exactly,
+    /// no proof. Then "credit the receiver without debiting the payer"
+    /// (the R5 money print) and "debit the payer without crediting the
+    /// receiver" both build a P-claw proof that fill_math does not.
+    fn claw_check(batch: &Batch, replay: &Engine, kind: &str) -> ClawOut {
+        assert_eq!(batch.fills.len(), 1, "single-fill unit: {:?}", batch.fills);
+        assert_eq!(batch.fills[0].split(':').nth(12), Some(kind));
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let c = claw_eval(&batch.fills[0], &batch.ops[0], &pre, &batch.leaf_trace[0])
+            .expect("P-claw judges this shape");
+        assert_eq!((c.dt, c.dm), (0, 0), "model == engine on both legs: {c:?}");
+        assert!(build_proof(batch, &mut replay.clone(), &[], 0).is_none());
+        c
+    }
+
+    fn claw_forgeries(batch: &Batch, replay: &Engine, c: &ClawOut) {
+        assert_ne!(c.x, 0, "fixture must claw");
+        let p: Vec<&str> = batch.fills[0].split(':').collect();
+        let (payer, receiver) = if c.x > 0 { (p[4], p[3]) } else { (p[3], p[4]) };
+        let amt = c.x.abs();
+        // Money print: the receiver keeps the claw, the payer is not debited.
+        let mut print = batch.clone();
+        bump_col(&mut print, 0, payer, amt);
+        let proof = build_proof(&print, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw", "fill_math alone cannot see it");
+        assert_eq!(proof.target(), "claw");
+        for key in [
+            "t_pre_acct",
+            "t_post_acct",
+            "m_pre_acct",
+            "m_post_acct",
+            "pre_meta",
+            "op",
+            "right",
+        ] {
+            assert!(proof.data.get(key).is_some(), "missing {key}");
+        }
+        // Burn: the payer pays, the receiver is not credited.
+        let mut burn = batch.clone();
+        bump_col(&mut burn, 0, receiver, -amt);
+        let proof = build_proof(&burn, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+    }
+
+    #[test]
+    fn r6_claw_maker_hole_clawed_from_cross_taker() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        // bob's 10k loss now exceeds his collateral: the claw covers 9k.
+        claw_set_col(&mut eng, b, 1_000);
+        let bid = claw_place(vec![i0], &alice, Side::Bid, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(c.x, -(9_000 * USD_SCALE as i128), "maker received 9k from the taker");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_taker_hole_clawed_from_maker() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, -(QTY_SCALE as i64), 90_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 90_000 * PRICE_SCALE as i64);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, a, 1_000);
+        // alice buys back her short 10k higher: her hole is clawed from bob.
+        let bid = claw_place(vec![i0], &alice, Side::Bid, TimeInForce::Ioc, px, QTY_SCALE, 1, None);
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        let c = claw_check(&batch, &replay, "0");
+        assert!(c.x > 0, "taker received from the maker: {c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_isolated_taker_refund_lands_after_the_claw() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(vec![genesis_id()], &bob, Side::Ask, TimeInForce::Gtc, px, QTY_SCALE, 1, None);
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, b, 1_000);
+        // Isolated IOC for 2: one fills (escrow share 10k to the bucket),
+        // the unfilled half's 10k escrow returns AFTER the claw.
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Ioc,
+            px,
+            2 * QTY_SCALE,
+            1,
+            Some(20_000 * USD_SCALE),
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        assert!(batch.ops[0].starts_with("p:") && batch.ops[0].contains(":1:20000000000:1:0"));
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(c.x, -(9_000 * USD_SCALE as i128));
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_adl_target_hole_clawed_from_counterparty() {
+        use minuend_types::{PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 1_000_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(&mut eng, b, -(QTY_SCALE as i64), 100_000 * PRICE_SCALE as i64);
+        // Mark crash, empty book: the remainder is ADL'd at the mark.
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![genesis_id()],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "2");
+        assert!(c.x > 0 && c.kpay == 0, "{c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_adl_keeper_reward_to_maker_caller() {
+        use minuend_types::{PRICE_SCALE, QTY_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 1_000_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(&mut eng, b, -(QTY_SCALE as i64), 100_000 * PRICE_SCALE as i64);
+        // 14k under water with 15k collateral: liquidatable, no claw; the
+        // ADL counterparty is also the keeper and gets the reward.
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 86_000 * PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![genesis_id()],
+            Op::Liquidate {
+                caller: b,
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &bob,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "2");
+        assert_eq!(c.x, 0);
+        assert!(c.kpay > 0, "keeper reward paid: {c:?}");
+        // The keeper credit withheld from the maker-caller.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &hex::encode(b.0), -c.kpay);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+    }
+
+    #[test]
+    fn r6_claw_liquidation_book_fill_partial_claw() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "3");
+        // bob pays everything he has (50k) into alice's ~85k hole.
+        assert_eq!(c.x, 50_000 * USD_SCALE as i128, "{c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_eval_gates_bounce() {
+        // Funding market / kind 1 / self-fill / insurance party / an op
+        // that is not the fill's: no judgement (the AA bounces).
+        let t = "aa".repeat(32);
+        let m = "cc".repeat(32);
+        let u = "11".repeat(32);
+        let ord = "33".repeat(32);
+        let fill = |tk: &str, mk: &str, kind: &str| {
+            format!("f:{u}:0:{tk}:{mk}:{}:{ord}:1:100:5:9:0:{kind}:0", "77".repeat(32))
+        };
+        let mut pre = vec![
+            format!("acct:{t}:1000:0:0"),
+            format!("acct:{m}:1000:0:0"),
+            "meta:1:1:1000:500:5:100:0:100:0:0".to_string(),
+            format!("ord:{ord}:1:1:100:3:5:{m}:0:0"),
+            "~:end".to_string(),
+        ];
+        pre.sort();
+        let op = format!("p:{t}:1:0:100:5:0:0:0:0");
+        assert!(claw_eval(&fill(&t, &m, "0"), &op, &pre, &pre).is_some());
+        assert!(claw_eval(&fill(&t, &m, "1"), &op, &pre, &pre).is_none());
+        assert!(claw_eval(&fill(&t, &t, "0"), &op, &pre, &pre).is_none());
+        let zero = "0".repeat(64);
+        assert!(claw_eval(&fill(&t, &zero, "0"), &op, &pre, &pre).is_none());
+        let other = format!("p:{m}:1:0:100:5:0:0:0:0");
+        assert!(claw_eval(&fill(&t, &m, "0"), &other, &pre, &pre).is_none());
+        let mut fpre = pre.clone();
+        fpre.retain(|l| !l.starts_with("meta:"));
+        fpre.push("meta:1:1:1000:500:5:100:0:100:7:0".to_string());
+        fpre.sort();
+        assert!(claw_eval(&fill(&t, &m, "0"), &op, &fpre, &fpre).is_none());
+        // Kind 2/3 need `L:{caller}:{taker}:{market}`.
+        assert!(claw_eval(&fill(&t, &m, "3"), &op, &pre, &pre).is_none());
+        let liq = format!("L:{}:{t}:1", "dd".repeat(32));
+        assert!(claw_eval(&fill(&t, &m, "3"), &liq, &pre, &pre).is_some());
     }
 }

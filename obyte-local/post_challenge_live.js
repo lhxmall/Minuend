@@ -7,7 +7,7 @@
 // set. post_challenge.js stays the local aa-testkit drill.
 //
 // Usage: node obyte-local/post_challenge_live.js --height H --pred P \
-//          --proof proof.json --target main|book|fill|bind [--network mainnet|testnet] \
+//          --proof proof.json --target main|book|fill|bind|claw [--network mainnet|testnet] \
 //          [--rollup ADDR] [--dispute-address ADDR]
 //
 // Environment:
@@ -19,7 +19,7 @@
 // Addresses (R2-R-8): the rollup is --rollup (minuend-watch always passes
 // the rollup it watches) > MINUEND_ROLLUP_AA > deployment.json, the last
 // only when its `network` matches. The dispute AA is the one the rollup has
-// bound in its dispute_aa / dispute_book_aa / dispute_fill_aa / dispute_bind_aa state var;
+// bound in its dispute_aa / dispute_book_aa / dispute_fill_aa / dispute_bind_aa / dispute_claw_aa state var;
 // --dispute-address, when given, must equal it.
 //
 // Safety (B10, 600 s margin): the dispute AAs judge the challenge unit's own
@@ -81,7 +81,7 @@ async function main() {
   const target = arg("target", "main");
   const network = arg("network", envCompat("MINUEND_WATCH_NETWORK") || "mainnet");
   if (!Number.isInteger(height) || height < 1 || !pred || !proofFile)
-    throw new Error("usage: node post_challenge_live.js --height N --pred P --proof proof.json --target main|book|fill|bind [--network mainnet|testnet]");
+    throw new Error("usage: node post_challenge_live.js --height N --pred P --proof proof.json --target main|book|fill|bind|claw [--network mainnet|testnet]");
   let deploy = {};
   try {
     deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));

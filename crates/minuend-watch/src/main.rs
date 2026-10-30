@@ -184,6 +184,7 @@ struct Args {
     dispute_fill: Option<String>,
     dispute_bind: Option<String>,
     dispute_book: Option<String>,
+    dispute_claw: Option<String>,
     hub: String,
     from_height: Option<u64>,
     state_dir: Option<PathBuf>,
@@ -197,6 +198,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dispute_fill = None;
     let mut dispute_bind = None;
     let mut dispute_book = None;
+    let mut dispute_claw = None;
     let mut state_dir = None;
     let mut hub = None;
     let mut from_height = None;
@@ -217,6 +219,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dispute-book" => {
                 dispute_book = Some(it.next().ok_or("--dispute-book needs a value")?)
+            }
+            "--dispute-claw" => {
+                dispute_claw = Some(it.next().ok_or("--dispute-claw needs a value")?)
             }
             "--state-dir" => {
                 state_dir = Some(PathBuf::from(it.next().ok_or("--state-dir needs a value")?))
@@ -259,6 +264,7 @@ fn parse_args() -> Result<Args, String> {
         dispute_fill,
         dispute_bind,
         dispute_book,
+        dispute_claw,
         hub: hub.ok_or("missing --hub")?,
         from_height,
         state_dir,
@@ -270,7 +276,7 @@ fn parse_args() -> Result<Args, String> {
 fn print_usage() {
     eprintln!(
         "minuend-watch --rollup <rollup-aa-addr> --vault <vault-aa-addr> --hub <hub-url> [--dispute <dispute-aa-addr>] \
- [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--state-dir <dir>] [--from-height <u64>] \
+ [--dispute-fill <addr>] [--dispute-bind <addr>] [--dispute-book <addr>] [--dispute-claw <addr>] [--state-dir <dir>] [--from-height <u64>] \
  [--poll-interval <secs>] [--bond <gross-bytes>]\n\
  \n\
 Polls the rollup's da_unit_<h> assertions, checks the DA header against the roots the\n\
@@ -366,6 +372,9 @@ struct ChallengeCtx {
     /// Round 2: P-ghost / P-skip live on `minuend_dispute_book.aa`
     /// (rollup var `dispute_book_aa`).
     dispute_book: Option<String>,
+    /// Round 6: P-claw lives on `minuend_dispute_claw.aa` (rollup var
+    /// `dispute_claw_aa`).
+    dispute_claw: Option<String>,
     proof_dir: PathBuf,
 }
 
@@ -376,6 +385,7 @@ impl ChallengeCtx {
         match target {
             "main" => self.dispute_main.as_deref(),
             "book" => self.dispute_book.as_deref(),
+            "claw" => self.dispute_claw.as_deref(),
             "fill" => self.dispute_fill.as_deref(),
             "bind" => self.dispute_bind.as_deref(),
             _ => None,
@@ -979,6 +989,7 @@ fn maybe_post_challenge(h: u64, submission: &str, alert: &str, proof: Option<&pr
             "fill" => args.push("--fill".into()),
             "bind" => args.push("--bind".into()),
             "book" => args.push("--book".into()),
+            "claw" => args.push("--claw".into()),
             _ => {}
         }
         cmd.args(args)
@@ -1398,6 +1409,7 @@ fn main() -> anyhow::Result<()> {
         dispute_fill: args.dispute_fill.clone(),
         dispute_bind: args.dispute_bind.clone(),
         dispute_book: args.dispute_book.clone(),
+        dispute_claw: args.dispute_claw.clone(),
         proof_dir,
     });
 
@@ -1846,6 +1858,7 @@ mod tests {
             dispute_fill: None,
             dispute_bind: Some("B".repeat(32)),
             dispute_book: Some("K".repeat(32)),
+            dispute_claw: Some("C".repeat(32)),
             proof_dir: Default::default(),
         };
         let s = std::path::Path::new("/x/p.js");
@@ -1897,6 +1910,18 @@ mod tests {
         assert_eq!(book[t + 1], "book");
         let j = book.iter().position(|a| a == "--dispute-address").unwrap();
         assert_eq!(book[j + 1], "K".repeat(32));
+        // Round 6: claw proofs target the claw AA (`--dispute-claw`).
+        let claw = minuend_watch::prove::BuiltProof {
+            pred: "claw".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data: serde_json::json!({}),
+        };
+        let cl = strs(live_challenge_args(s, 3, &claw, p, "mainnet", &ctx));
+        let t = cl.iter().position(|a| a == "--target").unwrap();
+        assert_eq!(cl[t + 1], "claw");
+        let j = cl.iter().position(|a| a == "--dispute-address").unwrap();
+        assert_eq!(cl[j + 1], "C".repeat(32));
     }
 
     /// R2-R-11: a challenge in flight or already broadcast is never posted

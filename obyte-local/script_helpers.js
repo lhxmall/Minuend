@@ -69,10 +69,12 @@ const TARGETS = {
   main: { deployKey: "dispute_aa_address", env: "MINUEND_DISPUTE_AA", bind: { bind: 1 }, rollupVar: "dispute_aa" },
   fill: { deployKey: "dispute_fill_aa_address", env: "MINUEND_DISPUTE_FILL_AA", bind: { bind_fill: 1 }, rollupVar: "dispute_fill_aa" },
   bind: { deployKey: "dispute_bind_aa_address", env: "MINUEND_DISPUTE_BIND_AA", bind: { bind_bind: 1 }, rollupVar: "dispute_bind_aa" },
+  // Round 6: P-claw (both legs of one fill) on the claw dispute AA.
+  claw: { deployKey: "dispute_claw_aa_address", env: "MINUEND_DISPUTE_CLAW_AA", bind: { bind_claw: 1 }, rollupVar: "dispute_claw_aa" },
 };
 function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
   const t = TARGETS[target];
-  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind)`);
+  if (!t) throw new Error(`unknown dispute target '${target}' (main|book|fill|bind|claw)`);
   const address = (deploy && deploy[t.deployKey]) || envCompat(t.env, env, warn);
   return Object.assign({ address: address || null }, t);
 }
@@ -138,6 +140,8 @@ function daBindHash(f) {
 // Proof-target routing by predicate name (round 2 split).
 function targetForPred(pred) {
   if (pred === "fill_math") return "fill";
+  // Round 6: P-claw on the claw AA.
+  if (pred === "claw") return "claw";
   // R4-A-1: P-mbind on the book AA; R4-A-3: P-frame on the bind AA;
   // R5-A-2: P-fsane on the book AA.
   if (pred === "ghost" || pred === "skip" || pred === "mbind" || pred === "fsane") return "book";

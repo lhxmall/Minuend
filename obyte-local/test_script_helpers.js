@@ -122,10 +122,15 @@ require("./test_frame_stamp");
   assert.strictEqual(targetForPred("skip"), "book");
   assert.strictEqual(targetForPred("mbind"), "book"); // R4-A-1
   assert.strictEqual(targetForPred("fsane"), "book"); // R5-A-2
+  assert.strictEqual(targetForPred("claw"), "claw"); // round 6 P-claw
   assert.strictEqual(targetForPred("fill_math"), "fill");
   for (const p of ["wpin", "adr", "tip", "keep", "mirror", "frame"]) assert.strictEqual(targetForPred(p), "bind");
   assert.strictEqual(targetForPred("deposit"), "main");
   assert.strictEqual(disputeTarget("book", { dispute_book_aa_address: "B".repeat(32) }).address, "B".repeat(32));
+  const claw = disputeTarget("claw", { dispute_claw_aa_address: "C".repeat(32) });
+  assert.strictEqual(claw.address, "C".repeat(32));
+  assert.strictEqual(claw.rollupVar, "dispute_claw_aa");
+  assert.deepStrictEqual(claw.bind, { bind_claw: 1 });
 }
 
 console.log("script helper checks passed");

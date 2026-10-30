@@ -367,8 +367,16 @@ pub fn ops_element(unit_hex: &str, op: &minuend_dag::Op) -> String {
         // (no predicate judges them through a Reveal). R3-E-1: a Reveal can
         // no longer carry Deposit/GovDeposit (refused at ingest and in
         // `reveal_op`), so only the withdrawal kinds are forwarded.
+        // Round 6 (PR #51 未修复项 30): a revealed Place / Liquidate runs
+        // through the same `dispatch` as a direct one, so its fills are
+        // judged against the INNER `p:` / `L:` descriptor (fill_math's
+        // escrow identity, P-claw's two-leg claw and keeper) instead of an
+        // opaque `x:` that hid the margin, tif and keeper.
         Reveal { op: inner, .. }
-            if matches!(inner.as_ref(), Withdraw { .. } | GovWithdraw { .. }) =>
+            if matches!(
+                inner.as_ref(),
+                Withdraw { .. } | GovWithdraw { .. } | Place { .. } | Liquidate { .. }
+            ) =>
         {
             ops_element(unit_hex, inner)
         }
@@ -3399,6 +3407,39 @@ mod tests {
             salt: [2; 32],
         };
         assert_eq!(ops_element("uu", &rev2), "x:uu");
+        // Round 6: a revealed Place / Liquidate commits the inner descriptor.
+        let place = minuend_dag::Op::Place {
+            account,
+            market: minuend_types::MarketId(1),
+            side: minuend_types::Side::Bid,
+            typ: minuend_types::OrderType::Limit,
+            tif: minuend_types::TimeInForce::Gtc,
+            price: 100,
+            qty: 2,
+            client_seq: 1,
+            isolated: true,
+            margin: 50,
+        };
+        let rev3 = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(place.clone()),
+            salt: [2; 32],
+        };
+        assert_eq!(ops_element("uu", &rev3), ops_element("uu", &place));
+        assert!(ops_element("uu", &rev3).starts_with("p:"));
+        let liq = minuend_dag::Op::Liquidate {
+            caller: account,
+            target: minuend_types::AccountId([5u8; 32]),
+            market: minuend_types::MarketId(1),
+        };
+        let rev4 = minuend_dag::Op::Reveal {
+            account,
+            commit_ref: [1; 32],
+            op: Box::new(liq.clone()),
+            salt: [2; 32],
+        };
+        assert!(ops_element("uu", &rev4).starts_with("L:"));
     }
 
     /// R2-R-1: the DA binding hash format is pinned (JS daBindHash and the

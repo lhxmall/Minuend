@@ -100,6 +100,9 @@ const DISPUTE_SRC = writeResolved("minuend_dispute.aa", { VAULT_BASE_HERE: VAULT
 const BOOK_SRC = writeResolved("minuend_dispute_book.aa", {}, ".e2e_book.aa");
 const BOOK_ADDR = chashOf(fs.readFileSync(BOOK_SRC, "utf8"));
 const FILL_SRC = writeResolved("minuend_dispute_fill.aa", {}, ".e2e_fill.aa");
+// Round 6: P-claw (both legs of one fill) on the claw dispute AA.
+const CLAW_SRC = writeResolved("minuend_dispute_claw.aa", {}, ".e2e_claw.aa");
+const CLAW_ADDR = chashOf(fs.readFileSync(CLAW_SRC, "utf8"));
 // R4-A-4: P-adr derives the vault from the base (deposit ledger backing).
 const BIND_SRC = writeResolved("minuend_dispute_bind.aa", { VAULT_BASE_HERE: VAULT_BASE_ADDR }, ".e2e_bind.aa");
 const DISPUTE_ADDR = chashOf(fs.readFileSync(DISPUTE_SRC, "utf8"));
@@ -110,6 +113,7 @@ const ROLLUP_SRC = writeResolved("minuend_rollup.aa", {
   DISPUTE_FILL_AA_HERE: FILL_ADDR,
   DISPUTE_BIND_AA_HERE: BIND_ADDR,
   DISPUTE_BOOK_AA_HERE: BOOK_ADDR,
+  DISPUTE_CLAW_AA_HERE: CLAW_ADDR,
 }, ".e2e_rollup.aa");
 const ROLLUP_ADDR = chashOf(fs.readFileSync(ROLLUP_SRC, "utf8"));
 const VAULT_DEF = { base_aa: VAULT_BASE_ADDR, params: { rollup: ROLLUP_ADDR } };
@@ -331,6 +335,7 @@ async function main() {
     .with.agent({ dispute: DISPUTE_SRC })
     .with.agent({ fill: FILL_SRC })
     .with.agent({ bind: BIND_SRC })
+    .with.agent({ claw: CLAW_SRC })
     .with.agent({ vault: VAULT_DEF })
     .with.wallet({ operator: 2e14 })
     .with.wallet({ challenger: 1e13 })
@@ -342,6 +347,8 @@ async function main() {
   const bindAa = network.agent.bind;
   const vault = network.agent.vault;
   const book = network.agent.book;
+  const claw = network.agent.claw;
+  if (claw !== CLAW_ADDR) throw new Error(`claw address mismatch: ${claw} != ${CLAW_ADDR}`);
   if (vault !== VAULT_ADDR) throw new Error(`vault address mismatch: ${vault} != ${VAULT_ADDR}`);
   if (rollup !== ROLLUP_ADDR) throw new Error(`rollup address mismatch: ${rollup} != ${ROLLUP_ADDR}`);
   console.log("network up:", { rollup, dispute, fill, vault });
@@ -351,7 +358,9 @@ async function main() {
   await trigger(operator, fill, { bind_fill: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, bindAa, { bind_bind: 1, rollup: ROLLUP_ADDR }, 20000);
   await trigger(operator, book, { bind_book: 1, rollup: ROLLUP_ADDR }, 20000);
+  await trigger(operator, claw, { bind_claw: 1, rollup: ROLLUP_ADDR }, 20000);
   let st = await vars(rollup);
+  if (String(st.dispute_claw_aa) !== claw) throw new Error("dispute_claw_aa not set: " + JSON.stringify(st.dispute_claw_aa));
   if (String(st.dispute_book_aa) !== book) throw new Error("dispute_book_aa not set: " + JSON.stringify(st.dispute_book_aa));
   if (String(st.dispute_bind_aa) !== bindAa) throw new Error("dispute_bind_aa not set: " + JSON.stringify(st.dispute_bind_aa));
   if (String(st.dispute_aa) !== dispute) throw new Error("dispute_aa not set: " + JSON.stringify(st.dispute_aa));
@@ -363,6 +372,7 @@ async function main() {
   await triggerBounce(operator, rollup, { set_dispute_fill: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_bind: 1 }, 20000, "not authorized");
   await triggerBounce(operator, rollup, { set_dispute_book: 1 }, 20000, "not authorized");
+  await triggerBounce(operator, rollup, { set_dispute_claw: 1 }, 20000, "not authorized");
   // A second bind succeeds on the dispute AA (it just re-forwards), but the
   // rollup bounces the secondary 'not authorized' verdict — dispute_aa var
   // must be unchanged afterwards.

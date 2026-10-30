@@ -27,7 +27,8 @@
 	// not provable on chain: the AA cannot read temp_data content).
 	// State vars:
 	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa,
-	//   dispute_bind_aa (#47 A2), dispute_book_aa (round 2: ghost/skip)
+	//   dispute_bind_aa (#47 A2), dispute_book_aa (round 2: ghost/skip),
+	//   dispute_claw_aa (round 6: P-claw)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
@@ -104,6 +105,24 @@
 						app: "state",
 						state: "{
 							var['dispute_book_aa'] = trigger.address;
+						}"
+					}
+				]
+			},
+			{
+				// Round 6: P-claw (both legs of one fill: the claw paid by
+				// one party must be the claw the other received) lives in a
+				// fifth dispute AA (ops budget).
+				if: "{trigger.data.set_dispute_claw}",
+				init: "{
+					if (trigger.address != 'DISPUTE_CLAW_AA_HERE' OR var['dispute_claw_aa'])
+						bounce('not authorized');
+				}",
+				messages: [
+					{
+						app: "state",
+						state: "{
+							var['dispute_claw_aa'] = trigger.address;
 						}"
 					}
 				]
@@ -348,7 +367,9 @@
 					$df = (var['dispute_fill_aa'] otherwise 0);
 					$db = (var['dispute_bind_aa'] otherwise 0);
 					$dk = (var['dispute_book_aa'] otherwise 0);
-					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk)
+					$dc = (var['dispute_claw_aa'] otherwise 0);
+					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk
+						AND trigger.address != $dc)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');

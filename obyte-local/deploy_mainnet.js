@@ -1,11 +1,12 @@
 "use strict";
 
-// MINUEND six-AA deployment — Obyte MAINNET (GBYTE collateral).
+// MINUEND seven-AA deployment — Obyte MAINNET (GBYTE collateral).
 //
 // Posts the vault BASE, minuend_dispute.aa, minuend_dispute_fill.aa,
-// minuend_dispute_bind.aa, minuend_dispute_book.aa, minuend_rollup.aa and
+// minuend_dispute_bind.aa, minuend_dispute_book.aa, minuend_dispute_claw.aa
+// (round 6), minuend_rollup.aa and
 // the vault INSTANCE {base_aa, params:{rollup}} via a light headless wallet
-// (default mainnet hub), binds all four dispute AAs, smoke-triggers the
+// (default mainnet hub), binds all five dispute AAs, smoke-triggers the
 // vault, and writes
 // obyte-local/deployment.json.
 //
@@ -121,6 +122,10 @@ async function main() {
   const bookSrc = readAa("minuend_dispute_book.aa");
   const bookDef = ["autonomous agent", await parseAa(bookSrc, "minuend_dispute_book.aa")];
   const bookAa = await postDefinition(bookDef, "book");
+  // Round 6: P-claw (both legs of one fill) in the claw dispute AA.
+  const clawSrc = readAa("minuend_dispute_claw.aa");
+  const clawDef = ["autonomous agent", await parseAa(clawSrc, "minuend_dispute_claw.aa")];
+  const clawAa = await postDefinition(clawDef, "claw");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
@@ -129,6 +134,7 @@ async function main() {
     DISPUTE_FILL_AA_HERE: fill.address,
     DISPUTE_BIND_AA_HERE: bindAa.address,
     DISPUTE_BOOK_AA_HERE: bookAa.address,
+    DISPUTE_CLAW_AA_HERE: clawAa.address,
   });
   const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
@@ -138,7 +144,7 @@ async function main() {
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 
-  // 3. Bind all four dispute AAs (20000 each, rollup address in trigger data);
+  // 3. Bind all five dispute AAs (20000 each, rollup address in trigger data);
   // assert via AA state.
   await triggerAa(
     { to: dispute.address, amount: 20000, data: { bind: 1, rollup: rollup.address } },
@@ -156,6 +162,10 @@ async function main() {
     { to: bookAa.address, amount: 20000, data: { bind_book: 1, rollup: rollup.address } },
     "book-dispute bind"
   );
+  await triggerAa(
+    { to: clawAa.address, amount: 20000, data: { bind_claw: 1, rollup: rollup.address } },
+    "claw-dispute bind"
+  );
   await waitBeat("binds", "bind");
   const state = await readAaState(rollup.address);
   if (String(state.dispute_aa) !== String(dispute.address))
@@ -166,7 +176,9 @@ async function main() {
     throw new Error("dispute_bind_aa not bound: " + JSON.stringify(state.dispute_bind_aa));
   if (String(state.dispute_book_aa) !== String(bookAa.address))
     throw new Error("dispute_book_aa not bound: " + JSON.stringify(state.dispute_book_aa));
-  console.log("all four dispute AAs bound");
+  if (String(state.dispute_claw_aa) !== String(clawAa.address))
+    throw new Error("dispute_claw_aa not bound: " + JSON.stringify(state.dispute_claw_aa));
+  console.log("all five dispute AAs bound");
 
   // 4. Write deployment.json.
   const info = {
@@ -176,6 +188,7 @@ async function main() {
     dispute_fill_aa_address: fill.address,
     dispute_bind_aa_address: bindAa.address,
     dispute_book_aa_address: bookAa.address,
+    dispute_claw_aa_address: clawAa.address,
     vault_aa_address: vault.address,
     vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
