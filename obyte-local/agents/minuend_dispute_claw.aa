@@ -127,31 +127,32 @@
 						// needs it) is fraud. Indices compared here live in the
 						// sorted witness tree: an aliased right index can only
 						// wrap to (max leaf `~:end`, min leaf), never a straddle.
-						$S = trigger.data;
-						$post_wit = $S.post_wit;
+						// R11-C1: no `$S = trigger.data` (ocore caps a local object at 4096
+						// chars after pemCurvesFix); every field is read from trigger.data.
+						$post_wit = trigger.data.post_wit;
 						// Any committed trace leaf (unit post tree) lacking a band
 						// is fraud whatever its k, so a short-depth (aliased)
 						// index cannot hide anything: an inner node is no meta
 						// tree. Non-string leaves bounce on the comparisons below.
-						if ($S.post_proof.index != $k OR $S.post_proof.root != $S.trace_root
-							OR !is_valid_merkle_proof($post_wit, $S.post_proof))
+						if (trigger.data.post_proof.index != $k OR trigger.data.post_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof))
 							bounce('bad post proof');
-						$pm = $S.meta;
+						$pm = trigger.data.meta;
 						$M = split($pm, ':');
 						if (array_length($M) != 11 OR $M[0] != 'meta'
-							OR !is_valid_merkle_proof($pm, $S.meta_proof) OR $S.meta_proof.root != $post_wit)
+							OR !is_valid_merkle_proof($pm, trigger.data.meta_proof) OR trigger.data.meta_proof.root != $post_wit)
 							bounce('bad meta');
 						$blo = 'band:' || $M[1] || ':';
 						$bhi = 'band:' || $M[1] || ';';
-						$nb1 = $S.right AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-							AND $S.left_proof.index + 1 == $S.right_proof.index
-							AND $S.left_proof.root == $post_wit AND $S.right_proof.root == $post_wit
-							AND $S.left < $blo AND $bhi <= $S.right
-							AND is_valid_merkle_proof($S.left, $S.left_proof)
-							AND is_valid_merkle_proof($S.right, $S.right_proof);
-						$nb2 = $S.left_proof.index == 0
-							AND $S.left_proof.root == $post_wit AND $bhi <= $S.left
-							AND is_valid_merkle_proof($S.left, $S.left_proof);
+						$nb1 = trigger.data.right AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+							AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+							AND trigger.data.left_proof.root == $post_wit AND trigger.data.right_proof.root == $post_wit
+							AND trigger.data.left < $blo AND $bhi <= trigger.data.right
+							AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+							AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+						$nb2 = trigger.data.left_proof.index == 0
+							AND trigger.data.left_proof.root == $post_wit AND $bhi <= trigger.data.left
+							AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
 						if (!$nb1 AND !$nb2) bounce('no fraud');
 					} else {
 					$fill = trigger.data.fill;

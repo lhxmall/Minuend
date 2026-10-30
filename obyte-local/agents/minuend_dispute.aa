@@ -288,10 +288,14 @@
 					if ($cred) {
 						$O = split($op, ':');
 						$vault = chash160(['autonomous agent', {base_aa: 'VAULT_BASE_HERE', params: {rollup: $rollup}}]);
-						$R = split((array_length($O) == 5) ? (var[$vault][($gov ? 'depp_' : 'dep_') || $O[4]] otherwise '') : '', ':');
-						$backed = array_length($R) == 3 AND $R[0] == $O[3] AND $R[2] == $O[1]
+						$rv = (array_length($O) == 5) ? (var[$vault][($gov ? 'depp_' : 'dep_') || $O[4]] otherwise '') : '';
+						$R = split($rv, ':');
+						// R11-C3: the account is compared / concatenated RAW
+						// ($acct = substring of the op), never as a split()
+						// field (a digit-only 64-hex id would be a Decimal).
+						$backed = array_length($R) == 3 AND $R[0] == $O[3] AND ends_with($rv, ':' || $acct)
 							AND 0 + $amount <= $R[1] + 0;
-						$ak = 'adr:' || $O[3] || ':' || $O[1];
+						$ak = 'adr:' || $O[3] || ':' || $acct;
 						$noadr = trigger.data.aleft AND contains(trigger.data.aleft, ':')
 							AND trigger.data.aleft_proof.root == $post_wit
 							AND ((trigger.data.aright AND contains(trigger.data.aright, ':')
@@ -436,7 +440,9 @@
 						OR trigger.data.pre_ord_proof.root != $pre_wit)
 						bounce('bad ord proof');
 					$O = split($pre_ord, ':');
-					if (array_length($O) != 10 OR $O[7] != $acct) bounce('bad ord');
+					// R11-C3: owner = the leaf's only other ':'-delimited
+					// 64-hex field (its id is the op's order, above).
+					if (array_length($O) != 10 OR !contains($pre_ord, ':' || $acct || ':')) bounce('bad ord');
 					$margin_left = $O[9] + 0;
 					if ($col0 + $margin_left == $col1) bounce('no fraud');
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');

@@ -59,9 +59,8 @@
 				if: "{trigger.data.set_dispute OR trigger.data.set_dispute_fill OR trigger.data.set_dispute_bind OR trigger.data.set_dispute_book
 					OR trigger.data.set_dispute_claw OR trigger.data.set_dispute_xframe OR trigger.data.set_dispute_mframe OR trigger.data.set_dispute_wf}",
 				init: "{
-					$D = trigger.data;
-					$xb = $D.set_dispute ? 'a' : ($D.set_dispute_fill ? 'f' : ($D.set_dispute_bind ? 'b' : ($D.set_dispute_book ? 'k'
-						: ($D.set_dispute_claw ? 'c' : ($D.set_dispute_xframe ? 'x' : ($D.set_dispute_mframe ? 'm' : 'w'))))));
+					$xb = trigger.data.set_dispute ? 'a' : (trigger.data.set_dispute_fill ? 'f' : (trigger.data.set_dispute_bind ? 'b' : (trigger.data.set_dispute_book ? 'k'
+						: (trigger.data.set_dispute_claw ? 'c' : (trigger.data.set_dispute_xframe ? 'x' : (trigger.data.set_dispute_mframe ? 'm' : 'w'))))));
 					$dkey = ($xb == 'a') ? 'dispute_aa' : (($xb == 'f') ? 'dispute_fill_aa' : (($xb == 'b') ? 'dispute_bind_aa' : (($xb == 'k') ? 'dispute_book_aa'
 						: (($xb == 'c') ? 'dispute_claw_aa' : (($xb == 'x') ? 'dispute_xframe_aa' : (($xb == 'm') ? 'dispute_mframe_aa' : 'dispute_wf_aa'))))));
 					$pin = ($xb == 'a') ? 'DISPUTE_AA_HERE' : (($xb == 'f') ? 'DISPUTE_FILL_AA_HERE' : (($xb == 'b') ? 'DISPUTE_BIND_AA_HERE' : (($xb == 'k') ? 'DISPUTE_BOOK_AA_HERE'
@@ -84,8 +83,11 @@
 				// forced before their submit (a missing one is P-omit fraud).
 				if: "{trigger.data.force}",
 				init: "{
-					$id = trigger.data.unit_id;
-					if (typeof($id) == 'boolean' OR length($id) != 64)
+					// R11-C4: a digit-only hex arrives as a Decimal; such an id
+					// is sent as 'Z' || hex (any id may be).
+					$rid = trigger.data.unit_id otherwise '';
+					$id = substring($rid, (typeof($rid) == 'string' AND starts_with($rid, 'Z')) ? 1 : 0);
+					if (length($id) != 64)
 						bounce('bad unit_id');
 					if (var['inbox_' || $id])
 						bounce('already forced');
@@ -96,7 +98,7 @@
 					{
 						app: "state",
 						state: "{
-							var['inbox_' || trigger.data.unit_id] = timestamp;
+							var['inbox_' || $id] = timestamp;
 						}"
 					}
 				]

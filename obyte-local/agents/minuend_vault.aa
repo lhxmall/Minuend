@@ -62,8 +62,11 @@
 						bounce('deposit too small');
 					// R3-A-5: the PAYER names the credited sidechain account
 					// (64 lowercase hex); only that account can ever claim it.
-					$acct = trigger.data.account;
-					if (typeof($acct) != 'string' OR length($acct) != 64
+					// R11-C3: a digit-only account hex arrives as a Decimal;
+					// it is sent as 'Z' || hex (any account may be).
+					$racct = trigger.data.account otherwise '';
+					$acct = substring($racct, (typeof($racct) == 'string' AND starts_with($racct, 'Z')) ? 1 : 0);
+					if (length($acct) != 64
 						OR length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($acct, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) != 0)
 						bounce('bad account');
 				}",
@@ -107,8 +110,11 @@
 					if ($pt > 99999999999999)
 						bounce('perp cap');
 					// R3-A-5/R3-A-7: same payer-chosen account as a base deposit.
-					$acct = trigger.data.account;
-					if (typeof($acct) != 'string' OR length($acct) != 64
+					// R11-C3: a digit-only account hex arrives as a Decimal;
+					// it is sent as 'Z' || hex (any account may be).
+					$racct = trigger.data.account otherwise '';
+					$acct = substring($racct, (typeof($racct) == 'string' AND starts_with($racct, 'Z')) ? 1 : 0);
+					if (length($acct) != 64
 						OR length(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($acct, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) != 0)
 						bounce('bad account');
 				}",
@@ -149,13 +155,16 @@
 					if (typeof(trigger.data.amount) == 'boolean'
 						OR typeof(trigger.data.amount) == 'string'
 						OR typeof(trigger.data.withdrawn) == 'boolean'
-						OR typeof(trigger.data.account) == 'boolean'
 						OR typeof(trigger.data.collateral) == 'boolean'
 						OR typeof(trigger.data.perp) == 'boolean'
 						OR !trigger.data.adr_proof
 						OR !trigger.data.acct_proof)
 						bounce('bad claim');
-					if (length(trigger.data.account) != 64)
+					// R11-C3: 'Z' || hex accepted (a digit-only hex arrives
+					// as a Decimal otherwise).
+					$racct = trigger.data.account otherwise '';
+					$acct = substring($racct, (typeof($racct) == 'string' AND starts_with($racct, 'Z')) ? 1 : 0);
+					if (length($acct) != 64 OR contains($acct, ':'))
 						bounce('bad claim');
 					// Root source: the finalized height's witness root.
 					$wr = var[$rollup]['wit_root_' || $ph];
@@ -188,13 +197,13 @@
 					// balance and never gates a payment.
 					if (length(trigger.data.collateral) > 15 OR length(trigger.data.withdrawn) > 15
 						OR trigger.data.amount < 0
-						OR trigger.data.amount + (var['wd_' || trigger.data.account] otherwise 0) > trigger.data.withdrawn
+						OR trigger.data.amount + (var['wd_' || $acct] otherwise 0) > trigger.data.withdrawn
 						OR $perp_claimed < 0)
 						bounce('bad claim amount');
 					// #47 A2: payee binding + balance leaf, both proven against
 					// the finalized witness root.
-					$adr_leaf = 'adr:' || trigger.address || ':' || trigger.data.account;
-					$acct_leaf = 'acct:' || trigger.data.account || ':' || trigger.data.collateral || ':' || trigger.data.perp || ':' || trigger.data.withdrawn;
+					$adr_leaf = 'adr:' || trigger.address || ':' || $acct;
+					$acct_leaf = 'acct:' || $acct || ':' || trigger.data.collateral || ':' || trigger.data.perp || ':' || trigger.data.withdrawn;
 					if (trigger.data.adr_proof.root != $wr OR !is_valid_merkle_proof($adr_leaf, trigger.data.adr_proof))
 						bounce('bad binding proof');
 					if (trigger.data.acct_proof.root != $wr OR !is_valid_merkle_proof($acct_leaf, trigger.data.acct_proof))
@@ -234,7 +243,7 @@
 					{
 						app: "state",
 						state: "{
-							var['wd_' || trigger.data.account] += trigger.data.amount;
+							var['wd_' || $acct] += trigger.data.amount;
 							var['wp_' || trigger.address] += $perp_claimed;
 						}"
 					}

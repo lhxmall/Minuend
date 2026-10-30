@@ -87,35 +87,36 @@
 					if (!$h OR !$n) bounce('no height');
 					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
 						bounce('challenge not possible');
-					$S = trigger.data;
-					$L = $S.leaf;
-					if (typeof($L) != 'string' OR !$S.leaf_proof) bounce('bad leaf');
-					$fm = $S.fills_root ? true : false;
-					$sib = array_length($S.leaf_proof.siblings);
+					// R11-C1: no `$S = trigger.data` (ocore caps a local object at 4096
+					// chars after pemCurvesFix); every field is read from trigger.data.
+					$L = trigger.data.leaf;
+					if (typeof($L) != 'string' OR !trigger.data.leaf_proof) bounce('bad leaf');
+					$fm = trigger.data.fills_root ? true : false;
+					$sib = array_length(trigger.data.leaf_proof.siblings);
 					if ($fm) {
 						$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
-						if ($S.fills_root != var[$rollup]['fills_root_' || $h] OR $S.leaf_proof.root != $S.fills_root
-							OR !is_valid_merkle_proof($L, $S.leaf_proof)
+						if (trigger.data.fills_root != var[$rollup]['fills_root_' || $h] OR trigger.data.leaf_proof.root != trigger.data.fills_root
+							OR !is_valid_merkle_proof($L, trigger.data.leaf_proof)
 							OR ($fc > 1 AND (2 ^ $sib < $fc OR 2 ^ $sib >= 2 * $fc)))
 							bounce('bad fill proof');
 					} else {
-						if ($S.trace_root != var[$rollup]['trace_root_' || $h]) bounce('stale roots');
-						$k = $S.k;
+						if (trigger.data.trace_root != var[$rollup]['trace_root_' || $h]) bounce('stale roots');
+						$k = trigger.data.k;
 						if (!is_integer($k) OR $k < 0 OR $k >= $n)
 							bounce('bad k');
-						$post_wit = $S.post_wit;
-						if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !$S.post_proof OR $S.post_proof.index != $k
-							OR $S.post_proof.root != $S.trace_root
-							OR !is_valid_merkle_proof($post_wit, $S.post_proof)
-							OR ($n > 1 AND (2 ^ array_length($S.post_proof.siblings) < $n OR 2 ^ array_length($S.post_proof.siblings) >= 2 * $n)))
+						$post_wit = trigger.data.post_wit;
+						if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !trigger.data.post_proof OR trigger.data.post_proof.index != $k
+							OR trigger.data.post_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof)
+							OR ($n > 1 AND (2 ^ array_length(trigger.data.post_proof.siblings) < $n OR 2 ^ array_length(trigger.data.post_proof.siblings) >= 2 * $n)))
 							bounce('bad post proof');
-						if ($S.leaf_proof.root != $post_wit OR !is_valid_merkle_proof($L, $S.leaf_proof))
+						if (trigger.data.leaf_proof.root != $post_wit OR !is_valid_merkle_proof($L, trigger.data.leaf_proof))
 							bounce('bad leaf proof');
 						// A ':'-less element is judged only as a leaf: same depth
 						// as the `~:end` sentinel leaf of the same tree.
-						if (!contains($L, ':') AND !($S.end_proof AND $S.end_proof.root == $post_wit
-							AND array_length($S.end_proof.siblings) == $sib
-							AND is_valid_merkle_proof('~:end', $S.end_proof)))
+						if (!contains($L, ':') AND !(trigger.data.end_proof AND trigger.data.end_proof.root == $post_wit
+							AND array_length(trigger.data.end_proof.siblings) == $sib
+							AND is_valid_merkle_proof('~:end', trigger.data.end_proof)))
 							bounce('not a leaf');
 					}
 					// One field of class $c: $v = the split value (numeric

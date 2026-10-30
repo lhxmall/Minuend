@@ -197,13 +197,17 @@
 						OR trigger.data.post_leaf_proof.root != $post_wit)
 						bounce('bad leaf proof');
 					$P = split($post_leaf, ':');
+					// R11-C3/C4: id fields are read from the ':'->':Z' split
+					// (never numeric) or as raw substrings — a split() field
+					// turns a digit-only 64-hex id into a Decimal.
+					$PZ = split(replace($post_leaf, ':', ':Z'), ':');
 					$wpin = trigger.data.pred == 'wpin';
 					if ($wpin) {
-						if (array_length($P) != 5 OR $P[0] != 'acct' OR length($P[1]) != 64) bounce('bad leaf');
-						$key = 'acct:' || $P[1] || ':';
+						if (array_length($P) != 5 OR $P[0] != 'acct' OR length($PZ[1]) != 65) bounce('bad leaf');
+						$key = substring($post_leaf, 0, 70);
 					} else {
-						if (array_length($P) != 3 OR $P[0] != 'adr' OR length($P[2]) != 64) bounce('bad leaf');
-						$key = 'adr:' || $P[1] || ':';
+						if (array_length($P) != 3 OR $P[0] != 'adr' OR length($PZ[2]) != 65) bounce('bad leaf');
+						$key = 'adr:' || substring($PZ[1], 1) || ':';
 					}
 					$khi = substring($key, 0, length($key) - 1) || ';';
 					// Pre leg: a proven pre leaf with the same key prefix, or
@@ -240,7 +244,7 @@
 							$w0s = '0';
 							$c0s = '0';
 						}
-						$own_w = array_length($O) == 4 AND $O[0] == 'w' AND $O[1] == $P[1];
+						$own_w = array_length($O) == 4 AND $O[0] == 'w' AND $key == ('acct:' || substring($op, 2, 65));
 						if ($own_w) {
 							// R2-A-2: rejected => BOTH columns unchanged (exact
 							// strings); accepted => W += amount AND collateral
@@ -268,7 +272,7 @@
 							$ok = ($pre_leaf == $post_leaf);
 						} else {
 							$xl = trigger.data.xleaf;
-							$bound = typeof($xl) != 'boolean' AND starts_with($xl, 'adrx:' || $P[2] || ':')
+							$bound = typeof($xl) != 'boolean' AND starts_with($xl, 'adrx:' || substring($PZ[2], 1) || ':')
 								AND is_valid_merkle_proof($xl, trigger.data.xleaf_proof)
 								AND trigger.data.xleaf_proof.root == $pre_wit;
 							// R4-A-4: the engine binds only on a CREDITED
@@ -278,11 +282,11 @@
 							// (payer:amount:account, R3-A-5). Vault derived
 							// exactly like P-deposit's, never caller-supplied.
 							$vault = chash160(['autonomous agent', {base_aa: 'VAULT_BASE_HERE', params: {rollup: $rollup}}]);
-							$R = split((array_length($O) == 5) ? (var[$vault][(($O[0] == 'D') ? 'depp_' : 'dep_') || $O[4]] otherwise '') : '', ':');
+							$R = split(replace((array_length($O) == 5) ? (var[$vault][(($O[0] == 'D') ? 'depp_' : 'dep_') || $O[4]] otherwise '') : '', ':', ':Z'), ':');
 							$ok = !$bound
 								AND ($O[0] == 'd' OR $O[0] == 'D') AND array_length($O) == 5
-								AND $O[1] == $P[2] AND $O[3] == $P[1]
-								AND array_length($R) == 3 AND $R[0] == $O[3] AND $R[2] == $O[1];
+								AND $PZ[2] == ('Z' || substring($op, 2, 64)) AND $O[3] == $P[1]
+								AND array_length($R) == 3 AND $R[0] == $O[3] AND $R[2] == $PZ[2];
 						}
 					}
 					if ($ok) bounce('no fraud');
@@ -347,13 +351,15 @@
 						bounce('bad post proof');
 					$L = trigger.data.leaf;
 					if (typeof($L) == 'boolean') bounce('bad leaf');
-					$Q = split($L, ':');
-					$is_adr = array_length($Q) == 3 AND $Q[0] == 'adr' AND length($Q[1]) == 32 AND length($Q[2]) == 64;
-					$is_adrx = array_length($Q) == 3 AND $Q[0] == 'adrx' AND length($Q[1]) == 64 AND length($Q[2]) == 32;
-					$is_dep = array_length($Q) == 2 AND $Q[0] == 'dep' AND length($Q[1]) == 44;
+					// R11-C3: ':'->':Z' split, fields are never numeric (a
+					// digit-only 64-hex id would be a Decimal out of split()).
+					$Q = split(replace($L, ':', ':Z'), ':');
+					$is_adr = array_length($Q) == 3 AND $Q[0] == 'adr' AND length($Q[1]) == 33 AND length($Q[2]) == 65;
+					$is_adrx = array_length($Q) == 3 AND $Q[0] == 'adrx' AND length($Q[1]) == 65 AND length($Q[2]) == 33;
+					$is_dep = array_length($Q) == 2 AND $Q[0] == 'dep' AND length($Q[1]) == 45;
 					// R3-A-6: an account leaf is permanent too; its absence is
 					// judged over the whole prefix range of the account.
-					$is_acct = array_length($Q) == 5 AND $Q[0] == 'acct' AND length($Q[1]) == 64;
+					$is_acct = array_length($Q) == 5 AND $Q[0] == 'acct' AND length($Q[1]) == 65;
 					if (trigger.data.pred == 'keep') {
 						if (!$is_adr AND !$is_adrx AND !$is_dep AND !$is_acct) bounce('bad leaf');
 						$pre_wit = trigger.data.pre_wit;
@@ -375,12 +381,12 @@
 						if (!$is_adr AND !$is_adrx) bounce('bad leaf');
 						if (!is_valid_merkle_proof($L, trigger.data.leaf_proof) OR trigger.data.leaf_proof.root != $post_wit)
 							bounce('bad leaf proof');
-						$M = ($is_adr ? 'adrx:' : 'adr:') || $Q[2] || ':' || $Q[1];
+						$M = ($is_adr ? 'adrx:' : 'adr:') || substring($Q[2], 1) || ':' || substring($Q[1], 1);
 					}
 					// Exact non-membership of $M in post_wit (acct: the
 					// prefix range [acct:X:, acct:X;) instead).
-					$lo = $is_acct ? ('acct:' || $Q[1] || ':') : $M;
-					$hi = $is_acct ? ('acct:' || $Q[1] || ';') : $M;
+					$lo = $is_acct ? substring($L, 0, 70) : $M;
+					$hi = $is_acct ? (substring($L, 0, 69) || ';') : $M;
 					$m1 = trigger.data.left AND trigger.data.right
 						AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
 						AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
@@ -491,7 +497,7 @@
 						bounce('bad post proof');
 					$L = trigger.data.leaf;
 					if (typeof($L) == 'boolean') bounce('bad leaf');
-					$Q = split($L, ':');
+					$Q = split(replace($L, ':', ':Z'), ':');
 					// pos: / ord: only (R7b-N2: acct: leaves are P-xframe's).
 					// Accounts are compared as substrings (an all-digit hex
 					// would read as a number out of split()).
@@ -512,8 +518,10 @@
 						if (trigger.data.fills_root != var[$rollup]['fills_root_' || $h]
 							OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
 							bounce('stale roots');
-						$u = trigger.data.unit;
-						if (typeof($u) == 'boolean' OR length($u) != 64 OR !trigger.data.units_proof
+						// R11-C4: the challenger sends the unit as 'Z' || hex
+						// (a digit-only hex in trigger.data is a Decimal).
+						$u = substring(trigger.data.unit otherwise '', 1);
+						if (length($u) != 64 OR !trigger.data.units_proof
 							OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root
 							OR !is_valid_merkle_proof($u, trigger.data.units_proof))
 							bounce('bad unit');
@@ -574,7 +582,7 @@
 						bounce('bad leaf proof');
 					// The cancelled order may vanish (only when it is the
 					// c:'s own order — a foreign cancel is rejected).
-					if (!$ins AND $t == 'c' AND $Q[0] == 'ord' AND $Q[1] == $O[2] AND $Q[7] == $O[1])
+					if (!$ins AND $t == 'c' AND $Q[0] == 'ord' AND $Q[1] == ('Z' || substring($op, 67, 64)) AND $Q[7] == ('Z' || substring($op, 2, 64)))
 						bounce('no fraud');
 					// Exact non-membership of $L in the other tree: adjacent
 					// straddle or before-min (every tree ends with the `~:end`

@@ -92,12 +92,18 @@
 						OR trigger.data.fill_proof.root != trigger.data.fills_root)
 						bounce('bad fill proof');
 					$F = split($fill, ':');
-					if (array_length($F) != 14) bounce('bad fill');
-					if ($F[12] == '2' OR $F[6] == '0000000000000000000000000000000000000000000000000000000000000000')
+					// R11-C3/C4: ids are read as raw substrings at fixed
+					// offsets (unit 2, taker 69, maker 134, taker order 199,
+					// maker order 264; every honest fill has idx 0, any
+					// other idx is P-fsane fraud) — never as split() fields,
+					// which turn a digit-only 64-hex id into a Decimal.
+					if (array_length($F) != 14 OR substring($fill, 66, 3) != ':0:') bounce('bad fill');
+					$mo_id = substring($fill, 264, 64);
+					if ($F[12] == '2' OR $mo_id == '0000000000000000000000000000000000000000000000000000000000000000')
 						bounce('no fraud');
 					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
 						OR trigger.data.units_proof.root != trigger.data.units_root
-						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
+						OR !is_valid_merkle_proof(substring($fill, 2, 64), trigger.data.units_proof))
 						bounce('bad unit');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
@@ -117,10 +123,11 @@
 					$ord = trigger.data.maker_ord;
 					if (typeof($ord) == 'boolean') bounce('bad maker ord');
 					$O = split($ord, ':');
+					$OZ = split(replace($ord, ':', ':Z'), ':');
 					$exp_side = ($F[11] == '0') ? '1' : '0';
-					if (array_length($O) != 10 OR $O[1] != $F[6] OR $O[2] != $F[7]
+					if (array_length($O) != 10 OR substring($ord, 4, 64) != $mo_id OR $O[2] != $F[7]
 						OR $O[3] != $exp_side OR $O[4] != $F[8]
-						OR $O[7] != $F[4]) bounce('bad maker ord');
+						OR $OZ[7] != ('Z' || substring($fill, 134, 64))) bounce('bad maker ord');
 					// Non-membership over the order-ID PREFIX range
 					// [$lo,$hi): ';' sorts after ':' so every leaf
 					// ord:{id}:... is < $hi. Grinding remaining/seq cannot
@@ -128,8 +135,8 @@
 					// inside the range breaks every straddle. R2-A-5: integer
 					// index >= 0 and ':'-bearing neighbours (no merkle node
 					// passes as a leaf, no fractional-index "adjacency").
-					$lo = 'ord:' || $F[6] || ':';
-					$hi = 'ord:' || $F[6] || ';';
+					$lo = 'ord:' || $mo_id || ':';
+					$hi = 'ord:' || $mo_id || ';';
 					$hit1 = trigger.data.left AND trigger.data.right
 						AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
 						AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
@@ -212,13 +219,15 @@
 						OR trigger.data.fill_proof.root != trigger.data.fills_root)
 						bounce('bad fill proof');
 					$F = split($fill, ':');
-					if (array_length($F) != 14 OR ($F[11] != '0' AND $F[11] != '1')) bounce('bad fill');
+					// R11-C3/C4: raw fixed-offset ids (see P-ghost).
+					if (array_length($F) != 14 OR substring($fill, 66, 3) != ':0:' OR ($F[11] != '0' AND $F[11] != '1')) bounce('bad fill');
+					$mo_id = substring($fill, 264, 64);
 					// ADL (kind 2) has no maker order (all-zero id).
-					if ($F[12] == '2' OR $F[6] == '0000000000000000000000000000000000000000000000000000000000000000')
+					if ($F[12] == '2' OR $mo_id == '0000000000000000000000000000000000000000000000000000000000000000')
 						bounce('no fraud');
 					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
 						OR trigger.data.units_proof.root != trigger.data.units_root
-						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
+						OR !is_valid_merkle_proof(substring($fill, 2, 64), trigger.data.units_proof))
 						bounce('bad unit');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
@@ -234,11 +243,12 @@
 					}
 					$mord = trigger.data.maker_ord;
 					if (typeof($mord) == 'boolean'
-						OR !starts_with($mord, 'ord:' || $F[6] || ':')
+						OR !starts_with($mord, 'ord:' || $mo_id || ':')
 						OR !is_valid_merkle_proof($mord, trigger.data.maker_ord_proof)
 						OR trigger.data.maker_ord_proof.root != $pre_wit)
 						bounce('bad maker ord');
 					$MO = split($mord, ':');
+					$MZ = split(replace($mord, ':', ':Z'), ':');
 					if (array_length($MO) != 10) bounce('bad maker ord');
 					// R5-A-3: qty vs remaining NUMERICALLY. Indexing split()
 					// already turns a numeric-looking field into a Decimal,
@@ -249,7 +259,7 @@
 					// non-integer, <= 0, or past remaining — is fraud.
 					$fq = $F[9];
 					$qty_bad = !is_integer($fq) OR $fq <= 0 OR $fq > $MO[6];
-					if ($MO[7] == $F[4] AND $MO[2] == $F[7] AND $MO[3] == (($F[11] == '0') ? '1' : '0')
+					if ($MZ[7] == ('Z' || substring($fill, 134, 64)) AND $MO[2] == $F[7] AND $MO[3] == (($F[11] == '0') ? '1' : '0')
 						AND $MO[4] == $F[8] AND !$qty_bad)
 						bounce('no fraud');
 					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
@@ -346,10 +356,11 @@
 					if ($shape14) {
 						if (!is_integer($k) OR $k < 0 OR $k >= $n)
 							bounce('bad k');
-						// R7-L2: the idx offset below assumes a 64-char unit.
-						if (length($F[1]) != 64 OR !trigger.data.units_proof OR trigger.data.units_proof.index != $k
+						// R7-L2 / R11-C4: the unit is the raw 64 chars at
+						// offset 2 (a longer unit field fails ':0:' below).
+						if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
 							OR trigger.data.units_proof.root != trigger.data.units_root
-							OR !is_valid_merkle_proof($F[1], trigger.data.units_proof)
+							OR !is_valid_merkle_proof(substring($fill, 2, 64), trigger.data.units_proof)
 							OR ($n > 1 AND (2 ^ array_length(trigger.data.units_proof.siblings) < $n
 								OR 2 ^ array_length(trigger.data.units_proof.siblings) >= 2 * $n)))
 							bounce('bad unit');
@@ -422,8 +433,10 @@
 						// absent party: [acct:X:, acct:X;) holds no leaf of pre
 						$who = trigger.data.who;
 						if (typeof($who) == 'string' AND ($who == 'taker' OR $who == 'maker')) {
-							$alo = 'acct:' || (($who == 'taker') ? $F[3] : $F[4]) || ':';
-							$ahi = 'acct:' || (($who == 'taker') ? $F[3] : $F[4]) || ';';
+							// R11-C3: raw account hex (idx 0 proven above).
+							$aid = substring($fill, ($who == 'taker') ? 69 : 134, 64);
+							$alo = 'acct:' || $aid || ':';
+							$ahi = 'acct:' || $aid || ';';
 							$ab1 = trigger.data.left AND trigger.data.right
 								AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
 								AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
@@ -445,7 +458,7 @@
 						// R7-L1: a second idx-0 fill of the same unit (left
 						// neighbour in the fills tree also `f:{U}:0:`).
 						$pv = trigger.data.prev;
-						$dup = typeof($pv) == 'string' AND starts_with($pv, 'f:' || $F[1] || ':0:')
+						$dup = typeof($pv) == 'string' AND starts_with($pv, 'f:' || substring($fill, 2, 64) || ':0:')
 							AND is_integer(trigger.data.fill_proof.index)
 							AND trigger.data.prev_proof.index + 1 == trigger.data.fill_proof.index
 							AND trigger.data.prev_proof.root == trigger.data.fills_root
@@ -520,9 +533,10 @@
 					if (array_length($F) != 14) bounce('bad fill');
 					$side = $F[11];
 					if ($side != '0' AND $side != '1') bounce('bad fill');
+					// R11-C3/C4: raw fixed-offset ids (idx 0 only, below).
 					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
 						OR trigger.data.units_proof.root != trigger.data.units_root
-						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
+						OR !is_valid_merkle_proof(substring($fill, 2, 64), trigger.data.units_proof))
 						bounce('bad unit');
 					// #37-9 / #47 B3: only the unit's FIRST fill (idx 0) is
 					// judged. For idx 0, pre_wit (state before this unit) IS
@@ -535,7 +549,7 @@
 					// units are NOT excluded any more: their first fill's
 					// priority is checkable (the old right-neighbor gate
 					// made every multi-maker sweep unchallengeable).
-					if ($F[2] != '0') bounce('no fraud');
+					if (substring($fill, 66, 3) != ':0:') bounce('no fraud');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
@@ -558,6 +572,7 @@
 						bounce('bad ord proof');
 					$MO = split($maker_ord, ':');
 					$BO = split($better_ord, ':');
+					$BZ = split(replace($better_ord, ':', ':Z'), ':');
 					if (array_length($MO) != 10 OR array_length($BO) != 10) bounce('bad ord');
 					if ($MO[2] != $F[7] OR $BO[2] != $F[7]) bounce('no fraud');
 					// Ordinal fields arrive as strings; Oscript forbids
@@ -569,7 +584,7 @@
 					$bo_seq = $BO[5] + 0;
 					$bo_rem = $BO[6] + 0;
 					$fill_price = $F[8] + 0;
-					if ($MO[1] != $F[6] OR $bo_rem <= 0) bounce('no fraud');
+					if (substring($maker_ord, 4, 64) != substring($fill, 264, 64) OR $bo_rem <= 0) bounce('no fraud');
 					// #37-9: the "better" order must not be the TAKER's own
 					// live CROSS order: self-trade cancel-maker-continue
 					// skips it by design, so waving it verdicts honest fills.
@@ -581,7 +596,7 @@
 					// cancel-maker-continue (escrow refunded), so the
 					// exemption stays for them. The MAKER's own better order
 					// skipped is always real fraud.
-					if ($BO[7] == $F[3] AND !($BO[9] + 0 > 0 AND ($F[12] == '0' OR $F[12] == '1')))
+					if ($BZ[7] == ('Z' || substring($fill, 69, 64)) AND !($BO[9] + 0 > 0 AND ($F[12] == '0' OR $F[12] == '1')))
 						bounce('no fraud');
 					$bid_better = ($side == '0') AND $BO[3] == '1'
 						AND ($bo_price < $mo_price OR ($bo_price == $mo_price AND $bo_seq < $mo_seq))

@@ -88,27 +88,28 @@
 					$k = trigger.data.k;
 					if (!is_integer($k) OR $k < 0 OR $k >= $n)
 						bounce('bad k');
-					$S = trigger.data;
-					$post_wit = $S.post_wit;
-					if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !$S.post_proof OR $S.post_proof.index != $k
-						OR $S.post_proof.root != $S.trace_root
-						OR !is_valid_merkle_proof($post_wit, $S.post_proof)
-						OR ($n > 1 AND (2 ^ array_length($S.post_proof.siblings) < $n OR 2 ^ array_length($S.post_proof.siblings) >= 2 * $n)))
+					// R11-C1: no `$S = trigger.data` (ocore caps a local object at 4096
+					// chars after pemCurvesFix); every field is read from trigger.data.
+					$post_wit = trigger.data.post_wit;
+					if (typeof($post_wit) != 'string' OR length($post_wit) != 44 OR !trigger.data.post_proof OR trigger.data.post_proof.index != $k
+						OR trigger.data.post_proof.root != trigger.data.trace_root
+						OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof)
+						OR ($n > 1 AND (2 ^ array_length(trigger.data.post_proof.siblings) < $n OR 2 ^ array_length(trigger.data.post_proof.siblings) >= 2 * $n)))
 						bounce('bad post proof');
 					// R8-C2: indices compared in the sorted witness tree can only
 					// wrap to (max leaf `~:end`, min leaf), which never straddles.
-					$op = $S.op;
-					if (typeof($op) != 'string' OR !contains($op, ':') OR !$S.ops_proof OR $S.ops_proof.index != $k
-						OR $S.ops_proof.root != $S.ops_root
-						OR !is_valid_merkle_proof($op, $S.ops_proof)
-						OR ($n > 1 AND (2 ^ array_length($S.ops_proof.siblings) < $n OR 2 ^ array_length($S.ops_proof.siblings) >= 2 * $n)))
+					$op = trigger.data.op;
+					if (typeof($op) != 'string' OR !contains($op, ':') OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof)
+						OR ($n > 1 AND (2 ^ array_length(trigger.data.ops_proof.siblings) < $n OR 2 ^ array_length(trigger.data.ops_proof.siblings) >= 2 * $n)))
 						bounce('bad ops proof');
-					$pre_wit = $S.pre_wit;
+					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($pre_wit != (($h == 1) ? 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=' : var[$rollup]['wit_root_' || ($h - 1)])) bounce('bad pre wit');
 					} else {
-						if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !$S.pre_proof OR $S.pre_proof.index != $k - 1 OR $S.pre_proof.root != $S.trace_root
-							OR !is_valid_merkle_proof($pre_wit, $S.pre_proof))
+						if (typeof($pre_wit) != 'string' OR length($pre_wit) != 44 OR !trigger.data.pre_proof OR trigger.data.pre_proof.index != $k - 1 OR trigger.data.pre_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($pre_wit, trigger.data.pre_proof))
 							bounce('bad pre proof');
 					}
 					$isx = starts_with($op, 'x:');
@@ -116,13 +117,16 @@
 					// so an `x:` op is judged only with its unit text (a
 					// challenger can no longer hide an honest tag by
 					// leaving `u_pre` out).
-					$u = $S.unit;
+					// R11-C4: an `x:` unit is the raw 64 chars of its proven
+					// op; a p:/L: unit arrives as 'Z' || hex (a digit-only hex
+					// in trigger.data is a Decimal).
+					$u = $isx ? substring($op, 2, 64) : substring(trigger.data.unit otherwise '', 1);
 					if ($isx) {
-						$pre = $S.u_pre;
-						if (typeof($u) != 'string' OR length($u) != 64 OR $op != ('x:' || $u) OR !$S.units_proof
-							OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root
-							OR !is_valid_merkle_proof($u, $S.units_proof)
-							OR ($n > 1 AND array_length($S.units_proof.siblings) != array_length($S.ops_proof.siblings)))
+						$pre = trigger.data.u_pre;
+						if (length($op) != 66 OR !trigger.data.units_proof
+							OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root
+							OR !is_valid_merkle_proof($u, trigger.data.units_proof)
+							OR ($n > 1 AND array_length(trigger.data.units_proof.siblings) != array_length(trigger.data.ops_proof.siblings)))
 							bounce('bad unit');
 						if (typeof($pre) != 'string' OR !starts_with($pre, 'mnu3|') OR !ends_with($pre, '|') OR array_length(split($pre, '|')) != 3
 							OR sha256($pre || 'x', 'hex') != $u)
@@ -141,21 +145,23 @@
 					// the oracle holds no bond, so a ReportPrice is ignored.
 					$bdlo = 'obond:' || $oa || ':';
 					$bdhi = 'obond:' || $oa || ';';
-					$nobond = $isx AND $S.bleft AND contains($S.bleft, ':') AND $S.bleft_proof.root == $pre_wit
-						AND is_valid_merkle_proof($S.bleft, $S.bleft_proof)
-						AND (($S.bright AND contains($S.bright, ':')
-							AND is_integer($S.bleft_proof.index) AND $S.bleft_proof.index >= 0
-							AND $S.bleft_proof.index + 1 == $S.bright_proof.index
-							AND $S.bright_proof.root == $pre_wit
-							AND $S.bleft < $bdlo AND $bdhi <= $S.bright
-							AND is_valid_merkle_proof($S.bright, $S.bright_proof))
-						OR ($S.bleft_proof.index == 0 AND $bdhi <= $S.bleft));
-					$L = $S.leaf;
+					$nobond = $isx AND trigger.data.bleft AND contains(trigger.data.bleft, ':') AND trigger.data.bleft_proof.root == $pre_wit
+						AND is_valid_merkle_proof(trigger.data.bleft, trigger.data.bleft_proof)
+						AND ((trigger.data.bright AND contains(trigger.data.bright, ':')
+							AND is_integer(trigger.data.bleft_proof.index) AND trigger.data.bleft_proof.index >= 0
+							AND trigger.data.bleft_proof.index + 1 == trigger.data.bright_proof.index
+							AND trigger.data.bright_proof.root == $pre_wit
+							AND trigger.data.bleft < $bdlo AND $bdhi <= trigger.data.bright
+							AND is_valid_merkle_proof(trigger.data.bright, trigger.data.bright_proof))
+						OR (trigger.data.bleft_proof.index == 0 AND $bdhi <= trigger.data.bleft));
+					$L = trigger.data.leaf;
 					if (typeof($L) == 'string') {
 						$Q = split($L, ':');
-						$ins = $S.ins ? true : false;
+						// R11-C3: the obond account from the ':'->':Z' split.
+						$QZ = split(replace($L, ':', ':Z'), ':');
+						$ins = trigger.data.ins ? true : false;
 						if ($Q[0] == 'band' AND array_length($Q) == 4) {
-							if ($S.keep) bounce('bad leaf');
+							if (trigger.data.keep) bounce('bad leaf');
 							// A band appears only with its CreateMarket.
 							if ($ins AND $tag == '0a') bounce('no fraud');
 						} else {
@@ -167,7 +173,7 @@
 							// of target X, or the batch boundary (k == 0,
 							// 0 < unlock <= h - 1). `keep`: such an expired
 							// leaf still in unit 0's post tree.
-							if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($Q[1]) == 64))
+							if (!($Q[0] == 'obond' AND array_length($Q) == 3 AND length($QZ[1]) == 65))
 								bounce('bad leaf');
 							// R10-H1: no json_parse of an operator-written field
 							// (json_parse('1e400') is a fatal error that bounced
@@ -175,9 +181,9 @@
 							// numeric field; anything else is not an expiring
 							// unlock here and is itself P-wf fraud.
 							$exp = $k == 0 AND is_integer($Q[2]) AND $Q[2] > 0 AND $Q[2] <= $h - 1;
-							if ($S.keep) {
-								if (!$exp OR !is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $pre_wit
-									OR !is_valid_merkle_proof($L, $S.keep_proof) OR $S.keep_proof.root != $post_wit)
+							if (trigger.data.keep) {
+								if (!$exp OR !is_valid_merkle_proof($L, trigger.data.leaf_proof) OR trigger.data.leaf_proof.root != $pre_wit
+									OR !is_valid_merkle_proof($L, trigger.data.keep_proof) OR trigger.data.keep_proof.root != $post_wit)
 									bounce('no fraud');
 							} else {
 								// A rejected 0e / 0f writes nothing: the
@@ -192,70 +198,70 @@
 								// <= h - 1) was released at the commit of h - 1, so
 								// it does not reject a 0e, and the refund
 								// (+ORACLE_BOND_PERP) nets the 0e debit to 0.
-								$pob = $S.pob;
+								$pob = trigger.data.pob;
 								$PB = split((typeof($pob) == 'string') ? $pob : '-', ':');
 								$pqv = $PB[2];
 								$pobok = typeof($pob) == 'string' AND starts_with($pob, $bdlo)
-									AND is_valid_merkle_proof($pob, $S.pob_proof) AND $S.pob_proof.root == $pre_wit;
+									AND is_valid_merkle_proof($pob, trigger.data.pob_proof) AND trigger.data.pob_proof.root == $pre_wit;
 								$pexp = $pobok AND $k == 0 AND is_integer($pqv) AND $pqv > 0 AND $pqv <= $h - 1;
 								$alo = 'acct:' || $oa || ':';
 								$ahi = 'acct:' || $oa || ';';
-								$A0 = split(typeof($S.pa0) == 'string' ? $S.pa0 : '-', ':');
-								$A1 = split(typeof($S.pa1) == 'string' ? $S.pa1 : '-', ':');
+								$A0 = split(typeof(trigger.data.pa0) == 'string' ? trigger.data.pa0 : '-', ':');
+								$A1 = split(typeof(trigger.data.pa1) == 'string' ? trigger.data.pa1 : '-', ':');
 								// Not debited: equal PERP (at k == 0 only with
 								// bleft/bright proving oa held no bond, else the
 								// refund may have paid the 0e), or +50000 at k == 0.
-								$nodebit = (array_length($A0) == 5 AND array_length($A1) == 5 AND starts_with($S.pa0, $alo) AND starts_with($S.pa1, $alo)
+								$nodebit = (array_length($A0) == 5 AND array_length($A1) == 5 AND starts_with(trigger.data.pa0, $alo) AND starts_with(trigger.data.pa1, $alo)
 										AND (($A0[3] == $A1[3]) ? ($k > 0 OR $nobond) : ($k == 0 AND length($A0[3]) <= 14 AND $A1[3] == $A0[3] + 50000))
-										AND is_valid_merkle_proof($S.pa0, $S.pa0_proof) AND $S.pa0_proof.root == $pre_wit
-										AND is_valid_merkle_proof($S.pa1, $S.pa1_proof) AND $S.pa1_proof.root == $post_wit)
-									OR ($S.aleft AND contains($S.aleft, ':') AND $S.aleft_proof.root == $pre_wit
-										AND is_valid_merkle_proof($S.aleft, $S.aleft_proof)
-										AND (($S.aright AND contains($S.aright, ':')
-											AND is_integer($S.aleft_proof.index) AND $S.aleft_proof.index >= 0
-											AND $S.aleft_proof.index + 1 == $S.aright_proof.index
-											AND $S.aright_proof.root == $pre_wit
-											AND $S.aleft < $alo AND $ahi <= $S.aright
-											AND is_valid_merkle_proof($S.aright, $S.aright_proof))
-										OR ($S.aleft_proof.index == 0 AND $ahi <= $S.aleft)));
-								if ($ins ? ($Q[1] == $oa AND (($tag == '0e' AND $Q[2] == '0' AND !($pobok AND !$pexp) AND !$nodebit)
+										AND is_valid_merkle_proof(trigger.data.pa0, trigger.data.pa0_proof) AND trigger.data.pa0_proof.root == $pre_wit
+										AND is_valid_merkle_proof(trigger.data.pa1, trigger.data.pa1_proof) AND trigger.data.pa1_proof.root == $post_wit)
+									OR (trigger.data.aleft AND contains(trigger.data.aleft, ':') AND trigger.data.aleft_proof.root == $pre_wit
+										AND is_valid_merkle_proof(trigger.data.aleft, trigger.data.aleft_proof)
+										AND ((trigger.data.aright AND contains(trigger.data.aright, ':')
+											AND is_integer(trigger.data.aleft_proof.index) AND trigger.data.aleft_proof.index >= 0
+											AND trigger.data.aleft_proof.index + 1 == trigger.data.aright_proof.index
+											AND trigger.data.aright_proof.root == $pre_wit
+											AND trigger.data.aleft < $alo AND $ahi <= trigger.data.aright
+											AND is_valid_merkle_proof(trigger.data.aright, trigger.data.aright_proof))
+										OR (trigger.data.aleft_proof.index == 0 AND $ahi <= trigger.data.aleft)));
+								if ($ins ? ($QZ[1] == ('Z' || $oa) AND (($tag == '0e' AND $Q[2] == '0' AND !($pobok AND !$pexp) AND !$nodebit)
 										OR ($tag == '0f' AND $Q[2] == $h + 255 AND !$nobond AND !($pobok AND $pob != ($bdlo || '0')))))
-									: (($Q[1] == $oa AND $tag == '0f' AND $Q[2] == '0') OR ($tag == '10' AND $Q[1] == substring($pre, $tq + 66, 64)) OR $exp))
+									: (($QZ[1] == ('Z' || $oa) AND $tag == '0f' AND $Q[2] == '0') OR ($tag == '10' AND $QZ[1] == ('Z' || substring($pre, $tq + 66, 64))) OR $exp))
 									bounce('no fraud');
 							}
 						}
-						if (!$S.keep) {
+						if (!trigger.data.keep) {
 							// Leaf frame: member of src, exactly absent from dst.
 							$src = $ins ? $post_wit : $pre_wit;
 							$dst = $ins ? $pre_wit : $post_wit;
-							if (!is_valid_merkle_proof($L, $S.leaf_proof) OR $S.leaf_proof.root != $src)
+							if (!is_valid_merkle_proof($L, trigger.data.leaf_proof) OR trigger.data.leaf_proof.root != $src)
 								bounce('bad leaf proof');
-							$m1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
-								AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-								AND $S.left_proof.index + 1 == $S.right_proof.index
-								AND $S.left_proof.root == $dst AND $S.right_proof.root == $dst
-								AND $S.left < $L AND $L < $S.right
-								AND is_valid_merkle_proof($S.left, $S.left_proof)
-								AND is_valid_merkle_proof($S.right, $S.right_proof);
-							$m2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
-								AND $S.left_proof.root == $dst AND $L < $S.left
-								AND is_valid_merkle_proof($S.left, $S.left_proof);
+							$m1 = trigger.data.left AND trigger.data.right AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
+								AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+								AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+								AND trigger.data.left_proof.root == $dst AND trigger.data.right_proof.root == $dst
+								AND trigger.data.left < $L AND $L < trigger.data.right
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+								AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+							$m2 = trigger.data.left AND contains(trigger.data.left, ':') AND trigger.data.left_proof.index == 0
+								AND trigger.data.left_proof.root == $dst AND $L < trigger.data.left
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
 							if (!$m1 AND !$m2) bounce('no fraud');
 						}
 					} else {
 						// meta arms.
-						$m0 = $S.pre_meta;
-						$m1x = $S.post_meta;
+						$m0 = trigger.data.pre_meta;
+						$m1x = trigger.data.post_meta;
 						$g0 = typeof($m0) == 'string';
 						$g1 = typeof($m1x) == 'string';
 						if (!$g0 AND !$g1) bounce('bad meta');
 						$M0 = split($g0 ? $m0 : '-', ':');
 						$M1 = split($g1 ? $m1x : '-', ':');
 						if ($g0 AND (array_length($M0) != 11 OR $M0[0] != 'meta'
-							OR !is_valid_merkle_proof($m0, $S.pre_meta_proof) OR $S.pre_meta_proof.root != $pre_wit))
+							OR !is_valid_merkle_proof($m0, trigger.data.pre_meta_proof) OR trigger.data.pre_meta_proof.root != $pre_wit))
 							bounce('bad pre meta');
 						if ($g1 AND (array_length($M1) != 11 OR $M1[0] != 'meta'
-							OR !is_valid_merkle_proof($m1x, $S.post_meta_proof) OR $S.post_meta_proof.root != $post_wit))
+							OR !is_valid_merkle_proof($m1x, trigger.data.post_meta_proof) OR trigger.data.post_meta_proof.root != $post_wit))
 							bounce('bad post meta');
 						if ($g0 AND $g1) {
 							if ($M0[1] != $M1[1]) bounce('bad meta');
@@ -333,30 +339,30 @@
 								$zO = split($op, ':');
 								$plm = ($zO[0] == 'p' AND array_length($zO) == 10 AND $zO[2] == $M0[1]) OR ($zO[0] == 'L' AND array_length($zO) == 4 AND $zO[3] == $M0[1]);
 								if ($plm) {
-									if ($S.fills_root != var[$rollup]['fills_root_' || $h] OR typeof($u) != 'string' OR length($u) != 64 OR !$S.units_proof
-										OR $S.units_proof.index != $k OR $S.units_proof.root != $S.units_root OR !is_valid_merkle_proof($u, $S.units_proof))
+									if (trigger.data.fills_root != var[$rollup]['fills_root_' || $h] OR length($u) != 64 OR !trigger.data.units_proof
+										OR trigger.data.units_proof.index != $k OR trigger.data.units_proof.root != trigger.data.units_root OR !is_valid_merkle_proof($u, trigger.data.units_proof))
 										bounce('bad unit');
-									$fl = $S.fill;
+									$fl = trigger.data.fill;
 									$F = split(typeof($fl) == 'string' ? $fl : '-', ':');
-									$hasF = array_length($F) == 14 AND $F[0] == 'f' AND $F[1] == $u AND $F[2] == '0'
-										AND $S.fill_proof.root == $S.fills_root AND is_valid_merkle_proof($fl, $S.fill_proof);
+									$hasF = array_length($F) == 14 AND starts_with($fl, 'f:' || $u || ':0:')
+										AND trigger.data.fill_proof.root == trigger.data.fills_root AND is_valid_merkle_proof($fl, trigger.data.fill_proof);
 									if (!$hasF) {
 										$fc = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
-										$rt = $S.fright;
-										$ri = $S.fright_proof.index;
-										$pv = $S.fprev;
-										if ($fc > 1 AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND $S.fright_proof.root == $S.fills_root
-											AND 2 ^ array_length($S.fright_proof.siblings) >= $fc AND 2 ^ array_length($S.fright_proof.siblings) < 2 * $fc
-											AND is_valid_merkle_proof($rt, $S.fright_proof)
-											AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND is_integer($S.fright_up.index) AND $S.fright_up.index > $k
-												AND $S.fright_up.index < $n AND $S.fright_up.root == $S.units_root
-												AND is_valid_merkle_proof(substring($rt, 2, 64), $S.fright_up)))
-											AND ($ri == 0 OR ($pv AND starts_with($pv, 'f:') AND $S.fprev_proof.index == $ri - 1 AND $S.fprev_proof.root == $S.fills_root
-												AND array_length($S.fprev_proof.siblings) == array_length($S.fright_proof.siblings)
-												AND is_valid_merkle_proof($pv, $S.fprev_proof)
-												AND is_integer($S.fprev_up.index) AND $S.fprev_up.index >= 0 AND $S.fprev_up.index < $k
-												AND $S.fprev_up.root == $S.units_root
-												AND is_valid_merkle_proof(substring($pv, 2, 64), $S.fprev_up)))))
+										$rt = trigger.data.fright;
+										$ri = trigger.data.fright_proof.index;
+										$pv = trigger.data.fprev;
+										if ($fc > 1 AND !($rt AND is_integer($ri) AND $ri >= 0 AND $ri < $fc AND trigger.data.fright_proof.root == trigger.data.fills_root
+											AND 2 ^ array_length(trigger.data.fright_proof.siblings) >= $fc AND 2 ^ array_length(trigger.data.fright_proof.siblings) < 2 * $fc
+											AND is_valid_merkle_proof($rt, trigger.data.fright_proof)
+											AND (starts_with($rt, 'n:') OR (starts_with($rt, 'f:') AND is_integer(trigger.data.fright_up.index) AND trigger.data.fright_up.index > $k
+												AND trigger.data.fright_up.index < $n AND trigger.data.fright_up.root == trigger.data.units_root
+												AND is_valid_merkle_proof(substring($rt, 2, 64), trigger.data.fright_up)))
+											AND ($ri == 0 OR ($pv AND starts_with($pv, 'f:') AND trigger.data.fprev_proof.index == $ri - 1 AND trigger.data.fprev_proof.root == trigger.data.fills_root
+												AND array_length(trigger.data.fprev_proof.siblings) == array_length(trigger.data.fright_proof.siblings)
+												AND is_valid_merkle_proof($pv, trigger.data.fprev_proof)
+												AND is_integer(trigger.data.fprev_up.index) AND trigger.data.fprev_up.index >= 0 AND trigger.data.fprev_up.index < $k
+												AND trigger.data.fprev_up.root == trigger.data.units_root
+												AND is_valid_merkle_proof(substring($pv, 2, 64), trigger.data.fprev_up)))))
 											bounce('no fraud');
 									}
 								}
@@ -376,16 +382,16 @@
 							$T = $g0 ? $post_wit : $pre_wit;
 							$lo = 'meta:' || $mk || ':';
 							$hi = 'meta:' || $mk || ';';
-							$q1 = $S.left AND $S.right AND contains($S.left, ':') AND contains($S.right, ':')
-								AND is_integer($S.left_proof.index) AND $S.left_proof.index >= 0
-								AND $S.left_proof.index + 1 == $S.right_proof.index
-								AND $S.left_proof.root == $T AND $S.right_proof.root == $T
-								AND $S.left < $lo AND $hi <= $S.right
-								AND is_valid_merkle_proof($S.left, $S.left_proof)
-								AND is_valid_merkle_proof($S.right, $S.right_proof);
-							$q2 = $S.left AND contains($S.left, ':') AND $S.left_proof.index == 0
-								AND $S.left_proof.root == $T AND $hi <= $S.left
-								AND is_valid_merkle_proof($S.left, $S.left_proof);
+							$q1 = trigger.data.left AND trigger.data.right AND contains(trigger.data.left, ':') AND contains(trigger.data.right, ':')
+								AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+								AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+								AND trigger.data.left_proof.root == $T AND trigger.data.right_proof.root == $T
+								AND trigger.data.left < $lo AND $hi <= trigger.data.right
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+								AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+							$q2 = trigger.data.left AND contains(trigger.data.left, ':') AND trigger.data.left_proof.index == 0
+								AND trigger.data.left_proof.root == $T AND $hi <= trigger.data.left
+								AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
 							if (!$q1 AND !$q2) bounce('no fraud');
 							// A market is created only by CreateMarket.
 							if (!$g0 AND $tag == '0a') bounce('no fraud');
