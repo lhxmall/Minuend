@@ -772,7 +772,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 
 ### 10.1 submit(h) — rollup
 
-前置：`chain_id=='minuend-v2'` ∧ `assertion_version==2`（#47 B8：随本次 AA 重新部署从 1 升到 2）
+前置：`chain_id=='minuend-v2'` ∧ `assertion_version==3`（#47 B8：随本次 AA 重新部署从 1 升到 2；第 6/6b 轮升到 3：Reveal{Place|Liquidate} 提交内层 `p:` / `L:`，`place` 执行 `QTY_CAP`）
 ∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 且 h == last_submitted 原位重提——#47 A1）
 ∧ 全新提交时 prev == `state_root_{h-1}`（前序高度 fraud-failed 时拒绝，
   不再豁免——失败高度之上的新链必须走重提分支）；重提时 prev 必须等于
@@ -802,7 +802,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | adr（P-adr） | dispute_bind | #47 A2：unit k 的 post 树出现 `adr:{A}:{X}`，但 pre 树中没有（左右邻叶非成员证明），且该 unit 的 op 不是携带地址 A 的 `d:{X}:…:{A}:…` / `D:{X}:…:{A}`；或 A 已有的绑定被改指向另一个账户（引擎从不改绑）；第 2 轮（R2-A-8）：账户 X 在 pre 树已有任何 `adrx:{X}:` 成员时出现新绑定也判欺诈；第 4 轮（R4-A-4）：新绑定还要求金库 `dep_<anchor>`（`D:` 为 `depp_<anchor>`）记录存在且 payer == A、account == X，否则判欺诈 |
 | mbind（P-mbind） | dispute_book | 第 4 轮 R4-A-1：成交 F 的 maker 订单在 pre_wit 中的 `ord:` 叶与 F 不符——owner、市场、方向（maker 与 taker 方向相反）、价格不同，或剩余量 < 成交量 |
 | claw（P-claw） | dispute_claw | 第 6 轮：单成交 unit 的**两条腿**——taker 与 maker 的 pre/post `acct:` 叶、两者的 pre 仓位、maker 订单、unit op——按引擎重算两方的成交阶段 collateral、claw（先 taker 后 maker，零和）、逐仓 taker 未留簿托管的退款（claw 之后）与 keeper 扣取（claw 之后，记给 caller）；任一方 post collateral 偏离超出舍入容差即欺诈（§10.12） |
-| frame（P-frame） | dispute_bind | 第 4 轮 R4-A-3：在 `c:` / `d:` / `w:` / `D:` / `W:` 单元里，`pos:` / `ord:` 叶不得出现、消失或被改写；唯一例外是 `c:` 撤掉的、属于该 `c:` 账户的那张订单 |
+| frame（P-frame） | dispute_bind | 第 4 轮 R4-A-3：在 `c:` / `d:` / `w:` / `D:` / `W:` 单元里，`pos:` / `ord:` 叶不得出现、消失或被改写；唯一例外是 `c:` 撤掉的、属于该 `c:` 账户的那张订单。第 6b 轮 R6-C2：普通市场零成交 / 单成交的 `p:` / `L:` 单元里，op 账户（L: 的 caller 与 target）、maker、保险账户以外的 `acct:` / `pos:` / `ord:` 叶同样冻结（§10.13） |
 | tip（P-tip） | dispute_bind | 第 2 轮 R2-A-1：trace 树下标 `unit_count-1` 的元素（44 字符）≠ `wit_root_h` |
 | keep / mirror | dispute_bind | 第 2 轮：`adrx:` 与 `dep:` 叶一旦出现永不消失（keep）；`adr:{A}:{X}` 与 `adrx:{X}:{A}` 必须成对（mirror） |
 | deposit（第 2/3 轮加强） | dispute | R2-A-3：`d:` 入账必须由金库 `dep_<u>` 记录支撑（payer == op 地址、amount ≤ 记录值），pre 树不得已有 `dep:{u}`（重复入账），post 树必须出现 `dep:{u}`；第 3 轮：记录的 account == op 账户（R3-A-5）、post 树必须有 `adr:{addr}:{acct}`（R3-A-4）、`D:` 同样需 `depp_<u>` 支撑（R3-A-7）、被接受的提款后 collateral ≥ 0（R3-A-1） |
@@ -1151,6 +1151,80 @@ dispute_bind 1618、dispute_book 1704、dispute_claw 1434（上限 2000）。
 两条腿互相绑定后，假 ADL 价格不能再造钱，但仍能在 target 与对手方之间按假价格转移已实现
 盈亏（以对手方自己的 collateral 为限）；多成交 unit 仍不判（未修复项 19）。
 
+### 10.13 第 6b 轮（#47 R6b）：成交 ↔ op 绑定、第三方账户、15 位精度
+
+第 6 轮复核（`findings/round-6-claw.md`）的五条，全部在 `fix/47-r6b` 处理：
+
+1. **R6-C1：成交与 op 不符本身就是欺诈（dispute_claw）**。P-claw 原来把"kind / op 形状不符"
+   当作不在判定范围而 bounce，但没有任何谓词把成交串的 `kind` 绑定到 unit op 的类型：
+   把 kind 0 ↔ 3 互换、或把 Place 的 op 叶写成 `x:{unit}`，P-claw 就整个跳过。现在对 unit k 的
+   **第一笔成交（idx 0，不论成交笔数、不论市场）**，在任何状态叶之前先判：
+   - op 不是 `p:` / `L:` → 欺诈（只有 Place / Liquidate 及其 Reveal 产生成交，Reveal 提交内层 op）；
+   - `p:`：10 段、账户 = taker、市场 / 方向与成交相同、`OP[6] ∈ {0,1}`、`OP[5]`（下单量）与
+     `OP[7]`（margin）为非负整数、成交量 ≤ 下单量、kind ∈ {0,1}，否则欺诈；
+   - `L:`：4 段、市场相同、target 是 taker 或 maker（资金费率市场的场外 ADL 里 target 是
+     maker）、caller ≠ target、caller ≠ 保险账户（引擎都拒绝）、kind ∈ {2,3}，否则欺诈；
+   - 成交量或下单量 ≥ 1e15 → 欺诈（R6-H1，引擎不会产生）。
+   这一步只需要成交串、op 串和三条 Merkle 证明。之后的单成交、普通市场门不变；在普通市场上
+   kind 1、或 `L:` 的 target 不是 taker，同样是欺诈。prove.rs `claw_shape_bad` /
+   `claw_regular_rule` 镜像，`claw_proof` 对**所有** op 运行（包括 `d:` / `w:` 等被改写的 op），
+   并且只在提交的 (成交, op) 与重放不同时才出证明。
+   - 仍然存在的路线（项 19）：运营方可以给单成交 unit **编造**第二笔成交（用自己账户真实存在
+     的挂单，P-mbind 通过），让 P-claw 的单成交门 bounce。第一笔成交的 kind / op 绑定照样判，
+     但两条腿的 claw 不再判。没有谓词能证明"第二笔成交不存在"，这条只能随多成交 unit 的
+     判定一起解决。
+2. **R6-C2：`p:` / `L:` 单元里第三方账户的余额（dispute_bind P-frame + dispute_claw）**。
+   - P-frame 接受 `p:`（10 段）/ `L:`（4 段）：pre `meta:` 证明市场为普通市场
+     （usd_per_unit = 0；资金费率市场的 peg 会改所有持仓者的现金，bounce）；用相邻的两片
+     fills 叶确定成交笔数——`fright`（叶 ri：`n:` 哨兵或**别的** unit 的成交）与 `fill`
+     （叶 ri−1，ri = 0 时没有）。`fill` 是本 unit 的 idx 0 → 单成交；否则 `fill` 属于更早的
+     unit、`fright` 属于更晚的 unit（各带 units_root 证明，`fill_up` / `fright_up`）或是哨兵
+     → 零成交（fills 按 unit 顺序提交）。多成交 → bounce（项 19）。
+   - 允许变化的账户：op 账户（`L:` 为 caller 与 target）；单成交时再加 maker 与保险账户。
+     其余账户的 `acct:` / `pos:` / `ord:` 叶（`ord:` 以 `:{account}:` 子串判 owner）
+     不得出现、消失或改写——与 c/d/w 单元相同的插入 / 删除两臂。
+   - P-claw 新增可选的第三个账户 `x_who`：`'c'` = 清算 caller（不是成交双方时，必须恰好
+     收到 `kpay`），`'i'` = 保险账户（必须恰好收到 taker fee）；pre 叶给出或以 `acct:{a}:`
+     前缀的相邻夹住证明不存在（余额 0），post 叶必须给出；容差 `slack + 4·floor(|pre|/1e12)`。
+   - 于是普通市场的零成交 / 单成交 Place / Liquidate 单元里每一个账户的余额都有谓词：
+     taker / maker（两腿模型）、caller / 保险（x_who）、其他所有人（P-frame）。
+   - 仍然存在：多成交单元（项 19）；资金费率市场；caller 的奖励被少记（只是 keeper 吃亏，
+     不是铸币；caller post 叶不存在时无法判）；op 指向不存在的市场（无 `meta:`，bounce）。
+     以上 P-frame 的保护都以 op 串如实提交为前提——项 10（`ops_root` 未绑定 unit 内容）未修，
+     运营方仍可把一个 Place 单元的 op 叶写成别的形状（例如一个会合法改动所有持仓者现金的
+     ReportPrice `x:`）。第 6b 轮关掉的是"op 如实提交时"的路线，以及带成交的 unit 上的 op
+     改写（R6-C1）。
+3. **R6-H1：数量与仓位上限 `QTY_CAP = 1e15`（共识变更，minuend-types / minuend-exec）**。
+   Oscript 只有 15 位有效数字：`|pos| ≥ 1e15` 时"翻转 1 手"会被舍成"纯减仓"，AA 少判一份
+   托管去向，任何人都能让诚实批次被判欺诈。引擎 `place` 现在拒绝（`RejectReason::Risk`）
+   让 `|仓位| + 该账户该市场所有挂单剩余量 + qty ≥ 1e15` 的下单。这是一个不变量：成交只把
+   某张挂单的剩余量挪进仓位，STP 撤单 / 撤单只减不增，清算 / ADL 只缩小仓位——所以任何
+   成交都不可能把 taker 或 maker 的仓位推到 1e15。AA 侧：
+   - P-fsane：成交量 ≥ 1e15 → 欺诈；P-claw：成交量或下单量 ≥ 1e15 → 欺诈（上面第 1 条），
+     成交把任一方仓位推到 ≥ 1e15 → 欺诈；
+   - P-claw / fill_math：pre 仓位（或 maker 挂单剩余量）≥ 1e15 → bounce。这种 pre 状态引擎
+     不会产生，欺诈在它被写入的那个 unit；在单成交普通市场上那一刻由 P-claw 的 `$fr1` 判，
+     多成交或资金费率市场上产生的超限仓位没有谓词能判（项 19 的一部分）。
+   - 低于 1e15 时 `qty` 与 `|pos|` 的比较是精确的；接近上限的诚实翻转（|pos| 4e14、
+     qty 4e14+1、逐仓托管）在 Rust 与 devnet 用例里都判 `no fraud`。
+4. **R6-M1（依赖项 10，未修）**：P-claw 的 claw 金额由 op 叶里的 isolated / margin / tif / typ
+   决定，项 10 让运营方能改写这些字段，把自己的 cross 亏损改成"逐仓、margin = 自己的 pre
+   collateral"，模型于是要求对手 maker 付 claw，最多每笔成交拿走自己 pre collateral 那么多。
+   fill_math 的 op 预算（1966/2000）放不下 pos 叶 isolated 标志的比较；真正的修复是绑定
+   `ops_root` 与 unit 内容（项 10）。
+5. **R6-L1**：`ASSERTION_VERSION` 升到 3（minuend-types、rollup AA 的 submit 门、deploy 脚本、
+   deployment.json、DA 绑定 golden vector 与 JS / Rust 测试夹具）。
+
+**watcher**：`claw_proof` 先判第一笔成交的形状（只带成交 / op / 三条证明），再判单成交
+两条腿、`$fr0` / `$fr1`，最后在两条腿正确时检查 caller / 保险（`x_who`）；`frame_proof` 对
+`p:` / `L:` 单元用 `pl_frame_scope` 求出允许变化的账户集合与 fills 证据。Rust 测试：kind 0→3、
+kind 3→0、`x:` op、他人的 `p:`、target 不在成交里的 `L:`；单成交 / 零成交 Place 给第三方
+加钱、清算单元出现幽灵账户；keeper 记 10 倍奖励、保险基金膨胀；接近上限的诚实逐仓翻转；
+引擎 `QTY_CAP`（单笔与"仓位 + 挂单"之和）。devnet e2e 场景 62–64（高度 76–82）。
+
+部署 op 预算（第 6b 轮）：vault 364、rollup 996、dispute 1383、dispute_fill 1966、
+dispute_bind 1937、dispute_book 1708、dispute_claw 1706（上限 2000）。
+
 ### 10.8 第 3 轮（#47 R3）变更汇总
 
 **统一的充值管线（R3-E-1 / R3-E-3 / R3-A-5 / R3-A-7 / R3-R-4，整合后只有一条路径）**
@@ -1399,12 +1473,14 @@ ingest → Applied{status: Optimistic}     # 立即执行、立即成交
   bucket、托管份额与挂单余量比较；PERP 只在引擎上限以下精确判定（pre PERP 列 > 14 位
   只可能来自更早已 finalize 的谎言，不再判定）；watcher 在金库记录未知时不构造依赖它的
   P-adr；dispute_fill 余量 29 ops
-- 第 5 轮的 CRITICAL（两条腿的 claw 金额没有互相绑定）已由第 6 轮 P-claw 关闭（§10.12），
-  范围是单成交 unit 的普通市场 kind 0/2/3（资金费率市场、逐仓清算目标、多成交 unit 仍不判）。
+- 第 5 轮的 CRITICAL（两条腿的 claw 金额没有互相绑定）由第 6 轮 P-claw 处理（§10.12），
+  第 6b 轮补上成交 ↔ op 绑定与第三方账户（§10.13）；范围是普通市场的零成交 / 单成交 unit
+  （资金费率市场、逐仓清算目标、多成交 unit 仍不判；运营方可以编造第二笔成交把单成交
+  unit 变成"多成交"，项 19）。这些保护以 op 串如实提交为前提，项 10 未修。
   ADL（kind 2）价格没有绑定到 mark（假价格不能再造钱，但能在 target 与对手方之间转移已实现
   盈亏，以对手方的 collateral 为限）。|price| / |entry| / |qty| ≥ 1e14 时仍跳过仓位 qty/entry
-  比较。`x:` taker 只判 collateral 上限——第 6 轮起 Reveal{Place} 提交内层 `p:`，诚实批次不再有
-  这种形状。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
+  比较。带成交的 unit 的 op 是 `x:` 时 P-claw 直接判欺诈（第 6b 轮）。数量与仓位低于
+  `QTY_CAP = 1e15`（引擎强制），pre 仓位 ≥ 1e15 时 P-claw / fill_math bounce。金库 PERP 上限先到先得，烧毁的 PERP 仍占额度；触顶 bounce 未在
   devnet 测试。P-fsane 的"被拒 Place"臂需要 op 账户的 pre 叶。cap bounce 的 P-deposit
   只在 watcher 读到 hub 时成立。
 
