@@ -3212,6 +3212,182 @@ async function main() {
     await triggerBounce(challenger, claw, clawPayload(P3, 75, ok3, null), 20000, "no fraud");
     await live(75, "honest ADL with keeper = maker");
     console.log("61. P-claw: kind-0 / kind-3 money print and burn, doubled ADL keeper credit → frozen; honest isolated-taker claw, honest ADL keeper, multi-fill → 'no fraud' (fill_math alone: 'no fraud' on the print)");
+
+    // ===================== ROUND 6b (fix/47-r6b) ==========================
+    const C = "e9".repeat(32);
+    const Z = "0".repeat(64);
+    // P-frame (binding AA) payload for a Place / Liquidate unit: the leaf,
+    // its exact absence in the other tree, and the fill-count evidence.
+    const pfPayload = (P, h, u, leaf, ins) => {
+      const tree = u.tree;
+      const ri = u.fill ? 1 : 0;
+      return Object.assign({
+        pred: "frame", height: h, rollup: ROLLUP_ADDR, k: 0,
+        trace_root: u.traceRoot, ops_root: u.opsRoot, op: u.op, ops_proof: merkle.getMerkleProof(u.ops, 0),
+        pre_wit: P.wit, post_wit: u.wit, post_proof: merkle.getMerkleProof(u.trace, 0),
+        leaf, ins, leaf_proof: ins ? u.leafProof(leaf) : P.proof(leaf),
+        fills_root: u.fillsRoot, units_root: ISO_UNITS_ROOT, unit: isoUnit, units_proof: ISO_UNITS_PROOF,
+        pre_meta: META1, pre_meta_proof: P.proof(META1),
+        fright: tree[ri], fright_proof: merkle.getMerkleProof(tree, ri),
+      }, u.fill ? { fill: tree[0], fill_proof: merkle.getMerkleProof(tree, 0) } : {},
+        absentIn(ins ? P.pre : u.post, leaf));
+    };
+
+    // ---- 62/63a. R6-C1 relabels + R6-C2 third-party credit (kind 0) ------
+    // The (a) kind-0 claw tree plus a bystander C (7000 USD).
+    const P5 = await clawSetup(76, "r6b-p5", [
+      acct(T, 50000000000), acct(M, 1000000000), acct(C, 7000000000), META1, MORD,
+      `pos:${M}:1:100000000:10000000000000:0:0`, END,
+    ]);
+    const post5 = (tc, mc, cc) => [acct(T, tc), acct(M, mc), acct(C, cc), META1, tPos1, END];
+    // (a) kind 0 -> 3 under the Place + money print: the claw AA used to
+    // bounce on the op shape; now the fill/op mismatch alone is the fraud.
+    const f1k3 = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO}:1:9000000000000:100000000:9:0:3:0`;
+    const rel = clawUnit(P5, "r6b-rel03", op1, [f1k3], post5(49955000000, 0, 7000000000));
+    await submitAt(77, rel);
+    await triggerVerdict(challenger, claw, {
+      pred: "claw", height: 77, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: rel.traceRoot, fills_root: rel.fillsRoot, ops_root: rel.opsRoot, units_root: ISO_UNITS_ROOT,
+      units_proof: ISO_UNITS_PROOF, fill: rel.fill, fill_proof: merkle.getMerkleProof(rel.tree, 0),
+      op: rel.op, ops_proof: merkle.getMerkleProof(rel.ops, 0),
+    }, 20000, "R6-C1 kind 0->3 relabel (no state leaves)");
+    await frozen(77, "kind 0->3 relabel");
+    // (c) the Place op committed as `x:{unit}` (item 10 route): only Place
+    // and Liquidate emit fills.
+    const xop = clawUnit(P5, "r6b-xop", "x:" + isoUnit, [f1], post5(49955000000, 0, 7000000000));
+    await submitAt(77, xop);
+    await triggerVerdict(challenger, claw, clawPayload(P5, 77, xop, MORD), 20000, "R6-C1 x: op with a fill");
+    await frozen(77, "x: op with a fill");
+    // A multi-fill unit whose first fill is not its op's: also fraud now.
+    const xmulti = clawUnit(P5, "r6b-xmulti", "x:" + isoUnit, [f1, f1b], post5(49955000000, 0, 7000000000));
+    await submitAt(77, xmulti);
+    await triggerVerdict(challenger, claw, clawPayload(P5, 77, xmulti, MORD), 20000, "R6-C1 x: op, multi-fill");
+    await frozen(77, "x: op on a multi-fill unit");
+    // R6-C2 (a): honest single-fill Place, bystander C credited 1e6 USD.
+    const tp3 = clawUnit(P5, "r6b-3p", op1, [f1], post5(40955000000, 0, 1007000000000));
+    await submitAt(77, tp3);
+    await triggerBounce(challenger, claw, clawPayload(P5, 77, tp3, MORD), 20000, "no fraud");
+    await triggerVerdict(challenger, bindAa, pfPayload(P5, 77, tp3, acct(C, 1007000000000), true), 20000, "R6-C2 third-party credit (single-fill Place)");
+    await frozen(77, "third-party credit in a Place unit");
+    // Honest: the claw bounces, and P-frame bounces on the maker's leaf
+    // (an allowed account) and cannot prove C's untouched leaf absent.
+    const ok5 = clawUnit(P5, "r6b-ok5", op1, [f1], post5(40955000000, 0, 7000000000));
+    await submitAt(77, ok5);
+    await triggerBounce(challenger, claw, clawPayload(P5, 77, ok5, MORD), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, pfPayload(P5, 77, ok5, acct(M, 1000000000), false), 20000, "no fraud");
+    await live(77, "honest kind-0 Place (shape + frame)");
+    // (b) zero-fill Place (a cross bid rests): only T may change.
+    const restOp = `p:${T}:1:0:8000000000000:100000000:0:0:0:0`;
+    const tOrd = `ord:${"ea".repeat(32)}:1:0:8000000000000:9:100000000:${T}:0:0`;
+    const zpost = (cc) => P5.pre.filter((l) => l !== acct(C, 7000000000)).concat([acct(C, cc), tOrd]);
+    const z3p = clawUnit(P5, "r6b-z3p", restOp, [], zpost(7000000005));
+    await submitAt(78, z3p);
+    await triggerVerdict(challenger, bindAa, pfPayload(P5, 78, z3p, acct(C, 7000000005), true), 20000, "R6-C2 third-party credit (zero-fill Place)");
+    await frozen(78, "third-party credit in a zero-fill Place");
+    const zok = clawUnit(P5, "r6b-zok", restOp, [], zpost(7000000000));
+    await submitAt(78, zok);
+    await triggerBounce(challenger, bindAa, pfPayload(P5, 78, zok, tOrd, true), 20000, "no fraud");
+    await live(78, "honest zero-fill Place");
+    console.log("62. R6-C1: kind 0→3 relabel (no state needed), x: op on a single- and a multi-fill unit → frozen; honest Place → 'no fraud'");
+
+    // ---- 62b/63c. kind 3 -> 0, keeper / insurance credit, ghost account --
+    // T long 1 @ 100k (15000 USD) liquidated into M's bid @ 90k by keeper
+    // K (no account yet): T 15000 - 10000 - 45 fee - 900 kpay = 4055,
+    // M unchanged (opens long, cross), insurance +45, K +900.
+    const MO3 = "eb".repeat(32);
+    const MORD3 = `ord:${MO3}:1:0:9000000000000:4:100000000:${M}:0:0`;
+    const P6 = await clawSetup(79, "r6b-p6", [
+      acct(T, 15000000000), acct(M, 50000000000), acct(Z, 1000000000), META1, MORD3,
+      `pos:${T}:1:100000000:10000000000000:0:0`, END,
+    ]);
+    const f6 = `f:${isoUnit}:0:${T}:${M}:${LO}:${MO3}:1:9000000000000:100000000:9:1:3:0`;
+    const op6 = `L:${K}:${T}:1`;
+    const mPos6 = `pos:${M}:1:100000000:9000000000000:0:0`;
+    const post6 = (tc, zc, kc, extra) => [acct(T, tc), acct(M, 50000000000), acct(Z, zc), META1, mPos6, END]
+      .concat(kc === null ? [] : [acct(K, kc)]).concat(extra || []);
+    const xFields = (P, u, who, a) => {
+      const post = u.post.find((l) => l.startsWith(`acct:${a}:`));
+      const o = { x_who: who, x_post_acct: post, x_post_acct_proof: u.leafProof(post) };
+      const pre = P.pre.find((l) => l.startsWith(`acct:${a}:`));
+      if (pre) {
+        o.x_pre_acct = pre; o.x_pre_acct_proof = P.proof(pre);
+      } else {
+        const i = P.pre.findIndex((l) => l > `acct:${a}:`);
+        o.x_pleft = P.pre[i - 1]; o.x_pleft_proof = P.proof(P.pre[i - 1]);
+        o.x_pright = P.pre[i]; o.x_pright_proof = P.proof(P.pre[i]);
+      }
+      return o;
+    };
+    // (b) kind 3 -> 0 under the Liquidate.
+    const f6k0 = `f:${isoUnit}:0:${T}:${M}:${LO}:${MO3}:1:9000000000000:100000000:9:1:0:0`;
+    const rel30 = clawUnit(P6, "r6b-rel30", op6, [f6k0], post6(4055000000, 1045000000, 900000000));
+    await submitAt(80, rel30);
+    await triggerVerdict(challenger, claw, clawPayload(P6, 80, rel30, MORD3), 20000, "R6-C1 kind 3->0 relabel");
+    await frozen(80, "kind 3->0 relabel");
+    // Keeper credited 10x its reward (the target pays it once).
+    const kOver = clawUnit(P6, "r6b-kover", op6, [f6], post6(4055000000, 1045000000, 9000000000));
+    await submitAt(80, kOver);
+    await triggerBounce(challenger, claw, clawPayload(P6, 80, kOver, MORD3), 20000, "no fraud");
+    await triggerVerdict(challenger, claw, Object.assign(clawPayload(P6, 80, kOver, MORD3), xFields(P6, kOver, "c", K)), 20000, "R6-C2 keeper over-credit");
+    await frozen(80, "keeper over-credit");
+    // Insurance inflated by 1e6 USD.
+    const iOver = clawUnit(P6, "r6b-iover", op6, [f6], post6(4055000000, 1001045000000, 900000000));
+    await submitAt(80, iOver);
+    await triggerVerdict(challenger, claw, Object.assign(clawPayload(P6, 80, iOver, MORD3), xFields(P6, iOver, "i", Z)), 20000, "R6-C2 insurance inflation");
+    await frozen(80, "insurance inflation");
+    // A ghost account appears in the liquidation unit.
+    const GH = acct("5e".repeat(32), 1000000000000);
+    const ghost = clawUnit(P6, "r6b-ghost", op6, [f6], post6(4055000000, 1045000000, 900000000, [GH]));
+    await submitAt(80, ghost);
+    await triggerVerdict(challenger, bindAa, pfPayload(P6, 80, ghost, GH, true), 20000, "R6-C2 ghost account (Liquidate)");
+    await frozen(80, "ghost account in a Liquidate unit");
+    const ok6 = clawUnit(P6, "r6b-ok6", op6, [f6], post6(4055000000, 1045000000, 900000000));
+    await submitAt(80, ok6);
+    await triggerBounce(challenger, claw, Object.assign(clawPayload(P6, 80, ok6, MORD3), xFields(P6, ok6, "c", K)), 20000, "no fraud");
+    await triggerBounce(challenger, claw, Object.assign(clawPayload(P6, 80, ok6, MORD3), xFields(P6, ok6, "i", Z)), 20000, "no fraud");
+    await triggerBounce(challenger, bindAa, pfPayload(P6, 80, ok6, acct(K, 900000000), true), 20000, "no fraud");
+    await live(80, "honest liquidation with a third-party keeper");
+    console.log("63. R6-C1 kind 3→0; R6-C2 bystander credit (single- and zero-fill Place), keeper 10x credit, insurance inflation, ghost account → frozen; honest Place / resting bid / keeper liquidation → 'no fraud'");
+
+    // ---- 64. R6-H1: exact flip / close below QTY_CAP (1e15) --------------
+    // M long 4e14 (isolated, bucket 1000 USD) asks 4e14 + 1 (escrow 500
+    // USD) at 0.00001 USD; cross taker T buys it all: M closes 4e14 and
+    // opens 1 short — its escrow goes to the NEW bucket, the old bucket
+    // returns: M 10000 + 1000 = 11000 USD; T pays the 0.02 USD fee.
+    const MO7 = "ec".repeat(32);
+    const Q = "400000000000001";
+    const MORD7 = `ord:${MO7}:1:1:1000:5:${Q}:${M}:1:500000000`;
+    const P7 = await clawSetup(81, "r6b-p7", [
+      acct(T, 10000000000), acct(M, 10000000000), META1, MORD7,
+      `pos:${M}:1:400000000000000:1000:1:1000000000`, END,
+    ]);
+    const f7 = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO7}:1:1000:${Q}:9:0:0:0`;
+    const op7 = `p:${T}:1:0:1000:${Q}:0:0:1:0`;
+    const post7 = (tc, mc) => [acct(T, tc), acct(M, mc), META1, `pos:${T}:1:${Q}:1000:0:0`, `pos:${M}:1:-1:1000:1:500000000`, END];
+    // The pre-cap model (escrow back to collateral, as if a pure close).
+    const h1lie = clawUnit(P7, "r6b-h1lie", op7, [f7], post7(9999980000, 11500000000));
+    await submitAt(82, h1lie);
+    await triggerVerdict(challenger, claw, clawPayload(P7, 82, h1lie, MORD7), 20000, "R6-H1 escrow share returned on a flip");
+    await frozen(82, "flip escrow returned to collateral");
+    // A fill at the cap is never emitted (P-claw shape + P-fsane).
+    const capQ = "1000000000000000";
+    const fcap = `f:${isoUnit}:0:${T}:${M}:${TO}:${MO7}:1:1000:${capQ}:9:0:0:0`;
+    const cap = clawUnit(P7, "r6b-cap", `p:${T}:1:0:1000:${capQ}:0:0:1:0`, [fcap], post7(9999980000, 11000000000));
+    await submitAt(82, cap);
+    await triggerVerdict(challenger, book, {
+      pred: "fsane", height: 82, rollup: ROLLUP_ADDR, k: 0,
+      trace_root: cap.traceRoot, fills_root: cap.fillsRoot, ops_root: cap.opsRoot, units_root: ISO_UNITS_ROOT,
+      units_proof: ISO_UNITS_PROOF, fill: fcap, fill_proof: merkle.getMerkleProof(cap.tree, 0), pre_wit: P7.wit,
+    }, 20000, "R6-H1 fill qty at the cap (fsane)");
+    await frozen(82, "fill qty 1e15 (fsane)");
+    await submitAt(82, cap);
+    await triggerVerdict(challenger, claw, clawPayload(P7, 82, cap, MORD7), 20000, "R6-H1 fill qty at the cap (claw)");
+    await frozen(82, "fill qty 1e15 (claw)");
+    const ok7 = clawUnit(P7, "r6b-ok7", op7, [f7], post7(9999980000, 11000000000));
+    await submitAt(82, ok7);
+    await triggerBounce(challenger, claw, clawPayload(P7, 82, ok7, MORD7), 20000, "no fraud");
+    await live(82, "honest maker flip 1 below the cap");
+    console.log("64. R6-H1: flip of |pos| 4e14 by 4e14+1 judged exactly (escrow to the new bucket), fill qty 1e15 → frozen (claw + fsane); honest flip → 'no fraud'");
   }
 
   // Scenario 23 (vault W-watermark drill, #37-11) lives in the standalone

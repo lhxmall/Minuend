@@ -10065,8 +10065,8 @@ mod tests {
         eng.ingest(deposit(vec![g], &alice, 1_000_000 * USD_SCALE as i128, 1))
             .unwrap();
         let q = 5_000_000_000_000_000_000u64; // two of these exceed i64::MAX
-        // R6-H1: `place` now refuses any qty >= QTY_CAP, so such orders can
-        // only exist if injected; the reserve sum must still not wrap.
+                                              // R6-H1: `place` now refuses any qty >= QTY_CAP, so such orders can
+                                              // only exist if injected; the reserve sum must still not wrap.
         let bid = place_on(
             vec![g],
             &alice,
@@ -10145,7 +10145,10 @@ mod tests {
             )
         };
         // One order at the cap: rejected.
-        assert!(rejected_with(&eng.ingest(bid(cap, 1)).unwrap(), RejectReason::Risk));
+        assert!(rejected_with(
+            &eng.ingest(bid(cap, 1)).unwrap(),
+            RejectReason::Risk
+        ));
         // 6e14 rests; another 4e14 would make the sum reach the cap.
         let first = 600_000_000_000_000u64;
         let evs = eng.ingest(bid(first, 1)).unwrap();
@@ -10173,7 +10176,10 @@ mod tests {
         assert!(applied_with_fills(&eng.ingest(ask).unwrap()));
         let pos = eng.state.accounts[&a].positions[&mkt].qty;
         assert_eq!(pos, 100_000_000_000_000);
-        assert!(rejected_with(&eng.ingest(bid(1, 3)).unwrap(), RejectReason::Risk));
+        assert!(rejected_with(
+            &eng.ingest(bid(1, 3)).unwrap(),
+            RejectReason::Risk
+        ));
     }
 
     /// R2-E-11: a funding-rate off-book liquidation that fails mid-way
