@@ -6,6 +6,8 @@ const {
   finalizeReached,
   challengeGate,
   disputeTarget,
+  resolveLiveRollup,
+  pickDisputeAddress,
   buildChallengeData,
   hubFor,
   CHALLENGE_SAFETY_MARGIN_SECS,
@@ -72,5 +74,28 @@ assert.strictEqual(finalizeReached("NaN", 5), false);
   assert.strictEqual(hubFor("testnet", "my.hub/bb"), "my.hub/bb");
   assert.throws(() => hubFor("devnet"));
 }
+
+// R2-R-8: the live poster challenges the WATCHED rollup, never a
+// deployment.json address for another network/deployment.
+{
+  const silent = () => {};
+  const X = "X".repeat(32), Y = "Y".repeat(32), E = "E".repeat(32);
+  const deploy = { network: "testnet", rollup_aa_address: Y };
+  assert.strictEqual(resolveLiveRollup({ cli: X, deploy, network: "mainnet", env: {}, warn: silent }), X);
+  assert.strictEqual(resolveLiveRollup({ cli: X, deploy, network: "testnet", env: { MINUEND_ROLLUP_AA: E }, warn: silent }), X);
+  assert.strictEqual(resolveLiveRollup({ deploy, network: "mainnet", env: { MINUEND_ROLLUP_AA: E }, warn: silent }), E);
+  assert.strictEqual(resolveLiveRollup({ deploy, network: "testnet", env: {}, warn: silent }), Y);
+  assert.throws(() => resolveLiveRollup({ deploy, network: "mainnet", env: {}, warn: silent }), /network/);
+  assert.throws(() => resolveLiveRollup({ deploy: { rollup_aa_address: Y, network: null }, network: "mainnet", env: {}, warn: silent }));
+  assert.throws(() => resolveLiveRollup({ deploy: {}, network: "mainnet", env: {}, warn: silent }), /--rollup/);
+  const B = "B".repeat(32);
+  assert.strictEqual(pickDisputeAddress({ bound: B, rollupVar: "dispute_aa" }), B);
+  assert.strictEqual(pickDisputeAddress({ cli: B, bound: B, rollupVar: "dispute_aa" }), B);
+  assert.throws(() => pickDisputeAddress({ cli: X, bound: B, rollupVar: "dispute_aa" }), /not the rollup/);
+  assert.throws(() => pickDisputeAddress({ bound: undefined, rollupVar: "dispute_bind_aa" }), /no dispute_bind_aa/);
+}
+
+// R2-R-4: frame stamping keeps frames byte-for-byte (own test file).
+require("./test_frame_stamp");
 
 console.log("script helper checks passed");

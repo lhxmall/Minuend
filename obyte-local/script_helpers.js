@@ -75,6 +75,33 @@ function disputeTarget(target, deploy, env = process.env, warn = console.warn) {
   return Object.assign({ address: address || null }, t);
 }
 
+// R2-R-8 (round 2 of #47): the live poster must challenge the rollup the
+// WATCHER is watching. Precedence: --rollup (the watcher always passes it)
+// > MINUEND_ROLLUP_AA > deployment.json — and deployment.json is only used
+// when its `network` matches the network we are posting to (deploy scripts
+// rewrite the same file, so it may describe another network/deployment).
+function resolveLiveRollup({ cli, deploy, network, env = process.env, warn = console.warn }) {
+  if (cli) return cli;
+  const fromEnv = envCompat("MINUEND_ROLLUP_AA", env, warn);
+  if (fromEnv) return fromEnv;
+  const d = deploy && deploy.rollup_aa_address;
+  if (!d) throw new Error("rollup address missing: pass --rollup (or MINUEND_ROLLUP_AA)");
+  if (!deploy.network || deploy.network !== network)
+    throw new Error(`deployment.json describes network ${JSON.stringify(deploy.network)}, not ${network}: pass --rollup`);
+  return d;
+}
+
+// R2-R-8: the dispute AA a challenge goes to is the one the rollup itself
+// has bound (`dispute_aa` / `dispute_fill_aa` / `dispute_bind_aa` state var)
+// — the only AA whose verdicts the rollup accepts. An explicit
+// --dispute-address must agree with it.
+function pickDisputeAddress({ cli, bound, rollupVar }) {
+  const b = typeof bound === "string" ? bound : "";
+  if (!/^[0-9A-Z]{32}$/.test(b)) throw new Error(`rollup has no ${rollupVar} bound (${JSON.stringify(bound)})`);
+  if (cli && cli !== b) throw new Error(`--dispute-address ${cli} is not the rollup's ${rollupVar} (${b})`);
+  return b;
+}
+
 // Challenge trigger data: the proof file's fields plus height/pred/rollup.
 // The proof must not override those three (a stale or foreign proof file
 // would otherwise redirect the challenge).
@@ -101,6 +128,8 @@ module.exports = {
   finalizeReached,
   challengeGate,
   disputeTarget,
+  resolveLiveRollup,
+  pickDisputeAddress,
   buildChallengeData,
   hubFor,
   CHALLENGE_WINDOW_SECS,

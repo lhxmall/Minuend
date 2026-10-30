@@ -5,7 +5,8 @@ use minuend_types::{
     UPDATE_EXTERNAL_PRICE_TAG,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
@@ -186,6 +187,10 @@ pub enum DagError {
     AddrTooLong,
     #[error("orphan retry payload mismatch")]
     RetryMismatch,
+    /// R2-R-6/7: a parent is outside the consensus parent window
+    /// ([`PARENT_WINDOW`]); the unit can never execute.
+    #[error("parent outside the parent window")]
+    StaleParent,
 }
 
 /// Hard cap on the Obyte withdrawal address bound by Deposit/GovDeposit ops.
@@ -556,6 +561,29 @@ pub fn sign_unit(parents: Vec<UnitId>, op: Op, secret: &[u8; 32]) -> Unit {
     unit
 }
 
+/// R2-R-6 / R2-R-7 (round 2 of #47): consensus parent-age window.
+///
+/// A unit may only be executed when every one of its parents is among the
+/// last `PARENT_WINDOW` executed units (genesis counts as the virtual unit
+/// executed just before the first one, so it stops being a valid parent once
+/// `PARENT_WINDOW` units have executed). The window is exactly the DAG
+/// anchor ring a snapshot persists (`minuend_state::persist::DAG_ANCHOR_LIMIT`
+/// is the same number), so a node restored from a snapshot and a node that
+/// has run since genesis judge every unit identically:
+///
+/// * a unit referencing an ancient parent (M2 residue) is refused by every
+///   node, instead of being executed by a long-running producer and then
+///   breaking every snapshot-restored replayer with `MissingParent`;
+/// * an old signed unit re-sent after its execution has slipped out of the
+///   window (H4 residue, including `parents == [genesis]`) cannot run a
+///   second time: all its parents are older than itself, hence stale.
+///
+/// The check is evaluated at execution position (see
+/// [`Dag::ready_linearized`]), which is identical on the producer and on
+/// every replayer, and additionally as an early reject at insertion when a
+/// parent is already stale (a stale parent never becomes fresh again).
+pub const PARENT_WINDOW: usize = 2 * minuend_types::BATCH_MAX_UNITS as usize;
+
 #[derive(Clone, Debug)]
 pub struct Dag {
     units: HashMap<UnitId, Unit>,
@@ -563,15 +591,20 @@ pub struct Dag {
     executed: HashSet<UnitId>,
     /// non-executed units; keeps ready_linearized O(pending) not O(all units)
     pending: HashSet<UnitId>,
-    /// units whose parents are not (yet) known; evicted by smallest UnitId
-    /// past capacity (see `insert_verified`)
+    /// units whose parents are not (yet) known; evicted by smallest salted
+    /// key past capacity (see `insert_verified`)
     pending_orphans: HashMap<UnitId, Unit>,
+    /// R2-R-13: `pending_orphans` ordered by salted eviction key, so an
+    /// eviction is O(log n) instead of hashing the whole buffer twice per
+    /// comparison. Rebuilt whenever the salt rotates.
+    orphan_order: BTreeSet<([u8; 32], UnitId)>,
     /// reverse index over `pending_orphans`: missing parent -> buffered
     /// children waiting on it; lets a newly known parent link only the
     /// orphans it actually unblocks instead of scanning the whole buffer
     waiting: HashMap<UnitId, Vec<UnitId>>,
-    /// Salt for orphan eviction + ordering tie-breaks (Step9): genesis id
-    /// until the first AA finalization, then the finalized state root.
+    /// Salt for orphan eviction only (execution order is plain lexicographic,
+    /// see `ready_linearized`): genesis id until the first AA finalization,
+    /// then derived from the finalized state root.
     eviction_salt: [u8; 32],
     /// #37-14: ids known to have been executed BEFORE a restored snapshot.
     /// Their full units are gone (the snapshot carries state, not the DAG),
@@ -579,10 +612,23 @@ pub struct Dag {
     /// buffered as orphans forever. `ready_linearized` already ignores
     /// parents outside `pending`, so an ancestor id is exactly "executed".
     ancestors: HashSet<UnitId>,
+    /// R2-R-6/7: the last `parent_window` executed ids, oldest first, with
+    /// their execution sequence numbers (`window_seq`). Ids leaving the
+    /// window are pruned from every other map (R2-R-5: the DAG no longer
+    /// grows with the whole history).
+    window: VecDeque<UnitId>,
+    window_seq: HashMap<UnitId, u64>,
+    /// Number of units executed (or seeded as ancestors) so far; the next
+    /// executed unit gets this sequence number.
+    next_seq: u64,
+    parent_window: usize,
+    /// Set by `ready_linearized` when it had to hold back a pending unit
+    /// with a stale parent; the next mutable call purges such units.
+    stale_pending: Cell<bool>,
 }
 
 /// Max buffered orphan units. Beyond this the orphan with the smallest
-/// UnitId is dropped.
+/// salted key is dropped.
 const ORPHAN_CAP: usize = 4096;
 
 impl Default for Dag {
@@ -593,6 +639,13 @@ impl Default for Dag {
 
 impl Dag {
     pub fn new() -> Self {
+        Self::with_parent_window(PARENT_WINDOW)
+    }
+
+    /// A DAG with a non-default parent window. Consensus code always uses
+    /// [`Dag::new`] ([`PARENT_WINDOW`]); smaller windows exist so tests can
+    /// exercise window expiry without executing 400 000 units.
+    pub fn with_parent_window(parent_window: usize) -> Self {
         let mut executed = HashSet::new();
         executed.insert(genesis_id());
         Self {
@@ -602,23 +655,33 @@ impl Dag {
             executed,
             pending: HashSet::new(),
             pending_orphans: HashMap::new(),
+            orphan_order: BTreeSet::new(),
             eviction_salt: genesis_id().0,
             ancestors: HashSet::new(),
+            window: VecDeque::new(),
+            window_seq: HashMap::new(),
+            next_seq: 0,
+            parent_window: parent_window.max(1),
+            stale_pending: Cell::new(false),
         }
     }
 
-    /// Rotate the eviction/ordering salt (Step9): the finalization observer
+    /// Rotate the orphan-eviction salt (Step9): the finalization observer
     /// calls this with each newly AA-finalized state root.
     pub fn set_eviction_salt(&mut self, salt: [u8; 32]) {
         self.eviction_salt = salt;
+        let ids: Vec<UnitId> = self.pending_orphans.keys().copied().collect();
+        self.orphan_order = ids
+            .into_iter()
+            .map(|id| (self.eviction_key(id), id))
+            .collect();
     }
 
     pub fn eviction_salt(&self) -> [u8; 32] {
         self.eviction_salt
     }
 
-    /// Salted eviction/ordering key: sha256(salt || unit_id). Grind-resistant
-    /// replacement for bare lexicographic UnitId ordering.
+    /// Salted eviction key: sha256(salt || unit_id).
     pub fn eviction_key(&self, id: UnitId) -> [u8; 32] {
         let mut b = Vec::with_capacity(64);
         b.extend_from_slice(&self.eviction_salt);
@@ -626,11 +689,72 @@ impl Dag {
         sha256(&b)
     }
 
+    fn orphan_put(&mut self, id: UnitId, unit: Unit) {
+        self.orphan_order.insert((self.eviction_key(id), id));
+        self.pending_orphans.insert(id, unit);
+    }
+
+    fn orphan_take(&mut self, id: UnitId) -> Option<Unit> {
+        let u = self.pending_orphans.remove(&id)?;
+        self.orphan_order.remove(&(self.eviction_key(id), id));
+        Some(u)
+    }
+
+    /// Number of buffered orphans (test/diagnostic aid).
+    pub fn orphan_count(&self) -> usize {
+        self.pending_orphans.len()
+    }
+
     /// Insert a unit, hashing it to compute its id.
     pub fn insert(&mut self, unit: Unit) -> Result<UnitId, DagError> {
         let id = unit_id(&unit);
         self.insert_verified(unit, id)
     }
+
+    /// Is `p` a valid parent for the unit executed at sequence `s`?
+    /// `virtual_seq` carries sequence numbers assigned earlier in the same
+    /// `ready_linearized` pass (units not executed yet).
+    fn parent_fresh_at(
+        &self,
+        p: UnitId,
+        s: u64,
+        virtual_seq: Option<&HashMap<UnitId, u64>>,
+    ) -> bool {
+        let w = self.parent_window as u64;
+        if p == genesis_id() {
+            // Genesis = virtual seq -1: fresh while s - (-1) <= w.
+            return s < w;
+        }
+        let seq = self
+            .window_seq
+            .get(&p)
+            .copied()
+            .or_else(|| virtual_seq.and_then(|m| m.get(&p).copied()));
+        match seq {
+            Some(q) => q + w >= s,
+            None => false,
+        }
+    }
+
+    /// R2-R-6/7 early reject: a known parent that is already outside the
+    /// window can never become fresh again, so the unit can never execute.
+    fn has_stale_known_parent(&self, unit: &Unit) -> bool {
+        unit.parents.iter().any(|p| {
+            if *p == genesis_id() {
+                return self.next_seq >= self.parent_window as u64;
+            }
+            if self.pending.contains(p) {
+                return false; // not executed yet: judged at execution
+            }
+            if self.window_seq.contains_key(p) {
+                return !self.parent_fresh_at(*p, self.next_seq, None);
+            }
+            // Executed but no longer in the window (or an ancestor that was
+            // trimmed): stale. Unknown ids are handled by the orphan path.
+            self.executed.contains(p) || self.ancestors.contains(p)
+        })
+    }
+
     /// Same as [`Dag::insert`] but the caller supplies the unit id, so an
     /// ingest path that already hashed the unit (signature check) never
     /// computes it twice. Unknown parents no longer drop the unit: on first
@@ -639,7 +763,9 @@ impl Dag {
     /// without error — a retry with DIFFERENT canonical bytes under an equal
     /// id is rejected with [`DagError::RetryMismatch`]. Buffered orphans are
     /// linked automatically once their parents arrive (see `mark_executed`),
-    /// so out-of-order delivery recovers.
+    /// so out-of-order delivery recovers. A unit with a parent outside the
+    /// consensus parent window ([`PARENT_WINDOW`]) is refused with
+    /// [`DagError::StaleParent`].
     ///
     /// Note: arrival-order buffering itself remains replica-dependent (which
     /// units sit in the buffer depends on delivery order). Eviction drops the
@@ -650,6 +776,9 @@ impl Dag {
     /// layer's temp_data full replay is the self-healing backstop that
     /// restores a common unit set after convergence.
     pub fn insert_verified(&mut self, unit: Unit, id: UnitId) -> Result<UnitId, DagError> {
+        if self.stale_pending.get() {
+            self.purge_stale_pending();
+        }
         if unit.parents.is_empty() {
             return Err(DagError::EmptyParents);
         }
@@ -678,6 +807,11 @@ impl Dag {
         if self.units.contains_key(&id) || self.ancestors.contains(&id) {
             return Err(DagError::Duplicate);
         }
+        // R2-R-6/7: a parent already outside the window (incl. genesis once
+        // the window is full) can never be valid again.
+        if self.has_stale_known_parent(&unit) {
+            return Err(DagError::StaleParent);
+        }
         let missing: Vec<UnitId> = unit
             .parents
             .iter()
@@ -700,20 +834,10 @@ impl Dag {
             }
             if self.pending_orphans.len() >= ORPHAN_CAP {
                 // Salted eviction (Step9): drop the orphan with the smallest
-                // key sha256(salt||id) — grind-resistant vs bare lexicographic
-                // min. The salt rotates with AA finalizations (see
-                // `Engine::note_finalized`), so eviction is NO LONGER a pure
-                // function of buffer contents: replicas whose finalize timing
-                // diverges pre-convergence may evict different orphans. The
-                // DA layer's temp_data full replay self-heals any resulting
-                // divergence.
-                if let Some(k) = self
-                    .pending_orphans
-                    .keys()
-                    .copied()
-                    .min_by(|a, b| self.eviction_key(*a).cmp(&self.eviction_key(*b)))
-                {
-                    if let Some(evicted) = self.pending_orphans.remove(&k) {
+                // key sha256(salt||id). R2-R-13: taken from the ordered
+                // index (O(log n)) instead of re-hashing the whole buffer.
+                if let Some(&(_, k)) = self.orphan_order.iter().next() {
+                    if let Some(evicted) = self.orphan_take(k) {
                         // Drop the evicted orphan's reverse-index entries.
                         for p in &evicted.parents {
                             if let Some(v) = self.waiting.get_mut(p) {
@@ -731,7 +855,7 @@ impl Dag {
             for p in &missing {
                 self.waiting.entry(*p).or_default().push(id);
             }
-            self.pending_orphans.insert(id, unit);
+            self.orphan_put(id, unit);
             return Err(DagError::MissingParent);
         }
         self.link(id, unit);
@@ -751,11 +875,39 @@ impl Dag {
         id == genesis_id() || self.units.contains_key(&id) || self.ancestors.contains(&id)
     }
 
+    /// Record `id` as the newest executed unit in the parent window and
+    /// prune whatever falls out of it.
+    fn push_window(&mut self, id: UnitId) {
+        if self.window_seq.contains_key(&id) {
+            return;
+        }
+        self.window.push_back(id);
+        self.window_seq.insert(id, self.next_seq);
+        self.next_seq += 1;
+        while self.window.len() > self.parent_window {
+            let Some(old) = self.window.pop_front() else {
+                break;
+            };
+            self.window_seq.remove(&old);
+            // R2-R-5: bounded DAG. A unit outside the window can never be a
+            // valid parent again, so its body, child list and executed mark
+            // are dropped. A re-send of it then finds only stale or unknown
+            // parents and can never execute again.
+            self.units.remove(&old);
+            self.children.remove(&old);
+            self.executed.remove(&old);
+            self.ancestors.remove(&old);
+        }
+    }
+
     /// #37-14: seed an id that was executed before the restored snapshot.
     /// Idempotent; never overrides a full unit if one is already present.
+    /// Anchors must be seeded oldest first (snapshot order): they also seed
+    /// the parent window (R2-R-6/7).
     pub fn mark_ancestor_known(&mut self, id: UnitId) {
-        if !self.units.contains_key(&id) {
+        if !self.units.contains_key(&id) && !self.window_seq.contains_key(&id) {
             self.ancestors.insert(id);
+            self.push_window(id);
         }
     }
 
@@ -764,9 +916,21 @@ impl Dag {
         self.ancestors.len()
     }
 
+    /// Number of units held with a full body (test/diagnostic aid).
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Executed units counted by the parent window (relative after a
+    /// snapshot restore; diagnostic aid).
+    pub fn executed_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     pub fn mark_executed(&mut self, id: UnitId) {
         self.executed.insert(id);
         self.pending.remove(&id);
+        self.push_window(id);
         // Newly known parent: link the buffered orphans indexed as waiting on
         // it. Linking an orphan makes it a known parent too, so keep walking
         // until fixpoint (orphans may chain).
@@ -775,14 +939,14 @@ impl Dag {
             None => return,
         };
         while let Some(oid) = frontier.pop() {
-            let unit = match self.pending_orphans.remove(&oid) {
+            let unit = match self.orphan_take(oid) {
                 Some(u) => u,
                 None => continue,
             };
             if !unit.parents.iter().all(|p| self.known(*p)) {
                 // Still missing another parent: leave it buffered; its
                 // remaining waiting-index entries stay intact.
-                self.pending_orphans.insert(oid, unit);
+                self.orphan_put(oid, unit);
                 continue;
             }
             // Drop this orphan's stale entries under its other parents.
@@ -800,6 +964,32 @@ impl Dag {
             self.link(oid, unit);
             if let Some(waiters) = self.waiting.remove(&oid) {
                 frontier.extend(waiters);
+            }
+        }
+    }
+
+    /// Drop pending units that `ready_linearized` held back because a parent
+    /// left the window, together with their pending descendants (they can
+    /// never become executable).
+    fn purge_stale_pending(&mut self) {
+        self.stale_pending.set(false);
+        let mut doomed: Vec<UnitId> = self
+            .pending
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.units[id].parents.iter().any(|p| {
+                    !self.pending.contains(p) && !self.parent_fresh_at(*p, self.next_seq, None)
+                })
+            })
+            .collect();
+        while let Some(id) = doomed.pop() {
+            if !self.pending.remove(&id) {
+                continue;
+            }
+            self.units.remove(&id);
+            if let Some(cs) = self.children.remove(&id) {
+                doomed.extend(cs.into_iter().filter(|c| self.pending.contains(c)));
             }
         }
     }
@@ -837,6 +1027,12 @@ impl Dag {
     /// deferred until finalize-batch determinization lands (README
     /// Limitations). Units whose parents are still buffered orphans stay
     /// excluded until `mark_executed` links them.
+    ///
+    /// R2-R-6/7: the caller executes the returned ids in order, so the i-th
+    /// id runs at sequence `next_seq + i`. A unit whose parent is outside
+    /// the parent window at that position is left out (with its
+    /// descendants) — every node computes the same verdict at the same
+    /// position, whether it runs from genesis or from a snapshot.
     pub fn ready_linearized(&self) -> Vec<UnitId> {
         // Indegree counts only parents inside the pending set; executed
         // parents (and genesis) impose no ordering constraint.
@@ -861,8 +1057,20 @@ impl Dag {
             .collect();
         ready.sort_unstable();
         let mut out = Vec::with_capacity(self.pending.len());
+        let mut virtual_seq: HashMap<UnitId, u64> = HashMap::new();
         while let Some(id) = ready.first().copied() {
             ready.remove(0);
+            let s = self.next_seq + out.len() as u64;
+            if !self.units[&id]
+                .parents
+                .iter()
+                .all(|p| self.parent_fresh_at(*p, s, Some(&virtual_seq)))
+            {
+                // Held back for good; its children never reach indegree 0.
+                self.stale_pending.set(true);
+                continue;
+            }
+            virtual_seq.insert(id, s);
             out.push(id);
             for c in self.children.get(&id).into_iter().flatten() {
                 if let Some(d) = indeg.get_mut(c) {
@@ -1188,5 +1396,180 @@ mod tests {
         );
         // The genuine retry still succeeds.
         assert_eq!(dag.insert(child), Ok(original_id));
+    }
+
+    // ---- R2-R-5/6/7/13 (round 2 of #47) ----
+
+    /// Execute everything ready, the way `Engine::apply_ready` does.
+    fn run(dag: &mut Dag) -> Vec<UnitId> {
+        let ready = dag.ready_linearized();
+        for id in &ready {
+            dag.mark_executed(*id);
+        }
+        ready
+    }
+
+    fn dep_n(parents: Vec<UnitId>, n: u32) -> Unit {
+        let secret = sk(7);
+        let account = account_id_from_pubkey(
+            &ed25519_dalek::SigningKey::from_bytes(&secret)
+                .verifying_key()
+                .to_bytes(),
+        );
+        let mut aa = [0u8; 32];
+        aa[..4].copy_from_slice(&n.to_le_bytes());
+        sign_unit(
+            parents,
+            Op::Deposit {
+                account,
+                addr: test_addr(1),
+                amount: USD_SCALE as i128 + n as i128,
+                aa_unit: aa,
+            },
+            &secret,
+        )
+    }
+
+    /// Execute a chain of `n` units on top of `tip`; returns their ids.
+    fn chain(dag: &mut Dag, mut tip: UnitId, n: u32, salt: u32) -> Vec<UnitId> {
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let u = dep_n(vec![tip], salt * 1000 + i);
+            tip = dag.insert(u).unwrap();
+            assert_eq!(run(dag), vec![tip]);
+            ids.push(tip);
+        }
+        ids
+    }
+
+    #[test]
+    fn parent_window_matches_snapshot_anchor_ring() {
+        assert_eq!(PARENT_WINDOW, 2 * minuend_types::BATCH_MAX_UNITS as usize);
+        assert_eq!(Dag::new().parent_window, PARENT_WINDOW);
+    }
+
+    /// R2-R-6: an old `parents == [genesis]` unit re-sent after it left the
+    /// window must never execute again — neither on the node that ran it
+    /// (its body was pruned) nor on a node restored from a snapshot.
+    #[test]
+    fn genesis_parent_unit_resent_after_window_is_not_reexecuted() {
+        let g = genesis_id();
+        let mut dag = Dag::with_parent_window(3);
+        let old = dep_n(vec![g], 1);
+        let old_id = dag.insert(old.clone()).unwrap();
+        assert_eq!(run(&mut dag), vec![old_id]);
+        let later = chain(&mut dag, old_id, 3, 1);
+        // `old` left the 3-wide window: pruned, and genesis is stale too.
+        assert!(dag.get(old_id).is_none());
+        assert_eq!(dag.insert(old.clone()), Err(DagError::StaleParent));
+        assert!(run(&mut dag).is_empty());
+        // Any NEW genesis-parent unit is refused once the window is full.
+        assert_eq!(dag.insert(dep_n(vec![g], 99)), Err(DagError::StaleParent));
+
+        // A node restored from the snapshot anchors (the same 3 ids) agrees.
+        let mut restored = Dag::with_parent_window(3);
+        for id in &later {
+            restored.mark_ancestor_known(*id);
+        }
+        assert_eq!(restored.insert(old), Err(DagError::StaleParent));
+        assert!(run(&mut restored).is_empty());
+        // Children of in-window units still link and run on both.
+        let c = dep_n(vec![later[0]], 50);
+        let cid = dag.insert(c.clone()).unwrap();
+        assert_eq!(run(&mut dag), vec![cid]);
+        assert_eq!(restored.insert(c).unwrap(), cid);
+        assert_eq!(run(&mut restored), vec![cid]);
+    }
+
+    /// R2-R-7: a unit naming an ancient parent is refused by the
+    /// long-running node too, so it never lands in a batch that a
+    /// snapshot-restored replayer cannot link.
+    #[test]
+    fn ancient_parent_is_refused_by_full_and_restored_nodes_alike() {
+        let g = genesis_id();
+        let mut full = Dag::with_parent_window(4);
+        let ids = chain(&mut full, g, 8, 2);
+        let mut restored = Dag::with_parent_window(4);
+        for id in &ids[ids.len() - 4..] {
+            restored.mark_ancestor_known(*id);
+        }
+        // ids[0] executed 8 units ago: outside the window on both nodes.
+        let ancient = dep_n(vec![ids[0]], 7);
+        let full_res = full.insert(ancient.clone());
+        let rest_res = restored.insert(ancient);
+        assert!(full_res.is_err() && rest_res.is_err());
+        assert!(run(&mut full).is_empty() && run(&mut restored).is_empty());
+        // ids[4] is the oldest in-window unit: accepted by both.
+        let ok = dep_n(vec![ids[4]], 8);
+        let a = full.insert(ok.clone()).unwrap();
+        let b = restored.insert(ok).unwrap();
+        assert_eq!(run(&mut full), vec![a]);
+        assert_eq!(run(&mut restored), vec![b]);
+        // The DAG no longer keeps the whole history (R2-R-5).
+        assert!(full.unit_count() <= 4 + 1);
+    }
+
+    /// R2-R-6/7: staleness is judged at execution position, so a parent
+    /// that falls out of the window while its child waits in the same
+    /// ready pass holds the child back (and the child is purged later).
+    #[test]
+    fn staleness_is_judged_at_execution_position() {
+        let g = genesis_id();
+        let mut dag = Dag::with_parent_window(2);
+        let a = dep_n(vec![g], 1);
+        let aid = unit_id(&a);
+        let b = dep_n(vec![aid], 2);
+        let bid = unit_id(&b);
+        let c = dep_n(vec![bid], 3);
+        let cid = unit_id(&c);
+        let mut pd = vec![aid, cid];
+        pd.sort();
+        let d = dep_n(pd, 4);
+        // Insert without executing in between (as a batch ingest would).
+        for u in [a, b, c, d.clone()] {
+            let id = unit_id(&u);
+            dag.insert_verified(u, id).unwrap();
+        }
+        // a@0 b@1 c@2 d@3: a (seq 0) is outside the 2-wide window at 3.
+        assert_eq!(run(&mut dag), vec![aid, bid, cid]);
+        // d was held back and is purged on the next insert; a retry can
+        // never run again (a is gone for good: it is only an orphan now).
+        assert!(dag.insert(d).is_err());
+        assert_eq!(dag.unit_count(), 2, "held-back d purged");
+        assert!(run(&mut dag).is_empty());
+    }
+
+    /// R2-R-13: eviction comes from the ordered index — always the orphan
+    /// with the smallest salted key — and the index follows salt rotation.
+    #[test]
+    fn orphan_eviction_uses_ordered_index() {
+        let mut dag = Dag::new();
+        for i in 0..(ORPHAN_CAP as u32 + 10) {
+            let fake = UnitId(sha256(&i.to_le_bytes()));
+            let u = dep_n(vec![fake], i);
+            if dag.pending_orphans.len() == ORPHAN_CAP {
+                let min = *dag
+                    .pending_orphans
+                    .keys()
+                    .min_by_key(|k| dag.eviction_key(**k))
+                    .unwrap();
+                assert_eq!(dag.insert(u), Err(DagError::MissingParent));
+                assert!(!dag.pending_orphans.contains_key(&min), "min key evicted");
+            } else {
+                assert_eq!(dag.insert(u), Err(DagError::MissingParent));
+            }
+            assert_eq!(dag.orphan_order.len(), dag.pending_orphans.len());
+        }
+        assert_eq!(dag.orphan_count(), ORPHAN_CAP);
+        dag.set_eviction_salt([5u8; 32]);
+        let (k, id) = *dag.orphan_order.iter().next().unwrap();
+        assert_eq!(k, dag.eviction_key(id));
+        let min = dag
+            .pending_orphans
+            .keys()
+            .map(|x| dag.eviction_key(*x))
+            .min()
+            .unwrap();
+        assert_eq!(k, min);
     }
 }

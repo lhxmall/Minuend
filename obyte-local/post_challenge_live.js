@@ -7,14 +7,20 @@
 // set. post_challenge.js stays the local aa-testkit drill.
 //
 // Usage: node obyte-local/post_challenge_live.js --height H --pred P \
-//          --proof proof.json --target main|fill|bind [--network mainnet|testnet]
+//          --proof proof.json --target main|fill|bind [--network mainnet|testnet] \
+//          [--rollup ADDR] [--dispute-address ADDR]
 //
 // Environment:
 //   MINUEND_WATCH_MNEMONIC   watcher wallet (12+ words; legacy OPERP_* accepted)
 //   MINUEND_WATCH_NETWORK    mainnet (default) | testnet
 //   MINUEND_WATCH_HUB        hub override (default obyte.org/bb[-test])
-//   MINUEND_ROLLUP_AA / MINUEND_DISPUTE_AA / MINUEND_DISPUTE_FILL_AA /
-//   MINUEND_DISPUTE_BIND_AA  when deployment.json carries no address
+//   MINUEND_ROLLUP_AA        when --rollup is not given
+//
+// Addresses (R2-R-8): the rollup is --rollup (minuend-watch always passes
+// the rollup it watches) > MINUEND_ROLLUP_AA > deployment.json, the last
+// only when its `network` matches. The dispute AA is the one the rollup has
+// bound in its dispute_aa / dispute_fill_aa / dispute_bind_aa state var;
+// --dispute-address, when given, must equal it.
 //
 // Safety (B10, 600 s margin): the dispute AAs judge the challenge unit's own
 // timestamp against submitted_at + 3600. After the wallet has booted (which
@@ -33,6 +39,8 @@ const {
   envCompat,
   challengeGate,
   disputeTarget,
+  resolveLiveRollup,
+  pickDisputeAddress,
   buildChallengeData,
   hubFor,
 } = require("./script_helpers");
@@ -52,11 +60,13 @@ async function main() {
   const network = arg("network", envCompat("MINUEND_WATCH_NETWORK") || "mainnet");
   if (!Number.isInteger(height) || height < 1 || !pred || !proofFile)
     throw new Error("usage: node post_challenge_live.js --height N --pred P --proof proof.json --target main|fill|bind [--network mainnet|testnet]");
-  const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
-  const rollup = deploy.rollup_aa_address || envCompat("MINUEND_ROLLUP_AA");
-  const t = disputeTarget(target, deploy);
-  if (!rollup || !t.address)
-    throw new Error(`rollup / ${target} dispute AA address missing (deployment.json or ${t.env})`);
+  let deploy = {};
+  try {
+    deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
+  } catch (_) { /* --rollup / env still work without the file */ }
+  const rollup = resolveLiveRollup({ cli: arg("rollup"), deploy, network });
+  // Target metadata only (state var name); the address comes from the rollup.
+  const t = disputeTarget(target, {}, {}, () => {});
   const proof = JSON.parse(fs.readFileSync(proofFile, "utf8"));
   const data = buildChallengeData({ height, pred, rollup, proof });
 
@@ -66,14 +76,17 @@ async function main() {
     network,
     hub: hubFor(network, envCompat("MINUEND_WATCH_HUB")),
   });
-  console.log(`watcher wallet ${w.address} on ${network}; target ${target} AA ${t.address}`);
   const readVars = (address, prefix) =>
     w.network.requestFromLightVendor("light/get_aa_state_vars", { address, var_prefix: prefix });
 
-  // The rollup must accept verdicts from this dispute AA at all.
+  // R2-R-8: post to the dispute AA the rollup actually accepts verdicts from.
   const bound = await readVars(rollup, t.rollupVar);
-  if (String(bound[t.rollupVar] || "") !== t.address)
-    throw new Error(`rollup ${rollup} has ${t.rollupVar}=${JSON.stringify(bound[t.rollupVar])}, not ${t.address}`);
+  const disputeAddress = pickDisputeAddress({
+    cli: arg("dispute-address"),
+    bound: bound[t.rollupVar],
+    rollupVar: t.rollupVar,
+  });
+  console.log(`watcher wallet ${w.address} on ${network}; rollup ${rollup}; target ${target} AA ${disputeAddress}`);
 
   // Fresh on-chain window facts + fresh clock, right before sending.
   const sa = (await readVars(rollup, "submitted_at_" + height))["submitted_at_" + height];
@@ -93,7 +106,7 @@ async function main() {
       payload: data,
     }];
     w.wallet.issueChangeAddressAndSendMultiPayment(
-      { to_address: t.address, amount: 20000, messages },
+      { to_address: disputeAddress, amount: 20000, messages },
       (err, u) => (err ? reject(new Error("send failed: " + err)) : resolve(u)),
     );
   });

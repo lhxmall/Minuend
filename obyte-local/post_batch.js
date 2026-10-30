@@ -212,18 +212,9 @@ async function main() {
   if (!frames.length) throw new Error("batch.json is missing the frames array (re-run export_batch)");
   const evByAnchor = new Map();
   for (const e of await buildDepositEvidences(batchData, vault)) evByAnchor.set(String(e.aa_unit).toLowerCase(), e);
-  const stamped = frames.map((f) => {
-    let o;
-    try { o = JSON.parse(f); } catch (_) { return f; }
-    const dep = (o.u && o.u.op && (o.u.op.Deposit || o.u.op.GovDeposit)) || null;
-    if (dep) {
-      const raw = dep.aa_unit;
-      const hex = Array.isArray(raw) ? Buffer.from(raw).toString("hex") : raw;
-      const ev = evByAnchor.get(String(hex || "").toLowerCase());
-      if (ev) o.e = ev;
-    }
-    return JSON.stringify(o);
-  });
+  // R2-R-4: frames pass through byte-for-byte (no JSON reparse, which
+  // rounded integers > 2^53); see frame_stamp.js.
+  const stamped = require("./frame_stamp").stampDepositEvidence(frames, evByAnchor);
   // Separators occur between frames/packages, never at the final byte. This
   // preserves old watcher split("\n") compatibility and avoids an empty
   // trailing frame. An indivisible oversized frame must fail before posting.
