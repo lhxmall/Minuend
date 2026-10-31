@@ -1,5 +1,7 @@
 # rv loop round 6 — governance + commit-reveal port, review of the new code (2026-10-31)
 
+**Status: FINAL (closed in loop round 8, 2026-11-01 ~00:50 CST, branch spike/rv-bisect).** Rows marked *not reached* / "still running" are suite jobs that had not finished on the shared VM when the logs were collected; later rounds re-run the same checks on newer code.
+
 Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ 6f33165 (loop round 5). Reference engine read only via
 `git archive 20326c0` (engine-diff/engine-src); fix/47-all, main and PR #51 untouched.
 

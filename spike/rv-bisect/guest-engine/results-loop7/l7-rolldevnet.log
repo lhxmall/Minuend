@@ -114,3 +114,24 @@ PASS | 6b referee nets (0, KEEP] from a move (KEEP minus its refund-unit fee) | 
 PASS | 6b operator move costs KEEP + its unit fee (< KEEP + 3000), not 10000 + fee | expected true | actual true {"odelta":-3184}
 PASS | 6b challenger pick after its deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":49,\"formula\":\"require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""}
 PASS | 6b resolve after the deadline | expected "ok" | actual "ok" 
+PASS | 6b rollup game marked d | expected "d" | actual "d" 
+PASS | 6b operator paid CBOND - GF - FEE (real output) | expected 108000 | actual 108000 
+PASS | 6b challenger paid nothing | expected 0 | actual 0 
+PASS | 6b h4 live, not fraud | expected [4,null] | actual [4,null] 
+PASS | 6c honest h5 by op1 | expected "ok" | actual "ok" 
+PASS | 6c two griefers open on h5 | expected "ok+ok" | actual "ok+ok" 
+PASS | 6c open-games counter = 2 | expected 2 | actual 2 
+PASS | 6c finalize h4 | expected "ok" | actual "ok" 
+PASS | 6c finalize h5 with 2 games open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":120,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN\",\"xpat"}
+PASS | 6c game A -> d | expected "d" | actual "d" 
+PASS | 6c A pays the operator CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6c open-games counter = 1 | expected 1 | actual 1 
+PASS | 6c finalize h5 with game B still open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":120,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN\",\"xpat"}
+PASS | 6c game B -> d | expected "d" | actual "d" 
+PASS | 6c B pays the operator CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6c open-games counter = 0 | expected 0 | actual 0 
+PASS | 6c finalize h5 after both games | expected "ok" | actual "ok" 
+PASS | 6c finalize pays OBOND - FEE | expected 198000 | actual 198000 
+PASS | 6c lf = 5 | expected 5 | actual 5 
+PASS | 6d fraudulent h6 by op2 | expected "ok" | actual "ok" 
+PASS | 6d h7 by op1 on bad h6 | expected "ok" | actual "ok" 

@@ -1,5 +1,7 @@
 # rv loop round 5 — unit id input, engine height = rollup height, oracle stake / unstake / slash port, review of rounds 4–5 (2026-10-31)
 
+**Status: FINAL (closed in loop round 8, 2026-11-01 ~00:50 CST, branch spike/rv-bisect).** Rows marked *not reached* / "still running" are suite jobs that had not finished on the shared VM when the logs were collected; later rounds re-run the same checks on newer code.
+
 Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ 4b039c2 (loop round 4 result + loop4-post.sh). Reference engine read
 only via `git archive 20326c0` (engine-diff/engine-src); fix/47-all, main and PR #51 untouched.
 

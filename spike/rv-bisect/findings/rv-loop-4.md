@@ -1,5 +1,7 @@
 # rv loop round 4 — liquidation / ADL / withdraw / oracle port, guarded state, session export / import, upgrade path (2026-10-31)
 
+**Status: FINAL (closed in loop round 8, 2026-11-01 ~00:50 CST, branch spike/rv-bisect).** Rows marked *not reached* / "still running" are suite jobs that had not finished on the shared VM when the logs were collected; later rounds re-run the same checks on newer code.
+
 Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ 4225a7f (loop round 3 result). Reference engine read only via
 `git archive 20326c0` (engine-diff/engine-src); fix/47-all, main and PR #51 untouched. Commits: de583c8 (round-3 suite
 results), 1d60b0c (port + guarded account map + snapshot, WIP), a0bdb3e (import lock, upgrade image, SetHeight hook,

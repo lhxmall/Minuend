@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 1m 34s
+govedge
+{"cases":8,"ok":8,"fail":[]}
+govfuzz
+{"seeds":30,"match":30,"units":10056,"why":"","coverage":{"commit:0x11":158,"commit:0x13":366,"commit:ok":737,"delisted":17,"final:0x7":213,"final:0xc":134,"final:ok":77,"gdep:0x7":156,"gdep:ok":589,"
+l7 mut 4 vs round-8 govedge: {"cases":8,"ok":0,"fail":["cap:perp_slash_new"]}
+EDONE

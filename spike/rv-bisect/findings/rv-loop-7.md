@@ -1,5 +1,7 @@
 # rv loop round 7 — per-height timestamp binding (R6-M2), review of the whole guest (2026-10-31)
 
+**Status: FINAL (closed in loop round 8, 2026-11-01 ~00:50 CST, branch spike/rv-bisect).** Rows marked *not reached* / "still running" are suite jobs that had not finished on the shared VM when the logs were collected; later rounds re-run the same checks on newer code.
+
 Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ db49ccb (loop round 6). Reference engine read only via
 `git archive 20326c0` (engine-diff/engine-src); fix/47-all, main and PR #51 untouched.
 
@@ -65,9 +67,9 @@ Totals: **C 0 · H 0 · M 3 · L 5 · I 8** — R6-M2 and R7-M1 fixed, R7-M2 doc
 | proofs / scen host / selftest + depthsel / heapsim | 0 / 829 291 forged · 47 / 47 · clean · ≤ 19.2 MB |
 | AA mutation (`js/aamut-l7.py`, ts rules) | 8 / 9 killed, 1 equivalent until 2106 |
 | rolltest (round-7 AAs, sandbox ocore 0.4.8) | 333 / 333 incl. group `ts` 23 / 23 |
-| rolldevnet (round-7 AAs, devnet clock ts, `l7rd.sh`) | RD7 |
+| rolldevnet (round-7 AAs, devnet clock ts, `l7rd.sh`) | 82 PASS / 0 FAIL at collection (2026-11-01 00:50 CST; still running, the round-4 devnet run has 149 checks) |
 | prodheight.js on the round-7/8 prod image | 15 / 16 with the round-7 script (stale GovWithdraw(0) expectation, R8-T2) → 16 / 16 fixed |
-| robust-limit, guest-poc, liq/snap/cap 300, JS-guest runs, sail, statecap | L7REST |
+| robust-limit, guest-poc, liq/snap/cap 300, JS-guest runs, sail, statecap | liq / snap / cap 300 still running at collection; robust-limit, guest-poc, JS-guest runs, sail, statecap *not reached* |
 
 ### Round-7 guest mutation subset (`scripts/loop7-mut.sh`, fail-fast; `l7-mut.log`; the first run is void: `l7-mut-invalid.log`)
 
@@ -76,11 +78,11 @@ Totals: **C 0 · H 0 · M 3 · L 5 · I 8** — R6-M2 and R7-M1 fixed, R7-M2 doc
 | 1 | R7-M1 rule deleted (GovWithdraw(0) by a new id) | killed (govedge) |
 | 2 | R7-M1 rule → ledger-size condition | killed (govedge) |
 | 3 | GovWithdraw dropped from the shared ledger cap | killed (govedge) |
-| 4 | Slash dropped from the shared ledger cap | L7M4 |
+| 4 | Slash dropped from the shared ledger cap | **survived** every round-7 check → killed by the round-8 govedge `cap:perp_slash_new` (R8-T4) |
 | 5 | inner-op `state_cap_ok` dropped | killed (govedge) |
 | 6 | inner-op W2 depth check dropped | **survived** every check → R8-L4 (no test reaches a too-deep key through a reveal) |
 | 7 | ADL one-fill rule dropped | killed (hbind) |
-| 8 | vote cap: snapshot voters no longer exempt | L7M8 |
+| 8 | vote cap: snapshot voters no longer exempt | killed (govedge) |
 
 ---
 
