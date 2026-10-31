@@ -50,7 +50,25 @@ pub struct OrderBook {
     /// O(own orders) instead of filtering every order of the book. Iterating it (OrderId order)
     /// visits exactly `orders.values().filter(|o| o.account == a)` in the same order.
     by_acct: BTreeMap<AccountId, BTreeSet<OrderId>>,
+    /// loop round 14 (feature `stateless`): heads examined by `submit_inner` (taker side, head price or
+    /// None = side empty), for the stateless guest's walk check. Not state: equal / cloned as empty.
+    pub peeks: PeekLog,
 }
+
+/// loop round 14: the head-walk log (never part of book equality or snapshots).
+#[derive(Debug, Default)]
+pub struct PeekLog(pub Vec<(Side, Option<Price>)>);
+impl Clone for PeekLog {
+    fn clone(&self) -> Self {
+        PeekLog(Vec::new())
+    }
+}
+impl PartialEq for PeekLog {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for PeekLog {}
 
 /// #47 B4: undo log for one `submit`. Holds the first-touch pre-image of
 /// every order and price level the match changed, so the book can be put
@@ -104,7 +122,39 @@ impl OrderBook {
             by_acct: BTreeMap::new(),
             arr: BTreeMap::new(),
             next_arr: 0,
+            peeks: PeekLog::default(),
         }
+    }
+
+    /// loop round 14 (stateless loader): append a verified live order at the back of its level.
+    pub fn sl_restore(&mut self, o: Order) {
+        let (side, price, q) = (o.side, o.price, o.remaining);
+        self.enqueue(o);
+        self.level_add(side, price, q as i64);
+    }
+    /// loop round 14: live order ids of one level in FIFO order (None = no live order there).
+    pub fn sl_level(&self, side: Side, price: Price) -> Option<Vec<OrderId>> {
+        let l = match side {
+            Side::Bid => self.bids.get(&Reverse(price)),
+            Side::Ask => self.asks.get(&price),
+        }?;
+        let v: Vec<OrderId> = l.values().copied().filter(|id| self.orders.get(id).is_some_and(|o| o.remaining > 0)).collect();
+        if v.is_empty() { None } else { Some(v) }
+    }
+    /// loop round 14: every non-empty level (side, price, live ids FIFO).
+    pub fn sl_levels(&self) -> Vec<(Side, Price, Vec<OrderId>)> {
+        let mut out = Vec::new();
+        for p in self.asks.keys() {
+            if let Some(v) = self.sl_level(Side::Ask, *p) {
+                out.push((Side::Ask, *p, v));
+            }
+        }
+        for p in self.bids.keys() {
+            if let Some(v) = self.sl_level(Side::Bid, p.0) {
+                out.push((Side::Bid, p.0, v));
+            }
+        }
+        out
     }
 
     // PILOT (S1b): level primitives. Every level mutation goes through these three, so the
@@ -588,6 +638,8 @@ impl OrderBook {
                 Side::Bid => self.next_ask_head(j),
                 Side::Ask => self.next_bid_head(j),
             };
+            #[cfg(feature = "stateless")]
+            self.peeks.0.push((order.side, head.map(|(_, p)| p)));
             let (maker_id, maker_price) = match head {
                 Some(v) => v,
                 None => break,

@@ -100,6 +100,8 @@ pub mod book;
 pub mod book_types;
 pub mod engine;
 pub mod snapshot;
+#[cfg(feature = "stateless")]
+pub mod stateless;
 pub mod state;
 pub mod types;
 pub mod wit;

@@ -21,6 +21,8 @@ mnpilot = { path = "../guest-engine" }
 depth8 = ["mnpilot/depth8"]
 # loop round 9 (R7-L3): governance leaves prop: / cmt: / gnon: in the port and in the real-engine mirror
 govwit = ["mnpilot/govwit"]
+# loop round 14: stateless guest prototype differential (slfuzz / sladv)
+stateless = ["mnpilot/stateless"]
 
 [profile.release]
 opt-level = 3

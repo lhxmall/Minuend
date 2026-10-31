@@ -47,6 +47,8 @@ mod seg;
 mod liq;
 mod gov;
 mod snap;
+#[cfg(feature = "stateless")]
+mod sl;
 #[global_allocator]
 static GA: heapsim::Sim = heapsim::Sim;
 
@@ -1335,6 +1337,10 @@ fn main() {
             let p = |i: usize, d: u64| a.get(i).map(|x| x.parse().unwrap()).unwrap_or(d);
             println!("{}", witfuzz(p(2, 300), p(3, 300) as u32, p(4, 300)));
         }
+        #[cfg(feature = "stateless")]
+        Some("slfuzz") => println!("{}", sl::slfuzz(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x == "adv").unwrap_or(false))), // loop round 14
+        #[cfg(feature = "stateless")]
+        Some("sladv") => println!("{}", sl::sladv(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 14
         Some("fuzz") => {
             let n: u64 = a[2].parse().unwrap();
             let ord: u32 = a[3].parse().unwrap();
