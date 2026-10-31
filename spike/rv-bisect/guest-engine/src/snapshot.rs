@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 pub const SNAP_MAGIC: u32 = 0x4D4E_5331; // "MNS1"
 pub const SNAP_END: u32 = 0x4D4E_5345; // "MNSE"
 pub const EXPORT_MAGIC: u32 = 0x4D4E_5845; // "MNXE"
-pub const SNAP_VERSION: u32 = 2; // loop round 5: + PERP / unbonding / slash state
+pub const SNAP_VERSION: u32 = 3; // loop round 5: + PERP / unbonding / slash state (v2); round 6: + governance (v3)
 /// Import refuses counts above these (each bounds one map of the snapshot; the session caps of
 /// state.rs keep honest exports far below them). Keeps a malformed snapshot from exhausting the
 /// guest heap before the digest check would reject it.
@@ -379,6 +379,45 @@ pub fn encode(sess: &Session, w: &mut SnapW) {
         w.u64(*h);
     }
     w.u64(s.oracle_slash_nonce);
+    // v3 (loop round 6): listing / governance / commit-reveal state
+    w.w(s.next_market_id);
+    w.u64(s.next_proposal_id);
+    w.len(s.proposals.len());
+    for (id, p) in &s.proposals {
+        w.u64(*id);
+        w.id(&p.creator.0);
+        w.w(p.market.0);
+        w.w(p.key.as_u8() as u32);
+        w.u64(p.value);
+        w.u64(p.created_seq);
+        w.u64(p.deadline_seq);
+        w.u128(p.supply_at_create);
+        w.u128(p.yes);
+        w.u128(p.no);
+        w.len(p.voted.len());
+        for a in &p.voted {
+            w.id(&a.0);
+        }
+        w.len(p.weight_snapshot.len());
+        for (a, v) in &p.weight_snapshot {
+            w.id(&a.0);
+            w.u128(*v);
+        }
+    }
+    w.len(s.seen_gov_nonces.len());
+    for (a, n) in &s.seen_gov_nonces {
+        w.id(&a.0);
+        w.u64(*n);
+    }
+    w.len(s.commits.len());
+    for (c, e) in &s.commits {
+        w.id(c);
+        w.id(&e.account.0);
+        w.id(&e.commit_unit);
+        w.u64(e.commit_height);
+        w.u64(e.ttl_height);
+        w.b(e.revealed);
+    }
     w.w(SNAP_END);
 }
 
@@ -396,7 +435,13 @@ fn asc<K: Ord + Copy>(prev: &mut Option<K>, k: K) -> Res<()> {
 /// Decode a snapshot into a fresh session (state, derived indexes, MNWIT1 tree). Errors on any
 /// malformed or non-canonical input. Returns the session and the digest of the words consumed.
 pub fn decode(r: &mut SnapR) -> Res<Session> {
-    if r.w()? != SNAP_MAGIC || r.w()? != SNAP_VERSION {
+    if r.w()? != SNAP_MAGIC {
+        return Err(());
+    }
+    // loop round 6: v2 (a round-5 image's export) is still importable -- the upgrade path reads the
+    // OLD image's snapshot; v2 had no governance state (cursors at their genesis values)
+    let ver = r.w()?;
+    if ver != 2 && ver != SNAP_VERSION {
         return Err(());
     }
     let mode = match r.w()? {
@@ -570,6 +615,59 @@ pub fn decode(r: &mut SnapR) -> Res<Session> {
         s.oracle_unbonding.insert(a, r.u64()?);
     }
     s.oracle_slash_nonce = r.u64()?;
+    if ver >= 3 {
+        s.next_market_id = r.w()?;
+        s.next_proposal_id = r.u64()?;
+        let mut pk = None;
+        for _ in 0..r.len()? {
+            let id = r.u64()?;
+            asc(&mut pk, id)?;
+            let creator = AccountId(r.id()?);
+            let market = MarketId(r.w()?);
+            let key = ParamKey::from_u8(u8::try_from(r.w()?).map_err(|_| ())?).ok_or(())?;
+            let value = r.u64()?;
+            let created_seq = r.u64()?;
+            let deadline_seq = r.u64()?;
+            let supply_at_create = r.u128()?;
+            let yes = r.u128()?;
+            let no = r.u128()?;
+            let mut voted = alloc::collections::BTreeSet::new();
+            let mut pv = None;
+            for _ in 0..r.len()? {
+                let a = AccountId(r.id()?);
+                asc(&mut pv, a)?;
+                voted.insert(a);
+            }
+            let mut weight_snapshot = alloc::collections::BTreeMap::new();
+            let mut pw = None;
+            for _ in 0..r.len()? {
+                let a = AccountId(r.id()?);
+                asc(&mut pw, a)?;
+                weight_snapshot.insert(a, r.u128()?);
+            }
+            s.proposals.insert(id, crate::state::Proposal { creator, market, key, value, created_seq, deadline_seq, supply_at_create, yes, no, voted, weight_snapshot });
+        }
+        let mut pk = None;
+        for _ in 0..r.len()? {
+            let a = AccountId(r.id()?);
+            asc(&mut pk, a)?;
+            s.seen_gov_nonces.insert(a, r.u64()?);
+        }
+        let mut pk = None;
+        for _ in 0..r.len()? {
+            let c = r.id()?;
+            asc(&mut pk, c)?;
+            let account = AccountId(r.id()?);
+            let commit_unit = r.id()?;
+            let commit_height = r.u64()?;
+            let ttl_height = r.u64()?;
+            let revealed = r.b()?;
+            s.commits.insert(c, crate::state::CommitEntry { account, commit_unit, commit_height, ttl_height, revealed });
+        }
+    } else {
+        s.next_market_id = 2;
+        s.next_proposal_id = 1;
+    }
     if r.w()? != SNAP_END {
         return Err(());
     }

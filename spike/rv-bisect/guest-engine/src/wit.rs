@@ -188,6 +188,14 @@ pub fn pos_key(id: &AccountId, m: MarketId) -> H {
     pos_leaf(&mut b, id, m, 0, 0, false, 0);
     key_of(&b.b[..b.kid])
 }
+/// loop round 6: the `band:` / `meta:` keys a CreateMarket creates
+pub fn market_keys(m: MarketId) -> [H; 2] {
+    let mut b = Buf::new();
+    band_leaf(&mut b, m, &crate::types::genesis_params());
+    let k1 = key_of(&b.b[..b.kid]);
+    meta_leaf(&mut b, m, &crate::types::genesis_params(), 0);
+    [k1, key_of(&b.b[..b.kid])]
+}
 pub fn ord_key(oid: &OrderId) -> H {
     let mut b = Buf::new();
     b.raw(b"ord:");

@@ -26,6 +26,9 @@
 //!   engine-diff snaptest <n_seeds> <n_ops>   loop round 4 (R3-H2): export/import of the session
 //!       at random segment boundaries == the uninterrupted run (roots, events, hash, re-export)
 //!
+//!   engine-diff govfuzz <n> <n_ops> / govedge / govgen <seed> <n_ops> <out.bin>   loop round 6:
+//!       governance + commit-reveal port (gov.rs)
+//!
 //! real/port print one JSON line: {"hash":..,"applied":..,"rejected":..,"fills":..,"ev":[..]}
 use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
 use minuend_exec::{Engine, ExecEvent, RejectReason};
@@ -42,6 +45,7 @@ mod heapsim;
 mod l2;
 mod seg;
 mod liq;
+mod gov;
 mod snap;
 #[global_allocator]
 static GA: heapsim::Sim = heapsim::Sim;
@@ -230,6 +234,66 @@ fn real_hash(s: &ChainState) -> [u8; 32] {
             h.update([t.source_id]);
         }
     }
+    // loop round 6: same bytes as mnpilot::state_hash's MNPILOT4 section
+    h.update(b"MNPILOT4");
+    h.update((s.markets.len() as u32).to_le_bytes());
+    for (m, p) in &s.markets {
+        h.update(m.0.to_le_bytes());
+        h.update(p.symbol);
+        h.update(p.tick_size.to_le_bytes());
+        for x in [p.im_bps, p.mm_bps, p.taker_fee_bps, p.keeper_reward_bps, p.usd_per_unit, p.funding_cap_bps] {
+            h.update(x.to_le_bytes());
+        }
+        h.update([p.delisted as u8, p.spot_only as u8, p.funding_rate as u8]);
+        h.update(p.min_price.to_le_bytes());
+        h.update(p.max_price.to_le_bytes());
+    }
+    h.update(s.next_market_id.to_le_bytes());
+    h.update((s.external_sources.len() as u32).to_le_bytes());
+    for a in &s.external_sources {
+        h.update(a.0);
+    }
+    h.update(s.next_proposal_id.to_le_bytes());
+    h.update((s.proposals.len() as u32).to_le_bytes());
+    for (id, p) in &s.proposals {
+        h.update(id.to_le_bytes());
+        h.update(p.creator.0);
+        h.update(p.market.0.to_le_bytes());
+        h.update([p.key.as_u8()]);
+        h.update(p.value.to_le_bytes());
+        h.update(p.created_seq.to_le_bytes());
+        h.update(p.deadline_seq.to_le_bytes());
+        h.update(p.supply_at_create.to_le_bytes());
+        h.update(p.yes.to_le_bytes());
+        h.update(p.no.to_le_bytes());
+        let mut voted: Vec<_> = p.voted.iter().collect();
+        voted.sort();
+        h.update((voted.len() as u32).to_le_bytes());
+        for a in voted {
+            h.update(a.0);
+        }
+        h.update((p.weight_snapshot.len() as u32).to_le_bytes());
+        for (a, w) in &p.weight_snapshot {
+            h.update(a.0);
+            h.update(w.to_le_bytes());
+        }
+    }
+    let mut gn: Vec<_> = s.seen_gov_nonces.iter().collect();
+    gn.sort();
+    h.update((gn.len() as u32).to_le_bytes());
+    for (a, n) in gn {
+        h.update(a.0);
+        h.update(n.to_le_bytes());
+    }
+    h.update((s.commits.len() as u32).to_le_bytes());
+    for (c, e) in &s.commits {
+        h.update(c);
+        h.update(e.account.0);
+        h.update(e.commit_unit.0);
+        h.update(e.commit_height.to_le_bytes());
+        h.update(e.ttl_height.to_le_bytes());
+        h.update([e.revealed as u8]);
+    }
     h.finalize().into()
 }
 
@@ -333,6 +397,105 @@ pub fn to_v2(w: &[u32]) -> Vec<u32> {
     v
 }
 
+/// The vault anchor of op i's deposit (collateral / PERP), as the harness admits it.
+pub fn aa_unit(perp: bool, i: usize) -> [u8; 32] {
+    let mut aa = [0u8; 32];
+    aa.copy_from_slice(&Sha256::digest(format!("{}-{}", if perp { "gaa" } else { "aa" }, i).as_bytes()));
+    aa
+}
+fn words_id(x: &[u32]) -> [u8; 32] {
+    let mut id = [0u8; 32];
+    for k in 0..8 {
+        id[k * 4..k * 4 + 4].copy_from_slice(&x[k].to_le_bytes());
+    }
+    id
+}
+/// MNP2 extension words [off, off+len) of batch `w` (loop round 6; None like the port's Ext::read)
+pub fn ext_read(w: &[u32], off: u32, len: u32) -> Option<Vec<u32>> {
+    if w[0] != mnpilot::MAGIC2 {
+        return None;
+    }
+    let eb = 4 + 8 * w[1] as usize + 16 * w[2] as usize;
+    let n = w.get(eb).copied().unwrap_or(0);
+    if n > mnpilot::MAX_EXT || off.checked_add(len)? > n {
+        return None;
+    }
+    Some((0..len as usize).map(|k| w.get(eb + 1 + off as usize + k).copied().unwrap_or(0)).collect())
+}
+/// The upstream Op of pilot op words `ow` (op index i: deposit anchors), None for fixtures / Bad /
+/// an index or extension the batch does not have (loop round 6: shared by the harness run, the
+/// generators and the commit-hash computation).
+pub fn real_op(ow: &[u32; 8], ids: &[AccountId], rx: &dyn Fn(u32, u32) -> Option<Vec<u32>>, i: usize) -> Option<Op> {
+    use mnpilot::BatchOp as B;
+    let id = |a: u32| ids.get(a as usize).copied();
+    let cv = |s: mnpilot::types::Side| if s == mnpilot::types::Side::Bid { Side::Bid } else { Side::Ask };
+    let ct = |t: mnpilot::types::OrderType| if t == mnpilot::types::OrderType::Limit { OrderType::Limit } else { OrderType::Market };
+    let cf = |t: mnpilot::types::TimeInForce| if t == mnpilot::types::TimeInForce::Gtc { TimeInForce::Gtc } else { TimeInForce::Ioc };
+    Some(match mnpilot::decode_op(ow) {
+        B::Deposit { acct, amount } => Op::Deposit { account: id(acct)?, addr: addr(acct), amount: amount as i128, aa_unit: aa_unit(false, i) },
+        B::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => Op::Place {
+            account: id(acct)?,
+            market: MarketId(market),
+            side: cv(side),
+            typ: ct(typ),
+            tif: cf(tif),
+            price,
+            qty,
+            client_seq,
+            isolated,
+            margin,
+        },
+        B::Cancel { acct, client_seq, market } => {
+            let a = id(acct)?;
+            Op::Cancel { account: a, order_id: order_id(a, MarketId(market), client_seq) }
+        }
+        B::Withdraw { acct, amount, nonce } => Op::Withdraw { account: id(acct)?, amount: amount as i128, nonce },
+        B::Liquidate { acct, target, market } => {
+            let t = if target == mnpilot::LIQ_TARGET_INSURANCE { minuend_types::INSURANCE_ACCOUNT } else { id(target)? };
+            Op::Liquidate { caller: id(acct)?, target: t, market: MarketId(market) }
+        }
+        B::Report { acct, price, market } => Op::ReportPrice { oracle: id(acct)?, market: MarketId(market), price },
+        B::ExtPrice { acct, price, source_id, market } => Op::UpdateExternalPrice { source: id(acct)?, market: MarketId(market), price, source_id },
+        B::Stake { acct } => Op::StakeOracle { account: id(acct)? },
+        B::Unstake { acct } => Op::UnstakeOracle { account: id(acct)? },
+        B::Slash { acct, target, market } => Op::SlashOracle { challenger: id(acct)?, target: id(target)?, market: MarketId(market) },
+        B::GovDeposit { acct, amount } => Op::GovDeposit { account: id(acct)?, addr: addr(acct), amount: amount as u128, aa_unit: aa_unit(true, i) },
+        B::GovWithdraw { acct, amount, nonce } => Op::GovWithdraw { account: id(acct)?, amount: amount as u128, nonce },
+        B::CreateMarket { acct, ext } => {
+            let l = mnpilot::listing_of(&rx(ext, mnpilot::EXT_MARKET_LEN)?);
+            Op::CreateMarket {
+                creator: id(acct)?,
+                symbol: l.symbol,
+                tick_size: l.tick_size,
+                im_bps: l.im_bps,
+                mm_bps: l.mm_bps,
+                taker_fee_bps: l.taker_fee_bps,
+                keeper_reward_bps: l.keeper_reward_bps,
+                spot_only: l.spot_only,
+                funding_rate: l.funding_rate,
+                usd_per_unit: l.usd_per_unit,
+                funding_cap_bps: l.funding_cap_bps,
+                min_price: l.min_price,
+                max_price: l.max_price,
+            }
+        }
+        B::CreateProposal { acct, market, key, value } => Op::CreateProposal { creator: id(acct)?, market: MarketId(market), key, value },
+        B::Vote { acct, id: pid, approve } => Op::Vote { voter: id(acct)?, proposal_id: pid, approve },
+        B::Finalize { acct, id: pid } => Op::FinalizeProposal { caller: id(acct)?, proposal_id: pid },
+        B::Commit { acct, ttl, ext } => Op::Commit { account: id(acct)?, commit: words_id(&rx(ext, mnpilot::EXT_COMMIT_LEN)?), ttl_height: ttl },
+        B::Reveal { acct, ext } => {
+            let e = rx(ext, mnpilot::EXT_REVEAL_LEN)?;
+            let mut iw = [0u32; 8];
+            iw.copy_from_slice(&e[16..24]);
+            if matches!(mnpilot::decode_op(&iw), B::Reveal { .. }) {
+                return None; // no recursion (the generator never nests)
+            }
+            Op::Reveal { account: id(acct)?, commit_ref: words_id(&e[0..8]), op: Box::new(real_op(&iw, ids, rx, i)?), salt: words_id(&e[8..16]) }
+        }
+        B::SetHeight { .. } | B::SetSeq { .. } | B::Bad => return None,
+    })
+}
+
 /// `pre(i)` = Some(h): run the batch-commit hook (height h, prune) before op i (loop round 5:
 /// the port's height binding at a segment start).
 fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine) {
@@ -374,61 +537,15 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
         }
         let mut ow = [0u32; 8];
         ow.copy_from_slice(&w[base + i * 8..base + i * 8 + 8]);
-        let (ai, op) = match mnpilot::decode_op(&ow) {
-            mnpilot::BatchOp::Deposit { acct, amount } => {
-                let mut aa = [0u8; 32];
-                aa.copy_from_slice(&Sha256::digest(format!("aa-{}", i).as_bytes()));
-                eng.state.deposits_allowed.insert((aa, false));
-                (acct, Op::Deposit { account: ids[acct as usize], addr: addr(acct), amount: amount as i128, aa_unit: aa })
-            }
-            mnpilot::BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => {
-                let cv = |s: mnpilot::types::Side| if s == mnpilot::types::Side::Bid { Side::Bid } else { Side::Ask };
-                let ct = |t: mnpilot::types::OrderType| if t == mnpilot::types::OrderType::Limit { OrderType::Limit } else { OrderType::Market };
-                let cf = |t: mnpilot::types::TimeInForce| if t == mnpilot::types::TimeInForce::Gtc { TimeInForce::Gtc } else { TimeInForce::Ioc };
-                (
-                    acct,
-                    Op::Place {
-                        account: ids[acct as usize],
-                        market: MarketId(market),
-                        side: cv(side),
-                        typ: ct(typ),
-                        tif: cf(tif),
-                        price,
-                        qty,
-                        client_seq,
-                        isolated,
-                        margin,
-                    },
-                )
-            }
-            mnpilot::BatchOp::Cancel { acct, client_seq, market } => {
-                let a = ids[acct as usize];
-                (acct, Op::Cancel { account: a, order_id: order_id(a, MarketId(market), client_seq) })
-            }
-            mnpilot::BatchOp::Withdraw { acct, amount, nonce } => {
-                (acct, Op::Withdraw { account: ids[acct as usize], amount: amount as i128, nonce })
-            }
-            mnpilot::BatchOp::Liquidate { acct, target, market } => {
-                let t = if target == mnpilot::LIQ_TARGET_INSURANCE { minuend_types::INSURANCE_ACCOUNT } else { ids[target as usize] };
-                (acct, Op::Liquidate { caller: ids[acct as usize], target: t, market: MarketId(market) })
-            }
-            mnpilot::BatchOp::Report { acct, price, market } => {
-                (acct, Op::ReportPrice { oracle: ids[acct as usize], market: MarketId(market), price })
-            }
-            mnpilot::BatchOp::ExtPrice { acct, price, source_id, market } => {
-                (acct, Op::UpdateExternalPrice { source: ids[acct as usize], market: MarketId(market), price, source_id })
-            }
-            mnpilot::BatchOp::Stake { acct } => (acct, Op::StakeOracle { account: ids[acct as usize] }),
-            mnpilot::BatchOp::Unstake { acct } => (acct, Op::UnstakeOracle { account: ids[acct as usize] }),
-            mnpilot::BatchOp::Slash { acct, target, market } => {
-                (acct, Op::SlashOracle { challenger: ids[acct as usize], target: ids[target as usize], market: MarketId(market) })
-            }
+        let dop = mnpilot::decode_op(&ow);
+        match dop {
             mnpilot::BatchOp::SetHeight { height } => {
                 // test fixture: not a unit upstream -- the batch-commit hook (minuend-settle) sets the
                 // height and prunes the withdrawal ledger
                 if height >= eng.state.height {
                     eng.state.height = height;
                     eng.state.prune_withdrawals(height);
+                    eng.state.prune_commits(height); // loop round 6
                     eng.state.prune_oracle_unbonding(height); // loop round 5: upstream's hook does both
                     out.ev.push(mnpilot::EV_HEIGHT);
                 } else {
@@ -439,9 +556,43 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
                 per_unit(&eng);
                 continue;
             }
-            mnpilot::BatchOp::Bad => panic!("bad op {}", i),
+            mnpilot::BatchOp::SetSeq { seq } => {
+                // loop round 6 test fixture: jump the global seq (proposal deadlines)
+                if seq >= eng.state.seq {
+                    eng.state.seq = seq;
+                    out.ev.push(mnpilot::EV_SEQ);
+                } else {
+                    out.rejected += 1;
+                    out.ev.push(2);
+                }
+                out.uids.push([0; 32]);
+                per_unit(&eng);
+                continue;
+            }
+            _ => {}
+        }
+        let rx = |off: u32, len: u32| ext_read(w, off, len);
+        if let mnpilot::BatchOp::Deposit { .. } = dop {
+            eng.state.deposits_allowed.insert((aa_unit(false, i), false));
+        }
+        if let mnpilot::BatchOp::GovDeposit { .. } = dop {
+            eng.state.deposits_allowed.insert((aa_unit(true, i), true));
+        }
+        let op = real_op(&ow, &ids, &rx, i).unwrap_or_else(|| panic!("op {} has no upstream form", i));
+        let ai = dop.signer().unwrap();
+        // loop round 6: a Reveal names its parents (MNP2 extension: P1, P2), every other unit
+        // chains on the previous one
+        let parents = match dop {
+            mnpilot::BatchOp::Reveal { ext, .. } => {
+                let e = rx(ext, mnpilot::EXT_REVEAL_LEN).expect("reveal ext");
+                let mut ps: Vec<minuend_types::UnitId> = [&e[24..32], &e[32..40]].iter().map(|x| minuend_types::UnitId(words_id(x))).filter(|p| p.0 != [0u8; 32]).collect();
+                ps.sort();
+                ps.dedup();
+                ps
+            }
+            _ => vec![parent],
         };
-        let u = sign_unit(vec![parent], op, &secret(ai));
+        let u = sign_unit(parents, op, &secret(ai));
         let id = unit_id(&u);
         if v2 {
             // the MNP2 table must carry the real unit id (to_v2 builds it from this very chain)
@@ -450,7 +601,19 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
             }
         }
         out.uids.push(id.0);
-        let evs = eng.ingest(u).expect("ingest");
+        // loop round 6: a unit the real engine refuses at ingest (a Reveal whose inner op is signed
+        // by another account or is a Commit / Reveal / Deposit / GovDeposit) never exists upstream;
+        // the port must refuse it BadAccount without any state change
+        let evs = match eng.ingest(u) {
+            Ok(evs) => evs,
+            Err(_) if matches!(dop, mnpilot::BatchOp::Reveal { .. }) => {
+                out.rejected += 1;
+                out.ev.push(2);
+                per_unit(&eng);
+                continue;
+            }
+            Err(e) => panic!("ingest op {}: {:?}", i, e),
+        };
         assert_eq!(evs.len(), 1, "linear chain: one event per unit");
         match &evs[0] {
             ExecEvent::Applied { fills, .. } => {
@@ -573,6 +736,8 @@ impl Gen {
                 return true;
             }
             mnpilot::BatchOp::Bad => unreachable!(),
+            // loop round 6 kinds are generated by gov.rs (its own builder), never through Gen
+            _ => unreachable!("Gen: governance kinds are built by gov.rs"),
         };
         self.ops.push(w);
         if r.is_ok() {
@@ -1044,6 +1209,13 @@ fn main() {
         Some("snapcap") => println!("{}", snap::snapcap()),
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqedge") => println!("{}", liq::liqedge()),
+        Some("govfuzz") => println!("{}", gov::govfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("govedge") => println!("{}", gov::govedge()),
+        Some("govgen") => {
+            let w = gov::gov_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"words\":{}}}", w.len());
+        }
         Some("orafuzz") => println!("{}", liq::orafuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("oragen") => {
             let w = liq::oracle_batch(a[2].parse().unwrap(), a[3].parse().unwrap());

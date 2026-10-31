@@ -182,6 +182,32 @@ impl Drop for AcctMut<'_> {
     }
 }
 
+/// Verbatim minuend-state `CommitEntry` (loop round 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitEntry {
+    pub account: AccountId,
+    pub commit_unit: [u8; 32],
+    pub commit_height: Height,
+    pub ttl_height: Height,
+    pub revealed: bool,
+}
+
+/// Verbatim minuend-state `Proposal` (loop round 6; `voted` HashSet -> BTreeSet).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proposal {
+    pub creator: AccountId,
+    pub market: MarketId,
+    pub key: crate::types::ParamKey,
+    pub value: u64,
+    pub created_seq: Seq,
+    pub deadline_seq: Seq,
+    pub supply_at_create: u128,
+    pub yes: u128,
+    pub no: u128,
+    pub voted: alloc::collections::BTreeSet<AccountId>,
+    pub weight_snapshot: BTreeMap<AccountId, u128>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChainState {
     /// PILOT: the batch height. Upstream sets it per batch; the pilot sets it only through the
@@ -218,6 +244,13 @@ pub struct ChainState {
     pub last_funding_height: BTreeMap<MarketId, Height>,
     /// upstream: HashMap<AccountId, u64>
     pub seen_client_seq: BTreeMap<AccountId, u64>,
+    /// loop round 6 (R4-M3 rest): governance + commit-reveal state (upstream fields; HashMap /
+    /// HashSet -> BTree). `next_market_id` / `next_proposal_id` start at 2 / 1 (`genesis`).
+    pub next_market_id: u32,
+    pub proposals: BTreeMap<u64, Proposal>,
+    pub next_proposal_id: u64,
+    pub seen_gov_nonces: BTreeMap<AccountId, u64>,
+    pub commits: BTreeMap<[u8; 32], CommitEntry>,
     /// PILOT (MNWIT1 proposal): order / market keys touched since the last witness commit
     /// (account keys: `accounts.dirty`).
     pub wit_dirty: crate::wit::WitDirty,
@@ -319,6 +352,10 @@ impl ChainState {
         self.set_perp(challenger, challenger_bal.saturating_add(reward));
         self.oracle_slash_nonce = self.oracle_slash_nonce.wrapping_add(1);
         Ok(())
+    }
+    /// Verbatim `prune_commits` (batch-commit hook, loop round 6).
+    pub fn prune_commits(&mut self, min_height: Height) {
+        self.commits.retain(|_, e| e.ttl_height >= min_height);
     }
     /// Verbatim `prune_oracle_unbonding` (batch-commit hook).
     pub fn prune_oracle_unbonding(&mut self, current_height: Height) {

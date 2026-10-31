@@ -303,3 +303,98 @@ pub fn liq_order_id(unit: [u8; 32]) -> OrderId {
     buf.extend_from_slice(&unit);
     OrderId(sha256(&buf))
 }
+
+// ---- loop round 6 (R4-M3 rest): governance + commit-reveal constants, copied from minuend-types ----
+pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
+pub const CREATE_MARKET_FEE_PERP: u128 = 10_000;
+pub const PROPOSAL_DURATION_SEQS: Seq = 20_000;
+pub const PROPOSAL_QUORUM_NUM: u128 = 10;
+pub const PROPOSAL_QUORUM_DEN: u128 = 100;
+pub const PROPOSAL_MIN_STAKE_PERP: u128 = 1_000;
+pub const COMMIT_TTL_HEIGHTS: Height = 16;
+pub const MAX_PENDING_COMMITS_PER_ACCOUNT: usize = 8;
+pub const UPDATE_EXTERNAL_PRICE_TAG: u8 = 17;
+pub const COMMIT_TAG: u8 = 18;
+pub const REVEAL_TAG: u8 = 19;
+
+/// Verbatim minuend-types `ParamKey`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ParamKey {
+    ImBps,
+    MmBps,
+    TakerFeeBps,
+    KeeperRewardBps,
+    Delist,
+}
+impl ParamKey {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            ParamKey::ImBps => 0,
+            ParamKey::MmBps => 1,
+            ParamKey::TakerFeeBps => 2,
+            ParamKey::KeeperRewardBps => 3,
+            ParamKey::Delist => 4,
+        }
+    }
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ParamKey::ImBps),
+            1 => Some(ParamKey::MmBps),
+            2 => Some(ParamKey::TakerFeeBps),
+            3 => Some(ParamKey::KeeperRewardBps),
+            4 => Some(ParamKey::Delist),
+            _ => None,
+        }
+    }
+}
+
+/// Verbatim minuend-types `risk_params_ok`.
+pub fn risk_params_ok(
+    im_bps: Bps,
+    mm_bps: Bps,
+    taker_fee_bps: Bps,
+    keeper_reward_bps: Bps,
+    funding_rate: bool,
+    funding_cap_bps: u64,
+    spot_only: bool,
+) -> bool {
+    if spot_only {
+        if funding_rate {
+            return false;
+        }
+        return im_bps == 10_000
+            && (500..=10_000).contains(&mm_bps)
+            && im_bps > mm_bps
+            && taker_fee_bps != 0
+            && taker_fee_bps <= 200
+            && keeper_reward_bps != 0
+            && keeper_reward_bps <= 500
+            && funding_cap_bps == 0;
+    }
+    let shared = im_bps != 0
+        && mm_bps != 0
+        && taker_fee_bps != 0
+        && keeper_reward_bps != 0
+        && im_bps <= 10_000
+        && mm_bps <= 10_000
+        && taker_fee_bps <= 10_000
+        && keeper_reward_bps <= 10_000
+        && im_bps > mm_bps
+        && im_bps <= 5000
+        && taker_fee_bps <= 200;
+    if !shared {
+        return false;
+    }
+    if funding_rate {
+        mm_bps >= 50
+            && im_bps >= 100
+            && (1..=500).contains(&funding_cap_bps)
+            && im_bps >= 10 * funding_cap_bps
+            && keeper_reward_bps <= im_bps / 10
+    } else {
+        mm_bps >= 500
+            && keeper_reward_bps <= 500
+            && im_bps >= 10 * (FUNDING_CAP_BPS as u64)
+            && funding_cap_bps == 0
+    }
+}

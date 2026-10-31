@@ -152,6 +152,8 @@ pub const LIQ_TARGET_INSURANCE: u32 = 0xFF_FFFF;
 pub const LIQ_TAKER_EV: u32 = 0x4C49_5121;
 /// event of a SetHeight fixture op
 pub const EV_HEIGHT: u32 = 0x4000_0000;
+/// event of a SetSeq fixture op (loop round 6)
+pub const EV_SEQ: u32 = 0x4000_0001;
 
 /// Max units (ops) per guest batch: the per-unit root region OUT+0x20000.. (8 words per unit)
 /// ends exactly at the top of the 2^24-word RAM (0x0400_0000), and the event log
@@ -210,6 +212,9 @@ pub const MAX_STATE_ACCOUNTS: usize = 256;
 pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap: usize) -> bool {
     match op {
         BatchOp::Deposit { .. } | BatchOp::Liquidate { .. } => s.accounts.contains_key(&author) || s.accounts.len() < cap,
+        // loop round 6 (R5-L3 with GovDeposit ported): a first PERP deposit adds an id to the PERP
+        // ledger (an acct: leaf without an accounts entry) -> the ledger is capped the same way
+        BatchOp::GovDeposit { .. } => s.perp_balances.contains_key(&author) || s.perp_balances.len() < cap,
         _ => true,
     }
 }
@@ -235,6 +240,9 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
         BatchOp::Liquidate { .. } => !new_acct || ok(&wit::acct_key(&author)),
         // loop round 5: a slash reward credits the challenger's PERP -> its acct: key may be created
         BatchOp::Slash { .. } => !new_acct || s.perp_balances.contains_key(&author) || s.withdrawn_total.contains_key(&author) || ok(&wit::acct_key(&author)),
+        // loop round 6: a gov deposit may create the author's acct: key; a listing creates band: + meta:
+        BatchOp::GovDeposit { .. } => !new_acct || s.perp_balances.contains_key(&author) || s.withdrawn_total.contains_key(&author) || ok(&wit::acct_key(&author)),
+        BatchOp::CreateMarket { .. } => wit::market_keys(MarketId(s.next_market_id)).iter().all(|k| ok(k)),
         BatchOp::Place { market, client_seq, .. } => {
             let m = MarketId(market);
             let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
@@ -313,6 +321,9 @@ impl state::ChainState {
         insurance.collateral = 10_000 * USD_SCALE as Usd; // INSURANCE_SEED
         s.put_account(INSURANCE_ACCOUNT, insurance);
         s.markets.insert(BTC_USD, genesis_params());
+        // loop round 6: upstream ChainState::new cursors
+        s.next_market_id = 2;
+        s.next_proposal_id = 1;
         s
     }
 }
@@ -473,6 +484,63 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
             h.update([t.source_id]);
         }
     }
+    // loop round 6 (R4-M3 rest): markets, listing / governance / commit-reveal state (engine-diff
+    // real_hash: same bytes)
+    h.update(b"MNPILOT4");
+    h.update((s.markets.len() as u32).to_le_bytes());
+    for (m, p) in &s.markets {
+        h.update(m.0.to_le_bytes());
+        h.update(p.symbol);
+        h.update(p.tick_size.to_le_bytes());
+        for x in [p.im_bps, p.mm_bps, p.taker_fee_bps, p.keeper_reward_bps, p.usd_per_unit, p.funding_cap_bps] {
+            h.update(x.to_le_bytes());
+        }
+        h.update([p.delisted as u8, p.spot_only as u8, p.funding_rate as u8]);
+        h.update(p.min_price.to_le_bytes());
+        h.update(p.max_price.to_le_bytes());
+    }
+    h.update(s.next_market_id.to_le_bytes());
+    h.update((s.external_sources.len() as u32).to_le_bytes());
+    for a in &s.external_sources {
+        h.update(a.0);
+    }
+    h.update(s.next_proposal_id.to_le_bytes());
+    h.update((s.proposals.len() as u32).to_le_bytes());
+    for (id, p) in &s.proposals {
+        h.update(id.to_le_bytes());
+        h.update(p.creator.0);
+        h.update(p.market.0.to_le_bytes());
+        h.update([p.key.as_u8()]);
+        h.update(p.value.to_le_bytes());
+        h.update(p.created_seq.to_le_bytes());
+        h.update(p.deadline_seq.to_le_bytes());
+        h.update(p.supply_at_create.to_le_bytes());
+        h.update(p.yes.to_le_bytes());
+        h.update(p.no.to_le_bytes());
+        h.update((p.voted.len() as u32).to_le_bytes());
+        for a in &p.voted {
+            h.update(a.0);
+        }
+        h.update((p.weight_snapshot.len() as u32).to_le_bytes());
+        for (a, w) in &p.weight_snapshot {
+            h.update(a.0);
+            h.update(w.to_le_bytes());
+        }
+    }
+    h.update((s.seen_gov_nonces.len() as u32).to_le_bytes());
+    for (a, n) in &s.seen_gov_nonces {
+        h.update(a.0);
+        h.update(n.to_le_bytes());
+    }
+    h.update((s.commits.len() as u32).to_le_bytes());
+    for (c, e) in &s.commits {
+        h.update(c);
+        h.update(e.account.0);
+        h.update(e.commit_unit);
+        h.update(e.commit_height.to_le_bytes());
+        h.update(e.ttl_height.to_le_bytes());
+        h.update([e.revealed as u8]);
+    }
     h.finalize().into()
 }
 
@@ -498,7 +566,98 @@ pub enum BatchOp {
     Stake { acct: u32 },
     Unstake { acct: u32 },
     Slash { acct: u32, target: u32, market: u32 },
+    /// loop round 6 (R4-M3 rest)
+    GovDeposit { acct: u32, amount: u64 },
+    GovWithdraw { acct: u32, amount: u64, nonce: u64 },
+    CreateMarket { acct: u32, ext: u32 },
+    CreateProposal { acct: u32, market: u32, key: u8, value: u64 },
+    Vote { acct: u32, id: u64, approve: bool },
+    Finalize { acct: u32, id: u64 },
+    Commit { acct: u32, ttl: u64, ext: u32 },
+    Reveal { acct: u32, ext: u32 },
+    SetSeq { seq: u64 },
     Bad,
+}
+impl BatchOp {
+    /// the op's signing account index (upstream `op_signer`); None for fixtures / Bad
+    pub fn signer(&self) -> Option<u32> {
+        match *self {
+            BatchOp::Deposit { acct, .. }
+            | BatchOp::Place { acct, .. }
+            | BatchOp::Cancel { acct, .. }
+            | BatchOp::Withdraw { acct, .. }
+            | BatchOp::Liquidate { acct, .. }
+            | BatchOp::Report { acct, .. }
+            | BatchOp::ExtPrice { acct, .. }
+            | BatchOp::Stake { acct }
+            | BatchOp::Unstake { acct }
+            | BatchOp::Slash { acct, .. }
+            | BatchOp::GovDeposit { acct, .. }
+            | BatchOp::GovWithdraw { acct, .. }
+            | BatchOp::CreateMarket { acct, .. }
+            | BatchOp::CreateProposal { acct, .. }
+            | BatchOp::Vote { acct, .. }
+            | BatchOp::Finalize { acct, .. }
+            | BatchOp::Commit { acct, .. }
+            | BatchOp::Reveal { acct, .. } => Some(acct),
+            BatchOp::SetHeight { .. } | BatchOp::SetSeq { .. } | BatchOp::Bad => None,
+        }
+    }
+}
+
+/// loop round 6: MNP2 extension area (after the unit-id table: word n_ext, then n_ext words).
+/// Ops whose payload does not fit 8 words (CreateMarket, Commit, Reveal) name an offset into it.
+#[derive(Clone, Copy, Debug)]
+pub struct Ext {
+    pub base: u32,
+    pub n: u32,
+}
+pub const MAX_EXT: u32 = 64 * MAX_UNITS;
+pub const EXT_MARKET_LEN: u32 = 23;
+pub const EXT_COMMIT_LEN: u32 = 8;
+pub const EXT_REVEAL_LEN: u32 = 40;
+const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + 2 * MAX_UNITS) + 1 + MAX_EXT < 1 << 24);
+impl Ext {
+    pub const NONE: Ext = Ext { base: 0, n: 0 };
+    /// words [off, off+len) of the area, None when outside it (or no area: MNP1)
+    pub fn read(&self, rd: &mut dyn FnMut(u32) -> u32, off: u32, len: u32) -> Option<Vec<u32>> {
+        if self.n > MAX_EXT || off.checked_add(len)? > self.n {
+            return None;
+        }
+        Some((0..len).map(|k| rd(self.base + 1 + off + k)).collect())
+    }
+}
+fn lo64(a: u32, b: u32) -> u64 {
+    (a as u64) | ((b as u64) << 32)
+}
+fn id32(w: &[u32]) -> [u8; 32] {
+    let mut id = [0u8; 32];
+    for k in 0..8 {
+        id[k * 4..k * 4 + 4].copy_from_slice(&w[k].to_le_bytes());
+    }
+    id
+}
+/// CreateMarket listing from its 23 ext words (see the format at the top)
+pub fn listing_of(e: &[u32]) -> types::MarketParams {
+    let mut symbol = [0u8; 16];
+    for k in 0..4 {
+        symbol[k * 4..k * 4 + 4].copy_from_slice(&e[k].to_le_bytes());
+    }
+    types::MarketParams {
+        symbol,
+        tick_size: lo64(e[4], e[5]) as i64,
+        im_bps: lo64(e[6], e[7]),
+        mm_bps: lo64(e[8], e[9]),
+        taker_fee_bps: lo64(e[10], e[11]),
+        keeper_reward_bps: lo64(e[12], e[13]),
+        delisted: false,
+        spot_only: e[14] & 1 != 0,
+        funding_rate: e[14] & 2 != 0,
+        usd_per_unit: lo64(e[15], e[16]),
+        funding_cap_bps: lo64(e[17], e[18]),
+        min_price: lo64(e[19], e[20]) as i64,
+        max_price: lo64(e[21], e[22]) as i64,
+    }
 }
 pub fn decode_op(w: &[u32; 8]) -> BatchOp {
     let acct = w[0] >> 8;
@@ -526,7 +685,244 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
         11 => BatchOp::Stake { acct },
         12 => BatchOp::Unstake { acct },
         13 => BatchOp::Slash { acct, target: w[1], market: w[7] },
+        14 => BatchOp::GovDeposit { acct, amount: lo64(w[1], w[2]) },
+        15 => BatchOp::GovWithdraw { acct, amount: lo64(w[1], w[2]), nonce: lo64(w[6], w[7]) },
+        16 => BatchOp::CreateMarket { acct, ext: w[7] },
+        17 => BatchOp::CreateProposal { acct, market: w[1], key: w[2] as u8, value: lo64(w[3], w[4]) },
+        18 => BatchOp::Vote { acct, id: lo64(w[1], w[2]), approve: w[3] & 1 != 0 },
+        19 => BatchOp::Finalize { acct, id: lo64(w[1], w[2]) },
+        20 => BatchOp::Commit { acct, ttl: lo64(w[1], w[2]), ext: w[7] },
+        21 => BatchOp::Reveal { acct, ext: w[7] },
+        22 => BatchOp::SetSeq { seq: lo64(w[1], w[2]) },
         _ => BatchOp::Bad,
+    }
+}
+
+/// Where op i's unit id sits (MNP2 table); MNP1: unit id 0.
+#[derive(Clone, Copy, Debug)]
+pub struct Uid {
+    pub v2: bool,
+    pub at: u32,
+}
+impl Uid {
+    pub fn read(&self, rd: &mut dyn FnMut(u32) -> u32) -> [u8; 32] {
+        let mut uid = [0u8; 32];
+        if self.v2 {
+            for k in 0..8 {
+                uid[k * 4..k * 4 + 4].copy_from_slice(&rd(self.at + k as u32).to_le_bytes());
+            }
+        }
+        uid
+    }
+}
+
+/// Upstream `minuend_dag::encode_op` (the commit-reveal preimage) of a pilot op whose signer is
+/// `accts[op.signer()]` (loop round 6). None for ops the pilot cannot name upstream (fixtures,
+/// Bad, an account index or extension outside the batch, kinds a Reveal may not carry anyway).
+pub fn encode_op(op: &BatchOp, accts: &[AccountId], ext: &Ext, rd: &mut dyn FnMut(u32) -> u32) -> Option<Vec<u8>> {
+    let id = |a: u32| accts.get(a as usize).copied();
+    let mut b = Vec::new();
+    match *op {
+        BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => {
+            b.push(1);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&market.to_le_bytes());
+            b.push(side.as_u8());
+            b.push(typ.as_u8());
+            b.push(tif.as_u8());
+            b.extend_from_slice(&price.to_le_bytes());
+            b.extend_from_slice(&qty.to_le_bytes());
+            b.extend_from_slice(&client_seq.to_le_bytes());
+            b.push(isolated as u8);
+            b.extend_from_slice(&margin.to_le_bytes());
+        }
+        BatchOp::Cancel { acct, client_seq, market } => {
+            let a = id(acct)?;
+            b.push(2);
+            b.extend_from_slice(&a.0);
+            b.extend_from_slice(&order_id(a, MarketId(market), client_seq).0);
+        }
+        BatchOp::Withdraw { acct, amount, nonce } => {
+            b.push(4);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&(amount as Usd).to_le_bytes());
+            b.extend_from_slice(&nonce.to_le_bytes());
+        }
+        BatchOp::Report { acct, price, market } => {
+            b.push(6);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&market.to_le_bytes());
+            b.extend_from_slice(&price.to_le_bytes());
+        }
+        BatchOp::GovWithdraw { acct, amount, nonce } => {
+            b.push(9);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&(amount as u128).to_le_bytes());
+            b.extend_from_slice(&nonce.to_le_bytes());
+        }
+        BatchOp::CreateMarket { acct, ext: off } => {
+            let l = listing_of(&ext.read(rd, off, EXT_MARKET_LEN)?);
+            b.push(10);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&l.symbol);
+            b.extend_from_slice(&l.tick_size.to_le_bytes());
+            b.extend_from_slice(&l.im_bps.to_le_bytes());
+            b.extend_from_slice(&l.mm_bps.to_le_bytes());
+            b.extend_from_slice(&l.taker_fee_bps.to_le_bytes());
+            b.extend_from_slice(&l.keeper_reward_bps.to_le_bytes());
+            b.push(l.spot_only as u8);
+            b.push(l.funding_rate as u8);
+            b.extend_from_slice(&l.usd_per_unit.to_le_bytes());
+            b.extend_from_slice(&l.funding_cap_bps.to_le_bytes());
+            b.extend_from_slice(&l.min_price.to_le_bytes());
+            b.extend_from_slice(&l.max_price.to_le_bytes());
+        }
+        BatchOp::CreateProposal { acct, market, key, value } => {
+            b.push(11);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&market.to_le_bytes());
+            b.push(key);
+            b.extend_from_slice(&value.to_le_bytes());
+        }
+        BatchOp::Vote { acct, id: pid, approve } => {
+            b.push(12);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&pid.to_le_bytes());
+            b.push(approve as u8);
+        }
+        BatchOp::Finalize { acct, id: pid } => {
+            b.push(13);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&pid.to_le_bytes());
+        }
+        BatchOp::Liquidate { acct, target, market } => {
+            let t = if target == LIQ_TARGET_INSURANCE { INSURANCE_ACCOUNT } else { id(target)? };
+            b.push(7);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&t.0);
+            b.extend_from_slice(&market.to_le_bytes());
+        }
+        BatchOp::Stake { acct } => {
+            b.push(14);
+            b.extend_from_slice(&id(acct)?.0);
+        }
+        BatchOp::Unstake { acct } => {
+            b.push(15);
+            b.extend_from_slice(&id(acct)?.0);
+        }
+        BatchOp::Slash { acct, target, market } => {
+            b.push(16);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&id(target)?.0);
+            b.extend_from_slice(&market.to_le_bytes());
+        }
+        BatchOp::ExtPrice { acct, price, source_id, market } => {
+            b.push(UPDATE_EXTERNAL_PRICE_TAG);
+            b.extend_from_slice(&id(acct)?.0);
+            b.extend_from_slice(&market.to_le_bytes());
+            b.extend_from_slice(&price.to_le_bytes());
+            b.push(source_id);
+        }
+        // a Reveal may not carry these (upstream `reveal_inner_kind_ok`; ingest refuses the unit)
+        BatchOp::Deposit { .. } | BatchOp::GovDeposit { .. } | BatchOp::Commit { .. } | BatchOp::Reveal { .. } => return None,
+        BatchOp::SetHeight { .. } | BatchOp::SetSeq { .. } | BatchOp::Bad => return None,
+    }
+    Some(b)
+}
+
+/// One unit's engine dispatch (upstream `dispatch`), for every op but the fixtures. `nested` = the
+/// inner op of a Reveal (loop round 6; upstream runs it through the same `dispatch` with the
+/// Reveal's unit id and seq).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch(
+    eng: &mut Engine,
+    op: &BatchOp,
+    accts: &[AccountId],
+    uid: Uid,
+    seq: Seq,
+    ext: &Ext,
+    rd: &mut dyn FnMut(u32) -> u32,
+    nested: bool,
+) -> Result<Vec<Fill>, RejectReason> {
+    let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
+    let need = |a: u32| acct_of(a).ok_or(RejectReason::BadAccount);
+    match *op {
+        BatchOp::Deposit { acct, amount } => eng.deposit(need(acct)?, amount as Usd),
+        BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => {
+            eng.place(need(acct)?, MarketId(market), side, typ, tif, price, qty, client_seq, [0u8; 32], seq, isolated, margin)
+        }
+        BatchOp::Cancel { acct, client_seq, market } => {
+            let a = need(acct)?;
+            eng.cancel(a, order_id(a, MarketId(market), client_seq))
+        }
+        BatchOp::Withdraw { acct, amount, nonce } => eng.withdraw(need(acct)?, amount as Usd, nonce),
+        BatchOp::Liquidate { acct, target, market } => {
+            let t = if target == LIQ_TARGET_INSURANCE { Some(INSURANCE_ACCOUNT) } else { accts.get(target as usize).copied() };
+            match (acct_of(acct), t) {
+                // R4-M2: the unit id from the MNP2 table (MNP1: 0, refused in prod)
+                (Some(_), Some(_)) if !uid.v2 && cfg!(feature = "prod") => Err(RejectReason::BadAccount),
+                (Some(a), Some(t)) => eng.liquidate(uid.read(rd), seq, a, t, MarketId(market)),
+                _ => Err(RejectReason::BadAccount),
+            }
+        }
+        BatchOp::Report { acct, price, market } => eng.report_price(need(acct)?, MarketId(market), price),
+        BatchOp::ExtPrice { acct, price, source_id, market } => eng.update_external_price(need(acct)?, MarketId(market), price, source_id, seq),
+        BatchOp::Stake { acct } => eng.stake_oracle(need(acct)?),
+        BatchOp::Unstake { acct } => eng.unstake_oracle(need(acct)?),
+        BatchOp::Slash { acct, target, market } => match (acct_of(acct), accts.get(target as usize).copied()) {
+            (Some(a), Some(t)) => eng.slash_oracle(a, t, MarketId(market)),
+            _ => Err(RejectReason::BadAccount),
+        },
+        // ---- loop round 6 (R4-M3 rest) ----
+        BatchOp::GovDeposit { acct, amount } => eng.gov_deposit(need(acct)?, amount as u128),
+        BatchOp::GovWithdraw { acct, amount, nonce } => eng.gov_withdraw(need(acct)?, amount as u128, nonce),
+        BatchOp::CreateMarket { acct, ext: off } => {
+            let a = need(acct)?;
+            let e = ext.read(rd, off, EXT_MARKET_LEN).ok_or(RejectReason::BadAccount)?;
+            eng.create_market(a, &listing_of(&e))
+        }
+        BatchOp::CreateProposal { acct, market, key, value } => eng.create_proposal(need(acct)?, MarketId(market), key, value, seq),
+        BatchOp::Vote { acct, id, approve } => eng.vote(need(acct)?, id, approve, seq),
+        BatchOp::Finalize { acct, id } => eng.finalize_proposal(need(acct)?, id, seq),
+        BatchOp::Commit { acct, ttl, ext: off } => {
+            let a = need(acct)?;
+            let e = ext.read(rd, off, EXT_COMMIT_LEN).ok_or(RejectReason::BadAccount)?;
+            // the commit unit's id: MNP2 table (MNP1 has no extension area, so never here)
+            eng.commit_op(uid.read(rd), a, id32(&e), ttl)
+        }
+        BatchOp::Reveal { acct, ext: off } => {
+            let a = need(acct)?;
+            if nested {
+                return Err(RejectReason::BadAccount);
+            }
+            let e = ext.read(rd, off, EXT_REVEAL_LEN).ok_or(RejectReason::BadAccount)?;
+            let commit_ref = id32(&e[0..8]);
+            let mut salt = [0u8; 32];
+            salt.copy_from_slice(&id32(&e[8..16]));
+            let mut iw = [0u32; 8];
+            iw.copy_from_slice(&e[16..24]);
+            let inner = decode_op(&iw);
+            let parents: Vec<[u8; 32]> = [id32(&e[24..32]), id32(&e[32..40])].into_iter().filter(|p| *p != [0u8; 32]).collect();
+            // upstream reveal_inner_ok: kind allowed and op_signer(inner) == the Reveal's account
+            let signer_ok = inner.signer().and_then(acct_of) == Some(a);
+            let enc = if signer_ok { encode_op(&inner, accts, ext, rd) } else { None };
+            let hash = match &enc {
+                Some(bytes) => {
+                    let mut h = sha2::Sha256::new();
+                    h.update(bytes);
+                    h.update(salt);
+                    h.finalize().into()
+                }
+                None => [0u8; 32],
+            };
+            eng.reveal_begin(a, commit_ref, enc.is_some(), hash, &parents)?;
+            let out = dispatch(eng, &inner, accts, uid, seq, ext, rd, true);
+            if out.is_err() {
+                eng.reveal_undo(commit_ref);
+            }
+            out
+        }
+        BatchOp::SetHeight { .. } | BatchOp::SetSeq { .. } | BatchOp::Bad => Err(RejectReason::BadAccount),
     }
 }
 
@@ -629,6 +1025,8 @@ pub fn commit_height(s: &mut state::ChainState, height: Height) {
     s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
     // loop round 5 (R4-M3): upstream's hook also releases finished oracle unbondings
     s.prune_oracle_unbonding(height);
+    // loop round 6: and drops expired commits
+    s.prune_commits(height);
 }
 
 /// `run_segment` with options (loop round 5: run number = rollup height, height binding).
@@ -663,6 +1061,8 @@ pub fn run_segment_n(
     // R4-M2: MNP2 carries the unit ids after the ops
     let v2 = rd(0) == MAGIC2;
     let uid_base = base + 8 * n_ops;
+    // loop round 6: MNP2 extension area
+    let ext = if v2 { Ext { base: uid_base + 8 * n_ops, n: rd(uid_base + 8 * n_ops) } } else { Ext::NONE };
     if sess.is_none() {
         let mut s = Session::genesis_with(rd(3), mode, &accts);
         s.segs = opt.run_no.unwrap_or(1);
@@ -698,80 +1098,27 @@ pub fn run_segment_n(
         // INSURANCE_ACCOUNT can never author a signed unit upstream (ids are pubkey hashes).
         let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
         let op = decode_op(&ow);
-        let author = match op {
-            BatchOp::Deposit { acct, .. }
-            | BatchOp::Place { acct, .. }
-            | BatchOp::Cancel { acct, .. }
-            | BatchOp::Withdraw { acct, .. }
-            | BatchOp::Liquidate { acct, .. }
-            | BatchOp::Report { acct, .. }
-            | BatchOp::ExtPrice { acct, .. }
-            | BatchOp::Stake { acct }
-            | BatchOp::Unstake { acct }
-            | BatchOp::Slash { acct, .. } => acct_of(acct),
-            BatchOp::SetHeight { .. } | BatchOp::Bad => None,
+        let author = op.signer().and_then(acct_of);
+        // loop round 6: a Reveal's inner op (its keys / account creation count for the rules below)
+        let inner = match op {
+            BatchOp::Reveal { ext: off, .. } => ext.read(rd, off, EXT_REVEAL_LEN).map(|e| {
+                let mut iw = [0u32; 8];
+                iw.copy_from_slice(&e[16..24]);
+                decode_op(&iw)
+            }),
+            _ => None,
         };
         // W2 depth rule (only where the tree exists: Incremental mode; Off/Legacy are bench builds)
         let too_deep = match (w.as_ref(), author) {
-            (Some(w), Some(a)) => !wit_depth_ok(w, &eng.state, &op, a),
+            (Some(w), Some(a)) => !wit_depth_ok(w, &eng.state, &op, a) || inner.is_some_and(|x| !wit_depth_ok(w, &eng.state, &x, a)),
             _ => false,
         };
         // loop round 4 (long-run heap bound): session account cap
-        let capped = !too_deep && author.is_some_and(|a| !state_cap_ok(&eng.state, &op, a, state_cap));
+        let capped = !too_deep
+            && author.is_some_and(|a| !state_cap_ok(&eng.state, &op, a, state_cap) || inner.is_some_and(|x| !state_cap_ok(&eng.state, &x, a, state_cap)));
         let rule = if too_deep { WIT_DEPTH_CODE } else { STATE_CAP_CODE };
         let mut height_op = false;
         let res = if too_deep || capped { Err(None) } else { match op {
-            BatchOp::Deposit { acct, amount } => match acct_of(acct) {
-                Some(a) => eng.deposit(a, amount as Usd),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => match acct_of(acct) {
-                Some(a) => eng.place(a, MarketId(market), side, typ, tif, price, qty, client_seq, [0u8; 32], seq, isolated, margin),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Cancel { acct, client_seq, market } => match acct_of(acct) {
-                Some(a) => eng.cancel(a, order_id(a, MarketId(market), client_seq)),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Withdraw { acct, amount, nonce } => match acct_of(acct) {
-                Some(a) => eng.withdraw(a, amount as Usd, nonce),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Liquidate { acct, target, market } => {
-                let t = if target == LIQ_TARGET_INSURANCE { Some(INSURANCE_ACCOUNT) } else { accts.get(target as usize).copied() };
-                // R4-M2: the unit id from the MNP2 table (MNP1: 0, refused in prod)
-                let mut uid = [0u8; 32];
-                if v2 {
-                    for k in 0..8 {
-                        uid[k * 4..k * 4 + 4].copy_from_slice(&rd(uid_base + i * 8 + k as u32).to_le_bytes());
-                    }
-                }
-                match (acct_of(acct), t) {
-                    (Some(_), Some(_)) if !v2 && cfg!(feature = "prod") => Err(RejectReason::BadAccount),
-                    (Some(a), Some(t)) => eng.liquidate(uid, seq, a, t, MarketId(market)),
-                    _ => Err(RejectReason::BadAccount),
-                }
-            }
-            BatchOp::Report { acct, price, market } => match acct_of(acct) {
-                Some(a) => eng.report_price(a, MarketId(market), price),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::ExtPrice { acct, price, source_id, market } => match acct_of(acct) {
-                Some(a) => eng.update_external_price(a, MarketId(market), price, source_id, seq),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Stake { acct } => match acct_of(acct) {
-                Some(a) => eng.stake_oracle(a),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Unstake { acct } => match acct_of(acct) {
-                Some(a) => eng.unstake_oracle(a),
-                None => Err(RejectReason::BadAccount),
-            },
-            BatchOp::Slash { acct, target, market } => match (acct_of(acct), accts.get(target as usize).copied()) {
-                (Some(a), Some(t)) => eng.slash_oracle(a, t, MarketId(market)),
-                _ => Err(RejectReason::BadAccount),
-            },
             BatchOp::SetHeight { height } => {
                 // test fixture (peg interval / feed staleness / unbonding): jumps allowed in test
                 // builds without height binding (round 4 R4-H2 rule superseded by R4-M4)
@@ -786,10 +1133,21 @@ pub fn run_segment_n(
                     Err(RejectReason::BadAccount)
                 }
             }
-            BatchOp::Bad => Err(RejectReason::BadAccount),
+            BatchOp::SetSeq { seq: x } => {
+                // loop round 6 test fixture: jump the global seq (proposal deadlines are 20 000
+                // applied units away); never in prod
+                if !cfg!(feature = "prod") && x >= eng.state.seq {
+                    eng.state.seq = x;
+                    height_op = true;
+                    Ok(Vec::new())
+                } else {
+                    Err(RejectReason::BadAccount)
+                }
+            }
+            _ => dispatch(eng, &op, &accts, Uid { v2, at: uid_base + i * 8 }, seq, &ext, rd, false),
         }.map_err(Some) };
         match res {
-            Ok(_) if height_op => ev(EV_HEIGHT),
+            Ok(_) if height_op => ev(if matches!(op, BatchOp::SetSeq { .. }) { EV_SEQ } else { EV_HEIGHT }),
             Ok(fills) => {
                 eng.state.seq += 1;
                 st.applied += 1;

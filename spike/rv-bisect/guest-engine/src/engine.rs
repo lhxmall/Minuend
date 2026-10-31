@@ -64,6 +64,23 @@ fn map_acct(e: AccountError) -> RejectReason {
     }
 }
 
+/// Verbatim minuend-exec `spot_fee_raise` (loop round 6).
+fn spot_fee_raise(params: &MarketParams, key: minuend_types::ParamKey, value: u64) -> bool {
+    params.spot_only && key == minuend_types::ParamKey::TakerFeeBps && value > params.taker_fee_bps
+}
+
+/// Verbatim minuend-exec `apply_param` (loop round 6).
+pub fn apply_param(params: &mut MarketParams, key: minuend_types::ParamKey, value: u64) {
+    use minuend_types::ParamKey;
+    match key {
+        ParamKey::ImBps => params.im_bps = value,
+        ParamKey::MmBps => params.mm_bps = value,
+        ParamKey::TakerFeeBps => params.taker_fee_bps = value,
+        ParamKey::KeeperRewardBps => params.keeper_reward_bps = value,
+        ParamKey::Delist => params.delisted = true,
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Engine {
     pub state: ChainState,
@@ -893,6 +910,286 @@ impl Engine {
     pub fn slash_oracle(&mut self, challenger: AccountId, target: AccountId, market: MarketId) -> Result<Vec<Fill>, RejectReason> {
         self.state.apply_slash(challenger, target, market)?;
         Ok(Vec::new())
+    }
+
+    // ---- PILOT (loop round 6, R4-M3 rest): governance + commit-reveal, copied from minuend-exec
+    // @ 20326c0 (`gov_deposit`, `gov_withdraw`, `create_market`, `create_proposal`, `vote`,
+    // `finalize_proposal`, `commit_op`, `reveal_op`'s state part, `spot_fee_raise`, `apply_param`).
+    // Edits marked PILOT: PERP writes through `set_perp` (MNWIT1 acct: key), market writes mark the
+    // market's meta:/band: keys dirty, gov_deposit keeps the pilot deposit model. ----
+    /// upstream `gov_deposit`. PILOT: the deposit model of `deposit` -- the anchor / backing /
+    /// address checks (`seen_aa_units`, `deposits_allowed`, `deposit_backing`, `aa_addresses`) are
+    /// not modelled (every pilot deposit is backed and uses the account's one address); the PERP
+    /// arithmetic is verbatim. The amount is a u64 (upstream ingest: `op_amounts_encodable`).
+    pub fn gov_deposit(&mut self, account: AccountId, amount: u128) -> Result<Vec<Fill>, RejectReason> {
+        let new_bal = self
+            .state
+            .perp_balances
+            .get(&account)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(amount)
+            .ok_or(RejectReason::Risk)?;
+        let new_supply = self
+            .state
+            .perp_supply
+            .checked_add(amount)
+            .filter(|s| *s <= minuend_types::PERP_SUPPLY_MAX)
+            .ok_or(RejectReason::Risk)?;
+        self.state.set_perp(account, new_bal); // PILOT (MNWIT1)
+        self.state.perp_supply = new_supply;
+        Ok(Vec::new())
+    }
+
+    /// upstream `gov_withdraw` (minus the gov-nonce WAL, a node-local durability buffer).
+    pub fn gov_withdraw(&mut self, account: AccountId, amount: u128, nonce: u64) -> Result<Vec<Fill>, RejectReason> {
+        if nonce <= self.state.seen_gov_nonces.get(&account).copied().unwrap_or(0) {
+            return Err(RejectReason::DuplicateNonce);
+        }
+        let bal = self.state.perp_balances.get(&account).copied().unwrap_or(0);
+        if bal < amount {
+            return Err(RejectReason::Insufficient);
+        }
+        self.state.set_perp(account, bal - amount); // PILOT (MNWIT1)
+        self.state.perp_supply -= amount;
+        self.state.seen_gov_nonces.insert(account, nonce);
+        Ok(Vec::new())
+    }
+
+    /// upstream `create_market` (the listing arguments as one `MarketParams`, `delisted` ignored).
+    pub fn create_market(&mut self, creator: AccountId, l: &MarketParams) -> Result<Vec<Fill>, RejectReason> {
+        let (spot_only, funding_rate, tick_size, min_price, max_price, usd_per_unit) =
+            (l.spot_only, l.funding_rate, l.tick_size, l.min_price, l.max_price, l.usd_per_unit);
+        if spot_only && funding_rate {
+            return Err(RejectReason::Risk);
+        }
+        if tick_size <= 0
+            || !minuend_types::risk_params_ok(
+                l.im_bps,
+                l.mm_bps,
+                l.taker_fee_bps,
+                l.keeper_reward_bps,
+                funding_rate,
+                l.funding_cap_bps,
+                spot_only,
+            )
+        {
+            return Err(RejectReason::Risk);
+        }
+        if (min_price != 0 && min_price % tick_size != 0)
+            || (max_price != 0 && max_price % tick_size != 0)
+            || (min_price != 0 && max_price != 0 && min_price >= max_price)
+        {
+            return Err(RejectReason::Risk);
+        }
+        if funding_rate && (min_price != 0 || max_price != 0) {
+            return Err(RejectReason::Risk);
+        }
+        if spot_only && (min_price <= 0 || max_price <= 0) {
+            return Err(RejectReason::Risk);
+        }
+        let money_ok = if funding_rate {
+            (1..=1_000_000_000).contains(&usd_per_unit)
+        } else {
+            usd_per_unit == 0
+        };
+        if !money_ok {
+            return Err(RejectReason::Risk);
+        }
+        let bal = self.state.perp_balances.get(&creator).copied().unwrap_or(0);
+        if bal < minuend_types::CREATE_MARKET_FEE_PERP {
+            return Err(RejectReason::Insufficient);
+        }
+        self.state.set_perp(creator, bal - minuend_types::CREATE_MARKET_FEE_PERP); // PILOT (MNWIT1)
+        self.state.perp_supply -= minuend_types::CREATE_MARKET_FEE_PERP;
+        self.state.perp_burned += minuend_types::CREATE_MARKET_FEE_PERP;
+        let id = MarketId(self.state.next_market_id);
+        self.state.next_market_id += 1;
+        self.state.markets.insert(
+            id,
+            MarketParams {
+                symbol: l.symbol,
+                tick_size,
+                im_bps: l.im_bps,
+                mm_bps: l.mm_bps,
+                taker_fee_bps: l.taker_fee_bps,
+                keeper_reward_bps: l.keeper_reward_bps,
+                spot_only,
+                funding_rate,
+                usd_per_unit,
+                funding_cap_bps: l.funding_cap_bps,
+                min_price,
+                max_price,
+                delisted: false,
+            },
+        );
+        self.state.wit_dirty.markets.insert(id); // PILOT (MNWIT1): band: + meta: leaves
+        if funding_rate {
+            self.state.external_sources.insert(creator);
+        }
+        Ok(Vec::new())
+    }
+
+    /// upstream `create_proposal`
+    pub fn create_proposal(&mut self, creator: AccountId, market: MarketId, key: u8, value: u64, seq: Seq) -> Result<Vec<Fill>, RejectReason> {
+        let key = minuend_types::ParamKey::from_u8(key).ok_or(RejectReason::Risk)?;
+        if key == minuend_types::ParamKey::Delist && value != 0 {
+            return Err(RejectReason::Risk);
+        }
+        if !self.state.markets.contains_key(&market) {
+            return Err(RejectReason::NotFound);
+        }
+        if key != minuend_types::ParamKey::Delist {
+            if spot_fee_raise(&self.state.markets[&market], key, value) {
+                return Err(RejectReason::Risk);
+            }
+            let mut params = self.state.markets[&market];
+            apply_param(&mut params, key, value);
+            if !minuend_types::risk_params_ok(
+                params.im_bps,
+                params.mm_bps,
+                params.taker_fee_bps,
+                params.keeper_reward_bps,
+                params.funding_rate,
+                params.funding_cap_bps,
+                params.spot_only,
+            ) {
+                return Err(RejectReason::Risk);
+            }
+        }
+        let bal = self.state.perp_balances.get(&creator).copied().unwrap_or(0);
+        if bal < minuend_types::PROPOSAL_MIN_STAKE_PERP {
+            return Err(RejectReason::Insufficient);
+        }
+        if self.state.proposals.len() >= 64 {
+            return Err(RejectReason::Risk);
+        }
+        let id = self.state.next_proposal_id;
+        self.state.next_proposal_id += 1;
+        let weight_snapshot = self.state.perp_balances.iter().filter(|(_, &b)| b != 0).map(|(a, &b)| (*a, b)).collect();
+        self.state.proposals.insert(
+            id,
+            minuend_state::Proposal {
+                creator,
+                market,
+                key,
+                value,
+                created_seq: seq,
+                deadline_seq: seq + minuend_types::PROPOSAL_DURATION_SEQS,
+                supply_at_create: self.state.perp_supply,
+                yes: 0,
+                no: 0,
+                voted: alloc::collections::BTreeSet::new(),
+                weight_snapshot,
+            },
+        );
+        Ok(Vec::new())
+    }
+
+    /// upstream `vote`
+    pub fn vote(&mut self, voter: AccountId, proposal_id: u64, approve: bool, seq: Seq) -> Result<Vec<Fill>, RejectReason> {
+        let p = self.state.proposals.get_mut(&proposal_id).ok_or(RejectReason::NoProposal)?;
+        if seq >= p.deadline_seq {
+            return Err(RejectReason::Risk);
+        }
+        if !p.voted.insert(voter) {
+            return Err(RejectReason::Risk);
+        }
+        let w = p.weight_snapshot.get(&voter).copied().unwrap_or(0);
+        if approve {
+            p.yes += w;
+        } else {
+            p.no += w;
+        }
+        Ok(Vec::new())
+    }
+
+    /// upstream `finalize_proposal`
+    pub fn finalize_proposal(&mut self, _caller: AccountId, proposal_id: u64, seq: Seq) -> Result<Vec<Fill>, RejectReason> {
+        let (pass, market, key, value) = {
+            let p = self.state.proposals.get(&proposal_id).ok_or(RejectReason::NoProposal)?;
+            if seq < p.deadline_seq {
+                return Err(RejectReason::Risk);
+            }
+            let pass = p.yes > p.no
+                && p.yes * minuend_types::PROPOSAL_QUORUM_DEN >= p.supply_at_create * minuend_types::PROPOSAL_QUORUM_NUM;
+            (pass, p.market, p.key, p.value)
+        };
+        if pass {
+            if let Some(params) = self.state.markets.get(&market) {
+                let mut updated = *params;
+                apply_param(&mut updated, key, value);
+                let legal = key == minuend_types::ParamKey::Delist
+                    || (!spot_fee_raise(params, key, value)
+                        && minuend_types::risk_params_ok(
+                            updated.im_bps,
+                            updated.mm_bps,
+                            updated.taker_fee_bps,
+                            updated.keeper_reward_bps,
+                            updated.funding_rate,
+                            updated.funding_cap_bps,
+                            updated.spot_only,
+                        ));
+                if legal {
+                    self.state.markets.insert(market, updated);
+                    self.state.wit_dirty.markets.insert(market); // PILOT (MNWIT1): meta: leaf
+                }
+            }
+        }
+        self.state.proposals.remove(&proposal_id);
+        Ok(Vec::new())
+    }
+
+    /// upstream `commit_op` (`id` = the Commit unit's id, from the MNP2 unit-id table)
+    pub fn commit_op(&mut self, id: UnitId, account: AccountId, commit: [u8; 32], ttl_height: minuend_types::Height) -> Result<Vec<Fill>, RejectReason> {
+        if self.state.commits.contains_key(&commit) {
+            return Err(RejectReason::BadCommit);
+        }
+        let commit_height = self.state.height;
+        if ttl_height <= commit_height || ttl_height > commit_height + minuend_types::COMMIT_TTL_HEIGHTS {
+            return Err(RejectReason::BadCommit);
+        }
+        let pending = self.state.commits.values().filter(|e| e.account == account && !e.revealed).count();
+        if pending >= minuend_types::MAX_PENDING_COMMITS_PER_ACCOUNT {
+            return Err(RejectReason::BadCommit);
+        }
+        self.state.commits.insert(
+            commit,
+            minuend_state::CommitEntry { account, commit_unit: id, commit_height, ttl_height, revealed: false },
+        );
+        Ok(Vec::new())
+    }
+
+    /// upstream `reveal_op` up to (excluding) the inner dispatch: returns Ok(()) when the commit is
+    /// consumed (revealed = true) and the inner op may run. `inner_ok` = reveal_inner_kind_ok &&
+    /// op_signer(inner) == account; `hash` = reveal_commit_hash(inner, salt) (computed by the
+    /// caller from the inner op's upstream encoding); `parents` = the Reveal unit's parents.
+    /// The caller runs the inner op and calls `reveal_undo` when it is rejected (R2-E-11).
+    pub fn reveal_begin(&mut self, account: AccountId, commit_ref: [u8; 32], inner_ok: bool, hash: [u8; 32], parents: &[[u8; 32]]) -> Result<(), RejectReason> {
+        // PILOT: the inner-op rule first. Upstream checks it at ingest (`account_matches` ->
+        // `reveal_inner_ok`: such a unit never reaches the executor) and again in reveal_op after
+        // the commit lookup; a unit the real engine cannot hold is refused BadAccount whether or
+        // not its commit exists (the harness maps an ingest refusal to BadAccount).
+        if !inner_ok {
+            return Err(RejectReason::BadAccount);
+        }
+        let entry = match self.state.commits.get(&commit_ref) {
+            Some(e) => *e,
+            None => return Err(RejectReason::BadCommit),
+        };
+        if entry.revealed || entry.account != account || self.state.height > entry.ttl_height || hash != commit_ref {
+            return Err(RejectReason::BadCommit);
+        }
+        if !parents.contains(&entry.commit_unit) {
+            return Err(RejectReason::BadCommit);
+        }
+        self.state.commits.get_mut(&commit_ref).unwrap().revealed = true;
+        Ok(())
+    }
+    pub fn reveal_undo(&mut self, commit_ref: [u8; 32]) {
+        if let Some(e) = self.state.commits.get_mut(&commit_ref) {
+            e.revealed = false;
+        }
     }
 
     pub fn report_price(&mut self, oracle: AccountId, market: MarketId, price: Price) -> Result<Vec<Fill>, RejectReason> {
