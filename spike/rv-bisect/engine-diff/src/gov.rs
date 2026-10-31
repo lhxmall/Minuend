@@ -1028,7 +1028,9 @@ pub fn govedge() -> String {
         expect("cap:perp_existing", pe[p0 + fresh_n as usize + 1] == OK, &mut fails);
         expect("cap:perp_gwd_new", pe[p0 + fresh_n as usize + 2] == mnpilot::STATE_CAP_CODE, &mut fails);
         let zv = &pe[z0..z0 + zcap + 2];
-        expect("cap:votes", zv[..zcap].iter().all(|e| *e == OK) && zv[zcap] == mnpilot::STATE_CAP_CODE && zv[zcap + 1] == OK, &mut fails);
+        let zbad = zv[..zcap].iter().position(|e| *e != OK);
+        let zname = format!("cap:votes(zcap {} first_bad {:?} code {:?} at_cap {} after {})", zcap, zbad, zbad.map(|i| zv[i]), zv[zcap], zv[zcap + 1]);
+        expect(&zname, zbad.is_none() && zv[zcap] == mnpilot::STATE_CAP_CODE && zv[zcap + 1] == OK, &mut fails);
         let cm = &pe[c0..c0 + mnpilot::MAX_STATE_COMMITS + 1];
         expect("cap:commits", cm[..mnpilot::MAX_STATE_COMMITS].iter().all(|e| *e == OK) && cm[mnpilot::MAX_STATE_COMMITS] == mnpilot::STATE_CAP_CODE, &mut fails);
         // nothing else differs from the real engine before the first cap event
@@ -1054,7 +1056,7 @@ pub fn govedge() -> String {
         let salt = [7u8; 32];
         let inner = GB::w_gwd(14, 0, 1);
         let h = g.commit_hash(&inner, &salt);
-        let w = g.w_commit(14, &h, 120);
+        let w = g.w_commit(14, &h, 5); // height 0: ttl within COMMIT_TTL_HEIGHTS
         expect("r7:commit", g.op(w) == OK, &mut fails);
         let cu = *g.uids.last().unwrap();
         let p1 = g.last();
