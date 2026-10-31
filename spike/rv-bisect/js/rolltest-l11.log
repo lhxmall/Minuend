@@ -127,7 +127,7 @@ require not met: height taken
 { bounce_message: 'height taken' }
 PASS race | h3 two operators same ts: first wins | expected "ok" | actual "ok" 
 PASS race | h3 second bounces | expected "bounce" | actual "bounce" 
-PASS race | h3 winner recorded | expected "iBws1Jvqmxh0iaMtAw1vzCPp9sZVWgurUPh+Cai9W+4=" | actual "iBws1Jvqmxh0iaMtAw1vzCPp9sZVWgurUPh+Cai9W+4=" 
+PASS race | h3 winner recorded | expected "EUvXBrvBrr2dxHKgY37ujT+ZhqyJ6U/be4QS02O8LlA=" | actual "EUvXBrvBrr2dxHKgY37ujT+ZhqyJ6U/be4QS02O8LlA=" 
 PASS race | record of h3 lists OP1 as operator | expected "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" | actual "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" 
 PASS window | open at 24h - 1 s | expected "ok" | actual "ok" 
 require not met: window closed
@@ -324,6 +324,21 @@ PASS stall (R10-M1) | (d) non-winner at until | expected "accepted" | actual "ac
 require not met: bond 204800000
 { bounce_message: 'bond 204800000' }
 PASS stall (R10-M1) | (c) cap: bond at v = 15 is OBOND x 2^MAXESC | expected ["bounce","accepted"] | actual ["bounce","accepted"] 
+PASS stall moving height (R11-M1) | cycle 0: fraudster wins the race for h1 at the base bond | expected ["accepted",200000] | actual ["accepted",200000] 
+PASS stall moving height (R11-M1) | cycle 0: fraud proven, h1 voided | expected ["c",0] | actual ["c",0] 
+PASS stall moving height (R11-M1) | cycle 0: the winner re-submits the honest h1 | expected "accepted" | actual "accepted" 
+PASS stall moving height (R11-M1) | cycle 1: fraudster wins the race for h2 at the base bond | expected ["accepted",200000] | actual ["accepted",200000] 
+PASS stall moving height (R11-M1) | cycle 1: fraud proven, h2 voided | expected ["c",1] | actual ["c",1] 
+PASS stall moving height (R11-M1) | cycle 1: the winner re-submits the honest h2 | expected "accepted" | actual "accepted" 
+PASS stall moving height (R11-M1) | cycle 2: fraudster wins the race for h3 at the base bond | expected ["accepted",200000] | actual ["accepted",200000] 
+PASS stall moving height (R11-M1) | cycle 2: fraud proven, h3 voided | expected ["c",2] | actual ["c",2] 
+PASS stall moving height (R11-M1) | cycle 2: the winner re-submits the honest h3 | expected "accepted" | actual "accepted" 
+PASS stall moving height (R11-M1) | cycle 3: fraudster wins the race for h4 at the base bond | expected ["accepted",200000] | actual ["accepted",200000] 
+PASS stall moving height (R11-M1) | cycle 3: fraud proven, h4 voided | expected ["c",3] | actual ["c",3] 
+PASS stall moving height (R11-M1) | cycle 3: the winner re-submits the honest h4 | expected "accepted" | actual "accepted" 
+PASS stall moving height (R11-M1) | every fraud posted only OBOND (no escalation across heights) | expected true | actual true {"bonds":[200000,200000,200000,200000]}
+PASS stall moving height (R11-M1) | honest heights enter their 24 h window one game apart (throughput <= 1 height per slow game) | expected true | actual true {"hoursPerHeight":[3.08,3.08,3.08,3.08]}
+PASS stall moving height (R11-M1) | fraudster cost per cycle = OBOND (no puppet) | expected 800000 | actual 800000 
 PASS grief | 12 griefers lose | expected 12 | actual 12 
 PASS grief | operator gets 12 x (CBOND - GF - FEE) | expected 1296000 | actual 1296000 
 PASS grief | referee AA keeps GF - GB per game for its fees | expected 108000 | actual 108000 
@@ -441,7 +456,7 @@ bounce called:  unknown command
 PASS overpay | nobody can take the burned half: {"burn":1} | expected "bounce" | actual "bounce" 
 require not met: cannot reclaim
 { bounce_message: 'cannot reclaim' }
-PASS overpay | nobody can take the burned half: {"reclaim":"qcVPQcUhILpbV4ghTU | expected "bounce" | actual "bounce" 
+PASS overpay | nobody can take the burned half: {"reclaim":"wVv2dWiUpf9Mcf8t5i | expected "bounce" | actual "bounce" 
 require not met: voided
 { bounce_message: 'voided' }
 PASS overpay | nobody can take the burned half: {"finalize":1} | expected "bounce" | actual "bounce" 
@@ -2730,4 +2745,4 @@ PASS ts (R6-M2) | its ts may be below the voided h2 ts | expected true | actual 
 PASS ts (R6-M2) | the zero-register trace differs from the submitted one only in the ts-carrying roots | expected [true,true,true] | actual [true,true,true] 
 PASS ts (R6-M2) | roots after x10 is overwritten agree | expected true | actual true 
 PASS invariant | rollup balance >= outstanding bonds + burned after every tx | expected 0 | actual 0 
-SUMMARY {"total":400,"pass":400,"fail":0}
+SUMMARY {"total":415,"pass":415,"fail":0}

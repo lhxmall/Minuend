@@ -327,6 +327,22 @@ groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.e
       bnc(await S(C3, OP1, ROLL, OBOND * 1024, subData(T.batch(G0, 1), 1, 'genesis')))]); }
 };
 
+// ---------- loop round 11 review (R11-M1 PoC): the per-height escalation does not cover a fraudster that moves up one
+//            height per cycle: it wins the top+1 race once per game, every fraud is the FIRST at its height (bond OBOND),
+//            and each height still waits ~ one slow game before its honest submission can even start its 24 h window.
+groups.stall11 = async () => { const g = 'stall moving height (R11-M1)'; const X = +(process.env.EXTRA || 4000); const CYC = +(process.env.CYCLES || 4);
+  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'); const x0 = C.b(OPX); let prev = { mem: G0, final: 'genesis' }, bonds = [], hours = [], subAt = [];
+  for (let c = 0; c < CYC; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { extra: X, k: 1 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h, { extra: X });
+    const ts0 = C.ts; bonds.push(bondFor(C, h));
+    rec(g, 'cycle ' + c + ': fraudster wins the race for h' + h + ' at the base bond', ['accepted', OBOND], [bnc(await submit(C, OPX, h, L, prev.final)), bonds[c]]);
+    const o = await open(C, CH1, L.sid); const gm = game(o, L, H, H, { defDelay: 'slow', chDelay: 60 }); await playAll(C, [gm]);
+    rec(g, 'cycle ' + c + ': fraud proven, h' + h + ' voided', ['c', h - 1], [gm.winner, +(C.r('top') || 0)]);
+    rec(g, 'cycle ' + c + ': the winner re-submits the honest h' + h, 'accepted', bnc(await submit(C, CH1, h, H, prev.final)));
+    subAt.push(C.ts); hours.push(+((C.ts - ts0) / 3600).toFixed(2)); prev = H; }
+  rec(g, 'every fraud posted only OBOND (no escalation across heights)', true, bonds.every(b => b === OBOND), { bonds });
+  rec(g, 'honest heights enter their 24 h window one game apart (throughput <= 1 height per slow game)', true, hours.every(x => x >= 2.5), { hoursPerHeight: hours });
+  rec(g, 'fraudster cost per cycle = OBOND (no puppet)', CYC * OBOND, x0 - C.b(OPX)); };
+
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const b2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, b2, b1.final);
   const games = []; for (let i = 0; i < 12; i++) { const P = A('GRIEF' + i); const sid = i % 2 ? b2.sid : b1.sid; const tr = i % 2 ? b2 : b1;
