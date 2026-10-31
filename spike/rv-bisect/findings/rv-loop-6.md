@@ -61,7 +61,31 @@ honest input (govfuzz / govedge / orafuzz / liqfuzz / fuzz / advfuzz / witfuzz /
 | R6-I6 | I | segments | does governance state survive segment cuts and export / import? | yes: govfuzz cuts every batch into three segments with an export + import at one cut |
 | R6-I7 | I | height hook | are commits pruned at the bound height? | yes: `commit_height` prunes; govedge case 5 (bound session, ttl h+1 survives h+1, gone at h+2) |
 
-RESULTS_TABLE_6
+### Round-6 results (`scripts/loop6-suite.sh c` + targeted runs, build target-l6c-*, sha1 in `results-loop6/l6-bins.txt`; logs `guest-engine/results-loop6/`)
+
+Same caveat as round 5: the suite (started 14:00 UTC) was reniced to 19 behind the round-7/8 jobs; *not reached* rows
+have round-7/8 counterparts.
+
+| check | result |
+|---|---|
+| quick (l6b-q1, notes): govedge 7, govfuzz 60, orafuzz 60, liqfuzz 30, hbind 30, snaptest 30, snapcap, capcheck 10, liqedge, fuzz 50, segfuzz 30, witfuzz 30, advfuzz 30, scen 47 | all green |
+| l6c-gov: govedge / govcap / liqedge / govfuzz 300 | 7 / 7 · caps: 256 PERP ids, 256 markets, 64 proposals / 19 999 voters, 1 024 commits → size-class high-water 3.89 MB (host 64-bit) · 10 / 10 incl. liq_eq / liq_eq_plus1 · 300 / 300 (100 526 units) |
+| l6c-guestq: prodheight.js | 16 / 16 (prod refuses SetSeq; governance ops + extension area in prod; MNP1 ext op → 2) |
+| l6gq: 4 govgen batches through the JS guest | 4 / 4 engine + roots match (914 units, 67.8 M steps) |
+| fuzz 300 / advfuzz 300 / witfuzz 300 / segfuzz 300 | 300 / 300 each (12 621 segments) |
+| proofs / scen host / selftest / heapsim | 0 / 829 291 forged · 47 / 47 · clean · ≤ 19.2 MB |
+| segguest small, PROD image with `PROD=1` (`sg56.sh`, own seg-small) | **7 / 7 match** |
+| robust-limit, guest-poc, liqfuzz 300 and the rest of the suite | *not reached* (still running at collection) |
+
+### Round-6 mutation test (`loop6-mut.sh` → fail-fast `loop6-mutff.sh`; `l6-mut.log`, `l6-mutff.log`)
+
+| # | mutant | result |
+|---|---|---|
+| 35 | liquidatable `<` | killed (liqedge `liq_eq`) |
+| 37 | ADL counterparty collateral `.max(0)` dropped | survived → equivalent (round 6 argument) |
+| 52 | smt_ref absence check without the prefix test | survived → equivalent under honest roots (round 6) |
+| 80, 81 | round-6 governance / commit-reveal mutants | killed (govedge) |
+| 82 … 111 | rest | *not reached* (fail-fast run still going at collection) |
 
 ---
 

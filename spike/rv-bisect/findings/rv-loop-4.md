@@ -149,7 +149,7 @@ Commits on `spike/rv-bisect`: 1d60b0c, a0bdb3e (step 1), 8d2140a (rv_rollup upgr
 ### Round-4 mutation test (`scripts/loop4-mut.sh`, `results-loop4/l4-mut.log`; survivors re-run with liqedge: `l4-mut2.log`)
 
 **41 / 61 killed** in the first pass. The 20 survivors were re-run with the deterministic liqedge cases
-(`loop4-post.sh`, `l4-mut2.log`): MUT2SUMMARY. Survivors and their disposition (rounds 5–6):
+(`loop4-post.sh`, `l4-mut2.log`): **4, 5, 10, 13 killed** by liqedge; 6, 9, 11, 15, 17, 18, 21, 23, 24, 27 not killed by the round-4 check set (at collection, 2026-11-01 ~00:45 CST, the re-run had reached mutant 27 of 56; 32 … 56 not reached — they are covered by the round-5/6 dispositions below). Survivors and their disposition (rounds 5–6):
 
 | # | mutant | disposition |
 |---|---|---|

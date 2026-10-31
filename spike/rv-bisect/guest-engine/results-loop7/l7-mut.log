@@ -1,3 +1,7 @@
 mut 1 [src/lib.rs: ] govedge 0 -> KILLED by govedge
 mut 2 [src/lib.rs:         BatchOp::GovWithdraw { amount: 0, .. } if s.perp_balances.len(] govedge 0 -> KILLED by govedge
 mut 3 [src/lib.rs: BatchOp::GovDeposit { .. } | BatchOp::Slash { .. } => {] govedge 0 -> KILLED by govedge
+mut 4 [src/lib.rs: BatchOp::GovDeposit { .. } | BatchOp::GovWithdraw { .. } => {] govedge 8 govfuzz 20 xfuzz 20 liqedge 1 capcheck 10 snapcap true snaptest 20 hbind 20 orafuzz 20 liqfuzz 30 segfuzz 30 fuzz 100 scen 47 witfuzz 30 advfuzz 30 selftest {"selftest_fail":[]} proofs ok depth8 5 -> no
+mut 5 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+mut 6 [src/lib.rs: ] govedge 8 govfuzz 20 xfuzz 20 liqedge 1 capcheck 10 snapcap true snaptest 20 hbind 20 orafuzz 20 liqfuzz 30 segfuzz 30 fuzz 100 scen 47 witfuzz 30 advfuzz 30 selftest {"selftest_fail":[]} proofs ok depth8 5 -> no
+mut 7 [src/engine.rs: if still && remaining_pos != 0 {] govedge 8 govfuzz 20 xfuzz 20 liqedge 1 capcheck 10 snapcap true snaptest 20 hbind 18 -> KILLED by hbind

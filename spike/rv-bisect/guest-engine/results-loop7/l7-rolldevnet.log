@@ -1,73 +1,116 @@
 ===== testnet = false
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
 (Use `node --trace-warnings ...` to show where the warning was created)
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
-(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:795883) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
 rundir /data/hark/spike-rv/roll7/devnet-testdata/runid-0001
 [INFO][genesis-node] Child started
 [INFO][obyte-witness-0001] Child started
 [INFO][obyte-witness-0002] Child started
 [INFO][obyte-hub-0001] Child started
-/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/network.js:4546
-	throw err; // crash the process to avoid ending up in an inconsistent state
-	^
-
-Error: listen EADDRINUSE: address already in use :::3005
-    at Server.setupListenHandle [as _listen2] (node:net:1941:16)
-    at listenInCluster (node:net:1998:12)
-    at Server.listen (node:net:2103:7)
-    at startWebserver (/data/hark/wt-all/vendor/aa-testkit/node_modules/obyte-hub/webserver.js:136:10)
-    at EventEmitter.<anonymous> (/data/hark/wt-all/vendor/aa-testkit/node_modules/obyte-hub/start.js:39:3)
-    at Object.onceWrapper (node:events:634:26)
-    at EventEmitter.emit (node:events:519:28)
-    at WebSocketServer.<anonymous> (/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/network.js:4390:12)
-    at WebSocketServer.emit (node:events:519:28)
-    at WebSocketServer.completeUpgrade (/data/hark/wt-all/vendor/aa-testkit/node_modules/ws/lib/websocket-server.js:450:5)
-Emitted 'error' event on Server instance at:
-    at emitErrorNT (node:net:1977:8)
-    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
-  code: 'EADDRINUSE',
-  errno: -98,
-  syscall: 'listen',
-  address: '::',
-  port: 3005
-}
-
-Node.js v22.23.3
-[INFO][obyte-hub-0001] Child exited
+[INFO][headless-wallet-0007] Child started
+[INFO][headless-wallet-0002] Child started
+[INFO][headless-wallet-0003] Child started
+[INFO][headless-wallet-0005] Child started
+[INFO][headless-wallet-0006] Child started
+[INFO][headless-wallet-0004] Child started
+[INFO][headless-wallet-0001] Child started
+MODE max_aa_responses set {"STEP":"7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA","GAME":"W7OQFFFU6446637YBHIA7B74L6X4ZO5B","ROLL":"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN"}
+PASS | deployed rv_step == address baked into the referee | expected "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" | actual "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" 
+PASS | deployed referee == address baked into rv_rollup | expected "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" | actual "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" 
+PASS | deployed rollup == computed address | expected "AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN" | actual "AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN" 
+PASS | loop 3: deployed seg referee == address baked into rv_rollup | expected "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" | actual "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" 
+PASS | loop 3: deployed witbind / witproof == computed | expected ["KCSB7QD2OHOVXOZGRTHD25OK6TY6AYTU","3UXBNLSCHNFZ7IMK5QI7P7BBJE4YEU56"] | actual ["KCSB7QD2OHOVXOZGRTHD25OK6TY6AYTU","3UXBNLSCHNFZ7IMK5QI7P7BBJE4YEU56"] 
+PASS | race: two h1 submits in flight together -> exactly one wins | expected "bounce+ok" | actual "bounce+ok" {"loserError":{"message":"height taken","formattedContext":"","codeLines":[{"lineNumber":72,"formula":"require($h > $top, 'height taken');"}],"trace":[{"type":"aa","aa":"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN","xpath":"/init","line":72}]}}
+PASS | race: winner recorded at h1 | expected true | actual true 
+PASS | fake s0 (genesis memory) at h2 | expected "bounce" | actual "bounce" 
+PASS | final root not matching its parts | expected "bounce" | actual "bounce" 
+PASS | h2 chained on the race loser | expected "bounce" | actual "bounce" 
+PASS | an AA submits h2 (it could refuse payouts) | expected "bounce" | actual "bounce" {"err":"{\"message\":\"one of secondary AAs bounced with error: \",\"callChain\":{\"address\":\"2524IWQMP7B2QVHVQU77XDEJA7ESEPCK\",\"next\":{\"address\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN\",\"message\":\"an AA cannot be an oper"}
+PASS | honest h2 by op2 | expected "ok" | actual "ok" 
+PASS | finalize h1 before 24 h | expected "bounce" | actual "bounce" {"err":"{\"message\":\"window open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":119,\"formula\":\"require($now >= $r[3] + $WIN, 'window open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN\","}
+PASS | griefer opens a game on h1 | expected "ok" | actual "ok" 
+PASS | referee received the open (secondary trigger) | expected true | actual true 
+PASS | referee game record exists | expected true | actual true 
+PASS | rollup forwarded GF to the referee | expected 10000 | actual 10000 
+PASS | finalize h1 with the game open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":120,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVKONN\",\"xpat"}
+PASS | griefer vs honest operator | expected "d" | actual "d" 
+PASS | rollup paid the operator CBOND - GF - FEE (real output) | expected 108000 | actual 108000 
+PASS | rollup game marked d | expected "d" | actual "d" 
+PASS | finalize h1 after the game | expected "ok" | actual "ok" 
+PASS | finalize pays OBOND - FEE (real output) | expected 198000 | actual 198000 
+PASS | fraudulent h3 submitted | expected "ok" | actual "ok" 
+PASS | h4 on bad h3 | expected "ok" | actual "ok" 
+PASS | h5 on h4 | expected "ok" | actual "ok" 
+PASS | honest challenger vs fraudulent h3 | expected "c" | actual "c" 
+PASS | challenger paid CBOND - GF - FEE + OBOND/2 (real output) | expected 208000 | actual 208000 
+PASS | top reset to 2 | expected 2 | actual 2 
+PASS | burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | h3 flagged fraud | expected 1 | actual 1 
+PASS | h2 finalizes | expected "ok" | actual "ok" 
+PASS | finalize voided h3 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"voided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":118,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'voided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU5FVK"}
+PASS | open on voided h5 | expected "bounce" | actual "bounce" 
+PASS | fraudster reclaims h3 | expected "bounce" | actual "bounce" 
+PASS | reclaim voided h4 | expected "ok" | actual "ok" 
+PASS | h4 bond back OBOND - FEE (real output) | expected 198000 | actual 198000 
+PASS | reclaim voided h5 | expected "ok" | actual "ok" 
+PASS | race restarts: honest h3 resubmitted | expected "ok" | actual "ok" 
+PASS | extend the voided chain | expected "bounce" | actual "bounce" 
+PASS | new h3 finalizes | expected "ok" | actual "ok" 
+PASS | 6a honest h4 by op1 | expected "ok" | actual "ok" 
+PASS | 6a ch1 opens on h4 | expected "ok" | actual "ok" 
+PASS | 6a resolve before the move deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"undecided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":64,\"formula\":\"require($w, 'undecided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"W7OQFFFU6446637YBHIA7B74L6X4ZO5B\",\"xpath\":\"/init\",\"line\":"}
+PASS | 6a operator mids after its deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":41,\"formula\":\"require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""}
+PASS | 6a resolve after the deadline | expected "ok" | actual "ok" 
+PASS | 6a rollup game marked c (operator timed out) | expected "c" | actual "c" 
+PASS | 6a challenger paid CBOND - GF - FEE + OBOND/2 (real output) | expected 208000 | actual 208000 
+PASS | 6a operator paid nothing | expected 0 | actual 0 
+PASS | 6a burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | 6a h4 flagged fraud | expected 1 | actual 1 
+PASS | 6a top back to 3 | expected 3 | actual 3 
+PASS | 6a open games on h4 back to 0 | expected 0 | actual 0 
+PASS | 6a timed-out operator reclaims h4 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":137,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"}
+PASS | 6b h4 resubmitted by op1 | expected "ok" | actual "ok" 
+PASS | 6b ch2 opens on h4 | expected "ok" | actual "ok" 
+PASS | 6b operator answered, challenger to move | expected "stopped" | actual "stopped" 
+MEASURE one operator mids sent with 10000 bytes: referee balance delta 1398 operator balance delta -3184
+PASS | 6b referee nets (0, KEEP] from a move (KEEP minus its refund-unit fee) | expected true | actual true {"gdelta":1398}
+PASS | 6b operator move costs KEEP + its unit fee (< KEEP + 3000), not 10000 + fee | expected true | actual true {"odelta":-3184}
+PASS | 6b challenger pick after its deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":49,\"formula\":\"require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""}
+PASS | 6b resolve after the deadline | expected "ok" | actual "ok" 

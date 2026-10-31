@@ -1005,12 +1005,13 @@ pub fn govedge() -> String {
         }
         g.op(GB::w_gdep(10, 1)); // existing id at the cap
         g.op(GB::w_gwd(11 + fresh_n + 1, 5, 1)); // loop round 7: a gov withdraw > 0 by a new id at the cap -> 19
+        g.op([13 | ((11 + fresh_n + 2) << 8), 1, 0, 0, 0, 0, 0, 1]); // loop round 8: a slash by a new id at the cap -> 19
         g.op(GB::w_prop(10, 1, 0, 1200));
         let z0 = g.ops.len();
         // the cap counts the PORT's snapshot: the real engine (no caps) also holds the id whose gov deposit the
         // port's ledger cap refused (cap:perp), so its snapshot is one entry larger (loop round 7 fix: test bug)
-        let capped = g.ids[(11 + fresh_n) as usize];
-        let zcap = g.eng.state.proposals[&1].weight_snapshot.keys().filter(|a| **a != capped).count() + mnpilot::MAX_ZERO_VOTERS;
+        let capped = [g.ids[(11 + fresh_n) as usize], g.ids[(11 + fresh_n + 2) as usize]]; // + the capped slasher (round 8)
+        let zcap = g.eng.state.proposals[&1].weight_snapshot.keys().filter(|a| !capped.contains(a)).count() + mnpilot::MAX_ZERO_VOTERS;
         for k in 0..=zcap as u32 {
             g.op(GB::w_vote(300 + k, 1, true));
         }
@@ -1042,6 +1043,8 @@ pub fn govedge() -> String {
         expect("cap:perp", pr[..fresh_n as usize].iter().all(|e| *e == OK) && pr[fresh_n as usize] == mnpilot::STATE_CAP_CODE, &mut fails);
         expect("cap:perp_existing", pe[p0 + fresh_n as usize + 1] == OK, &mut fails);
         expect("cap:perp_gwd_new", pe[p0 + fresh_n as usize + 2] == mnpilot::STATE_CAP_CODE, &mut fails);
+        // loop round 8 (round-7 mutant 4 survived: Slash dropped from the shared ledger cap)
+        expect("cap:perp_slash_new", pe[p0 + fresh_n as usize + 3] == mnpilot::STATE_CAP_CODE, &mut fails);
         let zv = &pe[z0..z0 + zcap + 2];
         let zbad = zv[..zcap].iter().position(|e| *e != OK);
         let zname = format!("cap:votes(zcap {} first_bad {:?} code {:?} at_cap {} after {})", zcap, zbad, zbad.map(|i| zv[i]), zv[zcap], zv[zcap + 1]);

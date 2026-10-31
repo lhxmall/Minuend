@@ -128,4 +128,33 @@ Commit / Reveal.
 
 ---
 
-RESULTS_TABLE_5
+### Round-5 results (`scripts/loop5-suite.sh c`, InstaBox VM, build target-l5c-*, sha1 in `results-loop5/l5-bins.txt`; logs `guest-engine/results-loop5/`)
+
+Status at the end of the session (loop round 8, 2026-11-01 ~00:40 CST): the round-5 suite ran from 12:36 UTC at load
+25–35 on 4 vCPU next to the round-4/6/7 jobs and was reniced to 19 once the round-7/8 code superseded it; the rows marked
+*not reached* had not run when the logs were collected (their round-7/8 counterparts are in the round-7/8 tables).
+
+| check | result |
+|---|---|
+| quick (l5c-q3: orafuzz 100, liqfuzz 30, hbind 30, snaptest 30, snapcap, capcheck 10, liqedge, fuzz 50, segfuzz 30, witfuzz 30, advfuzz 30, scen) | all green (orafuzz 100 / 100, 116 683 units) |
+| fuzz 300 × 300 / advfuzz 300 / witfuzz 300 | 300 / 300 · 300 / 300 · 300 / 300 |
+| segfuzz 300 | 300 / 300 (12 621 segments) |
+| proofs (host reference) | 177 087 membership, 61 540 absence ok, 0 / 829 291 forged |
+| scen upstream.scn (host) | 47 / 47 |
+| selftest / depthsel (64, 8) | clean |
+| heapsim (crowd / gen / adv / frag / limit) | ≤ 19.2 MB (crowdmax) < 50.2 MB |
+| robust-limit (16 384-unit limit batch through the JS guest) | 1 / 1 match (370 M steps) |
+| rolltest upgrade group / witproof group (round-5 AAs) | 33 / 33 · 19 / 19 |
+| segguest small, PROD image with `PROD=1` (own seg-small: genbig 7 300, segrun 90; `sg56.sh`) | **7 / 7 match** |
+| liqfuzz 300 / snaptest 300 / capcheck / orafuzz 300 / hbind 300 / statecap, guest-poc, JS-guest scen / extra / robust / depth8, snapimg, segrun / segbig, sail, rolltest full, rolldevnet | *not reached* (suite still running at collection) |
+
+### Round-5 mutation test (`scripts/loop5-mut.sh` → killed by load and restarted fail-fast as `loop5-mutff.sh`; `l5-mut.log`, `l5-mutff.log`)
+
+| # | mutant | result |
+|---|---|---|
+| 4, 5 | pending `>`, min-withdraw `<=` | killed (liqedge) |
+| 6, 10, 13 | withdraw equity `<=`, staleness `>=`, prune `>=` | killed (liqedge) |
+| 15 | capcheck fire rule | killed (capcheck) |
+| 9 | ADL last share | **survived** → equivalent under one fill per liquidation (R8-T3) |
+| 11 | TWAP min samples | survived → equivalent (`external_twap` unreachable, round 4) |
+| 17 … 79 | rest of the list | *not reached* (fail-fast run still going at collection) |

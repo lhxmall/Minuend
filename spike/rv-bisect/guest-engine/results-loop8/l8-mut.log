@@ -1,0 +1,13 @@
+mut 1 [src/lib.rs:     if false && !commit_bond_ok(] govedge 0 -> KILLED by govedge
+mut 2 [src/lib.rs: None => balance >= reserved,] govedge 0 -> KILLED by govedge
+mut 3 [src/lib.rs: None => balance > reserved + COMMIT_BOND_PERP,] govedge 0 -> KILLED by govedge
+mut 4 [src/lib.rs: .is_none_or(|rest| rest > reserved)] govedge 0 -> KILLED by govedge
+mut 5 [src/lib.rs: .is_some_and(|rest| rest >= reserved)] govedge 0 -> KILLED by govedge
+mut 6 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+mut 7 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+mut 8 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+mut 9 [src/lib.rs: s.commits.values().filter(|e| e.account == author && !e.revealed).coun] govedge 0 -> KILLED by govedge
+mut 10 [src/lib.rs: live().saturating_sub(1) as u128 * COMMIT_BOND_PERP] govedge 0 -> KILLED by govedge
+mut 11 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+DONE
+MUTDONE

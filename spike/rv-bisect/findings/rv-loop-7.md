@@ -55,7 +55,32 @@ Totals: **C 0 · H 0 · M 3 · L 5 · I 8** — R6-M2 and R7-M1 fixed, R7-M2 doc
 | R7-I7 | I | AA budget | do the ts checks fit ocore's limits? | rv_rollup complexity 69, ops 1 536 (< 2 000) |
 | R7-I8 | I | cross-module | do gov × liq × oracle sequences diverge between port and real engine? | see `xfuzz` in the results table |
 
-RESULTS_TABLE_7
+### Round-7 results (`scripts/loop7-suite.sh c`, build target-l7c-*, sha1 in `results-loop7/l7-bins.txt`; logs `guest-engine/results-loop7/`)
+
+| check | result |
+|---|---|
+| govedge (host rebuilt with the round-8 test fixes, `l7d-host.log` in the notes) | 8 / 8 (first run 6 / 8: `cap:votes`, `r7:commit` = test bugs, R8-T1) |
+| quick l7c-q: xfuzz 60, govfuzz 60, orafuzz 60, liqfuzz 30, hbind 30, snaptest 30, snapcap, capcheck 10, liqedge, fuzz 50, segfuzz 30, witfuzz 30, advfuzz 30, scen 47 | all green (xfuzz 60 / 60, 20 089 units incl. liquidations / slashes / withdraws / leveraged IOC) |
+| fuzz 300 / advfuzz 300 / witfuzz 300 / segfuzz 300 | 300 / 300 each (12 621 segments) |
+| proofs / scen host / selftest + depthsel / heapsim | 0 / 829 291 forged · 47 / 47 · clean · ≤ 19.2 MB |
+| AA mutation (`js/aamut-l7.py`, ts rules) | 8 / 9 killed, 1 equivalent until 2106 |
+| rolltest (round-7 AAs, sandbox ocore 0.4.8) | 333 / 333 incl. group `ts` 23 / 23 |
+| rolldevnet (round-7 AAs, devnet clock ts, `l7rd.sh`) | RD7 |
+| prodheight.js on the round-7/8 prod image | 15 / 16 with the round-7 script (stale GovWithdraw(0) expectation, R8-T2) → 16 / 16 fixed |
+| robust-limit, guest-poc, liq/snap/cap 300, JS-guest runs, sail, statecap | L7REST |
+
+### Round-7 guest mutation subset (`scripts/loop7-mut.sh`, fail-fast; `l7-mut.log`; the first run is void: `l7-mut-invalid.log`)
+
+| # | mutant | result |
+|---|---|---|
+| 1 | R7-M1 rule deleted (GovWithdraw(0) by a new id) | killed (govedge) |
+| 2 | R7-M1 rule → ledger-size condition | killed (govedge) |
+| 3 | GovWithdraw dropped from the shared ledger cap | killed (govedge) |
+| 4 | Slash dropped from the shared ledger cap | L7M4 |
+| 5 | inner-op `state_cap_ok` dropped | killed (govedge) |
+| 6 | inner-op W2 depth check dropped | **survived** every check → R8-L4 (no test reaches a too-deep key through a reveal) |
+| 7 | ADL one-fill rule dropped | killed (hbind) |
+| 8 | vote cap: snapshot voters no longer exempt | L7M8 |
 
 ---
 

@@ -1,0 +1,10 @@
+govguest
+{"batch":"gov11.bin","units":228,"engine_match":true,"roots_match":true,"steps":17415589,"halted":true}
+{"batch":"gov12.bin","units":233,"engine_match":true,"roots_match":true,"steps":21665674,"halted":true}
+{"batch":"gov13.bin","units":234,"engine_match":true,"roots_match":true,"steps":15766384,"halted":true}
+{"batches":3,"match":3,"units":695,"steps":54847647}
+prodheight
+{"check":"test image: no binding (height stays 9 in run 2)","ok":true,"status":0,"ev":[],"height":9,"segs":2}
+{"check":"test image: SetSeq fixture allowed (0x40000001), going back refused","ok":true,"status":0,"ev":[1073741825,2],"height":9,"segs":3}
+{"checks":16,"pass":15,"ok":false}
+GQDONE
