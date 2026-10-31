@@ -383,6 +383,33 @@ pub fn liqedge() -> String {
         g.apply([8 | (2 << 8), 0, (m + m / 10 + m / 50) as u32, ((m + m / 10 + m / 50) >> 32) as u32, 0, 0, 0, 1]);
         vec![(i, EV_APPLIED)]
     });
+    // adl_hole: a 10x long (0.3 + 0.7 BTC from two makers) loses 27.1 % through three exact 10 % oracle
+    // steps; the keeper's liquidation finds no bid, closes by ADL against the two shorts, and the hole
+    // left on the target is haircut pro-rata from them (the last one takes the remainder)
+    case("adl_hole", &|g| {
+        let qs = QTY_SCALE;
+        let m = 100_000 * DOLLAR;
+        let keep = 15_000 * USD_SCALE as i64;
+        g.apply(wd(11, 5_000_000 * USD_SCALE as i64 - keep, 1));
+        for (mk, q) in [(6u32, 3 * qs / 10), (7u32, 7 * qs / 10)] {
+            let c = g.next_cseq(mk);
+            g.apply([2 | (mk << 8), 1, m as u32, (m >> 32) as u32, q as u32, (q >> 32) as u32, c as u32, 1]);
+        }
+        for q in [3 * qs / 10, 7 * qs / 10] {
+            let c = g.next_cseq(11);
+            g.apply([2 | (11 << 8), 0, m as u32, (m >> 32) as u32, q as u32, (q >> 32) as u32, c as u32, 1]);
+        }
+        let mut p = m;
+        for h in 1..=3u64 {
+            p -= p / 10;
+            g.apply(hgt(h));
+            for o in ORACLES {
+                g.apply([8 | (o << 8), 0, p as u32, (p >> 32) as u32, 0, 0, 0, 1]);
+            }
+        }
+        g.apply([7 | (4 << 8), 11, 0, 0, 0, 0, 0, 1]);
+        vec![(g.ops.len() - 1, EV_APPLIED | 1)]
+    });
     format!("{{\"ok\":{},\"cases\":{{{}}}}}", all, res.join(","))
 }
 fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {
