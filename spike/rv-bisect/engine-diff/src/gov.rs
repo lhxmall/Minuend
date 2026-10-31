@@ -289,7 +289,10 @@ impl Rng {
 /// is checked with the Reveal's author (as the port does). Mirrored by the builder and by `run_real_eng_h`.
 pub fn pilot_gov_refused(eng: &Engine, d: &B, ids: &[AccountId], rx: &dyn Fn(u32, u32) -> Option<Vec<u32>>) -> bool {
     let Some(author) = d.signer().and_then(|a| ids.get(a as usize)) else { return false };
-    let zero_new = |x: &B| matches!(x, B::GovWithdraw { amount: 0, .. }) && !eng.state.perp_balances.contains_key(author);
+    // loop round 8 (R7-M2): the commit bond, the same predicate over the real engine's balance / live commits
+    let bal = || eng.state.perp_balances.get(author).copied().unwrap_or(0);
+    let live = || eng.state.commits.values().filter(|e| e.account == *author).count();
+    let zero_new = |x: &B| (matches!(x, B::GovWithdraw { amount: 0, .. }) && !eng.state.perp_balances.contains_key(author)) || !mnpilot::commit_bond_ok(x, bal, live);
     zero_new(d)
         || match d {
             B::Reveal { ext, .. } => rx(*ext, mnpilot::EXT_REVEAL_LEN).is_some_and(|e| {
@@ -835,6 +838,9 @@ pub fn govedge() -> String {
         let mut g = GB::new(12, flags);
         g.op(GB::w_dep(10, 50_000 * USD_SCALE as i64));
         g.op(GB::w_dep(11, 50_000 * USD_SCALE as i64));
+        // loop round 8 (R7-M2): committers need a PERP bond (COMMIT_BOND_PERP per live commit)
+        g.op(GB::w_gdep(10, 20_000));
+        g.op(GB::w_gdep(11, 20_000));
         g.op(GB::w_height(100));
         let px = 100_000 * DOLLAR;
         let salt = [9u8; 32];
@@ -875,7 +881,7 @@ pub fn govedge() -> String {
         expect("c:double", g.op(w) == 17, &mut fails);
         // inner reject keeps the commit: withdraw more than the collateral, then still revealable?
         // (the inner op is fixed by the hash: reveal fails while it is rejected, commit stays)
-        let inner2 = GB::w_prop(10, 1, 0, 1200); // 10 holds no PERP -> Insufficient
+        let inner2 = GB::w_gwd(10, 30_000, 1); // 10 holds 20 000 PERP -> Insufficient (loop round 8: was a proposal by a PERP-less id)
         let h2 = g.commit_hash(&inner2, &salt);
         let w = g.w_commit(10, &h2, 120);
         g.op(w);
@@ -883,7 +889,7 @@ pub fn govedge() -> String {
         let p1 = g.last();
         let w = g.w_reveal(10, &h2, &salt, &inner2, p1, cu2);
         expect("c:inner_reject", g.op(w) == 9, &mut fails);
-        g.op(GB::w_gdep(10, 1000));
+        g.op(GB::w_gdep(10, 15_000)); // 35 000 - 30 000 >= 2 live commits x COMMIT_BOND_PERP
         let p1 = g.last();
         let w = g.w_reveal(10, &h2, &salt, &inner2, p1, cu2);
         expect("c:inner_retry", g.op(w) == OK, &mut fails);
@@ -937,6 +943,7 @@ pub fn govedge() -> String {
         cases += 1;
         let mut g = GB::new(12, flags);
         g.op(GB::w_dep(10, 50_000 * USD_SCALE as i64));
+        g.op(GB::w_gdep(10, 1_000)); // loop round 8: commit bond
         let inner = GB::w_vote(10, 1, true);
         let h = g.commit_hash(&inner, &[1; 32]);
         // engine height 1 (bound run 1): ttl 2
@@ -1008,9 +1015,14 @@ pub fn govedge() -> String {
             g.op(GB::w_vote(300 + k, 1, true));
         }
         g.op(GB::w_vote(4, 1, true)); // snapshot voter after the zero-weight cap
+        // loop round 8 (R7-M2): committers need COMMIT_BOND_PERP per live commit and a ledger entry (the ledger is
+        // full): ledger ids 11.. top up to 10 000 (8 live commits each = the per-account pending cap)
+        for j in 0..=(mnpilot::MAX_STATE_COMMITS as u32 / 8) {
+            g.op(GB::w_gdep(11 + j, 8_000));
+        }
         let c0 = g.ops.len();
         for k in 0..=mnpilot::MAX_STATE_COMMITS as u32 {
-            let a = 270 + k / 8; // 8 pending each (the per-account cap)
+            let a = 11 + k / 8; // 8 pending each (the per-account cap)
             let mut h = [0u8; 32];
             h[..4].copy_from_slice(&k.to_le_bytes());
             h[31] = 0xcc;
@@ -1056,18 +1068,53 @@ pub fn govedge() -> String {
         let w = g.w_market(13, &listing_regular("ZERO")); // 13 now holds exactly 0 PERP (entry kept)
         g.op(w);
         expect("r7:gwd0_zero_balance_holder", g.op(GB::w_gwd(13, 0, 1)) == OK, &mut fails);
+        expect("r7:ledger_unchanged_by_refusals", g.eng.state.perp_balances.len() == n0 + 1, &mut fails);
+        // loop round 8 (R7-M2): the commit bond. A fresh id (no PERP) can no longer commit at all, so the round-7
+        // path "Reveal whose inner op is a GovWithdraw(0) by a fresh id" is unreachable; the inner-op check is
+        // exercised by a reveal whose inner withdraw would eat the reserved bond.
         let salt = [7u8; 32];
-        let inner = GB::w_gwd(14, 0, 1);
+        let inner = GB::w_gwd(14, 1_000, 10);
         let h = g.commit_hash(&inner, &salt);
+        let w = g.w_commit(14, &h, 5);
+        expect("r8:commit_no_bond", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("r8:ledger_unchanged", g.eng.state.perp_balances.len() == n0 + 1, &mut fails);
+        g.op(GB::w_gdep(14, 1_500));
         let w = g.w_commit(14, &h, 5); // height 0: ttl within COMMIT_TTL_HEIGHTS
-        expect("r7:commit", g.op(w) == OK, &mut fails);
+        expect("r8:commit_bond1", g.op(w) == OK, &mut fails);
         let cu = *g.uids.last().unwrap();
+        let mut s2 = salt;
+        s2[0] = 8;
+        let h2 = g.commit_hash(&inner, &s2);
+        let w = g.w_commit(14, &h2, 5);
+        expect("r8:commit_bond2", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("r8:gwd_reserved", g.op(GB::w_gwd(14, 600, 2)) == mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("r8:gwd_free", g.op(GB::w_gwd(14, 500, 3)) == OK, &mut fails);
+        expect("r8:gwd_over", g.op(GB::w_gwd(14, 5_000, 4)) == 9, &mut fails);
         let p1 = g.last();
         let w = g.w_reveal(14, &h, &salt, &inner, p1, cu);
-        expect("r7:reveal_inner_gwd0_fresh", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("r8:reveal_inner_reserved", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        // CreateMarket fee and oracle Stake bond against the reserve
+        g.op(GB::w_gdep(15, 10_500));
+        let inner15 = GB::w_vote(15, 1, true);
+        let h15 = g.commit_hash(&inner15, &salt);
+        let w = g.w_commit(15, &h15, 5);
+        expect("r8:commit15", g.op(w) == OK, &mut fails);
+        let w = g.w_market(15, &listing_regular("BOND"));
+        expect("r8:market_reserved", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        g.op(GB::w_gdep(12, mnpilot::types::ORACLE_BOND_PERP as u64 + 500));
+        let inner12 = GB::w_vote(12, 1, true);
+        let h12 = g.commit_hash(&inner12, &salt);
+        let w = g.w_commit(12, &h12, 5);
+        expect("r8:commit12", g.op(w) == OK, &mut fails);
+        expect("r8:stake_reserved", g.op([11 | (12 << 8), 0, 0, 0, 0, 0, 0, 0]) == mnpilot::STATE_CAP_CODE, &mut fails);
+        // the reserve is released when the commits are pruned (ttl 5 < height 6)
+        g.op(GB::w_height(6));
+        expect("r8:gwd_after_ttl", g.op(GB::w_gwd(14, 1_000, 5)) == OK, &mut fails);
+        let w = g.w_market(15, &listing_regular("BOND"));
+        expect("r8:market_after_ttl", g.op(w) == OK, &mut fails);
+        expect("r8:stake_after_ttl", g.op([11 | (12 << 8), 0, 0, 0, 0, 0, 0, 0]) == OK, &mut fails);
         let pe = run_port(&g.words());
-        expect("r7:port_events", pe.ev == g.ev, &mut fails);
-        expect("r7:ledger_unchanged_by_refusals", g.eng.state.perp_balances.len() == n0 + 1, &mut fails);
+        expect("r8:port_events", pe.ev == g.ev, &mut fails);
         run("r7", &g, &mut fails);
     }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();

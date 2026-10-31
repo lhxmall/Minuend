@@ -227,6 +227,10 @@ pub const MAX_STATE_MARKETS: usize = 256;
 /// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
 /// already holds `cap` accounts (the insurance account included).
 pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap: usize) -> bool {
+    // loop round 8 (R7-M2): the commit bond (see commit_bond_ok)
+    if !commit_bond_ok(op, || s.perp_balances.get(&author).copied().unwrap_or(0), || s.commits.values().filter(|e| e.account == author).count()) {
+        return false;
+    }
     match op {
         BatchOp::Deposit { .. } | BatchOp::Liquidate { .. } => s.accounts.contains_key(&author) || s.accounts.len() < cap,
         // loop round 6 review R6-H3 (R5-L3 with GovDeposit ported): every unit that can add an id to
@@ -255,6 +259,35 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
         // R6-M1: listings are bounded only by the burned fee upstream
         BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
         _ => true,
+    }
+}
+
+/// Loop round 8 review R7-M2 (PILOT consensus rule, refusal code STATE_CAP_CODE like the caps; NOT upstream
+/// semantics -- upstream @ 20326c0 has no commit deposit): every live commit (revealed or not, until it is pruned at
+/// its TTL) reserves COMMIT_BOND_PERP of its author's PERP balance. A Commit needs
+/// `balance >= (live + 1) * COMMIT_BOND_PERP`; a unit that debits its author's PERP (GovWithdraw amount, CreateMarket
+/// fee, oracle Stake bond) is refused when the debit is covered by the balance but would leave less than
+/// `live * COMMIT_BOND_PERP` (a debit larger than the balance keeps upstream's Insufficient). Nothing is moved: the
+/// reservation is a predicate over (balance, live commits), so state, snapshot and MNWIT1 are unchanged and the bond
+/// is "refunded" when the commit is pruned. Filling MAX_STATE_COMMITS now ties up
+/// MAX_STATE_COMMITS * COMMIT_BOND_PERP PERP for up to COMMIT_TTL_HEIGHTS heights instead of costing only unit fees
+/// (fresh ids no longer help: an id needs a PERP ledger entry, itself under the shared account cap).
+/// Applies to a Reveal's inner op too (state_cap_ok runs on it). `balance` / `live` (the author's PERP balance and
+/// live commits) are evaluated only for the four affected kinds: `live` is an O(commits) <= MAX_STATE_COMMITS scan,
+/// the same bound as upstream's per-Commit pending scan.
+pub const COMMIT_BOND_PERP: u128 = 1_000;
+pub fn commit_bond_ok(op: &BatchOp, balance: impl FnOnce() -> u128, live: impl FnOnce() -> usize) -> bool {
+    let debit = match *op {
+        BatchOp::Commit { .. } => None,
+        BatchOp::GovWithdraw { amount, .. } => Some(amount as u128),
+        BatchOp::CreateMarket { .. } => Some(types::CREATE_MARKET_FEE_PERP),
+        BatchOp::Stake { .. } => Some(types::ORACLE_BOND_PERP),
+        _ => return true,
+    };
+    let (balance, reserved) = (balance(), live() as u128 * COMMIT_BOND_PERP);
+    match debit {
+        None => balance >= reserved + COMMIT_BOND_PERP,
+        Some(d) => reserved == 0 || d > balance || balance - d >= reserved,
     }
 }
 
