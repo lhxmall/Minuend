@@ -36,14 +36,16 @@ const chk = (name, r, want) => { const ok = r.halted && Object.keys(want).every(
   // extension area (n_ext + words) after the unit ids; ops naming an offset outside it -> BadAccount 2
   const SEQ = [22, 5000, 0, 0, 0, 0, 0, 0];
   chk('prod: SetSeq refused (2), seq unchanged', runOne(P, batch([SEQ])), { status: 0, ev: [2], height: 10 });
-  const GW0 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // GovWithdraw 0 nonce 1: applies for any id (zero balance)
-  const GW1 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // same nonce again -> DuplicateNonce 6
+  // loop round 8 (test fixed for R7-M1): a GovWithdraw of 0 by an id WITHOUT a PERP ledger entry is refused (19), the
+  // prod image has no PERP fixture, so both withdraws are refused 19 (before R7-M1: applied, then DuplicateNonce 6)
+  const GW0 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // GovWithdraw 0 nonce 1 by a PERP-less id -> 19 (R7-M1)
+  const GW1 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // same again -> 19 (nothing was recorded)
   const VOTE = [18 | (1 << 8), 1, 0, 1, 0, 0, 0, 0];     // no proposal -> NoProposal 12
   const CM = [16 | (1 << 8), 0, 0, 0, 0, 0, 0, 0];       // CreateMarket ext at 0: listing words below, no PERP -> Insufficient 9
   const LIST = [0x544f4f52, 0, 0, 0, 1, 0, 1000, 0, 500, 0, 5, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   const CMX = [16 | (1 << 8), 0, 0, 0, 0, 0, 0, 999];    // offset past the area -> BadAccount 2
   const u = (k) => [k, 2, 3, 4, 5, 6, 7, 8];
-  chk('prod: MNP2 governance ops + extension area', runOne(P, [...batch2([GW0, GW1, VOTE, CM, CMX], [u(1), u(2), u(3), u(4), u(5)]), LIST.length, ...LIST]), { status: 0, ev: [0x80000000, 6, 12, 9, 2], height: 11 });
+  chk('prod: MNP2 governance ops + extension area', runOne(P, [...batch2([GW0, GW1, VOTE, CM, CMX], [u(1), u(2), u(3), u(4), u(5)]), LIST.length, ...LIST]), { status: 0, ev: [19, 19, 12, 9, 2], height: 11 });
   chk('prod: MNP1 governance op needing an extension -> BadAccount 2', runOne(P, batch([CM])), { status: 0, ev: [2], height: 12 }); }
 { const P = image(PROD);
   chk('prod fresh image: refused header at height 1, genesis at height 2 -> height 2', (runOne(P, [0x1234, 0, 0, 0]), runOne(P, batch([]))), { status: 0, height: 2, segs: 2 }); }
