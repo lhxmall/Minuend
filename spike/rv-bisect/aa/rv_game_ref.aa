@@ -10,6 +10,10 @@ $K = 16;            // branching factor
 $T = 3600;          // seconds per move
 $GF = 10000;        // the opener pays this per game; it covers the referee's callback unit
 $GB = 1000;         // bytes sent back with the result (a trigger needs a payment)
+// a primary trigger must carry >= bounce_fees (10000 bytes, ocore MIN_BYTES_BOUNCE_FEE); without a refund the
+// referee kept all of it, so every move cost the mover 10000 + unit fee (attack pass 2: deep games cost the honest
+// operator more than CBOND pays). Keep MK for the refund unit's fee, send the rest back on mids / pick.
+$MK = 2000;
 $d = trigger.data;
 $now = timestamp;
 // a root (and a ref) is 44 base64 chars ending in '=' and has no record separator ':' / ','
@@ -37,7 +41,8 @@ else {
 		$r = $d.roots;
 		require(is_array($r) AND length($r) == $cnt, 'need ' || $cnt || ' roots');
 		require(length(filter($r, 15, $x => !$isR($x))) == 0, 'bad root');
-		$st = {k: 'g_' || $gid, v: $pre || $lo || ':' || $hi || ':' || $g[5] || ':' || $g[6] || ':c:' || ($now + $T), m: join($r, ',')};
+		$st = {k: 'g_' || $gid, v: $pre || $lo || ':' || $hi || ':' || $g[5] || ':' || $g[6] || ':c:' || ($now + $T), m: join($r, ','),
+			rf: max(trigger.output[[asset=base]] - $MK, 0)};
 	}
 	else if ($d.pick) {
 		require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');
@@ -46,7 +51,8 @@ else {
 		$m = split(var['m_' || $gid], ',');
 		$rootAt = $i => $i == 0 ? $g[5] : $i == $cnt + 1 ? $g[6] : $m[$i - 1];
 		$nlo = $pt($j); $nhi = $pt($j + 1);
-		$st = {k: 'g_' || $gid, v: $pre || $nlo || ':' || $nhi || ':' || $rootAt($j) || ':' || $rootAt($j + 1) || ':' || ($nhi - $nlo == 1 ? 's' : 'd') || ':' || ($now + $T)};
+		$st = {k: 'g_' || $gid, v: $pre || $nlo || ':' || $nhi || ':' || $rootAt($j) || ':' || $rootAt($j + 1) || ':' || ($nhi - $nlo == 1 ? 's' : 'd') || ':' || ($now + $T),
+			rf: max(trigger.output[[asset=base]] - $MK, 0)};
 	}
 	else {
 		// resolve: one-step memo decides at a single step; otherwise whoever's move it is loses after the deadline
@@ -63,6 +69,7 @@ else {
  messages: [
   {if: `{$st.cb}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{$st.to}`, amount: `{$GB}`}]}},
   {if: `{$st.cb}`, app: 'data', payload: `{$st.cb}`},
+  {if: `{$st.rf}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{trigger.address}`, amount: `{$st.rf}`}]}},
   {app: 'state', state: `{
 	var[$st.k] = $st.v;
 	if ($st.m) var['m_' || $gid] = $st.m;

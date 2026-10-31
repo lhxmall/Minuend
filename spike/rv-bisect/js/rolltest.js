@@ -312,6 +312,19 @@ groups.aaplayer = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1
     rec('AA player', 'steps = 2^40 exactly (halted early, absorbing tail) accepted', 'ok', ok(await S(C, OP1, ROLL, OBOND, subData(t, 1, 'genesis', { steps: st2, final: fin2 })))); } };
 
 // random adversary fuzz: honest + fraudulent operators racing, griefers, an honest watcher, garbage, random clocks
+// move refunds: a primary trigger must carry >= 10000 bytes (bounce_fees); the referee keeps MK and refunds the rest on
+// mids / pick, so an honest operator's cost per round is MK + unit fee, not 10000 + unit fee (attack pass 2)
+groups.refund = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
+  const MK = M.ref.keep; const o = await open(C, CH1, b1.sid); const lie = T.batch(G0, 1, { k: 11, mut: T.MUT.reg });
+  let s = gv(C, o.gid).split(':'); let { cnt, pt } = pts(+s[3], +s[4]); const op0 = C.b(OP1), g0 = C.b(GAME);
+  let r = await S(C, OP1, GAME, 10000, { mids: o.gid, roots: Array.from({ length: cnt }, (_, i) => b1.roots[pt(i + 1)]) }); rec('refund', 'operator mids with a 10000-byte trigger', 'ok', ok(r));
+  rec('refund', 'operator pays only MK for the move', -MK, C.b(OP1) - op0); rec('refund', 'referee keeps MK', MK, C.b(GAME) - g0);
+  s = gv(C, o.gid).split(':'); ({ cnt, pt } = pts(+s[3], +s[4])); const m = String(C.v(GAME, 'm_' + o.gid)).split(','); let j = 0; while (j < cnt && m[j] === lie.roots[pt(j + 1)]) j++;
+  const ch0 = C.b(CH1); r = await S(C, CH1, GAME, 10000, { pick: o.gid, j }); rec('refund', 'challenger pick with 10000 pays only MK', -MK, ok(r) === 'ok' ? C.b(CH1) - ch0 : ok(r));
+  const op1 = C.b(OP1); r = await S(C, OP1, GAME, MK - 1, { mids: o.gid, roots: [] }); rec('refund', 'a move below MK gets no refund (and a bad move still bounces)', 'bounce', bnc(r, /need|not your move/));
+  const g = game(o, b1, lie, b1); await playAll(C, [g]); rec('refund', 'game still plays out: honest operator wins', 'd', g.winner);
+  r = await S(C, W, GAME, 10000, { resolve: o.gid }); rec('refund', 'resolve of a finished game bounces', 'bounce', bnc(r, /no game/)); };
+
 groups.fuzz = async () => { const RUNS = +(process.env.FUZZ || 6), STEPS = +(process.env.FUZZSTEPS || 60); let seed = +(process.env.FUZZSEED || 11);
   const rnd01 = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }; const pick = a => a[Math.floor(rnd01() * a.length)];
   const OPS = [OP1, OP2, OP3, A('OPFOUR')], GRIEF = [A('G1'), A('G2'), A('G3')], WATCH = A('HONESTWATCH');

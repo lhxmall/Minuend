@@ -19,7 +19,7 @@ const AAS = {
   [ROLL]: { f: M.body + '\n' + M.state, out: (st, L) => { const o = [];
       if (st.call) o.push({ to: GAME, amt: +L('GF'), data: st.call });
       if (st.pay && +st.amt > 0) o.push({ to: st.pay, amt: +st.amt }); return o; } },
-  [GAME]: { f: M.ref.body + '\n' + M.ref.state, out: (st, L) => st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : [] },
+  [GAME]: { f: M.ref.body + '\n' + M.ref.state, out: (st, L, from) => [...(st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : []), ...(+st.rf > 0 ? [{ to: from, amt: +st.rf }] : [])] }, // rf: move refund (trigger - MK)
   [STEP]: { f: STEPF, out: () => [] },
 };
 // an AA that bounces every trigger (used as a hostile operator / challenger that refuses payouts)
@@ -48,7 +48,7 @@ class Chain {
     const r = await run(aa.f, { data: JSON.parse(JSON.stringify(data || {})), address: from, ts: this.ts, stateVars: this.sv, unit, aa: to, outputs: { base: amount }, conn });
     if (r.err) return { err: errMsg(r.err) };
     const st = plain(val(r.locals, 'st')) || {}; const L = k => plain(val(r.locals, k));
-    const outs = aa.out(st, L); const pays = [];
+    const outs = aa.out(st, L, from); const pays = [];
     const runit = rnd();
     for (const o of outs) { if (this.b(to) < o.amt) return { err: 'not enough funds in ' + to.slice(0, 6) + ': has ' + this.b(to) + ' pays ' + o.amt };
       this.bal[to] -= o.amt; pays.push({ from: to, to: o.to, amt: o.amt });

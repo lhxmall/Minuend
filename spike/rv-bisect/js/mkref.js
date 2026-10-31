@@ -19,9 +19,10 @@ ${esc(body)}
  messages: [
   {if: \`{$st.cb}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{$st.to}\`, amount: \`{$GB}\`}]}},
   {if: \`{$st.cb}\`, app: 'data', payload: \`{$st.cb}\`},
+  {if: \`{$st.rf}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{trigger.address}\`, amount: \`{$st.rf}\`}]}},
   {app: 'state', state: \`{${esc(state)}}\`}
  ]
 }]`;
 fs.writeFileSync(__dirname+'/../aa/rv_game_ref.aa', aa);
 const addr = chashOf(aa);
-module.exports={body, state, stepAddr, addr, chashOf};
+module.exports={body, state, stepAddr, addr, chashOf, keep: 2000};
