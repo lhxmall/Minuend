@@ -49,3 +49,31 @@ Loop: attack -> fix -> rerun the full suite, until one pass finds nothing new (3
 - Pass 3 (final): 300/300 evaluator, 2x150 fuzz games, devnet 27/27, riscv-tests unchanged.
 - Open: the claim's `s0` must be bound by the rollup (prev finalized root + batch input root); the challenger must post the
   rv_step memo before the one-step deadline; no differential run against sail-riscv yet.
+
+## Rollup prototype (2026-10-31)
+Design doc (Chinese, beginner level, full flow + constants + costs + gaps): `docs/rv-dispute-design.md`.
+- `aa/rv_rollup.oscript` + `js/mkrollup.js` -> `aa/rv_rollup.aa` (complexity 42, ops **729**): heights submitted in order
+  (`h == top + 1`, one live submission per height = the race), operator bond OBOND 200000, `s0` computed by the AA
+  (pc 0, regs 0, previous final memory root / GENMEM, this batch's input root, step 0), final root must be a halted/trapped
+  state whose parts are given in clear; challengers open parallel games (CBOND 100000, GF 10000 forwarded to the referee);
+  a lost game = fraud: first winner gets CBOND-GF-FEE+OBOND/2 = 188000, the other OBOND/2 is burned, a live fraudulent h
+  voids h..top (`top = h-1`) and the race restarts at h; finalize in order after WIN 86400 s with zero open games
+  (198000 back); voided non-fraud submissions reclaim 198000 after their games end.
+- `aa/rv_game_ref.oscript` + `js/mkref.js` -> `aa/rv_game_ref.aa` (complexity 10, ops **840**): the same 16-ary bisection
+  as `rv_game` in referee mode (no bonds; result called back to the opener `{res, w: 'd'|'c'}` with GB 1000); move timeout
+  3600 s; keeps MK 2000 of each mids/pick trigger and refunds the rest (attack pass 2: without it an honest operator lost money
+  on games deeper than ~1.7e7 steps). `rv_step` unchanged (ops **1850**).
+- Tests: `js/rolltest.js` (real ocore evaluator, multi-AA chain in `js/chain.js`) **176/176**; `js/rolldevnet.js`
+  (aa-testkit devnet) **104/104**, incl. operator / challenger timeouts, two games on one height, fraud voiding with late
+  callbacks and reclaim. riscv-tests 48/50 (unchanged).
+- Recommendation: CBOND 120000 (>= 2.2x the honest operator's worst-case cost at 2^40 steps), or keep 100000 and cap
+  MAXSTEPS at 2^32.
+- tps fee: the 1,205,193-byte tps fee seen on one pick in devnet runs 3/5 is a devnet artifact, not a cost that would build up
+  on mainnet: the first AA trigger of each wallet prepays ocore's local tps estimate, and on devnet a unit's last ball usually
+  has the same timestamp (elapsed 0 -> 1 s, 14 units/s, tps_interval 2, x11 units for an AA trigger without
+  `max_aa_responses`). Settled actual fee 224; the rest stays as that address's tps-fee credit. Clients should still set
+  `max_aa_responses` (1 for submit/mids/pick/finalize/reclaim, 2 for open/resolve) to cut mainnet tps fees ~4-5x.
+  `js/tpsdiag.js` reproduces the analysis from a node's sqlite copy.
+- Known gaps: overpayment not refunded; burned funds locked in the AA; each fraud voiding costs the fraudster only OBOND/2
+  (sock-puppet first challenger); DA unsolved; 2^40 step cap; operators/challengers cannot be AAs; challenger must be online;
+  no sail-riscv cross-check; the Minuend engine is not yet ported to a no_std riscv32im guest.
