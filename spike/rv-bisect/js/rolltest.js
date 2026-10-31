@@ -2,7 +2,7 @@
 // usage: node rolltest.js [filter]     -> prints PASS/FAIL lines and SUMMARY {...}; writes rolltest-results.json
 'use strict';
 const { Chain, ROLL, GAME, STEP, SEG, BIND, PROOF, M, rnd, BOUNCER } = require('./chain.js'); const T = require('./rolltrace.js'); const ref = require('./ref.js'); const fs = require('fs');
-const OBOND = 200000, MAXESC = 10, PRIO = 1800, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
+const OBOND = 200000, MAXESC = 10, VCAP = 6, PRIO = 1800, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const A = s => require(OCP + '/object_hash.js').getChash160(['sig', { pubkey: require('crypto').createHash('sha256').update(s).digest('base64').slice(0, 44) }]); // valid Obyte address per name
 const OP1 = A('OPONE'), OP2 = A('OPTWO'), OP3 = A('OPTHREE'), CH1 = A('CHONE'), CH2 = A('CHTWO'), CH3 = A('CHTHREE'), W = A('WATCHER');
@@ -36,7 +36,7 @@ const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (
 const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
 const subData = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
 // loop round 11 (R10-M1) + 12 (R11-M1): bond = OBOND * 2^min(max(fraud voids at h, global V decayed 1 per 86400 s), MAXESC)
-const bondFor = (C, h) => { const V = Math.max(0, +(C.r('V') || 0) - Math.floor((C.ts - +(C.r('Vt') || 0)) / 86400)); return OBOND * 2 ** Math.min(Math.max(+(C.r('v' + h) || 0), process.env.NOR11 ? 0 : V), MAXESC); };
+const bondFor = (C, h) => { const V = Math.max(0, +(C.r('V') || 0) - Math.floor((C.ts - +(C.r('Vt') || 0)) / 86400)); return OBOND * 2 ** Math.min(Math.max(+(C.r('v' + h) || 0), process.env.NOR11 ? 0 : Math.min(V, process.env.NOR13 ? MAXESC : VCAP)), MAXESC); }; // round 13 (R12-M1): global term capped at VCAP
 async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, Number.isInteger(h) && h >= 1 ? bondFor(C, h) : OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
 async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
 const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
@@ -372,21 +372,24 @@ groups.r12 = async () => { const g = 'r12 global counter'; const G0 = T.genesis(
     const gs = os.map((o, i) => game(o, L, H, H, { chDelay: 10 + 50 * i })); await playAll(C, gs); return { r, L, H, gs }; };
   // (a) R12-L1: V is capped at MAXESC -- a void at V = 10 leaves V = 10 (uncapped it became 11: one more day at the cap
   //     for every honest operator, at no extra cost to the attacker, who pays the capped bond either way)
-  { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(10) }, Vt: { value: new D(C.ts) } };
-    rec(g, '(a) at V = 10 a submission posts OBOND x 2^10', OBOND * 1024, bondFor(C, 1));
+  //     loop round 13 (R12-M1): the stored cap is VCAP = 6 now; a void at V = 6 leaves V = 6
+  { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(VCAP) }, Vt: { value: new D(C.ts) } };
+    rec(g, '(a) at V = VCAP a submission posts OBOND x 2^VCAP', OBOND * 2 ** VCAP, bondFor(C, 1));
     const f = await fraudVoid(C, 1, G0, 'genesis', 41, [CH1]);
-    rec(g, '(a) R12-L1: a fraud void at the cap leaves V = MAXESC (not 11), Vt = now', ['accepted', 'c', 10, C.ts], [bnc(f.r), f.gs[0].winner, +C.r('V'), +C.r('Vt')]); }
+    rec(g, '(a) R12-L1 / R12-M1: a fraud void at the cap leaves V = VCAP (not 7), Vt = now', ['accepted', 'c', VCAP, C.ts], [bnc(f.r), f.gs[0].winner, +C.r('V'), +C.r('Vt')]); }
   // (b) R12-M1 (PoC, accepted/owner): capital amplification. At V = 10 EVERY height posts OBOND x 2^10 for its 24 h window.
   //     Attacker: one fraud void per day keeps V at the cap (net bond / 2 + GF + FEE = 102.412 M with a puppet first winner).
   //     Honest: N heights per day lock N x 204.8 M (returned at finalize). Ratio honest-locked / attacker-burn = 2N.
+  //     loop round 13 (R12-M1 fixed): even a legacy stored V = 10 is read through min(V, VCAP): every honest height posts
+  //     at most OBOND x 2^6 = 12.8 M (was 204.8 M)
   { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(10) }, Vt: { value: new D(C.ts) } }; let prev = { mem: G0, final: 'genesis' }; const N = 3, sids = [], o0 = C.b(OP1);
     for (let h = 1; h <= N; h++) { const H = T.batch(prev.mem, h);
-      if (h === 1) rec(g, '(b) honest h1 with OBOND x 2^9 bounces', 'bounce', bnc(await S(C, OP1, ROLL, OBOND * 512, subData(T.batch(G0, 1), 1, 'genesis')), /bond 204800000/));
-      rec(g, '(b) honest h' + h + ' posts OBOND x 2^10', 'accepted', bnc(await submit(C, OP1, h, H, prev.final))); sids.push(H.sid); prev = H; C.ts += 61; }
+      if (h === 1) rec(g, '(b) honest h1 with OBOND x 2^(VCAP-1) bounces', 'bounce', bnc(await S(C, OP1, ROLL, OBOND * 2 ** (VCAP - 1), subData(T.batch(G0, 1), 1, 'genesis')), /bond 12800000/));
+      rec(g, '(b) honest h' + h + ' posts OBOND x 2^VCAP (not 2^10)', ['accepted', OBOND * 2 ** VCAP], [bnc(await submit(C, OP1, h, H, prev.final)), +C.r('b' + H.sid)]); sids.push(H.sid); prev = H; C.ts += 61; }
     const locked = o0 - C.b(OP1) - 10000;
-    rec(g, '(b) honest capital locked for 24 h: N x 204.8 M', N * OBOND * 1024, locked, { N, locked, attackerBurnPerDay: OBOND * 512 + GF + FEE, ratio: +(locked / (OBOND * 512)).toFixed(1) });
+    rec(g, '(b) honest capital locked for 24 h: N x 12.8 M (round 12: N x 204.8 M)', N * OBOND * 2 ** VCAP, locked, { N, locked, attackerBurnPerDay: OBOND * 2 ** (VCAP - 1) + GF + FEE, ratio: +(locked / (OBOND * 2 ** (VCAP - 1))).toFixed(1) });
     C.ts += WIN; const b0 = C.b(OP1); for (let h = 1; h <= N; h++) await S(C, W, ROLL, 0, { finalize: h });
-    rec(g, '(b) all refunded at finalize (bond - FEE each)', N * (OBOND * 1024 - FEE), C.b(OP1) - b0); }
+    rec(g, '(b) all refunded at finalize (bond - FEE each)', N * (OBOND * 2 ** VCAP - FEE), C.b(OP1) - b0); }
   // (c) multi-challenger: two challengers win on the same fraudulent submission -> one void, V and v_h + 1 once; only
   //     the first winner gets bond / 2
   { const C = new Chain(); const f = await fraudVoid(C, 1, G0, 'genesis', 42, [CH1, CH2]);
@@ -398,6 +401,40 @@ groups.r12 = async () => { const g = 'r12 global counter'; const G0 = T.genesis(
     rec(g, '(d) the upgrade void is not fraud: V = 1, top = 1, v2 = 0', [1, 1, 1], [+C.r('V'), +C.r('top'), +(C.r('v2') || 0) + 1]);
     rec(g, '(d) governance cancel: V unchanged', ['accepted', 1], [bnc(await S(C, M.govAddr, ROLL, 0, { cancel: 1 })), +C.r('V')]);
     const c0 = C.b(OP1); rec(g, '(d) reclaim of the voided h2 pays its escalated bond back', ['accepted', 2 * OBOND - FEE], [bnc(await S(C, OP1, ROLL, 0, { reclaim: h2.sid })), C.b(OP1) - c0]); }
+};
+
+// ---------- loop round 13 (R12-M1 fixed, decision 2026-11-01): global term capped separately at VCAP = 6:
+//            bond = OBOND * 2^min(max(v_h, min(V, VCAP)), MAXESC). (a) a moving-height fraudster over 8 cycles: bonds double
+//            up to 64 x OBOND and stay there (cost still linear at 12.8 M per cycle beyond the cap); the honest re-submits
+//            never exceed 64 x OBOND. (b) the per-height escalation still reaches 2^10. (c) full decay from the cap in VCAP days.
+groups.r13 = async () => { const g = 'r13 separate global cap'; const G0 = T.genesis(); const D = require(OCP + '/../decimal.js'); const OPX = A('FRAUDSTER');
+  const CYC = +(process.env.CYCLES13 || 8);
+  { const C = new Chain(); const x0 = C.b(OPX); let prev = { mem: G0, final: 'genesis' }, bonds = [], hbonds = [];
+    for (let c = 0; c < CYC; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { k: 50 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h);
+      bonds.push(bondFor(C, h)); const r = await submit(C, OPX, h, L, prev.final);
+      const o = await open(C, CH1, L.sid); const gm = game(o, L, H, H); await playAll(C, [gm]);
+      rec(g, '(a) cycle ' + c + ': fraud at h' + h + ' with bond OBOND x 2^' + Math.min(c, VCAP) + ' voided; V = ' + Math.min(c + 1, VCAP), ['accepted', OBOND * 2 ** Math.min(c, VCAP), 'c', Math.min(c + 1, VCAP)], [bnc(r), bonds[c], gm.winner, +C.r('V')]);
+      hbonds.push(bondFor(C, h)); const rh = await submit(C, CH1, h, H, prev.final);
+      rec(g, '(a) cycle ' + c + ': honest re-submit of h' + h + ' posts max(v_h = 1, min(V, 6)) -> OBOND x 2^' + Math.min(Math.max(1, c + 1), VCAP), ['accepted', OBOND * 2 ** Math.min(Math.max(1, c + 1), VCAP)], [bnc(rh), hbonds[c]]);
+      C.ts += 61; prev = H; }
+    const cost = x0 - C.b(OPX), want = bonds.reduce((a, b) => a + b, 0);
+    rec(g, '(a) fraudster bonds: 1, 2, 4, ..., 64, 64 x OBOND (geometric to the cap, then 12.8 M per cycle)', bonds.map((_, c) => OBOND * 2 ** Math.min(c, VCAP)), bonds, { cost, want });
+    rec(g, '(a) fraudster lost every bond in full (honest first winner)', want, cost);
+    rec(g, '(a) honest locked capital per height <= OBOND x 2^VCAP = 12.8 M (round 12: up to 204.8 M)', true, hbonds.every(b => b <= OBOND * 2 ** VCAP), { hbonds, maxHonest: Math.max(...hbonds) });
+    C.ts += WIN; const ch0 = C.b(CH1); let fin = []; for (let h = 1; h <= CYC; h++) fin.push(ok(await S(C, W, ROLL, 0, { finalize: h })));
+    rec(g, '(a) honest heights finalize and are refunded (sum - FEE each)', [Array(CYC).fill('ok'), hbonds.reduce((a, b) => a + b, 0) - CYC * FEE], [fin, C.b(CH1) - ch0]);
+    // (c) decay from the cap: V = 6 at the last void; after k days the global term is 2^(6-k); after 6 days OBOND
+    const vt = +C.r('Vt'); const at = d => { C.ts = vt + 86400 * d; return bondFor(C, CYC + 1); };
+    rec(g, '(c) decay from the cap: days 1..6 -> 2^5 .. 2^0 x OBOND', [5, 4, 3, 2, 1, 0].map(k => OBOND * 2 ** k), [1, 2, 3, 4, 5, 6].map(at));
+    C.ts = vt + 86400 * 6; const Hn = T.batch(prev.mem, CYC + 1);
+    rec(g, '(c) after 6 days a new height posts OBOND on chain', ['accepted', undefined], [bnc(await submit(C, OP2, CYC + 1, Hn, prev.final)), C.r('b' + Hn.sid)]);
+    // honest-locked vs attacker burn at the plateau, per 24 h with a puppet first winner: N x 12.8 M locked vs 6.412 M burned
+    const N = 3; rec(g, '(a) plateau economics (N = 3 heights / day): honest locked N x 12.8 M, attacker burn 6.412 M / day (puppet first winner)', [N * OBOND * 64, OBOND * 32 + GF + FEE], [N * OBOND * 2 ** VCAP, OBOND * 2 ** (VCAP - 1) + GF + FEE]); }
+  // (b) the per-height escalation is not capped by VCAP: with V = 6 stored, v1 = 3 -> 2^6, v1 = 8 -> 2^8, v1 = 15 -> 2^10
+  for (const [v1, ex] of [[3, 6], [8, 8], [15, 10]]) { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(VCAP) }, Vt: { value: new D(C.ts) }, v1: { value: new D(v1) } };
+    const b = OBOND * 2 ** ex;
+    rec(g, '(b) V = 6, v1 = ' + v1 + ': bond OBOND x 2^' + ex + ' (b - 1 bounces, b accepted)', ['bounce', 'accepted'], [bnc(await S(C, OP1, ROLL, b - 1, subData(T.batch(G0, 1), 1, 'genesis')), new RegExp('bond ' + b)),
+      bnc(await S(C, OP1, ROLL, b, subData(T.batch(G0, 1), 1, 'genesis')))]); }
 };
 
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');

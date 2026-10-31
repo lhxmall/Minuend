@@ -55,6 +55,11 @@ $lf = var['lf'] OTHERWISE 0;         // last finalized height
 // too; it is stored as b<sid> and paid back in full (minus FEE) at finalize / reclaim, overpayment refunded at submit.
 // Must come after $now (an Oscript local defined before $now = timestamp would read it as 0).
 $VDECAY = 86400;
+// Loop round 13 (R12-M1, decision 2026-11-01 by the assistant per the owner's brief; owner may override): the global term
+// is capped SEPARATELY at VCAP = 6: bond = OBOND * 2^min(max(v_h, min(V, VCAP)), MAXESC). The per-height escalation
+// still reaches 2^MAXESC at an attacked height; the global term (which every honest operator pays on every height while
+// an attack lasts) is at most 2^6 = 64 x OBOND = 12.8 M bytes per height. V itself is stored capped at VCAP.
+$VCAP = 6;
 $Vdec = floor(($now - (var['Vt'] OTHERWISE 0)) / $VDECAY);
 $Vraw = var['V'] OTHERWISE 0;
 $Vnow = $Vraw > $Vdec ? $Vraw - $Vdec : 0;
@@ -97,7 +102,8 @@ else if ($d.submit) {
 	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
 	$paid = trigger.output[[asset=base]];
 	$vh = var['v' || $h] OTHERWISE 0;
-	$ex = $vh > $Vnow ? $vh : $Vnow;
+	$Vg = $Vnow < $VCAP ? $Vnow : $VCAP;   // loop round 13 (R12-M1): global term capped separately
+	$ex = $vh > $Vg ? $vh : $Vg;
 	$bond = $OBOND * 2^min($ex, $MAXESC);   // loop round 11 (R10-M1) + round 12 (R11-M1: max with the global V)
 	require($paid >= $bond, 'bond ' || $bond);
 	$pw = split(var['p' || $h] OTHERWISE '', ':');
@@ -261,7 +267,7 @@ else bounce('unknown command');
 		if ($st.void) {
 			var['top'] = $st.h - 1;
 			var['v' || $st.h] += 1;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
-			var['V'] = min($Vnow + 1, $MAXESC);   // loop round 12 (R11-M1): global counter (decayed value + 1, capped: R12-L1), decay restarts now
+			var['V'] = min($Vnow + 1, $VCAP);   // loop round 12 (R11-M1): global counter (decayed value + 1, capped: R12-L1 -> round 13: at VCAP), decay restarts now
 			var['Vt'] = $now;
 			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO);   // ... and only this winner may submit h for PRIO s
 		}
