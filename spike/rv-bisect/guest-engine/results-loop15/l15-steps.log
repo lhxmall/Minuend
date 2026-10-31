@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized] target(s) in 21.42s
+== slmigdump 3 200 60
+{"segments":3,"dir":"/data/hark/spike-rv/loop15/sl/mig3","migration":{"mig":"mig.bin","words":1876,"root":"0549e454444f5f9ef00842387dccf5a6cf85074ec9ced5f19184ee96a6d02959","segs":3}}
+digest 77739048549be380a9fb1e5903235c4e2b47120c205c65f725f416c7fcd78ca5:1876
+    Finished `release` profile [optimized] target(s) in 6.19s
+    Finished `release` profile [optimized] target(s) in 0.00s
+== slmig.js
+{"run":"migration","ok":true,"status":0,"steps":10393985,"root_ok":true,"words":1876}
+{"run":"sl002.bin","height":4,"units":60,"ok":true,"status":0,"steps":23306297}
+{"run":"sl003.bin","height":6,"units":60,"ok":false,"status":0,"steps":24248137,"roots":[true,false]}
+{"run":"sl004.bin","height":8,"units":18,"ok":false,"status":15,"steps":9129807,"roots":[false,false]}
+{"run":"neg","ok":true,"second_migration_status":8,"tampered_status":7}
+{"dir":"/data/hark/spike-rv/loop15/sl/mig3","migration_ok":true,"segments":3,"ok":1,"neg_ok":true,"all_ok":false}
+== sldump 3 300 100
+{"segments":4,"dir":"/data/hark/spike-rv/loop15/sl/s3-300-100"}
+{"seg":"seg000.bin","units":100,"session_steps":20146074,"stateless_steps":17587392,"ratio":0.873,"witness_bytes":3267,"leaves_verified":157,"node_hashes":214,"sl_peak_heap":207040,"session_heap":70400,"ok":true}
+{"seg":"seg001.bin","units":100,"session_steps":29721760,"stateless_steps":28056365,"ratio":0.944,"witness_bytes":20366,"leaves_verified":192,"node_hashes":455,"sl_peak_heap":352736,"session_heap":94144,"ok":true}
+{"seg":"seg002.bin","units":100,"session_steps":28389291,"stateless_steps":31032979,"ratio":1.093,"witness_bytes":24326,"leaves_verified":209,"node_hashes":525,"sl_peak_heap":362544,"session_heap":117440,"ok":true}
+{"seg":"seg003.bin","units":31,"session_steps":9275050,"stateless_steps":23683606,"ratio":2.553,"witness_bytes":27154,"leaves_verified":203,"node_hashes":568,"sl_peak_heap":362544,"session_heap":120512,"ok":true}
+{"dir":"/data/hark/spike-rv/loop15/sl/s3-300-100","segments":4,"ok":4,"units":331,"session_steps":87532175,"stateless_steps":100360342,"ratio":1.147,"session_steps_per_unit":264448,"stateless_steps_per_unit":303203}
+SDONE

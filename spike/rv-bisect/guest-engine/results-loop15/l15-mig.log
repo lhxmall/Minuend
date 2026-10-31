@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 17.57s
+== slmigdump 3 200 60
+{"segments":3,"dir":"/data/hark/spike-rv/loop15/sl/mig3","migration":{"mig":"mig.bin","words":1876,"root":"0549e454444f5f9ef00842387dccf5a6cf85074ec9ced5f19184ee96a6d02959","segs":3}}
+digest 77739048549be380a9fb1e5903235c4e2b47120c205c65f725f416c7fcd78ca5:1876
+    Finished `release` profile [optimized] target(s) in 0.00s
+    Finished `release` profile [optimized] target(s) in 0.00s
+== slmig.js
+{"run":"migration","ok":true,"status":0,"steps":10393985,"root_ok":true,"words":1876}
+{"run":"sl002.bin","height":4,"units":60,"ok":true,"status":0,"steps":23306297}
+{"run":"sl003.bin","height":5,"units":60,"ok":true,"status":0,"steps":24248137}
+{"run":"sl004.bin","height":6,"units":18,"ok":true,"status":0,"steps":17930347}
+{"run":"neg","ok":true,"second_migration_status":8,"tampered_status":7}
+{"dir":"/data/hark/spike-rv/loop15/sl/mig3","migration_ok":true,"segments":3,"ok":3,"neg_ok":true,"all_ok":true}
+SDONE

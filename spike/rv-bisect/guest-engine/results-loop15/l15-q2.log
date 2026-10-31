@@ -1,0 +1,14 @@
+== slpoc15 (23:02:11)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27948},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":19,"iterations":14,"witness_bytes":8633},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6"],"needs":20,"iterations":10,"witness_bytes":4249},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]}]}
+exit 0 (23:02:11)
+== sladv 6 120 wd (23:02:11)
+{"segments":29,"cases":3766,"sound":3766,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[22,22,0],"book:hide-level-in-trie":[22,22,0],"book:omit-best-level":[36,36,0],"book:reorder-fifo":[16,16,0],"duplicate:account":[29,29,0],"extra:valid":[29,0,29],"flip:records":[87,80,7],"flip:tree":[87,87,0],"forge:absent-via-leaf-key":[21,21,0],"forge:account":[23,23,0],"forge:self-consistent":[23,23,0],"forge:self-consistent:bound":[23,23,0],"honest":[29,0,29],"light:forged-collateral":[29,29,0],"light:forged-digest":[29,29,0],"light:user-account":[23,23,0],"limit:accounts":[29,29,0],"omit:account":[519,519,0],"omit:aord":[519,446,73],"omit:bmp":[498,315,183],"omit:level":[143,143,0],"omit:light":[29,28,1],"omit:market":[28,6,22],"omit:order":[83,50,33],"omit:path":[6,3,3],"omit:wdl":[84,84,0],"trailing":[29,29,0],"tree:leaf-as-opaque":[1137,1017,120],"truncate":[29,29,0],"wdl:add-record":[25,25,0],"wdl:claim-absent":[17,17,0],"wdl:drop-record":[17,17,0],"wrong-root":[23,11,12],"wrong-root:bound":[23,23,0]},"unsound_first":[]}
+exit 0 (23:02:11)
+TDONE

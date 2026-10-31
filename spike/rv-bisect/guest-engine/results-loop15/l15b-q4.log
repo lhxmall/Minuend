@@ -1,0 +1,14 @@
+== slpoc15 (23:23:08)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27948},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":19,"iterations":14,"witness_bytes":8633},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6", "6"],"needs":20,"iterations":10,"witness_bytes":4249},
+{"case":"P6 single omissions from the P3 witness","ok":true,"runs":20,"refused":20,"wrong":0},
+{"case":"P7 R2-E-3: withdraw against pre-existing resting IM","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["9", "applied/0"],"needs":5,"iterations":2,"witness_bytes":2337},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]},
+{"case":"P5 R15-M1 migration bounds: level of 4097 refused, 4096 accepted","ok":true,"status_over":16,"status_at":0,"root_at_ok":true}]}
+exit 0 (23:23:08)
+TDONE

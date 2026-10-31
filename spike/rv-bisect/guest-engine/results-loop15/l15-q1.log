@@ -1,0 +1,22 @@
+== slpoc15 (22:58:21)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27948},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":19,"iterations":14,"witness_bytes":8633},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6"],"needs":20,"iterations":10,"witness_bytes":4249}]}
+exit 0 (22:58:21)
+== slcaps (22:58:21)
+{"ok":true,"status":0,"units":["19", "applied/0", "19", "applied/0", "applied/1"],"level_orders":4096,"needs":99,"iterations":90,"witness_bytes":742754,"leaves_verified":4400}
+exit 0 (22:58:22)
+== slfuzz 20 300 (22:58:22)
+{"mode":"gen","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":0,"segments":138,"units":7425,"witness_bytes":3741887,"max_witness":59808,"leaves_verified":29946,"tree_nodes":40762,"sl_hashes":144532,"session_hashes":109768,"operator_iterations":5746,"first_bad":""}
+exit 0 (22:58:23)
+== slfuzz 20 300 wd (22:58:23)
+{"mode":"wd","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":0,"segments":157,"units":8345,"witness_bytes":4465366,"max_witness":65692,"leaves_verified":34192,"tree_nodes":48254,"sl_hashes":166190,"session_hashes":115879,"operator_iterations":6208,"first_bad":""}
+exit 0 (22:58:25)
+== sladv 4 120 wd (22:58:25)
+{"segments":21,"cases":2588,"sound":2588,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[16,16,0],"book:hide-level-in-trie":[16,16,0],"book:omit-best-level":[27,27,0],"book:reorder-fifo":[14,14,0],"duplicate:account":[21,21,0],"extra:valid":[21,0,21],"flip:records":[63,60,3],"flip:tree":[63,63,0],"forge:absent-via-leaf-key":[15,15,0],"forge:account":[17,17,0],"forge:self-consistent":[17,17,0],"forge:self-consistent:bound":[17,17,0],"honest":[21,0,21],"light:forged-digest":[21,21,0],"light:user-account":[17,17,0],"limit:accounts":[21,21,0],"omit:account":[354,354,0],"omit:aord":[354,307,47],"omit:bmp":[317,190,127],"omit:level":[86,86,0],"omit:light":[21,20,1],"omit:market":[20,4,16],"omit:order":[59,38,21],"omit:path":[5,3,2],"omit:wdl":[55,55,0],"trailing":[21,21,0],"tree:leaf-as-opaque":[837,746,91],"truncate":[21,21,0],"wdl:add-record":[17,17,0],"wrong-root":[17,8,9],"wrong-root:bound":[17,17,0]},"unsound_first":[]}
+exit 0 (22:58:26)
+TDONE

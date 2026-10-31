@@ -1216,6 +1216,49 @@ pub fn slpoc15() -> String {
         all_ok &= l.contains("\"ok\":true");
         res.push(l);
     }
+    // ---- P8 omissions on minimal withdraw segments whose outcome depends on state the catch-all never sees:
+    // (a) a dust withdraw re-using an existing nonce (DuplicateNonce before Risk) -- needs the wdl set;
+    // (b) the P7 R2-E-3 refusal -- needs the author's resting orders. Every single omission: refused or identical ----
+    {
+        let u = USD_SCALE as i64;
+        let mut sa = mnpilot::state::ChainState::genesis();
+        let mut a = mnpilot::account::Account::new(id(1));
+        a.collateral = 10_000 * USD_SCALE as i128;
+        sa.put_account(id(1), a);
+        sa.withdrawals.insert((id(1), 77), mnpilot::types::Withdrawal { amount: USD_SCALE as i128, pending: true, height: sa.height });
+        sa.withdrawn_total.insert(id(1), USD_SCALE as i128);
+        let _ = sa.take_dirty();
+        let mut sb = mnpilot::state::ChainState::genesis();
+        let mut b1 = mnpilot::account::Account::new(id(1));
+        b1.collateral = 100_000 * USD_SCALE as i128;
+        sb.put_account(id(1), b1);
+        sb.book_mut(M(1)).sl_restore(mnpilot::Order {
+            id: mnpilot::types::order_id(id(1), M(1), 1), account: id(1), market: M(1), side: mnpilot::types::Side::Bid,
+            typ: mnpilot::types::OrderType::Limit, tif: mnpilot::types::TimeInForce::Gtc, price: MID - 10 * DOLLAR, qty: QTY_SCALE,
+            remaining: QTY_SCALE, seq: 0, isolated: false, margin_left: 0,
+        });
+        sb.seen_client_seq.insert(id(1), 1);
+        let _ = sb.take_dirty();
+        for (nm, st, seg) in [("P8a dup-nonce dust", &sa, seg_words(&[1], &[wd(0, u / 2, 77)])), ("P8b resting IM", &sb, seg_words(&[1], &[wd(0, 95_000 * u, 1)]))] {
+            let (post, ev_ref) = direct(st, &seg);
+            let want = sl::s_root(&post);
+            let b = WitBuilder::new(st);
+            let (needs, _, o0, ev0, _) = operate(&b, &seg).unwrap();
+            let honest = o0.status == 0 && o0.end_root == want && ev0 == ev_ref;
+            let (mut runs, mut wrong) = (0, 0);
+            for nd in &needs {
+                let mut n2 = needs.clone();
+                n2.remove(nd);
+                let (o, ev) = run_sl(&seg, &b.build(&n2));
+                runs += 1;
+                if o.status == 0 && (o.end_root != want || ev != ev_ref) {
+                    wrong += 1;
+                }
+            }
+            all_ok &= honest && wrong == 0;
+            res.push(format!("{{\"case\":\"{} single omissions\",\"ok\":{},\"honest\":{},\"runs\":{},\"wrong\":{},\"ev\":{:?}}}", nm, honest && wrong == 0, honest, runs, wrong, ev_ref));
+        }
+    }
     // ---- P4 lazy expiry of withdrawal records (stateless chain: a wdl: leaf may still list records older than the
     // replay window; session semantics = pruned) ----
     {

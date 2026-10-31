@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 1m 02s
+    Finished `release` profile [optimized] target(s) in 37.71s
+    Finished `release` profile [optimized] target(s) in 16.01s
+    Finished `release` profile [optimized] target(s) in 39.70s
+f36c325d4ab9ed7adbbbcbac7c90fde9ae126fcb  /data/hark/target-l15b-host/release/engine-diff
+a13a4ffd1a3126d4f112083346399838de6ec24b  /data/hark/target-l15b-gsl/riscv32im-unknown-none-elf/release/rvengine
+43f65cb4cff03b5eba0142bb9b1bac10f57c2050  /data/hark/target-l15b-g/riscv32im-unknown-none-elf/release/rvengine
+BUILDDONE

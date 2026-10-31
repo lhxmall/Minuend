@@ -217,6 +217,19 @@ leaf with a forged key (status 0, wrong root) — PoC 15 / 15 before, 273 / 273 
 cap), R14-H2 (H, fixed in the guest: the image keeps its last good end root in the carried memory and refuses a witness for another start root),
 R14-M1 / M3 fixed, R14-M2 open. `sladv` 45 908 adversarial cases, 0 unsound; riscv32im steps 0.94 – 1.13 × the session on full segments (fixed ≈ 2.4 M per segment), peak heap ≤ 0.4 MB.
 
+## Loop round 15 (2026-11-01) — govwit default, stateless production items (withdraw, height hook, migration, light insurance)
+
+`findings/rv-loop-15.md`, `docs/rv-stateless-guest.md` §2–§4, §9, §11. govwit is the default feature (consensus change,
+see the top of this file). Stateless image: **Withdraw** (`wdl:` withdrawal-record leaves, R2-E-3 inputs loaded),
+the **height hook** (bound run number → engine height, lazy withdrawal expiry), **MNWIT-S genesis by migration**
+(export-digest-bound migration run, MNWIT-S root over the decoded session state, per-object bounds check), the **light
+insurance record** (R14-M2), `apos:` in digest form. Review: **R15-H1 (H, fixed)** the round-14 `apos:` leaf listed the
+markets in decimal and overflowed the 384-byte leaf buffer (guest panic → market halt) for 64 positions in high market
+ids; R15-M1 (fixed) migration refuses levels the stateless image could never load; R15-L1 / L2 fixed; I1–I4 documented
+(the rollup must bind a migration run by its digest, not the root chain). Tests: see the findings (slpoc15 P1–P8,
+slmig with height jumps against a lazy-commitment reference, `js/slmig.js` guest-level migration + chained runs,
+slfuzz / sladv incl. the `wd` workload, mutants `loop15-mut.py`).
+
 ## Loop round 13 (2026-11-01) — R12-M1 fixed: global term capped separately (rv_rollup rule change)
 
 `findings/rv-loop-13.md`, design §8 item 3. Decision (2026-11-01, by the assistant per the owner's brief; owner may

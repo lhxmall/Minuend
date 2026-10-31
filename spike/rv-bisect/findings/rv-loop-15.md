@@ -6,7 +6,7 @@ Branch `spike/rv-bisect`, parent 6e150e4 (the brief named c5d1d9d as the pushed 
 `js/slmig.js`, mutants `guest-engine/scripts/loop15-mut.py`. Box logs: `guest-engine/results-loop15/`. Notes:
 work/rv-rollup-notes.md "Loop round 15".
 
-Status: **FINAL** for this round's scope (see "What remains").
+Status: **FINAL** for this round's scope (all box rows collected) (see "What remains").
 
 ## What was done
 
@@ -28,6 +28,8 @@ Status: **FINAL** for this round's scope (see "What remains").
    * **MNWIT-S genesis by migration** — `stateless::migrate` / guest run `[SL_MIG_MAGIC, snapshot words]`: only a fresh
      lineage without a compiled genesis root, only the compiled-in export digest (`MNPILOT_IMPORT_DIGEST`, the R4-S1
      binding); MNWIT-S root over the decoded session state; per-object bounds check (R15-M1); sets `SL_ROOT` / `SL_RUNS`.
+     The decoded session's MNWIT1 tree is freed before the MNWIT-S tree is built (peak memory); a guest-level migration
+     of a session at the caps (256 accounts) was not measured (JS model too slow) — listed under "What remains".
    * Not done this round (budget, correctness first): liquidation / ADL, oracle / funding, governance / commit-reveal in
      stateless mode, linked-FIFO levels (design §11).
 
@@ -47,13 +49,39 @@ Status: **FINAL** for this round's scope (see "What remains").
 
 Totals: **C 0 · H 1 (fixed) · M 2 (fixed) · L 2 (fixed) · I 4**.
 
-## Tests
+## Tests (box, final binary f36c325d…, `results-loop15/l15b-final.log`; engine-diff `--features stateless`, govwit default)
 
-_filled from the box runs (results-loop15/), see below_
+| run | result |
+|---|---|
+| `slpoc15` | **all ok**: P1 R15-H1 (status 0, root + events = direct), P2 R14-M2 (light: status 0, fee credited; round-14 full path 12; light of a user account 12; forged digest 12), P3 withdraw paths, P4 lazy expiry (expired nonce re-used → applied, live duplicate → 6, untouched extra set unchanged), P5 R15-M1 (4 097 → 16, 4 096 → 0 with the host root), P6 20 / 20 single omissions refused, P7 R2-E-3 against pre-existing resting IM, P8a / P8b single omissions 0 wrong |
+| `slcaps` | ok (round-14 caps unchanged) |
+| `slmig 40 300 0` / `slmig 40 300 900` | **40 / 40** each: 40 migrations, 40 / 40 negative sets (tampered word / wrong digest → 7, non-fresh → 8, no compiled digest → 10), 184 stateless segments (8 442 units) chained on the migration root with the height hook; with height jumps 429 sets held expired records, every root = lazy-commitment reference, events = session |
+| `slfuzz` gen 300 × 300 / 100 × 1000 / adv 300 × 200 / ora 200 × 300 | 300 / 300, 100 / 100, 300 / 300, 200 / 200 (0 bad segments; ora: 201 unsupported first segments as in round 14) |
+| `slfuzz` **wd** 300 × 300 / 60 × 1500 | **300 / 300** (3 208 segments, 127 097 units), **60 / 60** (2 484 segments, 106 205 units; pending-cap reached) |
+| `sladv 40 200` (gen) | 325 segments, **46 719** cases, 0 unsound (incl. A14 light:forged-digest / forged-collateral / user-account) |
+| `sladv 30 200 wd` | 253 segments, **37 822** cases, 0 unsound (incl. A15 wdl:drop-record / claim-absent / add-record, omit:wdl, omit:light) |
+| session suites (quick, same binary) | govedge 9 / 9, govwit 1 / 1, fuzz 40 / 40, witfuzz 40 / 40, liqfuzz 40 / 40, segfuzz 40 / 40, govfuzz 40 / 40; the session `prod` guest image is byte-identical to round 14 (`43f65cb4…`, `l15b-build.log`) |
+| guest-level (riscv32im, JS model, `l15-mig.log`) | `js/slmig.js` on a `prod,stateless` image built with the export digest: migration run status 0, SEG roots = host MNWIT-S root (10.4 M steps, 1 876 snapshot words); 3 chained stateless runs at heights 4, 5, 6 (from `SL_RUNS`) status 0, events + roots = reference; second migration → 8, tampered snapshot on a fresh image → 7. First run caught the harness height bug R15-L2 |
+| steps (`l15-steps.log`, gen 3 · 300 · 100) | 4 / 4 ok; stateless 100.4 M vs session 87.5 M steps (1.15 ×; round 14: 1.13 ×), peak heap 0.36 MB |
 
-## Mutants (`guest-engine/scripts/loop15-mut.py`)
+## Mutants (`guest-engine/scripts/loop15-mut.py`; killed = slpoc15 not ok, sladv unsound, slfuzz bad segment, or a panic)
 
-_filled from l15-mut.log_
+| mutant | result |
+|---|---|
+| R15-H1-preFix-decimal-apos (round-14 decimal `apos:`) | **killed** — slpoc15 panics (PoC of R15-H1) |
+| light-any-account (light record accepted for any id) | killed (slpoc15 P2) |
+| light-apos-unchecked | killed (slpoc15) |
+| light-apos-unchecked + update-unverified | killed (slpoc15) |
+| light-acct-unchecked + update-unverified | killed (sladv wd, 26 unsound: `light:forged-collateral`) |
+| light-end-check-off (end-root membership check of a light record) | survives — **equivalent** for the current op set (no supported op changes the insurance membership or gives it positions); kept as defence for future ops |
+| wdl-pre-off (Withdraw without the author's `wdl` set) | survived pass 1 (the post catch-all caught every applied case); **killed** after P8a (dup-nonce dust withdraw: DuplicateNonce precedes Risk) — `l15-mut3.log` |
+| wdl-pre + post-off | killed (sladv wd, 47) |
+| wdl-unchecked + update-unverified | killed (sladv wd, 41) |
+| wdl-expiry-filter-off | killed (slpoc15 P4) |
+| wdl-rewrite-always (rewrite untouched sets) | killed (slpoc15 P4: untouched extra set with an expired record) |
+| withdraw-aord-pre-off (R2-E-3 inputs not required) | survived pass 1; **killed** after P7 (pre-existing resting IM) — `l15-mut2.log` |
+
+11 / 12 killed, 1 equivalent.
 
 ## What remains
 
@@ -61,4 +89,5 @@ Design §11: liquidation / ADL (per-market OI leaves, ordered ADL candidate inde
 funding in stateless mode, governance / commit-reveal (`weight_snapshot` O(holders)), CreateMarket, linked-FIFO levels
 (drops whole-level loading, the level cap and R15-M1), lazy expiry for commits / oracle unbonding once those ops are
 supported, rollup integration of the migration run (R15-I1) and DA of the witness, operator touched-set tracking,
-upstream mirroring of the leaf kinds (`apos` digest form, `wdl`).
+upstream mirroring of the leaf kinds (`apos` digest form, `wdl`), guest-level migration cost / peak heap for a session
+at the caps (needs a sail / native run, not the JS model).

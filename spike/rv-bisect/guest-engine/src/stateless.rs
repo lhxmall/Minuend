@@ -1797,7 +1797,9 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
     let mut rd1 = |i: u32| rd(1 + i);
     let mut r = crate::snapshot::SnapR::new(&mut rd1, *words);
     match crate::snapshot::decode(&mut r) {
-        Ok(sess) if r.i == *words => {
+        Ok(mut sess) if r.i == *words => {
+            // the decoded session's MNWIT1 tree is not needed: free it before the MNWIT-S tree is built (peak memory)
+            drop(sess.w.take());
             let st = &sess.eng.state;
             // R15-M1: every object must stay loadable under the stateless image's per-object bounds
             let mut expo: BTreeMap<AccountId, BTreeSet<u32>> = BTreeMap::new();

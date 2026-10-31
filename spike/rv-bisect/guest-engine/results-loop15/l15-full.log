@@ -1,0 +1,38 @@
+== slpoc15 (23:03:54)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27948},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":19,"iterations":14,"witness_bytes":8633},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6"],"needs":20,"iterations":10,"witness_bytes":4249},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]}]}
+exit 0 (23:03:54)
+== slcaps (23:03:54)
+{"ok":true,"status":0,"units":["19", "applied/0", "19", "applied/0", "applied/1"],"level_orders":4096,"needs":99,"iterations":90,"witness_bytes":742754,"leaves_verified":4400}
+exit 0 (23:03:54)
+== slfuzz 300 300 (23:03:54)
+{"mode":"gen","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":2836,"units":112794,"witness_bytes":78473446,"max_witness":73342,"leaves_verified":548705,"tree_nodes":890858,"sl_hashes":2845247,"session_hashes":1679553,"operator_iterations":110062,"first_bad":""}
+exit 0 (23:04:30)
+== slfuzz 100 1000 (23:04:30)
+{"mode":"gen","batches":100,"ok":100,"bad_segments":0,"unsupported_segments":0,"segments":2079,"units":107581,"witness_bytes":94655578,"max_witness":99367,"leaves_verified":639340,"tree_nodes":969999,"sl_hashes":3283429,"session_hashes":1845273,"operator_iterations":86391,"first_bad":""}
+exit 0 (23:05:48)
+== slfuzz 300 200 adv (23:05:48)
+{"mode":"adv","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":1662,"units":62300,"witness_bytes":9043573,"max_witness":15129,"leaves_verified":108776,"tree_nodes":98575,"sl_hashes":359670,"session_hashes":105062,"operator_iterations":30769,"first_bad":""}
+exit 0 (23:06:00)
+== slfuzz 200 300 ora (23:06:00)
+{"mode":"ora","batches":200,"ok":200,"bad_segments":0,"unsupported_segments":201,"segments":1655,"units":75765,"witness_bytes":48344432,"max_witness":72947,"leaves_verified":320992,"tree_nodes":542913,"sl_hashes":1687168,"session_hashes":894238,"operator_iterations":55507,"first_bad":""}
+exit 0 (23:07:07)
+== slfuzz 300 300 wd (23:07:07)
+{"mode":"wd","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":3208,"units":127097,"witness_bytes":92004316,"max_witness":76882,"leaves_verified":625075,"tree_nodes":1038840,"sl_hashes":3252762,"session_hashes":1766689,"operator_iterations":118503,"first_bad":""}
+exit 0 (23:09:44)
+== slfuzz 60 1500 wd (23:09:44)
+{"mode":"wd","batches":60,"ok":60,"bad_segments":0,"unsupported_segments":0,"segments":2484,"units":106205,"witness_bytes":128680212,"max_witness":125461,"leaves_verified":780145,"tree_nodes":1279737,"sl_hashes":4165691,"session_hashes":1469012,"operator_iterations":88034,"first_bad":""}
+exit 0 (23:12:30)
+== sladv 40 200 (23:12:30)
+{"segments":325,"cases":46719,"sound":46719,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[274,274,0],"book:hide-level-in-trie":[274,274,0],"book:omit-best-level":[478,478,0],"book:reorder-fifo":[173,173,0],"duplicate:account":[325,325,0],"extra:valid":[325,0,325],"flip:records":[975,921,54],"flip:tree":[975,974,1],"forge:absent-via-leaf-key":[273,273,0],"forge:account":[284,284,0],"forge:self-consistent":[284,284,0],"forge:self-consistent:bound":[284,284,0],"honest":[325,0,325],"light:forged-collateral":[325,325,0],"light:forged-digest":[325,325,0],"light:user-account":[284,284,0],"limit:accounts":[325,325,0],"omit:account":[5313,5313,0],"omit:aord":[5313,4682,631],"omit:bmp":[7902,4550,3352],"omit:level":[4720,4720,0],"omit:light":[325,317,8],"omit:market":[317,42,275],"omit:order":[974,672,302],"omit:path":[270,88,182],"trailing":[325,325,0],"tree:leaf-as-opaque":[13857,12181,1676],"truncate":[325,325,0],"wrong-root":[285,197,88],"wrong-root:bound":[285,285,0]},"unsound_first":[]}
+exit 0 (23:13:36)
+== sladv 30 200 wd (23:13:36)
+{"segments":253,"cases":37822,"sound":37822,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[216,216,0],"book:hide-level-in-trie":[216,216,0],"book:omit-best-level":[376,376,0],"book:reorder-fifo":[130,130,0],"duplicate:account":[253,253,0],"extra:valid":[253,0,253],"flip:records":[759,716,43],"flip:tree":[759,758,1],"forge:absent-via-leaf-key":[213,213,0],"forge:account":[223,223,0],"forge:self-consistent":[223,223,0],"forge:self-consistent:bound":[223,223,0],"honest":[253,0,253],"light:forged-collateral":[253,253,0],"light:forged-digest":[253,253,0],"light:user-account":[223,223,0],"limit:accounts":[253,253,0],"omit:account":[4301,4301,0],"omit:aord":[4301,3854,447],"omit:bmp":[5717,3358,2359],"omit:level":[3884,3884,0],"omit:light":[253,246,7],"omit:market":[246,30,216],"omit:order":[727,505,222],"omit:path":[208,69,139],"omit:wdl":[678,678,0],"trailing":[253,253,0],"tree:leaf-as-opaque":[10845,9550,1295],"truncate":[253,253,0],"wdl:add-record":[241,241,0],"wdl:claim-absent":[195,195,0],"wdl:drop-record":[195,195,0],"wrong-root":[223,148,75],"wrong-root:bound":[223,223,0]},"unsound_first":[]}
+exit 0 (23:14:13)
+TDONE
