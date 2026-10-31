@@ -67,9 +67,9 @@ Totals: **C 0 · H 0 · M 3 · L 5 · I 8** — R6-M2 and R7-M1 fixed, R7-M2 doc
 | proofs / scen host / selftest + depthsel / heapsim | 0 / 829 291 forged · 47 / 47 · clean · ≤ 19.2 MB |
 | AA mutation (`js/aamut-l7.py`, ts rules) | 8 / 9 killed, 1 equivalent until 2106 |
 | rolltest (round-7 AAs, sandbox ocore 0.4.8) | 333 / 333 incl. group `ts` 23 / 23 |
-| rolldevnet (round-7 AAs, devnet clock ts, `l7rd.sh`) | 82 PASS / 0 FAIL at collection (2026-11-01 00:50 CST; still running, the round-4 devnet run has 149 checks) |
+| rolldevnet (round-7 AAs, devnet clock ts, `l7rd.sh`) | **149 / 149 PASS** (RDDONE exit 0, 2026-11-01 00:50 CST; filled in loop round 9) |
 | prodheight.js on the round-7/8 prod image | 15 / 16 with the round-7 script (stale GovWithdraw(0) expectation, R8-T2) → 16 / 16 fixed |
-| robust-limit, guest-poc, liq/snap/cap 300, JS-guest runs, sail, statecap | liq / snap / cap 300 still running at collection; robust-limit, guest-poc, JS-guest runs, sail, statecap *not reached* |
+| robust-limit, guest-poc, liq/snap/cap 300, JS-guest runs, sail, statecap | still running at the loop-round-9 collection (2026-11-01 00:55 CST: liqfuzz 300 in progress, robust-limit / guest-poc JS-guest jobs running since 15:10 UTC); JS-guest runs, sail, statecap *not reached*. The round-8 suite (`loop8-suite.sh`, rv-loop-8) re-runs every one of these on the round-8 code |
 
 ### Round-7 guest mutation subset (`scripts/loop7-mut.sh`, fail-fast; `l7-mut.log`; the first run is void: `l7-mut-invalid.log`)
 

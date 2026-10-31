@@ -135,3 +135,85 @@ PASS | 6c finalize pays OBOND - FEE | expected 198000 | actual 198000
 PASS | 6c lf = 5 | expected 5 | actual 5 
 PASS | 6d fraudulent h6 by op2 | expected "ok" | actual "ok" 
 PASS | 6d h7 by op1 on bad h6 | expected "ok" | actual "ok" 
+PASS | 6d ch1 + ch2 open on h6, ch3 (griefer) on h7 | expected "ok+ok+ok" | actual "ok+ok+ok" 
+PASS | 6d open-games counter on h6 = 2 | expected 2 | actual 2 
+PASS | 6d game A (ch1) -> c | expected "c" | actual "c" 
+PASS | 6d first fraud win pays CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS | 6d top = 5 (h6, h7 voided) | expected 5 | actual 5 
+PASS | 6d burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | 6d h6 still has 1 open game | expected 1 | actual 1 
+PASS | 6d reclaim voided h7 while its game is open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":137,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"}
+PASS | 6d new open on voided h6 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not live\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":101,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'not live');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"AN7TRMLPLZVZFU3BKC6QSACBU"}
+PASS | 6d honest h6 resubmitted while old games run | expected "ok" | actual "ok" 
+PASS | 6d late game B (ch2) on voided h6 -> c | expected "c" | actual "c" 
+PASS | 6d second win gets only CBOND - GF - FEE (no second slash) | expected 108000 | actual 108000 
+PASS | 6d late c-callback does not void the new h6 | expected [6,"z2L7vS4SyS/j2XXlrnraLQJ8sqEDWA3/PUtglnyHaTM="] | actual [6,"z2L7vS4SyS/j2XXlrnraLQJ8sqEDWA3/PUtglnyHaTM="] 
+PASS | 6d burned unchanged by the second win | expected 100000 | actual 100000 
+PASS | 6d h6 games counter = 0 | expected 0 | actual 0 
+PASS | 6d late griefer game on voided h7 -> d | expected "d" | actual "d" 
+PASS | 6d late d-callback pays op1 CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6d top still 6 after the late d-callback | expected 6 | actual 6 
+PASS | 6d reclaim voided h7 after its game | expected "ok" | actual "ok" 
+PASS | 6d h7 bond back OBOND - FEE | expected 198000 | actual 198000 
+PASS | 6d fraudster reclaims old h6 | expected "bounce" | actual "bounce" 
+PASS | 6d new h6 finalizes | expected "ok" | actual "ok" 
+PASS | 6d lf = 6 | expected 6 | actual 6 
+PASS | 7 submit h7 with OBOND + 50000 | expected "ok" | actual "ok" 
+PASS | 7 submit refund = 50000 - FEE (real output) | expected 48000 | actual 48000 
+PASS | 7 open h7 with CBOND + 30000 | expected "ok" | actual "ok" 
+PASS | 7 open refund = 30000 in full (real output) | expected 30000 | actual 30000 
+PASS | 7 the same response unit pays GF to the referee | expected 10000 | actual 10000 
+PASS | 7 referee received the open (no refund back to the rollup) | expected true | actual true 
+PASS | 7 operator answered the overpaid game, challenger to move | expected "stopped" | actual "stopped" 
+PASS | 7 resolve with RK + 25000 | expected "ok" | actual "ok" 
+PASS | 7 resolve refund = 25000 (real output, same unit as the callback) | expected 25000 | actual 25000 
+PASS | 7 callback payment GB to the rollup | expected 1000 | actual 1000 
+PASS | 7 operator paid CBOND - GF - FEE = 108000 | expected 108000 | actual 108000 
+PASS | 7 finalize h7 | expected "ok" | actual "ok" 
+PASS | 7 finalize pays OBOND - FEE | expected 198000 | actual 198000 
+PASS | 7 submit h8 with OBOND + FEE (kept, no refund unit) | expected ["ok",0] | actual ["ok",0] 
+PASS | 7 direct referee open with GF + 5000 refunds 5000 | expected ["ok",5000] | actual ["ok",5000] 
+PASS | 8 state before: lf = 7, top = 8 | expected [7,8] | actual [7,8] 
+PASS | 8a honest h9 with units = 24 | expected "ok" | actual "ok" 
+PASS | 8a units stored | expected 24 | actual 24 
+PASS | 8a uopen with CBOND only | expected "bounce" | actual "bounce" 
+PASS | 8a griefer uopen h9 (CBOND + GF) | expected "ok" | actual "ok" 
+PASS | 8a the rollup response paid 2 GF to the seg referee | expected 20000 | actual 20000 
+PASS | 8a griefer vs honest operator via layer 1 + layer 2 (real chain) | expected "d" | actual "d" {"unit":[9,10,135,150]}
+PASS | 8a operator paid CBOND - GF - FEE (rollup response to the seg callback) | expected 108000 | actual 108000 
+PASS | 8a no game open on h9 | expected 0 | actual 0 
+PASS | 8a finalize h8 | expected "ok" | actual "ok" 
+PASS | 8a finalize h9 after its layer-1 game | expected "ok" | actual "ok" 
+PASS | 8b fraudulent h10 (units 5) | expected "ok" | actual "ok" 
+PASS | 8b honest challenger uopen h10 | expected "ok" | actual "ok" 
+PASS | 8b fraud proven through layer 1 | expected "c" | actual "c" {"unit":[2,3,24,37]}
+PASS | 8b challenger paid CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS | 8b h10 voided (top = 9), fraud flag | expected [9,1] | actual [9,1] 
+PASS | 8 seg referee solvent: per game it keeps GF, plus MK - refund-unit fee per mids / pick (as rv_game_ref), minus its response-unit fees (2 games, 4 moves) | expected true | actual true {"balance":23701}
+PASS | 8c h10 with the witness memory image | expected "ok" | actual "ok" 
+PASS | 8c bind before finalize | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not finalized\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":25,\"formula\":\"require(is_integer($h) AND $h >= 1 AND $h <= (var[$ROLL]['lf'] OTHERWISE 0), 'not finalized');\"}],\"trace\":[{\"t"}
+PASS | 8c finalize h10 | expected "ok" | actual "ok" 
+PASS | 8c bind with a flipped word bit | expected "bounce" | actual "bounce" 
+PASS | 8c bind h10 | expected "ok" | actual "ok" 
+PASS | 8c W10 = the root | expected "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=" | actual "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=" 
+PASS | 8c memberships proven against finalized h10 | expected 3 | actual 3 
+PASS | 8c absence proven | expected ["ok",1] | actual ["ok",1] 
+PASS | 8c tampered leaf | expected "bounce" | actual "bounce" 
+PASS | 8c R3-W4 prove with 25000 refunds 23000 (real output) | expected ["ok",23000] | actual ["ok",23000] 
+PASS | 8c proof against unbound h9 | expected "bounce" | actual "bounce" 
+PASS | rollup balance >= burned (all bonds settled) | expected true | actual true {"balance":732970,"burned":400000,"lf":10,"top":10}
+FEES {"submit":{"n":9,"avg":1236,"max":1237},"submit+tps":{"n":9,"avg":5,"max":26},"open":{"n":6,"avg":894,"max":946},"open+tps":{"n":6,"avg":20,"max":44},"mids":{"n":18,"avg":1365,"max":1580},"mids+tps":{"n":18,"avg":40,"max":282},"pick":{"n":16,"avg":924,"max":924},"pick+tps":{"n":16,"avg":18,"max":202},"step":{"n":8,"avg":2681,"max":3350},"step+tps":{"n":8,"avg":0,"max":0},"resolve":{"n":10,"avg":918,"max":918},"resolve+tps":{"n":10,"avg":117,"max":393},"uopen":{"n":3,"avg":884,"max":884},"uopen+tps":{"n":3,"avg":209,"max":628},"smids":{"n":2,"avg":1419,"max":1705},"smids+tps":{"n":2,"avg":0,"max":0},"spick-handoff":{"n":2,"avg":924,"max":924},"spick-handoff+tps":{"n":2,"avg":65,"max":129},"resolve3":{"n":2,"avg":918,"max":918},"resolve3+tps":{"n":2,"avg":254,"max":507},"bind":{"n":2,"avg":11488,"max":11488},"bind+tps":{"n":2,"avg":1844,"max":1844},"prove":{"n":5,"avg":1230,"max":1305},"prove+tps":{"n":5,"avg":0,"max":0}}
+TPS {"submit":{"n":22,"avg":10,"median":4,"max":40,"max_aa_responses":[1]},"fwd":{"n":1,"avg":90,"median":90,"max":90,"max_aa_responses":[2]},"finalize":{"n":15,"avg":0,"median":0,"max":0,"max_aa_responses":[1]},"open":{"n":12,"avg":89,"median":39,"max":639,"max_aa_responses":[2]},"mids":{"n":21,"avg":34,"median":4,"max":282,"max_aa_responses":[1]},"pick":{"n":19,"avg":22,"median":0,"max":202,"max_aa_responses":[1,2]},"step":{"n":21,"avg":30,"median":0,"max":628,"max_aa_responses":[1,2]},"resolve":{"n":13,"avg":130,"median":19,"max":507,"max_aa_responses":[2,3]},"reclaim":{"n":7,"avg":47,"median":10,"max":266,"max_aa_responses":[1]},"ropen":{"n":1,"avg":26,"median":26,"max":26,"max_aa_responses":[1]}}
+SUMMARY {"total":149,"pass":149,"fail":0}
+[INFO][headless-wallet-0001] Child exited
+[INFO][genesis-node] Child exited
+[INFO][obyte-witness-0002] Child exited
+[INFO][headless-wallet-0003] Child exited
+[INFO][headless-wallet-0006] Child exited
+[INFO][headless-wallet-0002] Child exited
+[INFO][headless-wallet-0004] Child exited
+[INFO][obyte-witness-0001] Child exited
+[INFO][obyte-hub-0001] Child exited
+[INFO][headless-wallet-0005] Child exited
+[INFO][headless-wallet-0007] Child exited
+RDDONE exit 0
