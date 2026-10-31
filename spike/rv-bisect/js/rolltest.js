@@ -19,12 +19,22 @@ function liabilities(C) { const sv = C.sv[ROLL] || {}; let L = 0; const v = k =>
   return L + (v('burned') || 0); }
 let invFail = 0;
 function inv(C, where) { const L = liabilities(C), b = C.b(ROLL); if (b < L) { invFail++; console.log('INVARIANT BROKEN', where, 'balance', b, 'liabilities', L); } return b - L; }
-async function S(C, from, to, amt, data) { const r = await C.send(from, to, amt, data); inv(C, JSON.stringify(data).slice(0, 60)); return r; }
+// loop round 7 (R6-M2): a submit built by subData carries its trace (__tr) and overrides (__o); S picks the height's
+// timestamp ts = max(C.ts - TSLACK, ts(h-1) + MINGAP) (advancing the clock when the gap needs it), re-times the trace
+// (s0 register x10 = ts) and fills ts / s0 unless the test overrides them (o.ts: s0 is then built for that ts).
+const TSLACK = 600, MINGAP = M.minGap;
+const tsOf = (C, h) => { const p = C.r('t' + C.r('h' + (h - 1))); return p === undefined || p === null || p === false ? null : +p; };
+function prep(C, data) { if (!data || !data.__tr) return data; const tr = data.__tr, o = data.__o || {}; delete data.__tr; delete data.__o;
+  if (!('ts' in o)) { const p = Number.isInteger(data.submit) && data.submit > 1 ? tsOf(C, data.submit) : null;
+    const ts = Math.max(C.ts - TSLACK, p === null ? 0 : p + MINGAP); if (ts > C.ts) C.ts = ts; T.retime(tr, ts); data.ts = ts; if (o.s0 === undefined) data.s0 = tr.s0; }
+  else if (o.s0 === undefined && Number.isInteger(o.ts)) data.s0 = T.at(tr, o.ts).s0;
+  return data; }
+async function S(C, from, to, amt, data) { data = prep(C, data); const r = await C.send(from, to, amt, data); inv(C, JSON.stringify(data).slice(0, 60)); return r; }
 
 // ---------- protocol helpers
 const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (const k in sv[a]) o[a][k] = { ...sv[a][k] }; } return o; };
 const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
-const subData = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
+const subData = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
 async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
 async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
 const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
@@ -57,7 +67,9 @@ async function playAll(C, games, tStop = Infinity) {
     if (r.err) { g.errs = (g.errs || 0) + 1; if (g.errs > 5) { g.winner = 'stuck: ' + r.err; g.dead = true; } }
   }
 }
-const game = (o, def, ch, honest, extra) => ({ gid: o.gid, def: def.op, ch: o.ch, defRoots: def.roots, chRoots: ch.roots, honest, ...extra });
+// loop round 7: the challenger's and the step-witness traces are re-timed to the defended submission's ts (copies)
+const game = (o, def, ch, honest, extra) => { const t = def.ts, c = T.at(ch, t), hh = honest === def ? def : honest === ch ? c : T.at(honest, t);
+  return { gid: o.gid, def: def.op, ch: o.ch, defRoots: def.roots, chRoots: c.roots, honest: hh, ...extra }; };
 
 // ---------- groups
 const groups = {};
@@ -592,8 +604,9 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
   const xb = (m, sid, o = {}) => ({ xbind: sid, words: [m.get(XK), ...Array.from({ length: 8 }, (_, k) => m.get(XK + 2 + k))], wsib: [m.proof(XK), ...Array.from({ length: 8 }, (_, k) => m.proof(XK + 2 + k))], ...o });
   const D = Array.from({ length: 8 }, (_, k) => (0x9e3779b9 * (k + 1)) >>> 0), D2 = D.map((w, k) => k === 5 ? (w ^ 1) >>> 0 : w);
   const sub = async (C, h, pmem, fm, prevFinal, seed) => { const inp = new ref.Mem(); inp.set(0, seed); inp.root(); const steps = 100 + seed, fpc = 2, fregs = Z32.split(',').join(',');
-    const s0 = ref.H('0:' + Z32 + ':' + pmem + ':' + inp.root() + ':0'); const final = ref.H(fpc + ':' + fregs + ':' + fm.root() + ':' + inp.root() + ':' + steps);
-    const r = await S(C, OP1, ROLL, OBOND, { submit: h, s0, steps, final, inp: inp.root(), fpc, fregs, fmem: fm.root(), prev: prevFinal, units: 1 }); return { ...r, final, fm }; };
+    const p = h > 1 ? tsOf(C, h) : null; const ts = Math.max(C.ts - TSLACK, p === null ? 0 : p + MINGAP); if (ts > C.ts) C.ts = ts; // loop round 7
+    const s0 = T.s0Of(ts, pmem, inp.root()); const final = ref.H(fpc + ':' + fregs + ':' + fm.root() + ':' + inp.root() + ':' + steps);
+    const r = await S(C, OP1, ROLL, OBOND, { submit: h, ts, s0, steps, final, inp: inp.root(), fpc, fregs, fmem: fm.root(), prev: prevFinal, units: 1 }); return { ...r, final, fm }; };
   const G = T.genesis().root(); const UM = memX(0, [0, 0, 0, 0, 0, 0, 0, 0], 777).root(); // the new image's memory root
   { const C = new Chain();
     const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); rec('upgrade', 'export height 1 submitted', 'accepted', bnc(e));
@@ -643,6 +656,44 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
     const i3 = await sub(C, 3, UM2, memX(2, D, 33), h2.final, 33); rec('upgrade', 'R5-M1: import height 3 from the new image', 'accepted', bnc(i3));
     const n4 = await sub(C, 4, i3.fm.root(), memX(0, D, 4), i3.final, 4); rec('upgrade', 'R5-M1: height 4 chains on m(3) (no stale image)', 'accepted', bnc(n4));
     rec('upgrade', 'R5-M1: a second upgrade above the pending one refused', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 5, mem: UM }), /upgrade pending at 3/)); }
+};
+
+// ---------- loop round 7 (R6-M2): per-height timestamp bound into s0 (register x10 = ts)
+groups.ts = async () => { const G0 = T.genesis(); const g = 'ts (R6-M2)';
+  { const C = new Chain(); const b1 = T.batch(G0, 1); const now = C.ts;
+    const d = (o) => subData(b1, 1, 'genesis', o); const sd = ts => T.at(b1, ts).s0;
+    rec(g, 'ts missing', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: undefined, s0: sd(now) })), /bad ts/));
+    rec(g, 'ts = now + 1 (future)', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now + 1 })), /bad ts/));
+    rec(g, 'ts = now - TSLACK - 1 (too old)', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now - TSLACK - 1 })), /bad ts/));
+    rec(g, 'ts = 2^32 (does not fit the register)', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: 2 ** 32 })), /bad ts/));
+    { const C2 = new Chain(); rec(g, "ts '1e9' (ocore casts numeric strings: same value, canonical in s0)", ['accepted', 1e9], [bnc(await S(C2, OP1, ROLL, OBOND, subData(T.batch(G0, 1), 1, 'genesis', { ts: '1e9', s0: sd(1e9) }))), +C2.r('t' + C2.r('h1'))]); }
+    rec(g, "ts ' 1000000000' (not a number)", 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: ' ' + now, s0: sd(now) })), /bad ts|string-casts/));
+    rec(g, 'ts fractional', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now - 0.5, s0: sd(now) })), /bad ts/));
+    rec(g, 'old s0 format (all registers 0) with a valid ts', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now, s0: T.s0Of(0, G0.root(), b1.inpRoot) })), /bad s0/));
+    rec(g, 's0 built for another ts than declared', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now, s0: sd(now - 1) })), /bad s0/));
+    rec(g, 'h1 at ts = now - TSLACK (oldest allowed)', 'accepted', bnc(await S(C, OP1, ROLL, OBOND, d({ ts: now - TSLACK }))));
+    b1.sid = C.r('h1'); T.retime(b1, now - TSLACK); rec(g, 't<sid> stored', now - TSLACK, +C.r('t' + b1.sid));
+    const b2 = T.batch(b1.mem, 2); const d2 = o => subData(b2, 2, b1.final, o); const t1 = now - TSLACK;
+    rec(g, 'h2 at ts(h1) + MINGAP - 1', 'bounce', bnc(await S(C, OP2, ROLL, OBOND, d2({ ts: t1 + MINGAP - 1 })), /ts gap/));
+    rec(g, 'h2 at ts(h1) (equal)', 'bounce', bnc(await S(C, OP2, ROLL, OBOND, d2({ ts: t1 })), /ts gap/));
+    rec(g, 'h2 at ts(h1) + MINGAP', 'accepted', bnc(await S(C, OP2, ROLL, OBOND, d2({ ts: t1 + MINGAP }))));
+    // pace: at a frozen clock at most TSLACK / MINGAP more heights fit; the next one needs the clock to move
+    let h = 3, prevT = b2, last = t1 + MINGAP; T.retime(b2, last); let acc = 0;
+    for (; h < 40; h++) { const b = T.batch(prevT.mem, h); const ts = last + MINGAP; if (ts > C.ts) break;
+      const r = await S(C, OP1, ROLL, OBOND, subData(b, h, prevT.final, { ts })); if (r.err) break; acc++; T.retime(b, ts); prevT = b; last = ts; }
+    rec(g, 'frozen clock: heights 3.. accepted until ts(h-1) + MINGAP > now', Math.floor((C.ts - (t1 + MINGAP)) / MINGAP), acc);
+    const bx = T.batch(prevT.mem, h); rec(g, 'the next height at ts = now (gap too small) refused', 'bounce', bnc(await S(C, OP1, ROLL, OBOND, subData(bx, h, prevT.final, { ts: C.ts })), /ts gap/));
+    C.ts += MINGAP; rec(g, 'accepted once the clock moved by MINGAP', 'accepted', bnc(await S(C, OP1, ROLL, OBOND, subData(bx, h, prevT.final, { ts: last + MINGAP })))); }
+  // a fraud void restarts the race at h: the new h's ts is checked against h-1 (not against the voided h)
+  { const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
+    const h2 = T.batch(b1.mem, 2), L2 = T.batch(b1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C, OP2, 2, L2, b1.final); const tL = +C.r('t' + L2.sid);
+    const o = await open(C, CH1, L2.sid); const gm = game(o, L2, h2, h2); await playAll(C, [gm]); rec(g, 'fraud at h2 proven (top = 1)', ['c', 1], [gm.winner, C.r('top')]);
+    const r = await submit(C, OP1, 2, h2, b1.final); rec(g, 'new h2 after the void: ts >= ts(h1) + MINGAP only', ['accepted', true], [bnc(r), +C.r('t' + h2.sid) >= +C.r('t' + b1.sid) + MINGAP]);
+    rec(g, 'its ts may be below the voided h2 ts', true, +C.r('t' + h2.sid) <= Math.max(tL, C.ts)); }
+  // the challenge game starts from the AA-computed s0 (x10 = ts): a trace started from registers 0 disagrees at root 0
+  { const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis'); const z = T.batch(G0, 1);
+    rec(g, 'the zero-register trace differs from the submitted one only in the ts-carrying roots', [true, true, z.final === b1.final], [z.roots[0] !== b1.roots[0], z.roots[b1.steps] === b1.final, true]);
+    rec(g, 'roots after x10 is overwritten agree', true, z.roots.slice(10).every((x, i) => x === b1.roots[10 + i])); }
 };
 
 (async () => {

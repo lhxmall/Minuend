@@ -5,7 +5,10 @@ let genMem = process.env.GENMEM;
 if (!genMem) genMem = require('./rolltrace.js').genesis().root();
 // loop round 4: GOV env = governance address allowed to schedule upgrades (default: a fixed test address)
 const govAddr = process.env.GOV || 'GOVXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-const body=fs.readFileSync(__dirname+'/../aa/rv_rollup.oscript','utf8').split('RV_GOV_ADDRESS').join(govAddr).split('RV_GAME_AA_ADDRESS').join(R.addr).split('RV_SEG_AA_ADDRESS').join(SR.addr).split('GENESIS_MEM_ROOT').join(genMem);
+// loop round 7 (R6-M2): RV_MINGAP env = minimum seconds between consecutive heights' timestamps (default 60; rolldevnet
+// uses 1: it runs on the devnet's real clock)
+const minGap = String(+(process.env.RV_MINGAP || 60));
+const body=fs.readFileSync(__dirname+'/../aa/rv_rollup.oscript','utf8').split('RV_MINGAP').join(minGap).split('RV_GOV_ADDRESS').join(govAddr).split('RV_GAME_AA_ADDRESS').join(R.addr).split('RV_SEG_AA_ADDRESS').join(SR.addr).split('GENESIS_MEM_ROOT').join(genMem);
 const state=`
 	if ($d.submit) {
 		var['top'] = $st.h;
@@ -13,6 +16,7 @@ const state=`
 		var['s' || $st.sid] = $st.rec;
 		var['m' || $st.sid] = $d.fmem;
 		var['u' || $st.sid] = $d.units;
+		var['t' || $st.sid] = $d.ts;   // loop round 7 (R6-M2)
 		response['sid'] = $st.sid;
 	}
 	else if ($d.open OR $d.uopen) {
@@ -60,4 +64,4 @@ ${esc(body)}
  ]
 }]`;
 fs.writeFileSync(__dirname+'/../aa/rv_rollup.aa', aa);
-module.exports={body, state, govAddr, gameAddr: R.addr, stepAddr: R.stepAddr, genMem, addr: R.chashOf(aa), ref: R, seg: SR, segAddr: SR.addr};
+module.exports={minGap: +minGap, body, state, govAddr, gameAddr: R.addr, stepAddr: R.stepAddr, genMem, addr: R.chashOf(aa), ref: R, seg: SR, segAddr: SR.addr};

@@ -75,6 +75,13 @@ impl GB {
         let i = self.ops.len();
         self.ops.push(w);
         let d = mnpilot::decode_op(&w);
+        // loop round 7 (R7-M1): the pilot refuses a GovWithdraw of 0 by an id without a PERP ledger entry (also as a
+        // Reveal's inner op); the unit never reaches the real engine (event 19, unit id 0)
+        if pilot_gov_refused(&self.eng, &d, &self.ids, &self.rx()) {
+            self.uids.push([0; 32]);
+            self.ev.push(mnpilot::STATE_CAP_CODE);
+            return mnpilot::STATE_CAP_CODE;
+        }
         let e = match d {
             B::SetHeight { height } => {
                 self.uids.push([0; 32]);
@@ -275,6 +282,23 @@ impl Rng {
         }
         s
     }
+}
+
+/// Loop round 7 (R7-M1): the pilot rule `state_cap_ok` adds below the caps -- a GovWithdraw of 0 by an id that has no
+/// PERP ledger entry (upstream: succeeds and inserts a zero balance) is refused with code 19; for a Reveal the inner op
+/// is checked with the Reveal's author (as the port does). Mirrored by the builder and by `run_real_eng_h`.
+pub fn pilot_gov_refused(eng: &Engine, d: &B, ids: &[AccountId], rx: &dyn Fn(u32, u32) -> Option<Vec<u32>>) -> bool {
+    let Some(author) = d.signer().and_then(|a| ids.get(a as usize)) else { return false };
+    let zero_new = |x: &B| matches!(x, B::GovWithdraw { amount: 0, .. }) && !eng.state.perp_balances.contains_key(author);
+    zero_new(d)
+        || match d {
+            B::Reveal { ext, .. } => rx(*ext, mnpilot::EXT_REVEAL_LEN).is_some_and(|e| {
+                let mut iw = [0u32; 8];
+                iw.copy_from_slice(&e[16..24]);
+                zero_new(&mnpilot::decode_op(&iw))
+            }),
+            _ => false,
+        }
 }
 
 /// A random but mostly-valid inner op for a Reveal by `a` (its extension put first).
@@ -920,7 +944,7 @@ pub fn govedge() -> String {
     //    no caps, so only the port's events are checked) and never before
     {
         cases += 1;
-        let n_acc = 420u32;
+        let n_acc = 700u32; // loop round 7: the ledger is filled with real deposits -> snapshot ~256, voters 300..620
         let mut g = GB::new(n_acc, flags);
         g.op(GB::w_gdep(10, 3_000_000));
         let mut codes = Vec::new();
@@ -928,13 +952,15 @@ pub fn govedge() -> String {
             let w = g.w_market(10, &listing_regular(&format!("M{}", k)));
             codes.push(g.op(w));
         }
-        // perp ledger: 6 fixture ids + 10 -> fresh ids 11.. by gov withdraw 0 up to the cap, then one more
+        // perp ledger: 6 fixture ids + 10 -> fresh ids 11.. by gov deposits up to the cap, then one more
+        // (loop round 7, R7-M1: a gov withdraw of 0 by a fresh id no longer adds an id at all, case 8)
         let base_perp = 7u32;
         let fresh_n = mnpilot::MAX_STATE_ACCOUNTS as u32 - base_perp;
         for k in 0..=fresh_n {
-            g.op(GB::w_gwd(11 + k, 0, 1));
+            g.op(GB::w_gdep(11 + k, 2_000));
         }
         g.op(GB::w_gdep(10, 1)); // existing id at the cap
+        g.op(GB::w_gwd(11 + fresh_n + 1, 5, 1)); // loop round 7: a gov withdraw > 0 by a new id at the cap -> 19
         g.op(GB::w_prop(10, 1, 0, 1200));
         let z0 = g.ops.len();
         let zcap = g.eng.state.proposals[&1].weight_snapshot.len() + mnpilot::MAX_ZERO_VOTERS;
@@ -963,6 +989,7 @@ pub fn govedge() -> String {
         let pr = &pe[p0..p0 + fresh_n as usize + 1];
         expect("cap:perp", pr[..fresh_n as usize].iter().all(|e| *e == OK) && pr[fresh_n as usize] == mnpilot::STATE_CAP_CODE, &mut fails);
         expect("cap:perp_existing", pe[p0 + fresh_n as usize + 1] == OK, &mut fails);
+        expect("cap:perp_gwd_new", pe[p0 + fresh_n as usize + 2] == mnpilot::STATE_CAP_CODE, &mut fails);
         let zv = &pe[z0..z0 + zcap + 2];
         expect("cap:votes", zv[..zcap].iter().all(|e| *e == OK) && zv[zcap] == mnpilot::STATE_CAP_CODE && zv[zcap + 1] == OK, &mut fails);
         let cm = &pe[c0..c0 + mnpilot::MAX_STATE_COMMITS + 1];
@@ -970,6 +997,36 @@ pub fn govedge() -> String {
         // nothing else differs from the real engine before the first cap event
         let first19 = pe.iter().position(|e| *e == mnpilot::STATE_CAP_CODE).unwrap_or(pe.len());
         expect("cap:not_early", pe[..first19] == g.ev[..first19], &mut fails);
+    }
+    // 8. loop round 7 review R7-M1: a gov withdraw of 0 by an id without a PERP ledger entry is refused (code 19) at
+    //    any ledger size -- also as a Reveal's inner op -- and adds nothing; by a holder (incl. a zero balance) it
+    //    applies; amount > 0 by a fresh id keeps the upstream rejection. PoC of the old behaviour: 249 such units
+    //    filled the shared ledger cap, then a slash by a new challenger was refused (code 19).
+    {
+        cases += 1;
+        let mut g = GB::new(16, flags);
+        let n0 = g.eng.state.perp_balances.len();
+        expect("r7:gwd0_fresh", g.op(GB::w_gwd(12, 0, 1)) == mnpilot::STATE_CAP_CODE, &mut fails);
+        let pos = g.op(GB::w_gwd(12, 5, 1));
+        expect("r7:gwd_pos_fresh", pos != OK && pos != mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("r7:gwd0_holder", g.op(GB::w_gwd(6, 0, 1)) == OK, &mut fails);
+        g.op(GB::w_gdep(13, 10_000));
+        let w = g.w_market(13, &listing_regular("ZERO")); // 13 now holds exactly 0 PERP (entry kept)
+        g.op(w);
+        expect("r7:gwd0_zero_balance_holder", g.op(GB::w_gwd(13, 0, 1)) == OK, &mut fails);
+        let salt = [7u8; 32];
+        let inner = GB::w_gwd(14, 0, 1);
+        let h = g.commit_hash(&inner, &salt);
+        let w = g.w_commit(14, &h, 120);
+        expect("r7:commit", g.op(w) == OK, &mut fails);
+        let cu = *g.uids.last().unwrap();
+        let p1 = g.last();
+        let w = g.w_reveal(14, &h, &salt, &inner, p1, cu);
+        expect("r7:reveal_inner_gwd0_fresh", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
+        let pe = run_port(&g.words());
+        expect("r7:port_events", pe.ev == g.ev, &mut fails);
+        expect("r7:ledger_unchanged_by_refusals", g.eng.state.perp_balances.len() == n0 + 1, &mut fails);
+        run("r7", &g, &mut fails);
     }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
     format!("{{\"cases\":{},\"ok\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, fj.join(","))

@@ -8,7 +8,7 @@
 //  membership of leaf (no key) -> var L<h>:<kid> = leaf; absence of key (64 lowercase hex; leaf = the terminal leaf
 //  text, or '' for an EMPTY terminal) -> var A<h>:<key> = 1. A vault / bridge AA reads these vars (a withdrawal =
 //  membership of the account's acct: leaf in a finalized root).
-$BIND = '3W4V2IRBAVYDVERP5GYWEE4MYYDPJL6I';   // mkwitproof.js bakes chash160(rv_witbind.aa)
+$BIND = 'HAM6T3JOC6LSKAXLHWP5SFTFHWJS3WI4';   // mkwitproof.js bakes chash160(rv_witbind.aa)
 $MK = 2000;   // R3-W4: keep MK of the (>= 10 000-byte bounce-fee) trigger for the refund unit, refund the rest (as rv_game_ref moves)
 $rf = max(trigger.output[[asset=base]] - $MK, 0);
 // trigger.data is read in place: a local copy of a ~10 KB proof object exceeds ocore's local-variable size limit

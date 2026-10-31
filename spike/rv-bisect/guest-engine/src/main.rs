@@ -31,6 +31,11 @@
 //! `segs` is set to RUNS before each run; an import sets RUNS = the imported `segs` + 1 (= export height + 1).
 //! OUT[0x1FFE6] = engine height (low word) after the run (0 without a session); in `prod` it equals the rollup
 //! height after every batch run (height binding).
+//! Loop round 7 (R6-M2): rv_rollup starts height h with register x10 (a0) = the height's timestamp ts (s0 =
+//! '0:' || x0..x9 = 0, x10 = ts, x11..x31 = 0 || ...); `_start` leaves a0 untouched, so it arrives as rmain's
+//! argument. The guest publishes it at OUT[0x1FFE5] in every run (written first, also by dead / refused runs), so the
+//! final memory root commits it next to the engine height. Monotonicity (ts(h) >= ts(h-1) + MINGAP) and its distance
+//! to the chain's clock are enforced by rv_rollup at submit; off-chain harnesses run with ts = 0.
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
 #[cfg(not(target_os = "none"))]
@@ -170,6 +175,8 @@ mod rt {
     const SEG_END: usize = 0x1FFE8;
     const SEG_N: usize = 0x1FFE7;
     const ENG_H: usize = 0x1FFE6;
+    /// loop round 7 (R6-M2): the height's timestamp (rmain's a0)
+    const TS_W: usize = 0x1FFE5;
     const SNAP_KIND: usize = 0x1FFD6;
     const SNAP_N: usize = 0x1FFD7;
     const SNAP_DIGEST: usize = 0x1FFD8;
@@ -179,10 +186,11 @@ mod rt {
         }
     }
     #[no_mangle]
-    extern "C" fn rmain() -> u32 {
+    extern "C" fn rmain(ts: u32) -> u32 {
         let mut n_ev: u32 = 0;
         // this run's counters start at 0 (OUT words survive from the previous run)
         unsafe {
+            OUT.add(TS_W).write_volatile(ts);
             OUT.add(ROOTS - 1).write_volatile(0);
             OUT.add(ROOTS - 8).write_volatile(0);
             OUT.add(8).write_volatile(0);

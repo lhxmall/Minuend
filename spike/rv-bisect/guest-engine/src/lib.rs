@@ -43,6 +43,17 @@
 //!   header [3] loop round 4 fixtures: bit 25 = list market 3 as a funding-rate market (the 100x
 //!     listing of upstream's funding tests; account 0 of the table is its external feed), bit 26 =
 //!     accounts 1..=3 of the table are bonded oracles (oracle_bonds = ORACLE_BOND_PERP)
+//!   loop round 6 (R4-M3 rest): 14 GovDeposit (w1,w2 = amount u64), 15 GovWithdraw (w1,w2 = amount u64; w6,w7 =
+//!                      nonce), 16 CreateMarket (w7 = extension offset: 23 words = symbol 4, tick i64, im, mm, fee,
+//!                      keeper u64, flags (bit0 spot_only, bit1 funding_rate), usd_per_unit u64, funding_cap u64,
+//!                      min_price i64, max_price i64), 17 CreateProposal (w1 = market, w2 = key u8, w3,w4 = value),
+//!                      18 Vote (w1,w2 = proposal id, w3 bit0 = approve), 19 FinalizeProposal (w1,w2 = id),
+//!                      20 Commit (w1,w2 = ttl height; w7 = extension offset: 8 words commit hash), 21 Reveal (w7 =
+//!                      extension offset: 40 words = commit_ref 8, salt 8, inner op 8 (pilot op words; an inner
+//!                      CreateMarket names its own offset), parent P1 8, parent P2 8), 22 SetSeq (test fixture:
+//!                      w1,w2 = new seq >= current; refused in prod; event EV_SEQ).
+//!   MNP2 extension area (round 6): after the unit-id table, word n_ext (<= MAX_EXT) then n_ext words. MNP1 has none
+//!   (ops needing it are refused BadAccount). An offset whose payload is not inside the area -> BadAccount.
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
 //!
 //! Loop round 5 (R4-M2): batch format v2, MAGIC2 "MNP2": identical to MNP1, followed by a unit-id
@@ -222,6 +233,12 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
         // the PERP ledger (an acct: leaf without an accounts entry) -- a gov deposit, a gov withdraw
         // (amount 0 succeeds for ANY id and inserts a zero balance), a slash (the reward credits the
         // challenger) -- is refused for a new id once the ledger holds `cap` ids
+        // loop round 7 review R7-M1: a GovWithdraw of 0 by an id WITHOUT a ledger entry succeeds upstream (it only
+        // inserts a zero balance + a nonce watermark), so below the cap it filled the shared ledger for free: 256 such
+        // units and every later GovDeposit / Slash by a new id was refused (code 19) -- new stakers locked out of
+        // governance, new challengers unable to slash. It is now refused (code 19) at any ledger size; it has no
+        // effect upstream besides the bloat (R6-L3). A GovWithdraw of 0 by an existing id is unchanged.
+        BatchOp::GovWithdraw { amount: 0, .. } if !s.perp_balances.contains_key(&author) => false,
         BatchOp::GovDeposit { .. } | BatchOp::GovWithdraw { .. } | BatchOp::Slash { .. } => {
             s.perp_balances.contains_key(&author) || s.perp_balances.len() < cap
         }

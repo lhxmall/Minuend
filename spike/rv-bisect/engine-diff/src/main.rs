@@ -572,6 +572,14 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
             _ => {}
         }
         let rx = |off: u32, len: u32| ext_read(w, off, len);
+        // loop round 7 (R7-M1): pilot refusal below the caps (gov.rs pilot_gov_refused): no unit upstream
+        if gov::pilot_gov_refused(&eng, &dop, &ids, &rx) {
+            out.rejected += 1;
+            out.ev.push(mnpilot::STATE_CAP_CODE);
+            out.uids.push([0; 32]);
+            per_unit(&eng);
+            continue;
+        }
         if let mnpilot::BatchOp::Deposit { .. } = dop {
             eng.state.deposits_allowed.insert((aa_unit(false, i), false));
         }

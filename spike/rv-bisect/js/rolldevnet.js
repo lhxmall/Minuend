@@ -10,6 +10,7 @@ process.env.NODE_PATH = [path.join(AATK, 'node_modules'), process.env.NODE_PATH]
 process.env.OCORE = process.env.OCORE || path.join(AATK, 'node_modules', 'ocore');
 const { Testkit } = require(path.join(AATK, 'main.js'));
 const { Network } = Testkit({ TESTDATA_DIR: process.env.TESTDATA || path.join(__dirname, '..', 'devnet-testdata-roll'), NETWORK_PORT: +(process.env.PORT || 16641) });
+process.env.RV_MINGAP = process.env.RV_MINGAP || '1'; // loop round 7 (R6-M2): the devnet runs on its real clock
 const ref = require('./ref.js'); const T = require('./rolltrace.js'); const M = require('./mkrollup.js'); // (re)generates rv_game_ref.aa / rv_seg_ref.aa / rv_rollup.aa
 const WP = require('./mkwitproof.js'); const K = require('./witkit.js'); // loop round 3: rv_witbind.aa / rv_witproof.aa
 const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, RK = 10000;
@@ -25,8 +26,18 @@ const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() =
 async function unitFee(u) { const info = await net.wallet.op1.getUnitInfo({ unit: u }); const o = info.unitObj || {}; unitFee.extra = (o.tps_fee || 0) + (o.oversize_fee || 0); return (o.headers_commission || 0) + (o.payload_commission || 0); }
 // one AA trigger (payment + data), with max_aa_responses unless NOMAXR
 let objectHash;
+// loop round 7 (R6-M2): a submit built by sub() carries its trace; the height's ts is taken from the devnet clock
+// (getTime follows timetravel), ts = max(now - 2, ts(h-1) + MINGAP) (waiting when the gap needs it); the trace is
+// re-timed in place (s0 register x10 = ts) unless the test overrides s0 / ts
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function prepSub(wallet, d) {
+  if (!d || !d.__tr) return d; const tr = d.__tr, o = d.__o || {}; delete d.__tr; delete d.__o; if ('ts' in o) return d;
+  const v = await wallet.readAAStateVars(ROLLA).then(x => x.vars || x); const p = d.submit > 1 ? v['t' + v['h' + (d.submit - 1)]] : undefined;
+  for (;;) { const now = Math.floor((await wallet.getTime()).time / 1000) - 2; const ts = Math.max(now, p === undefined ? 0 : +p + M.minGap);
+    if (ts <= now) { T.retime(tr, ts); d.ts = ts; if (!('s0' in o)) d.s0 = tr.s0; return d; } await sleep(500); } }
 async function send(wallet, to, data, amount, maxr) {
   objectHash = objectHash || require(path.join(process.env.OCORE, 'object_hash.js'));
+  if (data && data.__tr) data = await prepSub(wallet, data); else if (data && data.d && data.d.__tr) data = { ...data, d: await prepSub(wallet, data.d) };
   let cmd = cmdOf(data); if (cmd === 'open' && to === GAMEA) cmd = 'ropen';
   const opts = { to_address: to, amount, messages: [{ app: 'data', payload_location: 'inline', payload_hash: objectHash.getBase64Hash(data), payload: data }] };
   if (!NOMAXR) opts.max_aa_responses = maxr || (cmd === 'ropen' ? 1 : MAXR[cmd]);
@@ -64,7 +75,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   rec('loop 3: deployed seg referee == address baked into rv_rollup', SEG, M.segAddr); rec('loop 3: deployed witbind / witproof == computed', [WBIND, WPROOF], [WP.bind.addr, WP.proof.addr]);
   const vars = async aa => { const v = await op1.readAAStateVars(aa); return v.vars || v; };
   const pts = (lo, hi) => { const cnt = Math.min(16, hi - lo) - 1; return { cnt, pt: j => j == 0 ? lo : j == cnt + 1 ? hi : lo + Math.floor(j * (hi - lo) / (cnt + 1)) }; };
-  const sub = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o });
+  const sub = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o });
   // play a rollup game on chain; returns the winner and the rollup's secondary response to the result
   async function play(gid, def, chv, chw, honest, opw, stopAt) {
     for (let it = 0; it < 40; it++) {
@@ -105,7 +116,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     const gid = ROLL + o.unit; rec('referee game record exists', true, !!(await vars(GAME))['g_' + gid]);
     rec('rollup forwarded GF to the referee', GF, await paidTo(o.response, GAME));
     await net.timetravel({ shift: '1900s' }); r = await trig(w, ROLL, { finalize: 1 }); rec('finalize h1 with the game open', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
-    const L = T.batch(G0, h1 === b1 ? 1 : 7, { k: 11, mut: T.MUT.reg }); const win = await play(gid, h1.roots, L.roots, ch1, h1, opw1);
+    const L = T.batch(G0, h1 === b1 ? 1 : 7, { k: 11, mut: T.MUT.reg }); const win = await play(gid, h1.roots, T.at(L, h1.ts).roots, ch1, h1, opw1);
     rec('griefer vs honest operator', 'd', win); rec('rollup paid the operator CBOND - GF - FEE (real output)', CBOND - GF - FEE, await paidTo(play.last, h1op));
     rec('rollup game marked d', 'd', String((await vars(ROLL))['G' + o.unit]).split(':')[2]);
     const op0 = await bal(h1op); r = await trig(w, ROLL, { finalize: 1 }); rec('finalize h1 after the game', 'ok', r.err || 'ok'); rec('finalize pays OBOND - FEE (real output)', OBOND - FEE, await paidTo(r.response, h1op)); }
@@ -116,7 +127,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     const L4 = T.batch(L3.mem, 4); r = await trig(op1, ROLL, sub(L4, 4, L3.final), OBOND); rec('h4 on bad h3', 'ok', r.err || 'ok'); L4.sid = r.unit;
     const L5 = T.batch(L4.mem, 5); r = await trig(op1, ROLL, sub(L5, 5, L4.final), OBOND); rec('h5 on h4', 'ok', r.err || 'ok'); L5.sid = r.unit;
     const o = await trig(ch2, ROLL, { open: L3.sid }, CBOND); const burned0 = (await vars(ROLL)).burned || 0;
-    const win = await play(ROLL + o.unit, L3.roots, H3.roots, ch2, H3, op2); rec('honest challenger vs fraudulent h3', 'c', win);
+    T.retime(H3, L3.ts); const win = await play(ROLL + o.unit, L3.roots, H3.roots, ch2, H3, op2); rec('honest challenger vs fraudulent h3', 'c', win);
     rec('challenger paid CBOND - GF - FEE + OBOND/2 (real output)', CBOND - GF - FEE + OBOND / 2, await paidTo(play.last, A.ch2));
     const v = await vars(ROLL); rec('top reset to 2', 2, v.top); rec('burned += OBOND/2', OBOND / 2, (v.burned || 0) - burned0); rec('h3 flagged fraud', 1, v['f' + L3.sid]);
     await net.timetravel({ shift: WIN + 's' }); r = await trig(w, ROLL, { finalize: 2 }); rec('h2 finalizes', 'ok', r.err || 'ok');
@@ -152,7 +163,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   { let r = await trig(op1, ROLL, sub(H4, 4, H3.final), OBOND, 'submit'); rec('6b h4 resubmitted by op1', 'ok', r.err || 'ok'); const sid = r.unit;
     const o = await trig(ch2, ROLL, { open: sid }, CBOND, 'open'); rec('6b ch2 opens on h4', 'ok', o.err || 'ok'); const gid = ROLL + o.unit;
     const gb0 = await bal(GAME); const opb0 = await bal(A.op1);
-    const s = await play(gid, H4.roots, T.batch(H3.mem, 4, { k: 11, mut: T.MUT.reg }).roots, ch2, H4, op1, 'c'); rec('6b operator answered, challenger to move', 'stopped', s);
+    const s = await play(gid, H4.roots, T.at(T.batch(H3.mem, 4, { k: 11, mut: T.MUT.reg }), H4.ts).roots, ch2, H4, op1, 'c'); rec('6b operator answered, challenger to move', 'stopped', s);
     const gdelta = (await bal(GAME)) - gb0, odelta = (await bal(A.op1)) - opb0; console.log('MEASURE one operator mids sent with 10000 bytes: referee balance delta', gdelta, 'operator balance delta', odelta);
     if (KEEP !== undefined) { rec('6b referee nets (0, KEEP] from a move (KEEP minus its refund-unit fee)', true, gdelta > 0 && gdelta <= KEEP, { gdelta });
       rec('6b operator move costs KEEP + its unit fee (< KEEP + 3000), not 10000 + fee', true, -odelta > KEEP && -odelta < KEEP + 3000, { odelta }); }
@@ -170,10 +181,10 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     await net.timetravel({ shift: '1900s' });
     r = await trig(w, ROLL, { finalize: 4 }); rec('6c finalize h4', 'ok', r.err || 'ok');
     r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 with 2 games open', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
-    let win = await play(ROLL + oA.unit, H5.roots, T.batch(H4.mem, 5, { k: 11, mut: T.MUT.reg }).roots, ch1, H5, op1); rec('6c game A -> d', 'd', win);
+    let win = await play(ROLL + oA.unit, H5.roots, T.at(T.batch(H4.mem, 5, { k: 11, mut: T.MUT.reg }), H5.ts).roots, ch1, H5, op1); rec('6c game A -> d', 'd', win);
     rec('6c A pays the operator CBOND - GF - FEE', CBOND - GF - FEE, await paidTo(play.last, A.op1)); rec('6c open-games counter = 1', 1, (await vars(ROLL))['n' + sid]);
     r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 with game B still open', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
-    win = await play(ROLL + oB.unit, H5.roots, T.batch(H4.mem, 5, { k: 40, mut: T.MUT.pc }).roots, ch2, H5, op1); rec('6c game B -> d', 'd', win);
+    win = await play(ROLL + oB.unit, H5.roots, T.at(T.batch(H4.mem, 5, { k: 40, mut: T.MUT.pc }), H5.ts).roots, ch2, H5, op1); rec('6c game B -> d', 'd', win);
     rec('6c B pays the operator CBOND - GF - FEE', CBOND - GF - FEE, await paidTo(play.last, A.op1)); rec('6c open-games counter = 0', 0, (await vars(ROLL))['n' + sid] || 0);
     r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 after both games', 'ok', r.err || 'ok'); rec('6c finalize pays OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
     rec('6c lf = 5', 5, (await vars(ROLL)).lf); }
@@ -185,17 +196,17 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     const oA = await trig(ch1, ROLL, { open: s6 }, CBOND), oB = await trig(ch2, ROLL, { open: s6 }, CBOND), oC = await trig(ch3, ROLL, { open: s7 }, CBOND);
     rec('6d ch1 + ch2 open on h6, ch3 (griefer) on h7', 'ok+ok+ok', [oA, oB, oC].map(x => x.err || 'ok').join('+')); rec('6d open-games counter on h6 = 2', 2, (await vars(ROLL))['n' + s6]);
     const burned0 = (await vars(ROLL)).burned || 0;
-    let win = await play(ROLL + oA.unit, L6.roots, X6.roots, ch1, X6, op2); rec('6d game A (ch1) -> c', 'c', win);
+    const X6L = T.at(X6, L6.ts); let win = await play(ROLL + oA.unit, L6.roots, X6L.roots, ch1, X6L, op2); rec('6d game A (ch1) -> c', 'c', win);
     rec('6d first fraud win pays CBOND - GF - FEE + OBOND/2', CBOND - GF - FEE + OBOND / 2, await paidTo(play.last, A.ch1));
     let v = await vars(ROLL); rec('6d top = 5 (h6, h7 voided)', 5, v.top); rec('6d burned += OBOND/2', OBOND / 2, (v.burned || 0) - burned0); rec('6d h6 still has 1 open game', 1, v['n' + s6]);
     r = await trig(op1, ROLL, { reclaim: s7 }); rec('6d reclaim voided h7 while its game is open', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
     r = await trig(ch3, ROLL, { open: s6 }, CBOND); rec('6d new open on voided h6', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
     r = await trig(op1, ROLL, sub(X6, 6, H5.final), OBOND); rec('6d honest h6 resubmitted while old games run', 'ok', r.err || 'ok'); const n6 = r.unit;
-    win = await play(ROLL + oB.unit, L6.roots, X6.roots, ch2, X6, op2); rec('6d late game B (ch2) on voided h6 -> c', 'c', win);
+    win = await play(ROLL + oB.unit, L6.roots, X6L.roots, ch2, X6L, op2); rec('6d late game B (ch2) on voided h6 -> c', 'c', win);
     rec('6d second win gets only CBOND - GF - FEE (no second slash)', CBOND - GF - FEE, await paidTo(play.last, A.ch2));
     v = await vars(ROLL); rec('6d late c-callback does not void the new h6', [6, n6], [v.top, v.h6]); rec('6d burned unchanged by the second win', OBOND / 2, (v.burned || 0) - burned0);
     rec('6d h6 games counter = 0', 0, v['n' + s6] || 0);
-    win = await play(ROLL + oC.unit, L7.roots, T.batch(L6.mem, 7, { k: 11, mut: T.MUT.reg }).roots, ch3, L7, op1); rec('6d late griefer game on voided h7 -> d', 'd', win);
+    win = await play(ROLL + oC.unit, L7.roots, T.at(T.batch(L6.mem, 7, { k: 11, mut: T.MUT.reg }), L7.ts).roots, ch3, L7, op1); rec('6d late griefer game on voided h7 -> d', 'd', win);
     rec('6d late d-callback pays op1 CBOND - GF - FEE', CBOND - GF - FEE, await paidTo(play.last, A.op1));
     v = await vars(ROLL); rec('6d top still 6 after the late d-callback', 6, v.top);
     r = await trig(op1, ROLL, { reclaim: s7 }); rec('6d reclaim voided h7 after its game', 'ok', r.err || 'ok'); rec('6d h7 bond back OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
@@ -211,7 +222,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     rec('7 open refund = 30000 in full (real output)', 30000, await paidTo(o.response, A.ch1)); rec('7 the same response unit pays GF to the referee', GF, await paidTo(o.response, GAME));
     rec('7 referee received the open (no refund back to the rollup)', true, !!(await vars(GAME))['g_' + ROLL + o.unit]);
     await net.timetravel({ shift: '1900s' }); const gid = ROLL + o.unit;
-    const s = await play(gid, H7.roots, T.batch(H6.mem, 7, { k: 11, mut: T.MUT.reg }).roots, ch1, H7, op1, 'c'); rec('7 operator answered the overpaid game, challenger to move', 'stopped', s);
+    const s = await play(gid, H7.roots, T.at(T.batch(H6.mem, 7, { k: 11, mut: T.MUT.reg }), H7.ts).roots, ch1, H7, op1, 'c'); rec('7 operator answered the overpaid game, challenger to move', 'stopped', s);
     await net.timetravel({ shift: '3601s' });
     r = await trig(w, GAME, { resolve: gid }, RK + 25000, 'resolve'); rec('7 resolve with RK + 25000', 'ok', r.err || 'ok');
     rec('7 resolve refund = 25000 (real output, same unit as the callback)', 25000, await paidTo(r.response, A.w)); rec('7 callback payment GB to the rollup', GB, await paidTo(r.response, ROLL));
@@ -225,6 +236,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   // 3 (game -> seg -> rollup); seg resolve on a timeout 2 (seg -> rollup); bind / prove 1
   const H64 = x => require('crypto').createHash('sha256').update(x).digest('base64');
   async function playSeg(sgid, defT, chT, honest, opw, chw) {
+    chT = T.at(chT, defT.ts); honest = honest === defT ? defT : honest === chT ? chT : T.at(honest, defT.ts); // loop round 7
     const bnd = k => Math.floor(k * defT.steps / defT.units);
     for (let it = 0; it < 20; it++) {
       const g = String((await vars(SEG))['g_' + sgid] || '').split(':'); if (g[0] === 'done') return { w: g[1] };

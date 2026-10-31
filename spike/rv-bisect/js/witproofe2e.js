@@ -12,16 +12,18 @@ const out = []; const rec = (n, e, a, x) => { const p = JSON.stringify(e) === JS
 (async () => {
   const mem = new FastMem(); const entry = load(ELF, mem); const b = fs.readFileSync(BATCH); const inp = new FastMem();
   for (let i = 0; i < b.length / 4; i++) inp.set(i, b.readUInt32LE(4 * i));
-  const st = { pc: entry, regs: Array(32).fill(0), step: 0, inp }; while (st.pc !== ref.HALT && st.pc !== ref.TRAP && st.step < 2e10) ref.step(st, mem);
+  const TS = 1e9 - 30; // loop round 7 (R6-M2): the height's timestamp enters as register x10 (a0)
+  const st = { pc: entry, regs: T.regsTs(TS), step: 0, inp }; while (st.pc !== ref.HALT && st.pc !== ref.TRAP && st.step < 2e10) ref.step(st, mem);
   const P = JSON.parse(fs.readFileSync(PROOFS, 'utf8'));
   const words = Array.from({ length: 8 }, (_, k) => mem.get(K.OUTW + k));
   rec('guest halted, status 0', [true, 0], [st.pc === ref.HALT, mem.get(K.STW)], { steps: st.step });
   rec('guest OUT[0x1FFE8..8] = proofdump root (host real-engine state)', P.root, K.wordsRoot(words));
+  rec('loop 7: guest published ts at OUT[0x1FFE5]', TS, mem.get(K.OUTW - 3));
   const M = new ref.Mem(); for (const [i, v] of mem.w) M.set(i, v); const t0 = Date.now(); const root = M.root();
   rec('memory image words / Merkle root built', true, M.w.size > 1000, { words: M.w.size, ms: Date.now() - t0 });
-  const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1);
+  const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1, { ts: TS }); // s0 = toy trace (rv_rollup checks only its formula)
   const final = ref.H(st.pc + ':' + st.regs.join(',') + ':' + root + ':' + b1.inpRoot + ':' + b1.steps);
-  let r = await C.send(OP, ROLL, OBOND, { submit: 1, s0: b1.s0, steps: b1.steps, final, inp: b1.inpRoot, fpc: st.pc, fregs: st.regs.join(','), fmem: root, prev: 'genesis', units: 1 });
+  let r = await C.send(OP, ROLL, OBOND, { submit: 1, ts: TS, s0: b1.s0, steps: b1.steps, final, inp: b1.inpRoot, fpc: st.pc, fregs: st.regs.join(','), fmem: root, prev: 'genesis', units: 1 });
   rec('height 1 with the guest memory as fmem', 'ok', r.err || 'ok');
   C.ts += WIN; r = await C.send(W, ROLL, 0, { finalize: 1 }); rec('finalized', 'ok', r.err || 'ok');
   r = await C.send(W, BIND, 0, K.bindData(M, 1)); rec('bind from the real guest memory', ['ok', P.root], [r.err || 'ok', C.v(BIND, 'W1')]);

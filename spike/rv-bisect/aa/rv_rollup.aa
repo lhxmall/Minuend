@@ -23,7 +23,15 @@ $MAXSTEPS = 1099511627776;   // 2^40 (kept, owner 2026-10-31): a challenger must
 // The burned half of a fraudulent operator's bond (var['burned']) stays locked in this AA forever: no command pays it
 // out. Any exit (a treasury key, or a reward pool for challengers) brings back a trusted key, or lets a fraudster's own
 // puppet challenger recoup it (owner decision 2026-10-31).
-$Z32 = '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';
+$Z10 = '0,0,0,0,0,0,0,0,0,0';                             // registers x0..x9 of s0
+$Z21 = '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';           // registers x11..x31 of s0
+// Loop round 7 (R6-M2 / R5-M2): every height carries an operator-declared timestamp ts (var t<sid>), bound into s0 as
+// register x10 (a0) -- the guest's _start leaves a0 alone until \`call rmain\`, so rmain(ts) receives it without an input
+// format change or a memory proof. ts must lie in [timestamp - TSLACK, timestamp] (the trigger's own MCI time) and
+// grow by at least MINGAP per height, so the engine clock (= height) cannot outrun wall-clock time: over any
+// interval, heights <= elapsed / MINGAP + 1 (+ TSLACK / MINGAP once).
+$TSLACK = 600;                 // seconds an operator may backdate (covers its unit's path to stability)
+$MINGAP = 60;           // seconds between consecutive heights' ts (mkrollup.js bakes it, default 60)
 // loop round 4: an xbind trigger (~9 KB of proofs) is read in place (R3-W2: a local copy exceeds the size limit)
 $d = exists(trigger.data.xbind) ? {} : trigger.data;
 $now = timestamp;
@@ -59,7 +67,7 @@ if (trigger.address == $GAME OR trigger.address == $SEG) {
 	$st = {sid: $sid, fraud: $cw, first: $first, void: $cw AND $live($sid, $r), h: +$r[0],
 		pay: $cw ? $g[1] : $r[1], amt: $CBOND - $GF - $FEE + ($first ? $OBOND / 2 : 0)};
 }
-// ---- submit height h: {submit: h, s0, steps, final, inp, fpc, fregs, fmem, prev}
+// ---- submit height h: {submit: h, ts, s0, steps, final, inp, fpc, fregs, fmem, prev}
 else if ($d.submit) {
 	$h = $d.submit;
 	require(is_integer($h) AND $h >= 1, 'bad height');
@@ -79,7 +87,10 @@ else if ($d.submit) {
 	// s0 is not chosen by the operator: memory carried from the previous final state, this batch's input,
 	// pc 0, registers 0, step 0 (closes the "s0 unbound" gap)
 	$pmem = var['U' || $h] OTHERWISE ($h == 1 ? $GENMEM : var['m' || var['h' || ($h - 1)]]);   // loop round 4: upgrade
-	require($d.s0 == sha256('0:' || $Z32 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
+	// loop round 7 (R6-M2): the timestamp of this height, checked before it enters s0
+	require(is_integer($d.ts) AND $d.ts >= 1 AND $d.ts < 4294967296 AND $d.ts <= $now AND $d.ts >= $now - $TSLACK, 'bad ts');
+	require($h == 1 OR $d.ts >= var['t' || var['h' || ($h - 1)]] + $MINGAP, 'ts gap');
+	require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
 	// the final root must be the hash of a halted (pc 2) or trapped (pc 1) state; its memory root seeds h+1
 	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
 	$st = {sid: trigger.unit, h: $h, rf: max($paid - $OBOND - $FEE, 0), rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
@@ -136,7 +147,12 @@ else if ($d.upgrade) {
 	$h = $d.upgrade;
 	require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');
 	require($isR($d.mem), 'bad root');
-	$st = {up: $h};
+	// loop round 5 (R5-M1): at most ONE pending (unfinalized) upgrade, var uh. Re-scheduling at an earlier (or the same)
+	// height replaces it and clears the old U<uh>: before, a stale later U<h'> survived and height h' would again start
+	// from the old image, whose compiled-in digest can never match the new export at h'-1 (height h' never finalizes)
+	$p = var['uh'] OTHERWISE 0;
+	require($p <= $lf OR $h <= $p, 'upgrade pending at ' || $p);
+	$st = {up: $h, clr: ($p > $lf AND $p != $h) ? $p : 0};
 }
 // ---- loop round 4: xbind {xbind: sid, words: [kind, 8 digest words], wsib: [9 x [24 siblings]]}: proves a
 //      submission's snapshot kind and digest against its final memory root (anyone; once per submission)
@@ -168,6 +184,7 @@ else bounce('unknown command');
 		var['s' || $st.sid] = $st.rec;
 		var['m' || $st.sid] = $d.fmem;
 		var['u' || $st.sid] = $d.units;
+		var['t' || $st.sid] = $d.ts;   // loop round 7 (R6-M2)
 		response['sid'] = $st.sid;
 	}
 	else if ($d.open OR $d.uopen) {
@@ -181,7 +198,9 @@ else bounce('unknown command');
 	}
 	else if ($d.reclaim) var['r' || $st.sid] = 'R';
 	else if ($d.upgrade) {
+		if ($st.clr) var['U' || $st.clr] = false;   // loop round 5 (R5-M1)
 		var['U' || $st.up] = $d.mem;
+		var['uh'] = $st.up;
 		var['top'] = $st.up - 1;
 		response['upgrade'] = $st.up;
 	}
