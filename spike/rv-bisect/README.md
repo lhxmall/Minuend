@@ -172,3 +172,16 @@ may import, R4-S1) and **no batch before import** (R4-S2); `SetHeight` = the bat
 session account cap 256 (heap bound stopgap, R4-H1); `rv_rollup` `upgrade` (governance) + `xbind` (export / import
 digest proven from the heights' final memories before an upgrade height can finalize). Scripts:
 `guest-engine/scripts/loop4-{build,quick,snapimg,suite,mut}.sh`; JS: `js/snapguest.js`, `js/prodheight.js`.
+
+## Loop round 11 (2026-11-01) — R10-M1 stall economics: escalating bond + winner priority (rv_rollup rule change)
+
+`findings/rv-loop-11.md`, design §8 item 3. Owner decision (2026-11-01): every fraud void at height h doubles the bond the
+next submission of h must post, **bond_h = OBOND × 2^min(voids_h, 10)** (var `v<h>`; cap 2^10 = 204 800 000 bytes so an
+honest re-submitter can still pay it; the posted bond is stored per submission as `b<sid>` when above OBOND and every
+payout — finalize / reclaim `bond − FEE`, the first winner's `CBOND − GF − FEE + bond/2`, the burned `bond − bond/2`, the
+submit refund `paid − bond − FEE` — uses it). After a fraud void at h only the winning challenger whose result voided it
+may submit h for **PRIO = 1800 s** (var `p<h>` = `winner:until`). `rv_rollup` complexity 82 / ops 1 663 (limits 100 / 2 000).
+rolltest `stall10` (worst case: the fraudster's puppet wins first every cycle, holds the window, re-submits): stall per
+cycle unchanged (≈ one slow game), fraudster's net cost per cycle 112 000 / 222 000 / 422 000 / 822 000 (bond/2 + GF + FEE,
+ratio → 2); when an honest challenger wins first the fraudster cannot re-submit and the stall ends after one cycle.
+rolltest 400/400; AA mutants `js/aamut-l11.py` 16/16 killed.

@@ -1180,6 +1180,9 @@ pub fn govedge() -> String {
         expect("r10:oracles_rebond_not_cap", again != OK && again != mnpilot::STATE_CAP_CODE, &mut fails);
         let pe = run_port(&g.words());
         expect("r10:port_events", pe.ev == g.ev, &mut fails);
+        // loop round 11: the cap values themselves (the R10-H1 heap bound 46.1 MB < 50.2 MB was measured at 16 markets /
+        // 32 oracles; harness and port share the constants, so only this absolute check sees a changed value)
+        expect("r10:cap_values", mnpilot::MAX_STATE_MARKETS == 16 && mnpilot::MAX_STATE_ORACLES == 32, &mut fails);
         run("r10", &g, &mut fails);
     }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
