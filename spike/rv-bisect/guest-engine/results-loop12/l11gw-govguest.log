@@ -1,0 +1,4 @@
+{"batch":"gov41.bin","units":337,"engine_match":true,"roots_match":true,"steps":34392470,"halted":true}
+{"batch":"gov42.bin","units":331,"engine_match":true,"roots_match":true,"steps":30344411,"halted":true}
+{"batch":"gov43.bin","units":332,"engine_match":true,"roots_match":true,"steps":24084092,"halted":true}
+{"batches":3,"match":3,"units":1000,"steps":88820973}

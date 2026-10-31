@@ -1,0 +1,25 @@
+guest-engine/Cargo.toml:31:default = ["govwit"]
+engine-diff/Cargo.toml:25:default = ["govwit"]
+    Finished `release` profile [optimized] target(s) in 22.97s
+    Finished `release` profile [optimized] target(s) in 12.41s
+    Finished `release` profile [optimized] target(s) in 10.69s
+2f6645ccf5cc8ae1b7c7687ce306b02ce64d8a86  /data/hark/target-l11gw-host/release/engine-diff
+f2a8f889ca749d5b6756c78173998294be1b9b92  /data/hark/target-l11gw-g/riscv32im-unknown-none-elf/release/rvengine
+775896ba5a420f31112dfc27557fc11fe5c57e97  /data/hark/target-l11gw-gprod/riscv32im-unknown-none-elf/release/rvengine
+BUILT
+govedge {"cases":9,"ok":9,"fail":[]}
+govwit {"govwit":1,"ok":1,"fail":[]}
+govfuzz {"seeds":100,"match":100,"units":33490,"why":"","coverage":{"commit:0x11":549,"commit:0x13":1336,"commit:ok":2318,"delisted":54,"final:0x7":659,"final:0xc":512,"final:ok":295,"gdep:0x7":502,"gdep:ok":
+xfuzz {"seeds":100,"match":100,"units":33406,"why":"","coverage":{"commit:0x11":541,"commit:0x13":1369,"commit:ok":2314,"delisted":46,"final:0x7":655,"final:0xc":531,"final:ok":273,"gdep:0x7":488,"gdep:ok":
+witfuzz {"seeds":100,"match":100,"units_compared":37581,"history_independent":100,"max_leaves":253,"smt_rounds_ok":100,"smt_rounds_bad":0,"smt_ops":11647}
+segfuzz {"batches":100,"ok":100,"segments":3529,"units":37581}
+proofs {"batches":30,"membership_ok":16632,"membership_bad":0,"absence_ok":6120,"absence_bad":0,"forgery_attempts":78546,"forged":0,"max_depth":16}
+{"batch":"gov43.bin","units":332,"engine_match":true,"roots_match":true,"steps":24084092,"halted":true}
+{"batches":3,"match":3,"units":1000,"steps":88820973}
+{"checks":16,"pass":16,"ok":true}
+snap expect 2b86b814bf2f13a611a19938ade5b7ab07dc1037c5aa64f1842068a485237cec:3104 ac13d809f9abf7cd32556839e037817e008c3bb75539631b177404411c49aa0e:5483
+    Finished `release` profile [optimized] target(s) in 11.38s
+    Finished `release` profile [optimized] target(s) in 11.24s
+{"dir":"/data/hark/spike-rv/loop11gw/snap-liq7","checks":9,"pass":9,"ok":true,"steps":123862847}
+{"dir":"/data/hark/spike-rv/loop11gw/snap-gen","checks":9,"pass":9,"ok":true,"steps":293461401}
+GWDONE
