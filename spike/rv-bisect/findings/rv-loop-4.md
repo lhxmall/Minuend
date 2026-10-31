@@ -111,4 +111,56 @@ The xbind trigger (~9 KB) is read in place (`$d = {}` for it; R3-W2). rolltest `
 
 ## Fix status / tests
 
-RESULTS_TABLE_4
+Commits on `spike/rv-bisect`: 1d60b0c, a0bdb3e (step 1), 8d2140a (rv_rollup upgrade / xbind), 43776ea, b21b27e, 4b039c2
+(post scripts); results in `guest-engine/results-loop4/` (collected in loop round 7, commit after 76124b4).
+
+### Round-4 suite (`scripts/loop4-suite.sh c`, InstaBox VM, build target-l4c-*, sha1 in `l4-bins.txt`)
+
+| check | result |
+|---|---|
+| quick (l4c-quick: fuzz 100, witfuzz 50, advfuzz 50, segfuzz 50, scen, liqfuzz 100, snaptest 100) | all green |
+| fuzz 300 × 300 / advfuzz 300 / witfuzz 300 | 300 / 300 · 300 / 300 · 300 / 300 |
+| segfuzz 300 | 300 / 300 (12 621 segments) |
+| proofs (host reference) | 177 087 membership, 61 540 absence ok, 0 / 829 291 forged |
+| scen upstream.scn host / guest | 47 / 47 · 47 / 47 |
+| selftest / depthsel (64, 8) | clean |
+| depth8 host / guest | 20 / 20 · 20 / 20 |
+| liqfuzz 300 (liquidate / ADL / withdraw / reports / ext prices / heights, real vs port) | 300 / 300 (332 441 units) |
+| snaptest 300 (export / import / digest / flips / truncations) | 300 / 300, 2 400 flips never accepted with the same digest |
+| capcheck 50 × cap 8, 20 × cap 64 | 50 / 50 · 20 / 20 (cap fired in every batch) |
+| liqedge (deterministic boundary cases) | ok (7 / 7) |
+| statecap 64 / 128 / 256 accounts (42 orders + 64 withdrawals each) | size-class high-water 0.76 / 6.70 / 12.22 MB (host 64-bit) < 50.2 MB |
+| heapsim (crowd / gen / adv / frag / limit) | ≤ 19.2 MB (crowdmax) |
+| liquidation batches through the JS guest (liqgen 1–6) | 6 / 6 (6 819 units, 1.74 G steps) |
+| snapshot + upgrade images through the guest (snapimg: liq7, gen9 prod) | 9 / 9 · 9 / 9 |
+| prodheight.js (prod SetHeight rule) | 6 / 6 |
+| prodflags (prod image refuses header flags) | ok |
+| segrun small / big3k, segbig-adv (16 384 / 5 000 / 1 000) | ok · ok · 1 / 4 / 17 segments ok (the 5 000 run without an out dir panicked: harness misuse, fixed in loop 5/6 suites) |
+| segbig 20 000 units (segrun) | OOM-killed (R3-T1, harness only; segbig-adv covers the guest path) |
+| segguest small default / big3k | 7 / 7 · 5 / 5 |
+| segguest small PROD image | suite ran it without `PROD=1` → false 1 / 7 (R7-L5); re-run with `PROD=1`: SGPROD4 |
+| extra-guest / robust / robust-limit / guest-poc | 9 / 9 · 15 / 15 · 1 / 1 · 3 / 3 |
+| witproof e2e (prod guest memory → rv_witbind / rv_witproof) | 8 / 8 |
+| sail-riscv spot check (6 batches incl. adv21, crowdc256) | 6 / 6 out_match |
+| rolltest (round-4 AAs, real ocore) | 303 / 303 |
+| AA static cost (rv_rollup) | complexity 63, ops 1 449 |
+| rolldevnet (devnet) | suite run: 92 PASS / 0 FAIL, then killed by its 2 400 s timeout at section 6d (load ~25); re-run with 9 000 s: RD4 |
+
+### Round-4 mutation test (`scripts/loop4-mut.sh`, `results-loop4/l4-mut.log`; survivors re-run with liqedge: `l4-mut2.log`)
+
+**41 / 61 killed** in the first pass. The 20 survivors were re-run with the deterministic liqedge cases
+(`loop4-post.sh`, `l4-mut2.log`): MUT2SUMMARY. Survivors and their disposition (rounds 5–6):
+
+| # | mutant | disposition |
+|---|---|---|
+| 4, 5, 10, 13 | pending `>`, min-withdraw `<=`, staleness `>=`, prune `>=` | killed by liqedge (mut2) |
+| 6 | withdraw equity `<=` | killed in round 5 by liqedge `wd_equity` |
+| 9 | ADL last share | killed in round 5 (R5-L6) |
+| 11 | TWAP min samples | equivalent: `external_twap` unreachable (funding source BondedMedianTwap, governance switch unported in round 4) |
+| 15, 17, 18 | capcheck fire rule, import trailing word, snapshot decoder cap | killed in round 5 (capcheck all-new-authors rule, snaptest trailing word, snapcap) |
+| 21, 23, 24 | journal / book index / put_account variants | equivalent (round 5 analysis, R5-L6) |
+| 27, 32 | segs counter, report band `<` | killed in round 5 (R5-L6: segfuzz segs check, liqedge) |
+| 35 | liquidatable `<` | killed in round 6 (liqedge `liq_eq` / `liq_eq_plus1`) |
+| 37 | ADL counterparty collateral `.max(0)` dropped | equivalent (round 6: `cp.collateral < 0` → `min(...) < 0` → `pay > 0` false either way) |
+| 52 | smt_ref absence check without the prefix test | equivalent under honest roots (round 6) |
+| 55, 56 | book rollback order / pushed count | argued equivalent under one-fill-per-unit (round 5, not proven) |

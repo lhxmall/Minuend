@@ -74,7 +74,7 @@ echo SAILDONE >> $L/l7-sail.log
 echo SUITE_MAIN_DONE >> $L/l7-bins.txt
 # rollup AAs (round 7: per-height timestamp in s0) on the sim chain and on a devnet (RV_MINGAP=1 there)
 (cd /data/hark/spike-rv/roll7/js && export AATK=/data/hark/wt-all/vendor/aa-testkit OCORE=/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore &&
-  OUT=$L/l7-rolltest.json timeout 2400 node rolltest.js > $L/l7-rolltest.log 2>&1; node aacost.js > $L/l7-aacost.log 2>&1;
-  rm -rf /data/hark/spike-rv/roll7/devnet-testdata; TESTDATA=/data/hark/spike-rv/roll7/devnet-testdata PORT=16771 OUT=$L/l7-rolldevnet.json timeout 3600 node rolldevnet.js > $L/l7-rolldevnet.log 2>&1)
+  OUT=$L/l7-rolltest.json timeout 2400 node rolltest.js > $L/l7-rolltest.log 2>&1; node aacost.js > $L/l7-aacost.log 2>&1)
+# rolldevnet (RV_MINGAP=1, devnet clock) runs separately: l7rd.sh -> l7-rolldevnet.log
 wait $PL $PG $G4 $G5
 echo SUITEDONE >> $L/l7-bins.txt
