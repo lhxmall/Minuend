@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 41.21s
+govd8
+{"cases":2,"ok":2,"ground_id":30,"tried":1,"fail":[]}
+govedge-d8
+{"cases":8,"ok":8,"fail":[]}
+depth8
+{"depth8_batches":5,"ok":5,"max_wit_depth":8}
+mut6
+{"cases":2,"ok":0,"ground_id":30,"tried":1,"fail":["d8:reveal_inner_deep"]}
+D8DONE
