@@ -80,7 +80,7 @@ Totals: **C 0 · H 0 · M 3 · L 5 · I 8** — R6-M2 and R7-M1 fixed, R7-M2 doc
 | 3 | GovWithdraw dropped from the shared ledger cap | killed (govedge) |
 | 4 | Slash dropped from the shared ledger cap | **survived** every round-7 check → killed by the round-8 govedge `cap:perp_slash_new` (R8-T4) |
 | 5 | inner-op `state_cap_ok` dropped | killed (govedge) |
-| 6 | inner-op W2 depth check dropped | **survived** every check → R8-L4 (no test reaches a too-deep key through a reveal) |
+| 6 | inner-op W2 depth check dropped | **survived** every check → R8-L4 (no test reaches a too-deep key through a reveal) → **killed in loop round 9** by `govd8` (`d8:reveal_inner_deep`, depth8 build) |
 | 7 | ADL one-fill rule dropped | killed (hbind) |
 | 8 | vote cap: snapshot voters no longer exempt | killed (govedge) |
 

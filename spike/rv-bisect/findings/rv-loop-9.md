@@ -35,13 +35,13 @@ Work items:
    round-8 and round-9 AAs on the box (`l9rt.sh`); round-9 devnet queued (`l9rd.sh`).
 5. **R7-L3** — not implemented in this round (estimate below); the design is refined to an implementable spec.
 6. **Fresh adversarial review of the rollup / AA layer** (rv_rollup incl. ts / upgrade / xbind, rv_seg_ref, rv_game_ref,
-   rv_step, rv_witbind, rv_witproof): one **H** (R9-H1, fixed), two L, eight I.
+   rv_step, rv_witbind, rv_witproof): one **H** (R9-H1, fixed), three L, eight I.
 
 Severity as in rounds 1–8: **C** = honest party loses / wrong verdict on reachable input; **H** = guest ≠ host,
 undefined guest outcome, or a protocol-reachable state loss / halt; **M** = design/spec gap with a concrete failure
 mode or a defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
 
-Totals: **C 0 · H 1 (fixed) · M 0 · L 3 (R8-L4 closed, R9-L1, R9-L2) + R7-L3 deferred · I 8**.
+Totals: **C 0 · H 1 (fixed) · M 0 · L 4 (R8-L4 closed, R9-L1, R9-L2, R9-T1 open) + R7-L3 deferred · I 8**.
 
 | id | sev | area | title | status |
 |---|---|---|---|---|
@@ -50,6 +50,7 @@ Totals: **C 0 · H 1 (fixed) · M 0 · L 3 (R8-L4 closed, R9-L1, R9-L2) + R7-L3 
 | R7-L3 | L | witness | proposals, commits and gov nonces are not MNWIT1 leaves | deferred; design refined below (exact leaf texts, kid rule, dirty hooks, depth arms, harness mirror, tests, cost) |
 | R9-L1 | L | rv_rollup upgrade | `finalize` of uh−1 does not require its export proof, so a non-export uh−1 still finalizes and the stall only shows at uh | documented: a guard (`U<h+1>` pending ⇒ `x(h)` kind 1 before `finalize h`) would stop h−1 instead — still a stall that needs governance; `cancel` is the recovery either way. Operational rule: schedule an upgrade at `top + 1` only when `top` is an export run that has been xbound (`x(top)` kind 1), and cancel if a void re-opens uh−1 |
 | R9-L2 | L | rv_rollup trust | the governance address can void every live height ≥ lf + 1 at will (upgrade / cancel), discarding operators' work (bonds are reclaimable) | documented trust assumption (as R3-H2 / R4-S1): `$GOV` is a fixed address baked by mkrollup |
+| R9-T1 | L | tests | upgrade / xbind / cancel run only on the sim chain (real ocore evaluator, `chain.js`), never on a devnet: rolldevnet bakes `GOV` = the fixed test address `GOVXXX…`, which no devnet wallet controls | open: rolldevnet with `GOV` = a devnet wallet and one upgrade → xbind → finalize + one cancel flow |
 | R9-I1 | I | rv_rollup → rv_game_ref | `open` forwards `n: $r[4]` (a string from `split`) while `uopen` uses `+$r[4]` | no defect: ocore casts numeric strings in trigger data (R7-I1), rolltest / rolldevnet games pass `is_integer($d.n)`; noted for a cleanup |
 | R9-I2 | I | rv_seg_ref | can an honest defender be unable to post points (`need cnt points` strictly inside (slo, shi))? | no, if it places points at true unit ends: every unit runs ≥ 1 instruction, so an interval of k units spans ≥ k steps; a defender placing points elsewhere only hurts itself |
 | R9-I3 | I | rv_seg_ref / layer 2 | is the layer-2 game slot unique and the callback routed back? | yes: rv_game_ref id = SEG ‖ sha256(opener ‖ ref), `x_<sha256(gid)>` maps back (round-3 design, unchanged) |
