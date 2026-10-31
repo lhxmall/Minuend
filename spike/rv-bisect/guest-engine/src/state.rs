@@ -196,6 +196,14 @@ pub struct ChainState {
     pub marks: BTreeMap<MarketId, Price>,
     pub oracle_reports: BTreeMap<(MarketId, AccountId), Price>,
     pub oracle_bonds: BTreeMap<AccountId, u128>,
+    /// loop round 5 (R4-M3): PERP ledger + oracle unbonding / slash state (upstream fields).
+    /// A PERP balance gives its id an `acct:` leaf even without an `accounts` entry (upstream
+    /// R8-C3); every write marks the id's MNWIT1 key dirty.
+    pub perp_balances: BTreeMap<AccountId, u128>,
+    pub perp_supply: u128,
+    pub perp_burned: u128,
+    pub oracle_unbonding: BTreeMap<AccountId, Height>,
+    pub oracle_slash_nonce: u64,
     pub last_index: BTreeMap<MarketId, Price>,
     pub withdrawals: BTreeMap<(AccountId, u64), Withdrawal>,
     pub withdrawn_total: BTreeMap<AccountId, i128>,
@@ -223,6 +231,112 @@ impl ChainState {
     /// PILOT: `accounts.remove`.
     pub fn del_account(&mut self, id: &AccountId) {
         self.accounts.remove(id);
+    }
+    /// loop round 5 (R4-M3): `perp_balances.insert`, marking the id's acct: key dirty
+    pub fn set_perp(&mut self, id: AccountId, v: u128) {
+        self.perp_balances.insert(id, v);
+        self.accounts.mark_dirty(id);
+    }
+    /// Verbatim minuend-state `apply_stake` (StateError -> RejectReason as exec `map_state`).
+    pub fn apply_stake(&mut self, account: AccountId) -> Result<(), crate::engine::RejectReason> {
+        use crate::engine::RejectReason as R;
+        if self.oracle_bonds.contains_key(&account) {
+            return Err(R::AlreadyBonded);
+        }
+        if self.oracle_unbonding.contains_key(&account) {
+            return Err(R::Unbonding);
+        }
+        let bal = self.perp_balances.get(&account).copied().unwrap_or(0);
+        if bal < crate::types::ORACLE_BOND_PERP {
+            return Err(R::Insufficient);
+        }
+        self.set_perp(account, bal - crate::types::ORACLE_BOND_PERP);
+        self.oracle_bonds.insert(account, crate::types::ORACLE_BOND_PERP);
+        Ok(())
+    }
+    /// Verbatim `apply_unstake`.
+    pub fn apply_unstake(&mut self, account: AccountId) -> Result<(), crate::engine::RejectReason> {
+        use crate::engine::RejectReason as R;
+        if !self.oracle_bonds.contains_key(&account) {
+            return Err(R::NotBonded);
+        }
+        if self.oracle_unbonding.contains_key(&account) {
+            return Err(R::Unbonding);
+        }
+        let unlock = self.height.saturating_add(crate::types::ORACLE_UNBOND_HEIGHTS);
+        self.oracle_unbonding.insert(account, unlock);
+        Ok(())
+    }
+    /// Verbatim `apply_slash`.
+    pub fn apply_slash(&mut self, challenger: AccountId, target: AccountId, market: MarketId) -> Result<(), crate::engine::RejectReason> {
+        use crate::engine::RejectReason as R;
+        if !self.markets.contains_key(&market) {
+            return Err(R::NotFound);
+        }
+        if !self.oracle_bonds.contains_key(&target) {
+            return Err(R::NotBonded);
+        }
+        let twap = self.compute_twap(market).or_else(|| self.compute_funding_twap(market)).ok_or(R::SlashNotEligible)?;
+        if twap == 0 {
+            return Err(R::SlashNotEligible);
+        }
+        let hist = self.oracle_report_history.get(&(market, target)).ok_or(R::SlashNotEligible)?;
+        if hist.len() < crate::types::SLASH_TWAP_STREAK as usize {
+            return Err(R::SlashNotEligible);
+        }
+        let n = crate::types::SLASH_TWAP_STREAK as usize;
+        let start = hist.len() - n;
+        let deviation_bps = self.oracle_config(market).deviation_bps;
+        let latest_height = hist.back().map(|s| s.height).unwrap_or(0);
+        if self.height.saturating_sub(latest_height) > 256 {
+            return Err(R::SlashNotEligible);
+        }
+        for i in 0..n {
+            let idx = start + i;
+            let sample = hist[idx];
+            if i > 0 {
+                let prev = hist[idx - 1];
+                if sample.height != prev.height + 1 {
+                    return Err(R::SlashNotEligible);
+                }
+            }
+            let dev = ((sample.price as i128 - twap as i128).abs() * 10_000 / (twap as i128).abs()) as u64;
+            if dev < deviation_bps {
+                return Err(R::SlashNotEligible);
+            }
+        }
+        let bond = self.oracle_bonds.remove(&target).unwrap_or(crate::types::ORACLE_BOND_PERP);
+        self.oracle_unbonding.remove(&target);
+        self.oracle_reports.remove(&(market, target));
+        self.oracle_report_history.remove(&(market, target));
+        let burn = bond * (crate::types::SLASH_REWARD_BPS as u128) / 10_000;
+        let reward = bond.saturating_sub(burn);
+        self.perp_burned = self.perp_burned.saturating_add(burn);
+        if self.perp_supply >= burn {
+            self.perp_supply = self.perp_supply.saturating_sub(burn);
+        }
+        let challenger_bal = self.perp_balances.get(&challenger).copied().unwrap_or(0);
+        self.set_perp(challenger, challenger_bal.saturating_add(reward));
+        self.oracle_slash_nonce = self.oracle_slash_nonce.wrapping_add(1);
+        Ok(())
+    }
+    /// Verbatim `prune_oracle_unbonding` (batch-commit hook).
+    pub fn prune_oracle_unbonding(&mut self, current_height: Height) {
+        let mut to_release = Vec::new();
+        for (acct, unlock) in &self.oracle_unbonding {
+            if *unlock <= current_height {
+                to_release.push(*acct);
+            }
+        }
+        for acct in to_release {
+            self.oracle_unbonding.remove(&acct);
+            if let Some(bond) = self.oracle_bonds.remove(&acct) {
+                let bal = self.perp_balances.get(&acct).copied().unwrap_or(0);
+                self.set_perp(acct, bal.saturating_add(bond));
+                self.oracle_reports.retain(|(_, o), _| *o != acct);
+                self.oracle_report_history.retain(|(_, o), _| *o != acct);
+            }
+        }
     }
     /// PILOT: running indexes == full recomputation (host tests).
     pub fn oi_ok(&self) -> bool {

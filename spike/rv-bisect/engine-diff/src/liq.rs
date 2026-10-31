@@ -437,10 +437,11 @@ fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {
 /// include the height and the withdrawal ledger) must be equal, and the session's segs / height
 /// must equal the run number. Also: SetHeight in a binding session is refused (event 2).
 pub fn hbind(n: u64, ops: u32) -> String {
-    let (mut ok, mut segs_total, mut jumps) = (0u64, 0u64, 0u64);
+    let (mut ok, mut segs_total, mut jumps, mut empties) = (0u64, 0u64, 0u64, 0u64);
     let mut why = String::new();
     for seed in 1..=n {
-        let w0 = liq_batch(seed, ops);
+        // odd seeds: oracle batches (unstake + height jumps -> the hook releases bonds into PERP = acct: leaves)
+        let w0 = if seed % 2 == 0 { liq_batch(seed, ops) } else { oracle_batch(seed, ops) };
         let (n_acc, n0) = (w0[1] as usize, w0[2] as usize);
         let base = 4 + 8 * n_acc;
         let mut w: Vec<u32> = w0[..base].to_vec();
@@ -457,7 +458,8 @@ pub fn hbind(n: u64, ops: u32) -> String {
         let mut cuts: Vec<(usize, usize, u32)> = Vec::new();
         let (mut lo, mut rn) = (0usize, 0u32);
         while lo < kept as usize || cuts.is_empty() {
-            let hi = (lo + 1 + rng.below(80) as usize).min(kept as usize);
+            // now and then an empty segment (a height whose batch carries no unit: the hook alone)
+            let hi = if rng.below(8) == 0 && !cuts.is_empty() { lo } else { (lo + 1 + rng.below(80) as usize).min(kept as usize) };
             let gap = match rng.below(6) { 0 => rng.below(3000) as u32, 1 if rng.below(3) == 0 => 10_000 + rng.below(10_000) as u32, _ => 0 };
             if gap > 0 {
                 jumps += 1;
@@ -489,7 +491,7 @@ pub fn hbind(n: u64, ops: u32) -> String {
             sw.extend_from_slice(&w[4..base]);
             sw.extend_from_slice(&w[base + 8 * lo..base + 8 * hi]);
             let mut roots = Vec::new();
-            let (h, st, _) = mnpilot::run_segment_n(
+            let (h, st, wo) = mnpilot::run_segment_n(
                 &mut |i| sw.get(i as usize).copied().unwrap_or(0),
                 &mut |x| ev_all.push(x),
                 &mut |_, s, r| {
@@ -507,6 +509,9 @@ pub fn hbind(n: u64, ops: u32) -> String {
                 fail(s.eng.state.height == rn as u64, format!("segment {} height {} != run {}", k, s.eng.state.height, rn), &mut good);
             }
             fail(s.segs == rn, format!("segment {} segs", k), &mut good);
+            // R5-L4: the segment end root commits the whole state incl. the hook's effects (empty segments too)
+            fail(wo.root == smt_ref::root(&mnpilot::wit::all_leaves(&s.eng.state)), format!("segment {} end root != scratch root (empty {})", k, hi == lo), &mut good);
+            empties += (hi == lo) as u64;
         }
         fail(ev_all == rout.ev, "events".into(), &mut good);
         // SetHeight under binding: refused, nothing changes
@@ -524,5 +529,126 @@ pub fn hbind(n: u64, ops: u32) -> String {
             ok += 1;
         }
     }
-    format!("{{\"seeds\":{},\"ok\":{},\"segments\":{},\"height_jumps\":{},\"why\":\"{}\"}}", n, ok, segs_total, jumps, why)
+    format!("{{\"seeds\":{},\"ok\":{},\"segments\":{},\"empty_segments\":{},\"height_jumps\":{},\"why\":\"{}\"}}", n, ok, segs_total, empties, jumps, why)
+}
+
+/// Loop round 5 (R4-M3): oracle stake / unstake / slash batches. Accounts 1..=3 bonded (fixture),
+/// 4..=9 hold 2 x ORACLE_BOND_PERP PERP (fixture bit 27), 10.. traders / challengers. One of 4..=9
+/// is the "deviant": once staked it reports 6-20 % off the honest price at consecutive heights, so
+/// slash streaks form; heights advance by SetHeight (+1, sometimes +300 to finish unbondings).
+pub fn oracle_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+    let mut rng = Rng(seed.wrapping_mul(0x9FB2_1C65_1E98_DF25) | 1);
+    let n_acc = 14 + rng.below(6) as u32;
+    let flags = mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG | mnpilot::FUNDING_MKT_FLAG;
+    let (ids_real, mut g) = adv::new_gen(n_acc, flags);
+    for a in 0..n_acc {
+        let amt = 50_000 * USD_SCALE as i64;
+        g.apply([1 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]);
+    }
+    let deviant = 4 + rng.below(6) as u32;
+    let mut mark = MID;
+    let mut height = 0u64;
+    for o in ORACLES {
+        g.apply(w8(8, o, 0, mark, 0, 0, 0, 1));
+    }
+    for _ in 0..n_ops {
+        let r = rng.below(100);
+        let any = rng.below(n_acc as u64) as u32;
+        let staker = 4 + rng.below(6) as u32;
+        match r {
+            0..=9 => {
+                g.apply([11 | ((if rng.below(5) == 0 { any } else { staker }) << 8), 0, 0, 0, 0, 0, 0, 0]);
+            }
+            10..=13 => {
+                let a = if rng.below(3) == 0 { any } else if rng.below(2) == 0 { staker } else { ORACLES[rng.below(3) as usize] };
+                g.apply([12 | (a << 8), 0, 0, 0, 0, 0, 0, 0]);
+            }
+            14..=55 => {
+                // a round of reports at this height: honest oracles + bonded stakers, the deviant off
+                mark += (rng.below(41) as i64 - 20) * mark / 2000;
+                mark = mark.max(10_000 * DOLLAR);
+                let mut who: Vec<u32> = ORACLES.to_vec();
+                who.extend((4..10).filter(|a| rng.below(2) == 0 || *a == deviant));
+                for o in who {
+                    let px = if o == deviant {
+                        let d = mark * (6 + rng.below(15) as i64) / 100;
+                        if rng.below(2) == 0 { mark + d } else { mark - d }
+                    } else {
+                        mark + (rng.below(21) as i64 - 10) * mark / 10_000
+                    };
+                    let mkt = if rng.below(12) == 0 { mnpilot::FUNDING_MKT.0 } else { 1 };
+                    let px = if mkt == 1 { px } else { mnpilot::types::encode_funding_price(100 + rng.below(40) as i64) };
+                    g.apply(w8(8, o, 0, px, 0, 0, 0, mkt));
+                }
+                height += 1;
+                g.apply([10, height as u32, (height >> 32) as u32, 0, 0, 0, 0, 0]);
+            }
+            56..=63 => {
+                height += if rng.below(4) == 0 { 300 } else { 1 + rng.below(3) };
+                g.apply([10, height as u32, (height >> 32) as u32, 0, 0, 0, 0, 0]);
+            }
+            64..=89 => {
+                // slash: mostly the deviant, sometimes an honest oracle / a non-bonded id; any challenger
+                // (incl. a fresh id: the reward creates its PERP-only acct: leaf)
+                let target = match rng.below(6) { 0 => ORACLES[rng.below(3) as usize], 1 => any, _ => deviant };
+                let ch = if rng.below(4) == 0 { n_acc - 1 - rng.below(3) as u32 } else { any };
+                let mkt = if rng.below(10) == 0 { 2 } else { 1 };
+                g.apply([13 | (ch << 8), target, 0, 0, 0, 0, 0, mkt]);
+            }
+            _ => {
+                // a trade now and then (positions keep the acct leaves busy)
+                let t = 10 + rng.below((n_acc - 10) as u64) as u32;
+                let c = g.next_cseq(t);
+                let bid = rng.below(2) == 0;
+                let px = if bid { mark + mark / 100 } else { mark - mark / 100 };
+                let mk = 4 + rng.below(6) as u32;
+                let cm = g.next_cseq(mk);
+                g.apply([2 | (mk << 8), bid as u32, px as u32, (px >> 32) as u32, (QTY_SCALE / 100) as u32, 0, cm as u32, 1]);
+                g.apply([2 | (t << 8), !bid as u32, px as u32, (px >> 32) as u32, (QTY_SCALE / 100) as u32, 0, c as u32, 1]);
+            }
+        }
+    }
+    adv::batch_words(&ids_real, &g.ops, flags)
+}
+
+/// real vs port on oracle_batch: hash, events, per-unit MNWIT1 roots (real scratch / port
+/// incremental / port scratch); plus a snapshot round trip of the final session (new v2 fields)
+pub fn orafuzz(n: u64, ops: u32) -> String {
+    let (mut ok, mut units) = (0u64, 0u64);
+    let mut cov: std::collections::BTreeMap<String, u64> = Default::default();
+    for s in 1..=n {
+        let w = oracle_batch(s, ops);
+        let mut a = Vec::new();
+        let (r, _) = run_real_eng_cb(&w, &mut |e| a.push(smt_ref::root(&real_pilot_leaves(e))));
+        let p = run_port(&w);
+        let (b, c, wo) = port_roots(&w);
+        let same = r.hash == p.hash && r.ev == p.ev && r.applied == p.applied;
+        let roots = a == b && b == c && wo.scratch_ok && a.len() == w[2] as usize;
+        // snapshot round trip
+        let mut sess: Option<mnpilot::Session> = None;
+        let _ = mnpilot::run_segment(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |_| {}, &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess);
+        let (d, words) = snap::export_words(sess.as_ref().unwrap());
+        let mut imp: Option<mnpilot::Session> = None;
+        let io = mnpilot::run_import(&mut |i| words.get(i as usize).copied().unwrap_or(0), &mut imp, Some(&(d, words.len() as u32)));
+        let er = sess.as_mut().unwrap().w.as_mut().map(|t| t.root());
+        let snap_ok = io.status == 0 && er == Some(io.root) && imp.as_ref().map(|x| mnpilot::state_hash(&x.eng.state) == p.hash).unwrap_or(false);
+        if same && roots && snap_ok {
+            ok += 1;
+        } else {
+            let first_ev = r.ev.iter().zip(&p.ev).position(|(x, y)| x != y);
+            let first_root = a.iter().zip(&b).zip(&c).position(|((x, y), z)| x != y || y != z);
+            println!("ORAMISMATCH seed {} engine {} roots {} snap {} first_ev {:?} first_root {:?}", s, same, roots, snap_ok, first_ev, first_root);
+        }
+        units += a.len() as u64;
+        let o = outcomes(&w, &p.ev);
+        let base = 4 + 8 * w[1] as usize;
+        for (i, e) in o.iter().enumerate() {
+            let k = w[base + 8 * i] & 0xff;
+            let name = match k { 11 => "stake", 12 => "unstake", 13 => "slash", 8 => "report", 10 => "height", _ => continue };
+            let res = if *e == mnpilot::EV_HEIGHT { "set".to_string() } else if e & EV_APPLIED != 0 { "ok".to_string() } else { format!("{:#x}", e) };
+            *cov.entry(format!("{}:{}", name, res)).or_default() += 1;
+        }
+    }
+    let cs: Vec<String> = cov.iter().map(|(k, v)| format!("\"{}\":{}", k, v)).collect();
+    format!("{{\"seeds\":{},\"match\":{},\"units\":{},\"coverage\":{{{}}}}}", n, ok, units, cs.join(","))
 }

@@ -881,6 +881,20 @@ impl Engine {
     // PILOT: `mut` bindings for the guarded account handles, the holders index instead of
     // full account scans, `note_journal` for the MNWIT1 dirty set, no re-entrancy flag. ----
     /// upstream `dispatch` arm `Op::ReportPrice`
+    /// loop round 5 (R4-M3): exec `stake_oracle` / `unstake_oracle` / `slash_oracle`
+    pub fn stake_oracle(&mut self, account: AccountId) -> Result<Vec<Fill>, RejectReason> {
+        self.state.apply_stake(account)?;
+        Ok(Vec::new())
+    }
+    pub fn unstake_oracle(&mut self, account: AccountId) -> Result<Vec<Fill>, RejectReason> {
+        self.state.apply_unstake(account)?;
+        Ok(Vec::new())
+    }
+    pub fn slash_oracle(&mut self, challenger: AccountId, target: AccountId, market: MarketId) -> Result<Vec<Fill>, RejectReason> {
+        self.state.apply_slash(challenger, target, market)?;
+        Ok(Vec::new())
+    }
+
     pub fn report_price(&mut self, oracle: AccountId, market: MarketId, price: Price) -> Result<Vec<Fill>, RejectReason> {
         // Bond gate: only PERP-bonded accounts may report prices;
         // unknown markets have no book to index either.

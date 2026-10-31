@@ -41,7 +41,7 @@ fn run_seg(sw: &[u32], sess: &mut Option<mnpilot::Session>) -> (String, [u8; 32]
         wo.root,
     )
 }
-fn export_words(sess: &mnpilot::Session) -> ([u8; 32], Vec<u32>) {
+pub(crate) fn export_words(sess: &mnpilot::Session) -> ([u8; 32], Vec<u32>) {
     let (d, _, k) = mnpilot::snapshot::export(sess, true);
     (d, k.unwrap())
 }

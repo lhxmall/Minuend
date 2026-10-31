@@ -36,6 +36,10 @@
 //!                      (round 5, R4-M4: the hook runs at segment start with the rollup height).
 //!                      Emits EV_HEIGHT, is neither applied nor rejected (no seq), but is a unit for
 //!                      the per-unit roots
+//!   loop round 5 (R4-M3 port): 11 StakeOracle (author), 12 UnstakeOracle (author), 13 SlashOracle
+//!                      (author = challenger; w1 = target account index; w7 = market). Header bit 27
+//!                      (fixture, non-prod): accounts 4..=9 of the table hold 2 x ORACLE_BOND_PERP PERP
+//!                      (upstream: a GovDeposit; not ported) and perp_supply counts it.
 //!   header [3] loop round 4 fixtures: bit 25 = list market 3 as a funding-rate market (the 100x
 //!     listing of upstream's funding tests; account 0 of the table is its external feed), bit 26 =
 //!     accounts 1..=3 of the table are bonded oracles (oracle_bonds = ORACLE_BOND_PERP)
@@ -138,6 +142,9 @@ pub const MARKET2_FLAG: u32 = 1 << 24;
 /// loop round 4 fixtures (header word 3, non-prod): funding-rate market 3 / bonded oracles
 pub const FUNDING_MKT_FLAG: u32 = 1 << 25;
 pub const ORACLES_FLAG: u32 = 1 << 26;
+/// loop round 5 fixture: accounts 4..=9 hold PERP (stake / slash tests)
+pub const PERP_FLAG: u32 = 1 << 27;
+pub const PERP_FIXTURE: u128 = 2 * ORACLE_BOND_PERP;
 pub const FUNDING_MKT: MarketId = MarketId(3);
 /// Liquidate op: target index meaning the insurance account
 pub const LIQ_TARGET_INSURANCE: u32 = 0xFF_FFFF;
@@ -226,6 +233,8 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
         // loop round 4: a keeper reward credits the caller (`account_mut(caller)`): its acct: key
         // can be created by the unit -> checked like a deposit's
         BatchOp::Liquidate { .. } => !new_acct || ok(&wit::acct_key(&author)),
+        // loop round 5: a slash reward credits the challenger's PERP -> its acct: key may be created
+        BatchOp::Slash { .. } => !new_acct || s.perp_balances.contains_key(&author) || s.withdrawn_total.contains_key(&author) || ok(&wit::acct_key(&author)),
         BatchOp::Place { market, client_seq, .. } => {
             let m = MarketId(market);
             let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
@@ -284,6 +293,14 @@ impl state::ChainState {
         if flags & ORACLES_FLAG != 0 {
             for a in accts.iter().skip(1).take(3) {
                 s.oracle_bonds.insert(*a, ORACLE_BOND_PERP);
+            }
+        }
+        if flags & PERP_FLAG != 0 {
+            for a in accts.iter().skip(4).take(6) {
+                if *a != INSURANCE_ACCOUNT {
+                    s.set_perp(*a, PERP_FIXTURE);
+                    s.perp_supply += PERP_FIXTURE;
+                }
             }
         }
         s
@@ -355,7 +372,7 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
     h.update(s.seq.to_le_bytes());
     h.update((s.accounts.len() as u32).to_le_bytes());
     for a in s.accounts.values() {
-        h.update(account_leaf(a, 0, s.withdrawn_total.get(&a.id).copied().unwrap_or(0)));
+        h.update(account_leaf(a, s.perp_balances.get(&a.id).copied().unwrap_or(0), s.withdrawn_total.get(&a.id).copied().unwrap_or(0)));
     }
     h.update((s.books.len() as u32).to_le_bytes());
     for (m, b) in &s.books {
@@ -425,6 +442,26 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
             h.update(t.seq.to_le_bytes());
         }
     }
+    // loop round 5 (R4-M3): PERP ledger + oracle bonds / unbonding / slash state (engine-diff real_hash: same bytes)
+    h.update(b"MNPILOT3");
+    h.update((s.perp_balances.len() as u32).to_le_bytes());
+    for (a, v) in &s.perp_balances {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
+    h.update(s.perp_supply.to_le_bytes());
+    h.update(s.perp_burned.to_le_bytes());
+    h.update(s.oracle_slash_nonce.to_le_bytes());
+    h.update((s.oracle_bonds.len() as u32).to_le_bytes());
+    for (a, v) in &s.oracle_bonds {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
+    h.update((s.oracle_unbonding.len() as u32).to_le_bytes());
+    for (a, v) in &s.oracle_unbonding {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
     h.update((s.external_price_ring.len() as u32).to_le_bytes());
     for (m, q) in &s.external_price_ring {
         h.update(m.0.to_le_bytes());
@@ -458,6 +495,9 @@ pub enum BatchOp {
     Report { acct: u32, price: i64, market: u32 },
     ExtPrice { acct: u32, price: i64, source_id: u8, market: u32 },
     SetHeight { height: u64 },
+    Stake { acct: u32 },
+    Unstake { acct: u32 },
+    Slash { acct: u32, target: u32, market: u32 },
     Bad,
 }
 pub fn decode_op(w: &[u32; 8]) -> BatchOp {
@@ -483,6 +523,9 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
         8 => BatchOp::Report { acct, price: lo64(w[2], w[3]) as i64, market: w[7] },
         9 => BatchOp::ExtPrice { acct, price: lo64(w[2], w[3]) as i64, source_id: w[6] as u8, market: w[7] },
         10 => BatchOp::SetHeight { height: lo64(w[1], w[2]) },
+        11 => BatchOp::Stake { acct },
+        12 => BatchOp::Unstake { acct },
+        13 => BatchOp::Slash { acct, target: w[1], market: w[7] },
         _ => BatchOp::Bad,
     }
 }
@@ -584,6 +627,8 @@ pub fn run_segment(
 pub fn commit_height(s: &mut state::ChainState, height: Height) {
     s.height = height;
     s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
+    // loop round 5 (R4-M3): upstream's hook also releases finished oracle unbondings
+    s.prune_oracle_unbonding(height);
 }
 
 /// `run_segment` with options (loop round 5: run number = rollup height, height binding).
@@ -627,15 +672,22 @@ pub fn run_segment_n(
     let Session { eng, w, state_cap, segs, bind_height, .. } = sess.as_mut().unwrap();
     let state_cap = *state_cap;
     let bind_height = *bind_height;
-    // R4-M4: the batch-commit hook at the rollup height (before any unit and before the start
-    // root, so the start root is the state the first unit sees; the hook only touches the
-    // withdrawal ledger + height, which MNWIT1 does not commit)
-    if bind_height && (*segs as Height) > eng.state.height {
-        commit_height(&mut eng.state, *segs as Height);
-    }
+    // segment start root = the previous segment's end root (the tree as committed so far)
     if let Some(w) = w.as_mut() {
         wo.root = w.root();
         wo.start_root = wo.root;
+    }
+    // R4-M4: the batch-commit hook at the rollup height, before any unit (units of height h see
+    // engine height h). Since round 5 (R4-M3 port) the hook can change committed leaves: a finished
+    // unbonding returns its bond to the reporter's PERP (acct: leaf). Review R5-L4: the witness is
+    // committed right after the hook, so the hook's effects are in the end root even of a segment
+    // without units (before: they first appeared in the next unit's root, and W<h> of an empty
+    // height showed the pre-release balance); with units the first unit's root contains them anyway.
+    if bind_height && (*segs as Height) > eng.state.height {
+        commit_height(&mut eng.state, *segs as Height);
+        if let Some(w) = w.as_mut() {
+            wo.root = w.commit(&mut eng.state);
+        }
     }
     for i in 0..n_ops {
         let mut ow = [0u32; 8];
@@ -653,7 +705,10 @@ pub fn run_segment_n(
             | BatchOp::Withdraw { acct, .. }
             | BatchOp::Liquidate { acct, .. }
             | BatchOp::Report { acct, .. }
-            | BatchOp::ExtPrice { acct, .. } => acct_of(acct),
+            | BatchOp::ExtPrice { acct, .. }
+            | BatchOp::Stake { acct }
+            | BatchOp::Unstake { acct }
+            | BatchOp::Slash { acct, .. } => acct_of(acct),
             BatchOp::SetHeight { .. } | BatchOp::Bad => None,
         };
         // W2 depth rule (only where the tree exists: Incremental mode; Off/Legacy are bench builds)
@@ -705,11 +760,21 @@ pub fn run_segment_n(
                 Some(a) => eng.update_external_price(a, MarketId(market), price, source_id, seq),
                 None => Err(RejectReason::BadAccount),
             },
+            BatchOp::Stake { acct } => match acct_of(acct) {
+                Some(a) => eng.stake_oracle(a),
+                None => Err(RejectReason::BadAccount),
+            },
+            BatchOp::Unstake { acct } => match acct_of(acct) {
+                Some(a) => eng.unstake_oracle(a),
+                None => Err(RejectReason::BadAccount),
+            },
+            BatchOp::Slash { acct, target, market } => match (acct_of(acct), accts.get(target as usize).copied()) {
+                (Some(a), Some(t)) => eng.slash_oracle(a, t, MarketId(market)),
+                _ => Err(RejectReason::BadAccount),
+            },
             BatchOp::SetHeight { height } => {
-                // prod: the batch-commit hook only ever advances by one height (review R4-H2);
-                // test builds may jump (peg interval / feed staleness fixtures)
-                // prod: also only as the segment's first unit, so the height advances at most once per
-                // rollup height (each costs an operator bond + a challenge window), R4-H2
+                // test fixture (peg interval / feed staleness / unbonding): jumps allowed in test
+                // builds without height binding (round 4 R4-H2 rule superseded by R4-M4)
                 // loop round 5 (R4-M4): with height binding (always in prod) the height is the
                 // rollup height, set by the hook at segment start -> SetHeight is always refused
                 let ok_h = !bind_height && !cfg!(feature = "prod") && height >= eng.state.height;

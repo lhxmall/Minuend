@@ -238,6 +238,9 @@ pub const FUNDING_TWAP_WINDOW: Height = 256;
 pub const FUNDING_TWAP_MIN_SAMPLES: usize = 2;
 pub const FUNDING_EXTERNAL_MAX_STALENESS: Height = 32;
 pub const ORACLE_BOND_PERP: u128 = 50_000;
+/// loop round 5 (R4-M3 port: oracle stake / unstake / slash), minuend-types lib.rs
+pub const ORACLE_UNBOND_HEIGHTS: Height = 256;
+pub const SLASH_TWAP_STREAK: u64 = 3;
 /// minuend-exec: pending withdrawals per account / smallest partial withdrawal
 pub const MAX_PENDING_WITHDRAWALS_PER_ACCOUNT: usize = 64;
 pub const MIN_WITHDRAW_AMOUNT: Usd = USD_SCALE as Usd;

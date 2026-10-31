@@ -27,7 +27,8 @@
 //!   ChainState: height, seq, accounts, markets, books, marks, oracle_reports, oracle_bonds,
 //!   last_index, withdrawals, withdrawn_total, oracle_configs, oracle_report_history, oracle_twap,
 //!   funding_twap, funding_index_twap, funding_source, external_price_ring, external_sources,
-//!   last_funding_height, seen_client_seq; SNAP_END.
+//!   last_funding_height, seen_client_seq, (v2, loop round 5 R4-M3) perp_balances, perp_supply, perp_burned,
+//!   oracle_unbonding, oracle_slash_nonce; SNAP_END.
 //! Book arrival numbers are not encoded (only their order matters): import numbers each book's
 //! level entries 0.. in (ask levels ascending, bid levels descending, FIFO) order, so an imported
 //! session exports the identical words.
@@ -44,7 +45,7 @@ use sha2::{Digest, Sha256};
 pub const SNAP_MAGIC: u32 = 0x4D4E_5331; // "MNS1"
 pub const SNAP_END: u32 = 0x4D4E_5345; // "MNSE"
 pub const EXPORT_MAGIC: u32 = 0x4D4E_5845; // "MNXE"
-pub const SNAP_VERSION: u32 = 1;
+pub const SNAP_VERSION: u32 = 2; // loop round 5: + PERP / unbonding / slash state
 /// Import refuses counts above these (each bounds one map of the snapshot; the session caps of
 /// state.rs keep honest exports far below them). Keeps a malformed snapshot from exhausting the
 /// guest heap before the digest check would reject it.
@@ -365,6 +366,19 @@ pub fn encode(sess: &Session, w: &mut SnapW) {
         w.id(&a.0);
         w.u64(*c);
     }
+    w.len(s.perp_balances.len());
+    for (a, v) in &s.perp_balances {
+        w.id(&a.0);
+        w.u128(*v);
+    }
+    w.u128(s.perp_supply);
+    w.u128(s.perp_burned);
+    w.len(s.oracle_unbonding.len());
+    for (a, h) in &s.oracle_unbonding {
+        w.id(&a.0);
+        w.u64(*h);
+    }
+    w.u64(s.oracle_slash_nonce);
     w.w(SNAP_END);
 }
 
@@ -541,6 +555,21 @@ pub fn decode(r: &mut SnapR) -> Res<Session> {
         asc(&mut pk, a)?;
         s.seen_client_seq.insert(a, r.u64()?);
     }
+    let mut pk = None;
+    for _ in 0..r.len()? {
+        let a = AccountId(r.id()?);
+        asc(&mut pk, a)?;
+        s.perp_balances.insert(a, r.u128()?);
+    }
+    s.perp_supply = r.u128()?;
+    s.perp_burned = r.u128()?;
+    let mut pk = None;
+    for _ in 0..r.len()? {
+        let a = AccountId(r.id()?);
+        asc(&mut pk, a)?;
+        s.oracle_unbonding.insert(a, r.u64()?);
+    }
+    s.oracle_slash_nonce = r.u64()?;
     if r.w()? != SNAP_END {
         return Err(());
     }

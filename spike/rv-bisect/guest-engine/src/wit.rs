@@ -465,6 +465,8 @@ impl Wit {
         let mut w = Wit::default();
         let mut d = WitDirty::default();
         d.accounts.extend(s.accounts.keys().copied());
+        d.accounts.extend(s.perp_balances.keys().copied());
+        d.accounts.extend(s.withdrawn_total.keys().copied());
         for (m, book) in &s.books {
             for o in book.live_orders() {
                 d.orders.insert((*m, o.id));
@@ -480,11 +482,11 @@ impl Wit {
         for id in &d.accounts {
             let old = self.pos_index.remove(id).unwrap_or_default();
             match s.accounts.get(id) {
-                // PILOT: perp_balances are not modelled (always 0 here); upstream also gives an
-                // acct: leaf to ids that only hold PERP or W (W needs an account in the pilot:
-                // withdraw refuses an unknown account and accounts are never removed).
+                // loop round 5 (R4-M3): PERP is modelled; like upstream (R8-C3) an id that only
+                // holds PERP (or W) has an acct: leaf with collateral 0 (W needs an account in the
+                // pilot: withdraw refuses an unknown account and accounts are never removed).
                 Some(a) => {
-                    acct_leaf(&mut b, id, a.collateral, 0, s.withdrawn_total.get(id).copied().unwrap_or(0));
+                    acct_leaf(&mut b, id, a.collateral, s.perp_balances.get(id).copied().unwrap_or(0), s.withdrawn_total.get(id).copied().unwrap_or(0));
                     put(&mut self.smt, &b, &mut self.leaf_updates);
                     let cur = self.put_positions(&mut b, a);
                     for m in old.iter().filter(|m| !cur.contains(m)) {
@@ -493,6 +495,14 @@ impl Wit {
                     }
                     if !cur.is_empty() {
                         self.pos_index.insert(*id, cur);
+                    }
+                }
+                None if s.perp_balances.contains_key(id) || s.withdrawn_total.contains_key(id) => {
+                    acct_leaf(&mut b, id, 0, s.perp_balances.get(id).copied().unwrap_or(0), s.withdrawn_total.get(id).copied().unwrap_or(0));
+                    put(&mut self.smt, &b, &mut self.leaf_updates);
+                    for m in &old {
+                        pos_leaf(&mut b, id, *m, 0, 0, false, 0);
+                        self.smt.remove(&key_of(&b.b[..b.kid]));
                     }
                 }
                 None => {
@@ -565,9 +575,12 @@ pub fn all_leaves(s: &ChainState) -> Vec<String> {
     let mut out = Vec::new();
     let mut b = Buf::new();
     let mut push = |b: &Buf| out.push(String::from(core::str::from_utf8(b.as_bytes()).unwrap()));
-    for (id, a) in &s.accounts {
-        acct_leaf(&mut b, id, a.collateral, 0, s.withdrawn_total.get(id).copied().unwrap_or(0));
+    let ids: BTreeSet<AccountId> = s.accounts.keys().chain(s.perp_balances.keys()).chain(s.withdrawn_total.keys()).copied().collect();
+    for id in &ids {
+        let a = s.accounts.get(id);
+        acct_leaf(&mut b, id, a.map(|a| a.collateral).unwrap_or(0), s.perp_balances.get(id).copied().unwrap_or(0), s.withdrawn_total.get(id).copied().unwrap_or(0));
         push(&b);
+        let Some(a) = a else { continue };
         for (m, p) in &a.positions {
             pos_leaf(&mut b, id, *m, p.qty, p.entry_price, p.isolated, a.isolated_margin.get(m).copied().unwrap_or(0));
             push(&b);

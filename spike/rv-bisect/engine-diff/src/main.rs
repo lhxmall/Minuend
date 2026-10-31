@@ -199,6 +199,26 @@ fn real_hash(s: &ChainState) -> [u8; 32] {
             h.update(t.seq.to_le_bytes());
         }
     }
+    // loop round 5 (R4-M3): same bytes as mnpilot::state_hash's MNPILOT3 section
+    h.update(b"MNPILOT3");
+    h.update((s.perp_balances.len() as u32).to_le_bytes());
+    for (a, v) in &s.perp_balances {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
+    h.update(s.perp_supply.to_le_bytes());
+    h.update(s.perp_burned.to_le_bytes());
+    h.update(s.oracle_slash_nonce.to_le_bytes());
+    h.update((s.oracle_bonds.len() as u32).to_le_bytes());
+    for (a, v) in &s.oracle_bonds {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
+    h.update((s.oracle_unbonding.len() as u32).to_le_bytes());
+    for (a, v) in &s.oracle_unbonding {
+        h.update(a.0);
+        h.update(v.to_le_bytes());
+    }
     h.update((s.external_price_ring.len() as u32).to_le_bytes());
     for (m, q) in &s.external_price_ring {
         h.update(m.0.to_le_bytes());
@@ -243,6 +263,13 @@ fn real_fixtures(eng: &mut Engine, flags: u32, ids: &[AccountId]) {
     if flags & mnpilot::ORACLES_FLAG != 0 {
         for a in ids.iter().skip(1).take(3) {
             eng.state.oracle_bonds.insert(*a, minuend_types::ORACLE_BOND_PERP);
+        }
+    }
+    // loop round 5: PERP fixture (upstream would get there with GovDeposit units)
+    if flags & mnpilot::PERP_FLAG != 0 {
+        for a in ids.iter().skip(4).take(6) {
+            eng.state.perp_balances.insert(*a, mnpilot::PERP_FIXTURE);
+            eng.state.perp_supply += mnpilot::PERP_FIXTURE;
         }
     }
 }
@@ -342,6 +369,7 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
             if h > eng.state.height {
                 eng.state.height = h;
                 eng.state.prune_withdrawals(h);
+                eng.state.prune_oracle_unbonding(h);
             }
         }
         let mut ow = [0u32; 8];
@@ -390,12 +418,18 @@ fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut 
             mnpilot::BatchOp::ExtPrice { acct, price, source_id, market } => {
                 (acct, Op::UpdateExternalPrice { source: ids[acct as usize], market: MarketId(market), price, source_id })
             }
+            mnpilot::BatchOp::Stake { acct } => (acct, Op::StakeOracle { account: ids[acct as usize] }),
+            mnpilot::BatchOp::Unstake { acct } => (acct, Op::UnstakeOracle { account: ids[acct as usize] }),
+            mnpilot::BatchOp::Slash { acct, target, market } => {
+                (acct, Op::SlashOracle { challenger: ids[acct as usize], target: ids[target as usize], market: MarketId(market) })
+            }
             mnpilot::BatchOp::SetHeight { height } => {
                 // test fixture: not a unit upstream -- the batch-commit hook (minuend-settle) sets the
                 // height and prunes the withdrawal ledger
                 if height >= eng.state.height {
                     eng.state.height = height;
                     eng.state.prune_withdrawals(height);
+                    eng.state.prune_oracle_unbonding(height); // loop round 5: upstream's hook does both
                     out.ev.push(mnpilot::EV_HEIGHT);
                 } else {
                     out.rejected += 1;
@@ -528,10 +562,13 @@ impl Gen {
             mnpilot::BatchOp::ExtPrice { acct, price, source_id, market } => {
                 self.eng.update_external_price(self.ids[acct as usize], M(market), price, source_id, seq)
             }
+            mnpilot::BatchOp::Stake { acct } => self.eng.stake_oracle(self.ids[acct as usize]),
+            mnpilot::BatchOp::Unstake { acct } => self.eng.unstake_oracle(self.ids[acct as usize]),
+            mnpilot::BatchOp::Slash { acct, target, market } => self.eng.slash_oracle(self.ids[acct as usize], self.ids[target as usize], M(market)),
             mnpilot::BatchOp::SetHeight { height } => {
                 self.ops.push(w);
                 if height >= self.eng.state.height {
-                    self.eng.state.height = height;
+                    mnpilot::commit_height(&mut self.eng.state, height);
                 }
                 return true;
             }
@@ -1007,6 +1044,12 @@ fn main() {
         Some("snapcap") => println!("{}", snap::snapcap()),
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqedge") => println!("{}", liq::liqedge()),
+        Some("orafuzz") => println!("{}", liq::orafuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("oragen") => {
+            let w = liq::oracle_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"ops\":{}}}", w[2]);
+        }
         Some("hbind") => println!("{}", liq::hbind(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqgen") => {
             // loop round 5: 5th arg "v2" = MNP2 (real unit ids appended)

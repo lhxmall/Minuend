@@ -3,7 +3,7 @@
 // counts its runs (RUNS) and every batch run first runs the batch-commit hook with height = run number, so the operator no
 // longer decides the engine clock: SetHeight (kind 10) is refused in prod, export / import heights are skipped by the next
 // batch's hook. OUT[0x1FFE6] = engine height, OUT[0x1FFE7] = segs (= run number). Also R4-M2: in prod an MNP1 Liquidate is
-// refused (BadAccount 2: no unit id), the MNP2 one runs (here: target without a position -> NotLiquidatable 11).
+// refused (BadAccount 2: no unit id), the MNP2 one runs (here: target without an account -> NotFound 10).
 // A test image (no binding) keeps SetHeight jumps (fixtures).
 // usage: node prodheight.js <prod elf> <test elf>   -> one JSON line per check + summary
 const ref = require('./ref.js'); const { FastMem, load } = require('./elfrun.js');
@@ -31,7 +31,7 @@ const chk = (name, r, want) => { const ok = r.halted && Object.keys(want).every(
   chk('prod run 6: refused header (bad magic) still counts as a height', runOne(P, [0x1234, 0, 0, 0]), { status: 1, segs: 6 });
   chk('prod run 7: -> height 7', runOne(P, batch([])), { status: 0, height: 7, segs: 7 });
   chk('prod: MNP1 Liquidate refused (no unit id) -> 2', runOne(P, batch([LIQ])), { status: 0, ev: [2], height: 8 });
-  chk('prod: MNP2 Liquidate runs (no position -> NotLiquidatable 11)', runOne(P, batch2([LIQ], [[1, 2, 3, 4, 5, 6, 7, 8]])), { status: 0, ev: [11], height: 9 }); }
+  chk('prod: MNP2 Liquidate runs past the gate (target has no account -> NotFound 10)', runOne(P, batch2([LIQ], [[1, 2, 3, 4, 5, 6, 7, 8]])), { status: 0, ev: [10], height: 9 }); }
 { const P = image(PROD);
   chk('prod fresh image: refused header at height 1, genesis at height 2 -> height 2', (runOne(P, [0x1234, 0, 0, 0]), runOne(P, batch([]))), { status: 0, height: 2, segs: 2 }); }
 { const T = image(TEST);
