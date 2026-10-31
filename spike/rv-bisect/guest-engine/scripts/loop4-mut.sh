@@ -4,7 +4,8 @@
 # loop-3 list (patterns updated for round 4). Checks per mutant: loop3-mut.sh's set plus
 #   liqfuzz 30 300 (port vs real engine on liquidate / ADL / withdraw / reports / ext prices / heights),
 #   snaptest 20 200 (export / import / import lock / digest), capcheck 10 100 8 (account cap rule).
-# MUTS="1 5 7" runs only those mutant numbers.
+# MUTS="1 5 7" runs only those mutant numbers. liqedge (deterministic boundary batches) added after the first
+# full run; the first run's survivors were re-run with it (LOG=l4-mut2.log).
 . /data/hark/spike-rv/env.sh
 P=${P:-/data/hark/spike-rv/loop4}; M=$P/mut; LOG=${LOG:-/data/hark/logs/rv/l4-mut.log}; : > $LOG
 muts=(
@@ -112,8 +113,9 @@ PY
   lq=$($B liqfuzz 30 300 2>/dev/null | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/')
   sn=$($B snaptest 20 200 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/')
   cc=$($B capcheck 10 100 8 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/')
+  le=$($B liqedge 2>/dev/null | grep -c '"ok":true')
   pk=ok; echo "$pf" | grep -q '"membership_bad":0,.*"absence_bad":0,.*"forged":0,' || pk=BAD
-  k=no; { [ "$fz" != 100 ] || [ "$sc" != 47 ] || [ "$wf" != 30 ] || [ "$af" != 30 ] || [ "$stf" != '{"selftest_fail":[]}' ] || [ "$pk" != ok ] || [ "$d8" != 5 ] || [ "$sf" != 30 ] || [ "$lq" != 30 ] || [ "$sn" != 20 ] || [ "$cc" != 10 ]; } && k=KILLED
-  echo "mut $i [$f: ${to:0:70}] fuzz $fz/100 scen $sc/47 witfuzz $wf/30 advfuzz $af/30 selftest $stf proofs $pk depth8 $d8/5 segfuzz $sf/30 liqfuzz $lq/30 snaptest $sn/20 capcheck $cc/10 -> $k" >> $LOG
+  k=no; { [ "$fz" != 100 ] || [ "$sc" != 47 ] || [ "$wf" != 30 ] || [ "$af" != 30 ] || [ "$stf" != '{"selftest_fail":[]}' ] || [ "$pk" != ok ] || [ "$d8" != 5 ] || [ "$sf" != 30 ] || [ "$lq" != 30 ] || [ "$sn" != 20 ] || [ "$cc" != 10 ] || [ "$le" != 1 ]; } && k=KILLED
+  echo "mut $i [$f: ${to:0:70}] fuzz $fz/100 scen $sc/47 witfuzz $wf/30 advfuzz $af/30 selftest $stf proofs $pk depth8 $d8/5 segfuzz $sf/30 liqfuzz $lq/30 snaptest $sn/20 capcheck $cc/10 liqedge $le/1 -> $k" >> $LOG
 done
 echo DONE >> $LOG

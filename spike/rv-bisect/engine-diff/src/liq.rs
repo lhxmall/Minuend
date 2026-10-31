@@ -274,3 +274,117 @@ pub fn liqfuzz(n: u64, ops: u32) -> String {
     let cs: Vec<String> = cov.iter().map(|(k, v)| format!("\"{}\":{}", k, v)).collect();
     format!("{{\"seeds\":{},\"match\":{},\"units\":{},\"funding_clock_armed_batches\":{},\"coverage\":{{{}}}}}", n, ok, units, paid, cs.join(","))
 }
+
+/// Per-op first event word (EV_APPLIED|fills, a reject code, or EV_HEIGHT).
+fn outcomes(w: &[u32], ev: &[u32]) -> Vec<u32> {
+    let mut o = Vec::new();
+    let mut k = 0usize;
+    for _ in 0..w[2] as usize {
+        let e = ev[k];
+        o.push(e);
+        k += if e & EV_APPLIED != 0 && e != mnpilot::EV_HEIGHT { 1 + 6 * (e & 0xff) as usize } else { 1 };
+    }
+    o
+}
+
+/// Loop round 4 (mutation follow-up): deterministic boundary batches for the ported paths that
+/// random liqfuzz batches rarely hit exactly. Each case is checked real vs port (hash, events,
+/// per-unit roots) AND for intent (the real engine's outcome at the boundary op is the expected
+/// one, so the case really sits on the boundary):
+///   wd_limit   64 pending withdrawals accepted, the 65th refused (Risk)
+///   wd_min     exactly MIN_WITHDRAW_AMOUNT accepted, one micro-USD less refused
+///   wd_prune   a nonce stays used at height h0 + REPLAY_WINDOW - 1, is reusable at h0 + REPLAY_WINDOW
+///   stale_peg  external print at P + 14400 - 32 is stale for the peg at P + 14400 (no payment);
+///              print one height later is fresh (payment) -- both must match the real engine
+///   band10     an oracle median exactly 10 % above the mark moves the mark (dev == old / 10)
+pub fn liqedge() -> String {
+    use mnpilot::types::encode_funding_price as efp;
+    let fm = mnpilot::FUNDING_MKT.0;
+    let flags = mnpilot::FUNDING_MKT_FLAG | mnpilot::ORACLES_FLAG;
+    let mut res = Vec::new();
+    let mut all = true;
+    let mut case = |name: &str, build: &dyn Fn(&mut Gen) -> Vec<(usize, u32)>| {
+        let (ids_real, mut g) = adv::new_gen(12, flags);
+        for a in 0..12u32 {
+            let amt = 5_000_000 * USD_SCALE as i64;
+            g.apply([1 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]);
+        }
+        let want = build(&mut g);
+        let w = adv::batch_words(&ids_real, &g.ops, flags);
+        let mut a = Vec::new();
+        let (r, _) = run_real_eng_cb(&w, &mut |e| a.push(smt_ref::root(&real_pilot_leaves(e))));
+        let p = run_port(&w);
+        let (b, c, wo) = port_roots(&w);
+        let same = r.hash == p.hash && r.ev == p.ev && r.applied == p.applied && a == b && b == c && wo.scratch_ok;
+        let out = outcomes(&w, &r.ev);
+        let intent = want.iter().all(|&(i, e)| if e == EV_APPLIED { out[i] & EV_APPLIED != 0 && out[i] != mnpilot::EV_HEIGHT } else { out[i] == e });
+        all &= same && intent;
+        res.push(format!("\"{}\":{{\"match\":{},\"intent\":{}}}", name, same, intent));
+    };
+    let wd = |a: u32, amt: i64, nonce: u64| -> [u32; 8] { [6 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, nonce as u32, (nonce >> 32) as u32] };
+    let hgt = |h: u64| -> [u32; 8] { [10, h as u32, (h >> 32) as u32, 0, 0, 0, 0, 0] };
+    let risk = reason_code_of(mnpilot::engine::RejectReason::Risk);
+    let dup = reason_code_of(mnpilot::engine::RejectReason::DuplicateNonce);
+    case("wd_limit", &|g| {
+        let mut want = Vec::new();
+        for n in 1..=64u64 {
+            g.apply(wd(10, 2 * USD_SCALE as i64, n));
+            want.push((g.ops.len() - 1, EV_APPLIED));
+        }
+        g.apply(wd(10, 2 * USD_SCALE as i64, 65));
+        want.push((g.ops.len() - 1, risk));
+        want
+    });
+    case("wd_min", &|g| {
+        g.apply(wd(10, USD_SCALE as i64, 1));
+        let i = g.ops.len() - 1;
+        g.apply(wd(11, USD_SCALE as i64 - 1, 1));
+        vec![(i, EV_APPLIED), (i + 1, risk)]
+    });
+    case("wd_prune", &|g| {
+        let w0 = mnpilot::types::REPLAY_WINDOW;
+        g.apply(hgt(5));
+        g.apply(wd(10, 3 * USD_SCALE as i64, 7));
+        let i0 = g.ops.len() - 1;
+        g.apply(hgt(5 + w0 - 1));
+        g.apply(wd(10, 3 * USD_SCALE as i64, 7));
+        let i1 = g.ops.len() - 1;
+        g.apply(hgt(5 + w0));
+        g.apply(wd(10, 3 * USD_SCALE as i64, 7));
+        let i2 = g.ops.len() - 1;
+        vec![(i0, EV_APPLIED), (i1, dup), (i2, EV_APPLIED)]
+    });
+    for (name, late) in [("stale_peg", 0u64), ("fresh_peg", 1u64)] {
+        case(name, &|g| {
+            let qs = QTY_SCALE;
+            let p0 = 10u64;
+            g.apply(hgt(p0));
+            // index 100 bps; a print at 105 bps sets the mark (bootstrap within the 10 bps cap) and arms the peg clock
+            g.apply([9, 0, efp(100) as u32, (efp(100) >> 32) as u32, 0, 0, 0, fm]);
+            let c6 = g.next_cseq(6);
+            g.apply([2 | (6 << 8), 1, efp(105) as u32, (efp(105) >> 32) as u32, qs as u32, (qs >> 32) as u32, c6 as u32, fm]);
+            let c10 = g.next_cseq(10);
+            g.apply([2 | (10 << 8), 0, efp(105) as u32, (efp(105) >> 32) as u32, qs as u32, (qs >> 32) as u32, c10 as u32, fm]);
+            let fill = g.ops.len() - 1;
+            let pk = p0 + mnpilot::types::FUNDING_PEG_INTERVAL_HEIGHTS;
+            let hp = pk - mnpilot::types::FUNDING_EXTERNAL_MAX_STALENESS + late;
+            g.apply(hgt(hp));
+            g.apply([9, 0, efp(40) as u32, (efp(40) >> 32) as u32, 0, 0, 1, fm]);
+            g.apply(hgt(pk));
+            // a bonded oracle report on the funding market settles the peg at pk
+            g.apply([8 | (1 << 8), 0, efp(105) as u32, (efp(105) >> 32) as u32, 0, 0, 0, fm]);
+            vec![(fill, EV_APPLIED | 1), (g.ops.len() - 1, EV_APPLIED)]
+        });
+    }
+    case("band10", &|g| {
+        let m = 100_000 * DOLLAR;
+        g.apply([8 | (1 << 8), 0, (m + m / 10) as u32, ((m + m / 10) >> 32) as u32, 0, 0, 0, 1]);
+        let i = g.ops.len() - 1;
+        g.apply([8 | (2 << 8), 0, (m + m / 10 + m / 50) as u32, ((m + m / 10 + m / 50) >> 32) as u32, 0, 0, 0, 1]);
+        vec![(i, EV_APPLIED)]
+    });
+    format!("{{\"ok\":{},\"cases\":{{{}}}}}", all, res.join(","))
+}
+fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {
+    mnpilot::reason_code(&r)
+}

@@ -21,6 +21,8 @@
 //!   engine-diff liqfuzz <n_seeds> <n_ops>   loop round 4: leverage / oracle / liquidation / ADL /
 //!       funding-rate / withdraw batches: real vs port (hash + events + per-unit MNWIT1 roots)
 //!   engine-diff liqgen <seed> <n_ops> <out.bin>   write one liqfuzz batch
+//!   engine-diff liqedge   loop round 4: deterministic boundary batches (withdraw limit / min / prune,
+//!       feed staleness at the peg, report band) real vs port + intent
 //!   engine-diff snaptest <n_seeds> <n_ops>   loop round 4 (R3-H2): export/import of the session
 //!       at random segment boundaries == the uninterrupted run (roots, events, hash, re-export)
 //!
@@ -965,6 +967,7 @@ fn main() {
         Some("statecap") => println!("{}", snap::statecap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
         Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])),
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("liqedge") => println!("{}", liq::liqedge()),
         Some("liqgen") => {
             let w = liq::liq_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
             write_words(&a[4], &w);
