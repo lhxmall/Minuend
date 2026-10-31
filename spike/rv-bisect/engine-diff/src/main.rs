@@ -360,9 +360,11 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
                 (acct, Op::UpdateExternalPrice { source: ids[acct as usize], market: MarketId(market), price, source_id })
             }
             mnpilot::BatchOp::SetHeight { height } => {
-                // test fixture: not a unit upstream -- the batch layer sets the height
+                // test fixture: not a unit upstream -- the batch-commit hook (minuend-settle) sets the
+                // height and prunes the withdrawal ledger
                 if height >= eng.state.height {
                     eng.state.height = height;
+                    eng.state.prune_withdrawals(height);
                     out.ev.push(mnpilot::EV_HEIGHT);
                 } else {
                     out.rejected += 1;
@@ -959,6 +961,8 @@ fn main() {
             println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
         }
         Some("snaptest") => println!("{}", snap::snaptest(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("capcheck") => println!("{}", snap::capcheck(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
+        Some("statecap") => println!("{}", snap::statecap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
         Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])),
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqgen") => {

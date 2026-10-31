@@ -18,9 +18,13 @@
 //! dead: later runs execute nothing (status ST_DEAD = 5). Loop round 3 review R3-G1/G2.
 //! Loop round 4 (R3-H2, snapshot.rs): input word 0 = EXPORT_MAGIC -> export run (needs a live session:
 //! digest of the canonical snapshot at OUT[0x1FFD8..8], its length in words at [0x1FFD7], kind 1 at
-//! [0x1FFD6], session root as both segment roots); word 0 = SNAP_MAGIC -> import run (only without a live
-//! session: a fresh image, or a DEAD one, whose allocator is then reset and torn session abandoned;
-//! digest of the words consumed, kind 2, rebuilt root as both segment roots; ST_BAD_SNAP on bad input).
+//! [0x1FFD6], session root as both segment roots); word 0 = SNAP_MAGIC -> import run, accepted only as
+//! an upgrade image built with MNPILOT_IMPORT_DIGEST=<export digest hex>:<words> while it has no session
+//! (review R4-S1: the digest is part of the image, so the governance-chosen GENMEM decides which state may
+//! be imported; any other image -> ST_IMPORT_LOCKED, a mismatching / malformed snapshot -> ST_BAD_SNAP; the
+//! words are hashed BEFORE they are decoded). An upgrade image refuses batch runs until it imported
+//! (ST_NEED_IMPORT, R4-S2: else its first batch would start a genesis session = wipe the state). A dead
+//! image stays dead (ST_DEAD); recovery is an upgrade to a new image that imports the last good export.
 //! [0x1FFD6..0x1FFE0] are zero in every other run. Event log cap lowered to 0x1FFD6 (EV_CAP).
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
@@ -82,6 +86,9 @@ mod rt {
     /// moved out of its box: SESS points at freed memory), so every later run refuses to execute (ST_DEAD).
     #[link_section = ".data.sess"]
     static mut IN_RUN: u32 = 0;
+    /// loop round 4 (R4-S1): "<digest hex>:<words>" of the export an upgrade image may import (compiled in, so
+    /// the image's memory root commits it); None = ordinary image, imports refused
+    const IMPORT_DIGEST: Option<&str> = option_env!("MNPILOT_IMPORT_DIGEST");
     extern "C" { static _heap_start: u8; }
     const HEAP_END: usize = 0x0300_0000; // below the embed input region; stack has 15 MiB above
     #[inline]
@@ -179,22 +186,10 @@ mod rt {
             put_root(SNAP_DIGEST, &[0; 32]);
             OUT.add(SNAP_N).write_volatile(0);
             OUT.add(SNAP_KIND).write_volatile(0);
-            let import = read_word(0) == mnpilot::snapshot::SNAP_MAGIC;
             if DEAD != 0 || IN_RUN != 0 {
-                if !import {
-                    DEAD = 1;
-                    OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
-                    return 0;
-                }
-                // loop round 4 (R3-H2) revive: abandon the torn session and its heap -- the allocator
-                // starts over from _heap_start (nothing of this run is allocated yet)
-                FREE = [0; NCLASS];
-                HEAP = 0;
-                HEAP0 = 0;
-                LIVE = 0;
-                PEAK = 0;
-                SESS = 0;
-                DEAD = 0;
+                DEAD = 1;
+                OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
+                return 0;
             }
             IN_RUN = 1;
         }
@@ -202,11 +197,12 @@ mod rt {
             if SESS == 0 { None } else { Some(*alloc::boxed::Box::from_raw(SESS as *mut mnpilot::Session)) }
         };
         let w0 = read_word(0);
+        let expect = IMPORT_DIGEST.and_then(mnpilot::parse_expect);
         if w0 == mnpilot::snapshot::EXPORT_MAGIC || w0 == mnpilot::snapshot::SNAP_MAGIC {
             let so = if w0 == mnpilot::snapshot::EXPORT_MAGIC {
                 mnpilot::run_export(&mut |i| read_word(i), &mut sess)
             } else {
-                mnpilot::run_import(&mut |i| read_word(i), &mut sess)
+                mnpilot::run_import(&mut |i| read_word(i), &mut sess, expect.as_ref())
             };
             unsafe {
                 let segs = sess.as_ref().map(|s| s.segs).unwrap_or(0);
@@ -230,6 +226,22 @@ mod rt {
                 IN_RUN = 0; // clean exit
             }
             return so.status;
+        }
+        // R4-S2: an upgrade image (MNPILOT_IMPORT_DIGEST set, even if malformed) without a session runs no
+        // units: run_segment would start a fresh genesis session (= the rollup state wiped). Nothing is
+        // allocated or kept; the image stays importable.
+        if IMPORT_DIGEST.is_some() && sess.is_none() {
+            unsafe {
+                OUT.add(SEG_N).write_volatile(0);
+                for k in 0..13 {
+                    OUT.add(k).write_volatile(0);
+                }
+                OUT.add(12).write_volatile((HEAP - HEAP0) as u32);
+                OUT.add(ROOTS - 6).write_volatile(PEAK as u32);
+                OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_NEED_IMPORT);
+                IN_RUN = 0; // clean exit
+            }
+            return mnpilot::ST_NEED_IMPORT;
         }
         #[cfg(feature = "nowit")]
         let mode = mnpilot::WitMode::Off;

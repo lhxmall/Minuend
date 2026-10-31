@@ -550,7 +550,11 @@ pub fn decode(r: &mut SnapR) -> Res<Session> {
     }
     let w = if mode == WitMode::Incremental { Some(crate::wit::Wit::from_state(&s)) } else { None };
     let _ = s.take_dirty();
-    Ok(Session { eng: crate::engine::Engine { state: s }, w, mode, segs })
+    // the account cap is a consensus constant, not session state; an import above it is malformed
+    if s.accounts.len() > crate::MAX_STATE_ACCOUNTS {
+        return Err(());
+    }
+    Ok(Session { eng: crate::engine::Engine { state: s }, w, mode, segs, state_cap: crate::MAX_STATE_ACCOUNTS })
 }
 
 /// Host / guest export: (digest, words, kept words).

@@ -30,9 +30,10 @@
 //!                      the unit input)
 //!     8 ReportPrice:   author = oracle; w2,w3 = price; w7 = market
 //!     9 ExternalPrice: author = source; w2,w3 = price; w6 = source_id (low byte); w7 = market
-//!    10 SetHeight:     TEST FIXTURE (refused as kind 0 in `prod`): w1,w2 = new batch height (must be >=
-//!                      the current one, else event 2); emits EV_HEIGHT, is neither applied nor rejected
-//!                      (no seq), but is a unit for the per-unit roots (unchanged root)
+//!    10 SetHeight:     the batch-commit hook (minuend-settle: height = prev + 1, prune_withdrawals):
+//!                      w1,w2 = new batch height; `prod` requires exactly current + 1, test builds any
+//!                      height >= current (fixtures); else event 2. Emits EV_HEIGHT, is neither applied
+//!                      nor rejected (no seq), but is a unit for the per-unit roots
 //!   header [3] loop round 4 fixtures: bit 25 = list market 3 as a funding-rate market (the 100x
 //!     listing of upstream's funding tests; account 0 of the table is its external feed), bit 26 =
 //!     accounts 1..=3 of the table are bonded oracles (oracle_bonds = ORACLE_BOND_PERP)
@@ -152,8 +153,39 @@ pub const ST_BAD_SNAP: u32 = 7;
 pub const ST_SESSION_LIVE: u32 = 8;
 /// EXPORT header words 1..3 must be 0
 pub const ST_BAD_EXPORT: u32 = 9;
+/// IMPORT refused: the image has no compiled-in expected digest (an ordinary image, e.g. the
+/// genesis image). Loop round 4 review R4-S1.
+pub const ST_IMPORT_LOCKED: u32 = 10;
+/// batch refused: an upgrade image (one with an expected import digest) must import before it
+/// runs units -- else its first batch would start a fresh genesis session (R4-S2)
+pub const ST_NEED_IMPORT: u32 = 11;
 /// input words an import may read (the input tree's index range below the ecall trap range)
 pub const SNAP_LIMIT: u32 = (1 << 24) - 1;
+
+/// Event code of a unit rejected by the session account cap (loop round 4, `state_cap_ok`).
+pub const STATE_CAP_CODE: u32 = 19;
+/// Loop round 4 (long-run heap bound): the session lives in guest memory across heights and
+/// accounts are never deleted, so the heap needs a consensus bound on the state. Everything else
+/// is bounded per account (<= MAX_LIVE_ORDERS_PER_ACCOUNT live orders, <= 64 withdrawals, one
+/// position per market, one seen client_seq) or globally constant (markets, bonded oracles,
+/// rings), so capping the number of accounts bounds the heap. Measured (engine-diff statecap,
+/// 64-bit host sizes = upper bound of rv32): <= 1.3 KB per bare account, ~170 B per withdrawal,
+/// ~1 KB per live order incl. book indexes and MNWIT1 nodes -> <= ~80 KB per fully loaded account;
+/// MAX_STATE_ACCOUNTS fully loaded <= 20.5 MB, x1.3 fragmentation (round 2 A3) + 4.4 MB per-run
+/// transient (limit batch) = 31.1 MB < the 50.2 MB heap (statecap 384 x 64 x 64 measured 23.1 MB
+/// with 42 live orders per account). The cap is a STOPGAP that makes OOM
+/// impossible; production needs a stateless guest (state as witness input) or a larger RAM, see
+/// findings/rv-loop-4.md R4-H1.
+pub const MAX_STATE_ACCOUNTS: usize = 256;
+/// Units that can create an account for their author (deposit; liquidate: the keeper reward
+/// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
+/// already holds `cap` accounts (the insurance account included).
+pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap: usize) -> bool {
+    match op {
+        BatchOp::Deposit { .. } | BatchOp::Liquidate { .. } => s.accounts.contains_key(&author) || s.accounts.len() < cap,
+        _ => true,
+    }
+}
 
 /// Event code of a unit rejected by the MNWIT1 depth rule (wit::MAX_WIT_DEPTH, loop round 2 W2);
 /// outside the engine's RejectReason codes (1..17, 0x100+).
@@ -428,7 +460,7 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
         7 => BatchOp::Liquidate { acct, target: w[1], market: w[7] },
         8 => BatchOp::Report { acct, price: lo64(w[2], w[3]) as i64, market: w[7] },
         9 => BatchOp::ExtPrice { acct, price: lo64(w[2], w[3]) as i64, source_id: w[6] as u8, market: w[7] },
-        10 if !cfg!(feature = "prod") => BatchOp::SetHeight { height: lo64(w[1], w[2]) },
+        10 => BatchOp::SetHeight { height: lo64(w[1], w[2]) },
         _ => BatchOp::Bad,
     }
 }
@@ -463,6 +495,8 @@ pub struct Session {
     pub mode: WitMode,
     /// segments run so far (incl. ones whose header was rejected)
     pub segs: u32,
+    /// account cap (MAX_STATE_ACCOUNTS; host tests may lower it; not part of the snapshot)
+    pub state_cap: usize,
 }
 impl Session {
     pub fn genesis(flags: u32, mode: WitMode) -> Self {
@@ -472,7 +506,7 @@ impl Session {
         let mut eng = Engine { state: state::ChainState::genesis_fixture(flags, accts) };
         let w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
         let _ = eng.state.take_dirty();
-        Session { eng, w, mode, segs: 0 }
+        Session { eng, w, mode, segs: 0, state_cap: MAX_STATE_ACCOUNTS }
     }
 }
 
@@ -532,7 +566,8 @@ pub fn run_segment(
         s.segs = 1;
         *sess = Some(s);
     }
-    let Session { eng, w, .. } = sess.as_mut().unwrap();
+    let Session { eng, w, state_cap, .. } = sess.as_mut().unwrap();
+    let state_cap = *state_cap;
     if let Some(w) = w.as_mut() {
         wo.root = w.root();
         wo.start_root = wo.root;
@@ -561,8 +596,11 @@ pub fn run_segment(
             (Some(w), Some(a)) => !wit_depth_ok(w, &eng.state, &op, a),
             _ => false,
         };
+        // loop round 4 (long-run heap bound): session account cap
+        let capped = !too_deep && author.is_some_and(|a| !state_cap_ok(&eng.state, &op, a, state_cap));
+        let rule = if too_deep { WIT_DEPTH_CODE } else { STATE_CAP_CODE };
         let mut height_op = false;
-        let res = if too_deep { Err(None) } else { match op {
+        let res = if too_deep || capped { Err(None) } else { match op {
             BatchOp::Deposit { acct, amount } => match acct_of(acct) {
                 Some(a) => eng.deposit(a, amount as Usd),
                 None => Err(RejectReason::BadAccount),
@@ -595,8 +633,20 @@ pub fn run_segment(
                 None => Err(RejectReason::BadAccount),
             },
             BatchOp::SetHeight { height } => {
-                if height >= eng.state.height {
+                // prod: the batch-commit hook only ever advances by one height (review R4-H2);
+                // test builds may jump (peg interval / feed staleness fixtures)
+                // prod: also only as the segment's first unit, so the height advances at most once per
+                // rollup height (each costs an operator bond + a challenge window), R4-H2
+                let ok_h = if cfg!(feature = "prod") {
+                    i == 0 && Some(height) == eng.state.height.checked_add(1)
+                } else {
+                    height >= eng.state.height
+                };
+                if ok_h {
+                    // the batch-commit hook (minuend-settle: height = prev + 1, then
+                    // prune_withdrawals(height)); the other prunes touch unmodelled state
                     eng.state.height = height;
+                    eng.state.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
                     height_op = true;
                     Ok(Vec::new())
                 } else {
@@ -627,7 +677,7 @@ pub fn run_segment(
             }
             Err(r) => {
                 st.rejected += 1;
-                ev(r.as_ref().map(reason_code).unwrap_or(WIT_DEPTH_CODE));
+                ev(r.as_ref().map(reason_code).unwrap_or(rule));
             }
         }
         let root = match mode {
@@ -701,25 +751,68 @@ pub fn run_export(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>) ->
     o
 }
 
-/// IMPORT run: only without a live session. On success `sess` holds the decoded session (the
-/// import itself does not count as a segment: the imported session IS the exported one).
-pub fn run_import(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>) -> SnapOut {
+/// IMPORT run: only without a live session, only on an image that carries the expected export
+/// (`expect` = digest + word count, compiled into the upgrade image, so the governance-chosen GENMEM
+/// commits it). The first `words` input words are hashed BEFORE anything is decoded (R4-L: a bogus
+/// snapshot cannot make the decoder allocate first); then they are decoded. On success `sess`
+/// holds the decoded session (the import itself does not count as a segment: the imported
+/// session IS the exported one). Loop round 4 review R4-S1: without `expect`, any image without a
+/// session -- the genesis image at height 1 -- accepted ANY well-formed snapshot (arbitrary state).
+pub fn run_import(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>, expect: Option<&([u8; 32], u32)>) -> SnapOut {
     let mut o = SnapOut { status: ST_OK, digest: [0; 32], words: 0, root: [0; 32] };
     if sess.is_some() {
         o.status = ST_SESSION_LIVE;
         return o;
     }
-    let mut r = snapshot::SnapR::new(rd, SNAP_LIMIT);
+    let Some((digest, words)) = expect else {
+        o.status = ST_IMPORT_LOCKED;
+        return o;
+    };
+    if *words > SNAP_LIMIT {
+        o.status = ST_BAD_SNAP;
+        return o;
+    }
+    let mut h = sha2::Sha256::new();
+    for i in 0..*words {
+        h.update(rd(i).to_le_bytes());
+    }
+    let d: [u8; 32] = h.finalize().into();
+    if d != *digest {
+        o.status = ST_BAD_SNAP;
+        return o;
+    }
+    let mut r = snapshot::SnapR::new(rd, *words);
     match snapshot::decode(&mut r) {
-        Ok(mut s) => {
-            o.words = r.i;
-            o.digest = r.digest();
+        // the digest matched, so a decode failure / short read means the image was built for a
+        // malformed export: refused all the same
+        Ok(mut s) if r.i == *words => {
+            o.words = *words;
+            o.digest = d;
             if let Some(w) = s.w.as_mut() {
                 o.root = w.root();
             }
             *sess = Some(s);
         }
-        Err(()) => o.status = ST_BAD_SNAP,
+        _ => o.status = ST_BAD_SNAP,
     }
     o
+}
+/// "<64 lowercase hex>:<decimal words>" -> (digest, words) (the upgrade image's compiled-in
+/// MNPILOT_IMPORT_DIGEST)
+pub fn parse_expect(h: &str) -> Option<([u8; 32], u32)> {
+    let (hx, n) = h.split_once(':')?;
+    let b = hx.as_bytes();
+    if b.len() != 64 {
+        return None;
+    }
+    let v = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut o = [0u8; 32];
+    for i in 0..32 {
+        o[i] = (v(b[2 * i])? << 4) | v(b[2 * i + 1])?;
+    }
+    Some((o, n.parse().ok()?))
 }

@@ -241,6 +241,8 @@ pub const ORACLE_BOND_PERP: u128 = 50_000;
 /// minuend-exec: pending withdrawals per account / smallest partial withdrawal
 pub const MAX_PENDING_WITHDRAWALS_PER_ACCOUNT: usize = 64;
 pub const MIN_WITHDRAW_AMOUNT: Usd = USD_SCALE as Usd;
+/// minuend-types: withdrawal replay window (heights), pruned at batch commit
+pub const REPLAY_WINDOW: u64 = 2048;
 pub fn encode_funding_price(rate_bps: i64) -> Price {
     FUNDING_PRICE_OFFSET + rate_bps.saturating_mul(FUNDING_BPS_UNIT)
 }
