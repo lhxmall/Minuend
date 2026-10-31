@@ -30,6 +30,8 @@ pub struct GB {
     pub flags: u32,
     /// real event of every op (same codes as the harness)
     pub ev: Vec<u32>,
+    /// ids of the units the real engine holds (a Reveal may name any of them as a parent)
+    pub ingested: Vec<[u8; 32]>,
 }
 
 fn le_words(b: &[u8; 32]) -> [u32; 8] {
@@ -50,7 +52,7 @@ impl GB {
             eng.state.marks.insert(MarketId(2), 100_000 * PRICE_SCALE as i64);
         }
         real_fixtures(&mut eng, flags, &ids);
-        GB { eng, ids, parent: genesis_id(), ops: Vec::new(), ext: Vec::new(), uids: Vec::new(), flags, ev: Vec::new() }
+        GB { eng, ids, parent: genesis_id(), ops: Vec::new(), ext: Vec::new(), uids: Vec::new(), flags, ev: Vec::new(), ingested: Vec::new() }
     }
     /// append extension words, return their offset
     pub fn put_ext(&mut self, p: &[u32]) -> u32 {
@@ -124,6 +126,7 @@ impl GB {
                     Ok(evs) => {
                         assert_eq!(evs.len(), 1);
                         self.parent = id;
+                        self.ingested.push(id.0);
                         match &evs[0] {
                             ExecEvent::Applied { fills, .. } => EV_APPLIED | fills.len() as u32,
                             ExecEvent::Rejected { reason, .. } => real_reason(reason),
@@ -443,7 +446,8 @@ pub fn gov_build(seed: u64, n_ops: u32) -> GB {
                 let who = if rng.below(10) == 0 { a } else { ca };
                 let p2 = match rng.below(8) {
                     0 => [0u8; 32],
-                    1 => *g.uids.iter().rev().find(|u| **u != [0; 32]).unwrap(),
+                    // another unit the engine holds (not the commit): the parent edge fails
+                    1 if !g.ingested.is_empty() => g.ingested[rng.below(g.ingested.len() as u64) as usize],
                     _ => cu,
                 };
                 let mut sl = salt;
@@ -912,6 +916,119 @@ pub fn govedge() -> String {
         w1[base + 7] = 0;
         expect("x:mnp1", ev_of(&w1) == vec![2], &mut fails);
     }
+    // 7. review R6-H1/H2/H3/M1: the state caps fire exactly at the cap (port; the real engine has
+    //    no caps, so only the port's events are checked) and never before
+    {
+        cases += 1;
+        let n_acc = 420u32;
+        let mut g = GB::new(n_acc, flags);
+        g.op(GB::w_gdep(10, 3_000_000));
+        let mut codes = Vec::new();
+        for k in 0..mnpilot::MAX_STATE_MARKETS as u32 {
+            let w = g.w_market(10, &listing_regular(&format!("M{}", k)));
+            codes.push(g.op(w));
+        }
+        // perp ledger: 6 fixture ids + 10 -> fresh ids 11.. by gov withdraw 0 up to the cap, then one more
+        let base_perp = 7u32;
+        let fresh_n = mnpilot::MAX_STATE_ACCOUNTS as u32 - base_perp;
+        for k in 0..=fresh_n {
+            g.op(GB::w_gwd(11 + k, 0, 1));
+        }
+        g.op(GB::w_gdep(10, 1)); // existing id at the cap
+        g.op(GB::w_prop(10, 1, 0, 1200));
+        let z0 = g.ops.len();
+        let zcap = g.eng.state.proposals[&1].weight_snapshot.len() + mnpilot::MAX_ZERO_VOTERS;
+        for k in 0..=zcap as u32 {
+            g.op(GB::w_vote(300 + k, 1, true));
+        }
+        g.op(GB::w_vote(4, 1, true)); // snapshot voter after the zero-weight cap
+        let c0 = g.ops.len();
+        for k in 0..=mnpilot::MAX_STATE_COMMITS as u32 {
+            let a = 270 + k / 8; // 8 pending each (the per-account cap)
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&k.to_le_bytes());
+            h[31] = 0xcc;
+            let w = g.w_commit(a, &h, 5);
+            g.op(w);
+        }
+        let w = g.words();
+        let pe = run_port(&w).ev;
+        let base = 4 + 8 * w[1] as usize;
+        let kind = |i: usize| w[base + 8 * i] & 0xff;
+        let _ = kind;
+        let n_mk = mnpilot::MAX_STATE_MARKETS; // BTC + 255 ok, the 256th listing refused
+        let mk_ok = pe[1..n_mk].iter().all(|e| *e == OK) && pe[n_mk] == mnpilot::STATE_CAP_CODE;
+        expect("cap:markets", mk_ok, &mut fails);
+        let p0 = 1 + n_mk;
+        let pr = &pe[p0..p0 + fresh_n as usize + 1];
+        expect("cap:perp", pr[..fresh_n as usize].iter().all(|e| *e == OK) && pr[fresh_n as usize] == mnpilot::STATE_CAP_CODE, &mut fails);
+        expect("cap:perp_existing", pe[p0 + fresh_n as usize + 1] == OK, &mut fails);
+        let zv = &pe[z0..z0 + zcap + 2];
+        expect("cap:votes", zv[..zcap].iter().all(|e| *e == OK) && zv[zcap] == mnpilot::STATE_CAP_CODE && zv[zcap + 1] == OK, &mut fails);
+        let cm = &pe[c0..c0 + mnpilot::MAX_STATE_COMMITS + 1];
+        expect("cap:commits", cm[..mnpilot::MAX_STATE_COMMITS].iter().all(|e| *e == OK) && cm[mnpilot::MAX_STATE_COMMITS] == mnpilot::STATE_CAP_CODE, &mut fails);
+        // nothing else differs from the real engine before the first cap event
+        let first19 = pe.iter().position(|e| *e == mnpilot::STATE_CAP_CODE).unwrap_or(pe.len());
+        expect("cap:not_early", pe[..first19] == g.ev[..first19], &mut fails);
+    }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
     format!("{{\"cases\":{},\"ok\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, fj.join(","))
+}
+
+/// Heap of the governance / commit-reveal state at its caps (host allocator simulation, 64-bit
+/// sizes = upper bound of rv32): MAX_STATE_ACCOUNTS PERP ids, MAX_STATE_MARKETS markets, 64
+/// proposals each with a full weight snapshot and snapshot + MAX_ZERO_VOTERS voters, MAX_STATE_COMMITS
+/// commits.
+pub fn govcap() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    heapsim::reset();
+    heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut sess = mnpilot::Session::genesis(0, mnpilot::WitMode::Incremental);
+    let id = |i: u32| A(Sha256::digest(format!("govcap-{}", i).as_bytes()).into());
+    let mut fails = 0u32;
+    {
+        let e = &mut sess.eng;
+        let mut ok = |r: Result<Vec<mnpilot::Fill>, mnpilot::engine::RejectReason>, e: &mut mnpilot::engine::Engine| {
+            if r.is_ok() { e.state.seq += 1 } else { fails += 1 }
+        };
+        for i in 0..mnpilot::MAX_STATE_ACCOUNTS as u32 {
+            let r = e.gov_deposit(id(i), if i == 0 { 10_000_000 } else { 2_000 });
+            ok(r, e);
+        }
+        let l = mnpilot::listing_of(&listing_regular("CAP"));
+        for _ in 1..mnpilot::MAX_STATE_MARKETS {
+            let r = e.create_market(id(0), &l);
+            ok(r, e);
+        }
+        for k in 0..64u32 {
+            let seq = e.state.seq;
+            let r = e.create_proposal(id(k + 1), M(1), 0, 1000 + k as u64, seq);
+            ok(r, e);
+        }
+        for p in 1..=64u64 {
+            for v in 0..(mnpilot::MAX_STATE_ACCOUNTS + mnpilot::MAX_ZERO_VOTERS) as u32 {
+                let seq = e.state.seq;
+                let r = e.vote(id(v), p, true, seq);
+                ok(r, e);
+            }
+        }
+        for k in 0..mnpilot::MAX_STATE_COMMITS as u32 {
+            let mut h = [0u8; 32];
+            h[..4].copy_from_slice(&k.to_le_bytes());
+            let r = e.commit_op([1; 32], id(1000 + k / 8), h, 10);
+            ok(r, e);
+        }
+    }
+    if let Some(w) = sess.w.as_mut() {
+        w.commit(&mut sess.eng.state);
+    }
+    heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (top, peak, _) = heapsim::read();
+    let (_, words, _) = mnpilot::snapshot::export(&sess, false);
+    let st = &sess.eng.state;
+    format!(
+        "{{\"perp_ids\":{},\"markets\":{},\"proposals\":{},\"voted\":{},\"commits\":{},\"rejected_ops\":{},\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{}}}",
+        st.perp_balances.len(), st.markets.len(), st.proposals.len(), st.proposals.values().map(|p| p.voted.len()).sum::<usize>(), st.commits.len(), fails,
+        sess.w.as_ref().map(|w| w.smt.count).unwrap_or(0), top, peak, heapsim::sum_class_peaks(), words
+    )
 }

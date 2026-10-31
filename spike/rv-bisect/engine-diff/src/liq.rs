@@ -437,6 +437,33 @@ pub fn liqedge() -> String {
         g.apply(wd(8, (col - r + 1) as i64, 1));
         vec![(i, EV_APPLIED), (i + 1, reason_code_of(mnpilot::engine::RejectReason::Insufficient))]
     });
+    // loop round 6 (round-4/5 survivor 35, the cross `liquidatable` boundary): a 10x long whose equity is
+    // EXACTLY LIQ_RATIO_BPS x MM (equity * 10 000 == mm * 10 500) is liquidatable; one micro-USD more is not
+    for (name, extra) in [("liq_eq", 0i64), ("liq_eq_plus1", 1i64)] {
+        case(name, &|g| {
+            let (m, qs) = (100_000 * DOLLAR, QTY_SCALE);
+            g.apply(wd(11, 5_000_000 * USD_SCALE as i64 - 14_000 * USD_SCALE as i64, 1));
+            let c = g.next_cseq(6);
+            g.apply([2 | (6 << 8), 1, m as u32, (m >> 32) as u32, qs as u32, (qs >> 32) as u32, c as u32, 1]);
+            let c = g.next_cseq(11);
+            g.apply([2 | (11 << 8), 0, m as u32, (m >> 32) as u32, qs as u32, (qs >> 32) as u32, c as u32, 1]);
+            let p = m - m / 10;
+            g.apply(hgt(1));
+            for o in ORACLES {
+                g.apply([8 | (o << 8), 0, p as u32, (p >> 32) as u32, 0, 0, 0, 1]);
+            }
+            // top up to the exact boundary (computed from the port's own risk snapshot)
+            let st = &g.eng.state;
+            let snap = st.accounts[&g.ids[11]].snapshot(&st.marks, &st.markets);
+            let target = snap.mm * i128::from(mnpilot::types::LIQ_RATIO_BPS);
+            assert!(target % 10_000 == 0 && snap.equity * 10_000 < target, "liq_eq setup: equity {} mm {}", snap.equity, snap.mm);
+            let top = (target / 10_000 - snap.equity) as i64 + extra;
+            g.apply([1 | (11 << 8), top as u32, (top >> 32) as u32, 0, 0, 0, 0, 0]);
+            g.apply([7 | (4 << 8), 11, 0, 0, 0, 0, 0, 1]);
+            let want = if extra == 0 { EV_APPLIED } else { reason_code_of(mnpilot::engine::RejectReason::NotLiquidatable) };
+            vec![(g.ops.len() - 1, want)]
+        });
+    }
     format!("{{\"ok\":{},\"cases\":{{{}}}}}", all, res.join(","))
 }
 fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {

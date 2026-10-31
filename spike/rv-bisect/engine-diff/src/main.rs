@@ -1211,6 +1211,7 @@ fn main() {
         Some("liqedge") => println!("{}", liq::liqedge()),
         Some("govfuzz") => println!("{}", gov::govfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("govedge") => println!("{}", gov::govedge()),
+        Some("govcap") => println!("{}", gov::govcap()),
         Some("govgen") => {
             let w = gov::gov_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
             write_words(&a[4], &w);

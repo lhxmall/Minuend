@@ -31,10 +31,24 @@ const chk = (name, r, want) => { const ok = r.halted && Object.keys(want).every(
   chk('prod run 6: refused header (bad magic) still counts as a height', runOne(P, [0x1234, 0, 0, 0]), { status: 1, segs: 6 });
   chk('prod run 7: -> height 7', runOne(P, batch([])), { status: 0, height: 7, segs: 7 });
   chk('prod: MNP1 Liquidate refused (no unit id) -> 2', runOne(P, batch([LIQ])), { status: 0, ev: [2], height: 8 });
-  chk('prod: MNP2 Liquidate runs past the gate (target has no account -> NotFound 10)', runOne(P, batch2([LIQ], [[1, 2, 3, 4, 5, 6, 7, 8]])), { status: 0, ev: [10], height: 9 }); }
+  chk('prod: MNP2 Liquidate runs past the gate (target has no account -> NotFound 10)', runOne(P, batch2([LIQ], [[1, 2, 3, 4, 5, 6, 7, 8]])), { status: 0, ev: [10], height: 9 });
+  // loop round 6: the SetSeq fixture (kind 22) is refused in prod; governance kinds run in the prod image; an MNP2
+  // extension area (n_ext + words) after the unit ids; ops naming an offset outside it -> BadAccount 2
+  const SEQ = [22, 5000, 0, 0, 0, 0, 0, 0];
+  chk('prod: SetSeq refused (2), seq unchanged', runOne(P, batch([SEQ])), { status: 0, ev: [2], height: 10 });
+  const GW0 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // GovWithdraw 0 nonce 1: applies for any id (zero balance)
+  const GW1 = [15 | (0 << 8), 0, 0, 0, 0, 0, 1, 0];      // same nonce again -> DuplicateNonce 6
+  const VOTE = [18 | (1 << 8), 1, 0, 1, 0, 0, 0, 0];     // no proposal -> NoProposal 12
+  const CM = [16 | (1 << 8), 0, 0, 0, 0, 0, 0, 0];       // CreateMarket ext at 0: listing words below, no PERP -> Insufficient 9
+  const LIST = [0x544f4f52, 0, 0, 0, 1, 0, 1000, 0, 500, 0, 5, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const CMX = [16 | (1 << 8), 0, 0, 0, 0, 0, 0, 999];    // offset past the area -> BadAccount 2
+  const u = (k) => [k, 2, 3, 4, 5, 6, 7, 8];
+  chk('prod: MNP2 governance ops + extension area', runOne(P, [...batch2([GW0, GW1, VOTE, CM, CMX], [u(1), u(2), u(3), u(4), u(5)]), LIST.length, ...LIST]), { status: 0, ev: [0x80000000, 6, 12, 9, 2], height: 11 });
+  chk('prod: MNP1 governance op needing an extension -> BadAccount 2', runOne(P, batch([CM])), { status: 0, ev: [2], height: 12 }); }
 { const P = image(PROD);
   chk('prod fresh image: refused header at height 1, genesis at height 2 -> height 2', (runOne(P, [0x1234, 0, 0, 0]), runOne(P, batch([]))), { status: 0, height: 2, segs: 2 }); }
 { const T = image(TEST);
   chk('test image: SetHeight jumps allowed (fixtures), going back refused', runOne(T, batch([H(5), H(9), H(9), H(3)])), { status: 0, ev: [EVH, EVH, EVH, 2], height: 9, segs: 1 });
-  chk('test image: no binding (height stays 9 in run 2)', runOne(T, batch([])), { status: 0, ev: [], height: 9, segs: 2 }); }
+  chk('test image: no binding (height stays 9 in run 2)', runOne(T, batch([])), { status: 0, ev: [], height: 9, segs: 2 });
+  chk('test image: SetSeq fixture allowed (0x40000001), going back refused', runOne(T, batch([[22, 5000, 0, 0, 0, 0, 0, 0], [22, 10, 0, 0, 0, 0, 0, 0]])), { status: 0, ev: [0x40000001, 2], segs: 3 }); }
 console.log(JSON.stringify({ checks: checks.length, pass: checks.filter(Boolean).length, ok: checks.every(Boolean) }));

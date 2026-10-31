@@ -206,15 +206,37 @@ pub const STATE_CAP_CODE: u32 = 19;
 /// impossible; production needs a stateless guest (state as witness input) or a larger RAM, see
 /// findings/rv-loop-4.md R4-H1.
 pub const MAX_STATE_ACCOUNTS: usize = 256;
+/// Loop round 6 review (governance + commit-reveal heap bounds, pilot consensus rules like the
+/// account cap; STATE_CAP_CODE): live commits (R6-H1), zero-weight voters per proposal beyond its
+/// weight snapshot (R6-H2), listed markets (R6-M1). The PERP ledger shares the account cap (R6-H3).
+pub const MAX_STATE_COMMITS: usize = 1024;
+pub const MAX_ZERO_VOTERS: usize = 64;
+pub const MAX_STATE_MARKETS: usize = 256;
 /// Units that can create an account for their author (deposit; liquidate: the keeper reward
 /// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
 /// already holds `cap` accounts (the insurance account included).
 pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap: usize) -> bool {
     match op {
         BatchOp::Deposit { .. } | BatchOp::Liquidate { .. } => s.accounts.contains_key(&author) || s.accounts.len() < cap,
-        // loop round 6 (R5-L3 with GovDeposit ported): a first PERP deposit adds an id to the PERP
-        // ledger (an acct: leaf without an accounts entry) -> the ledger is capped the same way
-        BatchOp::GovDeposit { .. } => s.perp_balances.contains_key(&author) || s.perp_balances.len() < cap,
+        // loop round 6 review R6-H3 (R5-L3 with GovDeposit ported): every unit that can add an id to
+        // the PERP ledger (an acct: leaf without an accounts entry) -- a gov deposit, a gov withdraw
+        // (amount 0 succeeds for ANY id and inserts a zero balance), a slash (the reward credits the
+        // challenger) -- is refused for a new id once the ledger holds `cap` ids
+        BatchOp::GovDeposit { .. } | BatchOp::GovWithdraw { .. } | BatchOp::Slash { .. } => {
+            s.perp_balances.contains_key(&author) || s.perp_balances.len() < cap
+        }
+        // R6-H1: commits are kept until their TTL passes (revealed ones too) and any id may commit
+        // -> a global cap (also bounds upstream's O(commits) pending scan per Commit)
+        BatchOp::Commit { .. } => s.commits.len() < MAX_STATE_COMMITS,
+        // R6-H2: a voter outside the creation-time weight snapshot votes with weight 0 but is
+        // recorded in `voted` (any fresh id) -> at most MAX_ZERO_VOTERS such voters per proposal
+        // beyond the snapshot size; a snapshot voter (and a repeat voter, refused by the engine) passes
+        BatchOp::Vote { id, .. } => match s.proposals.get(id) {
+            Some(p) => p.weight_snapshot.contains_key(&author) || p.voted.contains(&author) || p.voted.len() < p.weight_snapshot.len() + MAX_ZERO_VOTERS,
+            None => true,
+        },
+        // R6-M1: listings are bounded only by the burned fee upstream
+        BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
         _ => true,
     }
 }
