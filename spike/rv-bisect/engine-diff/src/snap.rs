@@ -97,10 +97,33 @@ pub fn snaptest(n: u64, ops: u32) -> String {
         let mut c: Option<mnpilot::Session> = None;
         let io = mnpilot::run_import(&mut |i| words.get(i as usize).copied().unwrap_or(0), &mut c, Some(&(d, words.len() as u32)));
         note(io.status == 0 && io.digest == eb.digest && io.words == eb.words && io.root == eb.root, "import digest / root");
+        // (the import counted itself as a run, segs + 1: re-export with the exported count)
+        c.as_mut().unwrap().segs -= 1;
         let (d2, words2) = export_words(c.as_ref().unwrap());
+        c.as_mut().unwrap().segs += 1;
         note(d2 == d && words2 == words, "re-export of the import");
         note(c.as_ref().unwrap().eng.state.oi_ok(), "derived indexes after import");
         note(c.as_ref().unwrap().eng.state.books.values().all(|bk| bk.index_ok() && bk.level_ok()), "book indexes after import");
+        // loop round 5 (R4-M4): the import run is a rollup height of its own (segs + 1); the
+        // uninterrupted session spends that height too
+        note(c.as_ref().unwrap().segs == a.as_ref().unwrap().segs + 1, "import counts as a run");
+        a.as_mut().unwrap().segs += 1;
+        // loop round 5 (mutation follow-up, round-4 survivor 17): an image built for the digest of
+        // the snapshot + one trailing word refuses it (decode must consume exactly `words`)
+        {
+            let mut v = words.clone();
+            v.push(rng.below(1 << 32) as u32);
+            let dv: [u8; 32] = {
+                let mut h = Sha256::new();
+                for x in &v {
+                    h.update(x.to_le_bytes());
+                }
+                h.finalize().into()
+            };
+            let mut z: Option<mnpilot::Session> = None;
+            let o = mnpilot::run_import(&mut |i| v.get(i as usize).copied().unwrap_or(0), &mut z, Some(&(dv, v.len() as u32)));
+            note(o.status == mnpilot::ST_BAD_SNAP && z.is_none(), "snapshot + trailing word accepted");
+        }
         // continue: every later segment identical
         let start = if k == 0 { 1 } else { k };
         for (j, sw) in segs.iter().enumerate().skip(start) {
@@ -153,7 +176,7 @@ pub fn snaptest(n: u64, ops: u32) -> String {
 
 /// Files for js/snapguest.js: seg000..seg{k-1}.bin, export.bin, snap.bin, seg{k}.. and
 /// manifest.json = per-file expectations of the UNINTERRUPTED session (host).
-pub fn snapdir(w: &[u32], s: u32, k: usize, dir: &str) -> String {
+pub fn snapdir(w: &[u32], s: u32, k: usize, dir: &str, bind: bool) -> String {
     fs::create_dir_all(dir).unwrap();
     let segs = seg::split(w, s);
     let k = k.clamp(1, segs.len());
@@ -163,12 +186,13 @@ pub fn snapdir(w: &[u32], s: u32, k: usize, dir: &str) -> String {
     let seg_entry = |name: String, sw: &[u32], a: &mut Option<mnpilot::Session>| {
         let mut ev = Vec::new();
         let mut roots: Vec<[u8; 32]> = Vec::new();
-        let (h, st, wo) = mnpilot::run_segment(
+        let (h, st, wo) = mnpilot::run_segment_n(
             &mut |i| sw.get(i as usize).copied().unwrap_or(0),
             &mut |x| ev.push(x),
             &mut |_, _, r| roots.push(*r),
             mnpilot::WitMode::Incremental,
             a,
+            mnpilot::SegOpt { run_no: None, bind },
         );
         write_words(&format!("{}/{}", dir, name), sw);
         format!(
@@ -190,6 +214,9 @@ pub fn snapdir(w: &[u32], s: u32, k: usize, dir: &str) -> String {
         "{{\"file\":\"export.bin\",\"kind\":\"export\",\"status\":{},\"digest\":\"{}\",\"words\":{},\"root\":\"{}\",\"segs\":{}}}",
         eo.status, hx(&eo.digest), eo.words, hx(&eo.root), a.as_ref().unwrap().segs
     ));
+    // loop round 5 (R4-M4): the expectations after the export are those of the UPGRADE path (the
+    // import is a run = a rollup height); an image that runs on without importing is one behind
+    a.as_mut().unwrap().segs += 1;
     for (j, sw) in segs.iter().enumerate().skip(k) {
         man.push(seg_entry(format!("seg{:03}.bin", j), sw, &mut a));
     }
@@ -338,7 +365,24 @@ pub fn capcheck(n: u64, ops: u32, cap: usize) -> String {
                     good &= (kind == 1 || kind == 7) && pre >= cap;
                 }
             }
-        } else {
+        }
+        // loop round 5 (round-4 survivor 15): the rule must FIRE for every deposit / liquidate by a
+        // brand-new author at the cap (18 = depth rule may come first)
+        {
+            let mut created = std::collections::BTreeSet::new();
+            for (i, e) in ec.iter().enumerate() {
+                let op0 = w[base + 8 * i];
+                let (kind, au) = (op0 & 0xff, op0 >> 8);
+                let pre = if i == 0 { 0 } else { lc[i - 1] };
+                if au as usize >= n_acc && (kind == 1 || kind == 7) && pre >= cap && !created.contains(&au) {
+                    good &= e == &vec![mnpilot::STATE_CAP_CODE] || e == &vec![mnpilot::WIT_DEPTH_CODE];
+                }
+                if e.first().is_some_and(|x| x & EV_APPLIED != 0) {
+                    created.insert(au);
+                }
+            }
+        }
+        if first19.is_none() {
             good &= ec == eu;
         }
         if good {
@@ -348,4 +392,29 @@ pub fn capcheck(n: u64, ops: u32, cap: usize) -> String {
         }
     }
     format!("{{\"batches\":{},\"ok\":{},\"cap\":{},\"cap_fired_batches\":{},\"why\":\"{}\"}}", n, ok, cap, fired, why)
+}
+
+/// Loop round 5 (mutation follow-up, round-4 survivor 18): a snapshot of a session holding more
+/// than MAX_STATE_ACCOUNTS accounts (a host session with a raised cap) is refused by the decoder
+/// even with a matching digest; one at exactly the cap is accepted.
+pub fn snapcap() -> String {
+    let mk = |n: usize| {
+        let mut s = mnpilot::Session::genesis(0, mnpilot::WitMode::Incremental);
+        s.state_cap = n + 10;
+        let mut i = 0u32;
+        while s.eng.state.accounts.len() < n {
+            let a = mnpilot::types::AccountId(Sha256::digest(format!("snapcap-{}", i).as_bytes()).into());
+            s.eng.deposit(a, 1_000 * USD_SCALE as i128).unwrap();
+            i += 1;
+        }
+        let _ = s.eng.state.take_dirty();
+        s.w = Some(mnpilot::wit::Wit::from_state(&s.eng.state));
+        let (d, words) = export_words(&s);
+        let mut z: Option<mnpilot::Session> = None;
+        let o = mnpilot::run_import(&mut |i| words.get(i as usize).copied().unwrap_or(0), &mut z, Some(&(d, words.len() as u32)));
+        o.status
+    };
+    let at = mk(mnpilot::MAX_STATE_ACCOUNTS);
+    let over = mk(mnpilot::MAX_STATE_ACCOUNTS + 1);
+    format!("{{\"ok\":{},\"at_cap_status\":{},\"over_cap_status\":{}}}", at == 0 && over == mnpilot::ST_BAD_SNAP, at, over)
 }

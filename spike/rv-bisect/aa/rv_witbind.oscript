@@ -5,6 +5,9 @@
 //  (rv_rollup var m<sid>) commits both. bind checks the 8 words and status == 0 with memory Merkle proofs (the
 //  rv_step tree, depth 24) and stores the root base64-encoded: var W<h>. A height whose status != 0 (rejected header)
 //  has no root and cannot be bound (its zero words would make every absence "provable" against EMPTY).
+//  Loop round 5 (R4-M4): also {hsib: [24 siblings]} proving OUT[0x1FFE7] (the guest's run counter = segs) == h: the
+//  bound root is the root of the guest run that knows it is height h, so its units ran at engine height h (prod binds
+//  the engine height to that counter).
 //  Separate AA from rv_witproof: ocore's static budget is per AA (ops 2000 summed over all branches); bind + verifier
 //  together measured 2 935 ops.
 $ROLL = 'RV_ROLLUP_AA_ADDRESS';   // mkwitproof.js bakes chash160(rv_rollup.aa)
@@ -13,6 +16,7 @@ $rf = max(trigger.output[[asset=base]] - $MK, 0);
 $MD = 24;                          // memory tree depth (rv_step $D)
 $OUTW = 16646120;                  // word index of OUT[0x1FFE8] = 0x03F00000/4 + 0x1FFE8
 $STW = 16646137;                   // word index of OUT[0x1FFF9] (status)
+$SNW = 16646119;                   // loop round 5: word index of OUT[0x1FFE7] (segs = rollup height of the run)
 $B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 // trigger.data is read in place: a local copy of a ~10 KB proof object exceeds ocore's local-variable size limit
 if (exists(trigger.data.bind)) {
@@ -26,6 +30,7 @@ if (exists(trigger.data.bind)) {
 		AND is_array(trigger.data.wsib[$k]) AND length(trigger.data.wsib[$k]) == $MD
 		AND is_valid_merkle_proof($w[$k], {root: $mem, siblings: trigger.data.wsib[$k], index: $OUTW + $k})))) == 0, 'word proof');
 	require(is_array(trigger.data.ssib) AND length(trigger.data.ssib) == $MD AND is_valid_merkle_proof(0, {root: $mem, siblings: trigger.data.ssib, index: $STW}), 'status');
+	require(is_array(trigger.data.hsib) AND length(trigger.data.hsib) == $MD AND is_valid_merkle_proof($h, {root: $mem, siblings: trigger.data.hsib, index: $SNW}), 'height');
 	// 8 little-endian words -> 32 bytes -> standard base64 (44 chars, '=' pad), as wit::b64_32
 	$P = [1, 256, 65536, 16777216];
 	$byte = $i => $i >= 32 ? 0 : floor($w[floor($i / 4)] / $P[$i % 4]) % 256;

@@ -543,17 +543,20 @@ groups.witproof = async () => { const K = require('./witkit.js'); const dir = __
   const sets = files.map(f => ({ name: f, ...JSON.parse(fs.readFileSync(dir + f, 'utf8')) }));
   sets.push({ name: 'synth64', ...synth(64, 64) }); sets.push({ name: 'synth65', ...synth(65, 65) });
   const C = new Chain(); let prev = T.genesis(), prevFinal = 'genesis'; const H = [];
-  const addHeight = async (rootB64, status) => { const h = H.length + 1; const b = T.batch(prev, h); const m = K.memWithRoot(rootB64, status);
+  const addHeight = async (rootB64, status, segs) => { const h = H.length + 1; const b = T.batch(prev, h); const m = K.memWithRoot(rootB64, status, {}, segs === undefined ? h : segs);
     const final = ref.H(b.fpc + ':' + b.fregs + ':' + m.root() + ':' + b.inpRoot + ':' + b.steps);
     const r = await S(C, OP1, ROLL, OBOND, subData(b, h, prevFinal, { fmem: m.root(), final })); H.push({ h, m, sid: r.unit, err: r.err }); prev = m; prevFinal = final; return H[h - 1]; };
   for (const st of sets) st.H = await addHeight(st.root, 0);
   const bad = await addHeight(sets[0].root, 4);   // a height whose guest run reported status 4: no root to bind
-  rec('witproof', 'heights submitted (one memory image per proof set, + a status-4 image)', sets.length + 1, H.filter(x => !x.err).length);
+  const offh = await addHeight(sets[0].root, 0, H.length);   // loop round 5 (R4-M4): a guest run whose counter says h-1
+  rec('witproof', 'heights submitted (one memory image per proof set, + a status-4 image, + a wrong-counter image)', sets.length + 2, H.filter(x => !x.err).length);
   rec('witproof', 'bind before finalize', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, 1)), /not finalized/));
   C.ts += WIN; for (const x of H) await S(C, W, ROLL, 0, { finalize: x.h }); rec('witproof', 'all heights finalized', H.length, C.r('lf'));
   rec('witproof', 'bind with a wrong word', 'bounce', bnc(await S(C, W, BIND, 0, { ...K.bindData(sets[0].H.m, 1), words: K.bindData(sets[0].H.m, 1).words.map((w, k) => k === 3 ? (w ^ 1) >>> 0 : w) }), /word proof/));
   rec('witproof', 'bind with the words of another height', 'bounce', bnc(await S(C, W, BIND, 0, { ...K.bindData(sets[1].H.m, 1), bind: 1 }), /word proof/));
   rec('witproof', 'bind a status-4 height', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(bad.m, bad.h)), /status/));
+  rec('witproof', 'R4-M4: bind a height whose guest run counter (OUT segs) != h', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(offh.m, offh.h)), /height/));
+  rec('witproof', 'R4-M4: bind without the counter proof', 'bounce', bnc(await S(C, W, BIND, 0, { ...K.bindData(sets[0].H.m, 1), hsib: undefined }), /height/));
   rec('witproof', 'bind a height above lf', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, H.length + 1)), /not finalized/));
   let bound = 0; for (const st of sets) { const r = await S(C, W, BIND, 0, K.bindData(st.H.m, st.H.h)); if (!r.err && C.v(BIND, 'W' + st.H.h) === st.root) bound++; else console.log('bind fail', st.name, r.err); }
   rec('witproof', 'bind every finalized height: W<h> = the guest-layout root', sets.length, bound);
@@ -630,6 +633,16 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
     const i = await sub(C, 2, UM, memX(1, D, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
     await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(i.fm, i.unit));
     rec('upgrade', 'kinds swapped (export run at h, import at h-1) never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/)); }
+  { const C = new Chain(); // loop round 5 (R5-M1): re-scheduling an upgrade at an earlier height clears the later one
+    const UM2 = memX(0, [0, 0, 0, 0, 0, 0, 0, 0], 778).root();
+    const h1 = await sub(C, 1, G, memX(0, D, 1), 'genesis', 1); const h2 = await sub(C, 2, h1.fm.root(), memX(0, D, 2), h1.final, 2);
+    const h3 = await sub(C, 3, h2.fm.root(), memX(1, D, 3), h2.final, 3);
+    rec('upgrade', 'R5-M1: upgrade height 4 scheduled', ['accepted', 3], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 4, mem: UM })), C.r('top')]);
+    rec('upgrade', 'R5-M1: re-scheduled earlier at height 3 (voids 3..top)', ['accepted', 2, UM2], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM2 })), C.r('top'), C.r('U3')]);
+    rec('upgrade', 'R5-M1: the stale U4 is cleared', false, !!C.r('U4'));
+    const i3 = await sub(C, 3, UM2, memX(2, D, 33), h2.final, 33); rec('upgrade', 'R5-M1: import height 3 from the new image', 'accepted', bnc(i3));
+    const n4 = await sub(C, 4, i3.fm.root(), memX(0, D, 4), i3.final, 4); rec('upgrade', 'R5-M1: height 4 chains on m(3) (no stale image)', 'accepted', bnc(n4));
+    rec('upgrade', 'R5-M1: a second upgrade above the pending one refused', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 5, mem: UM }), /upgrade pending at 3/)); }
 };
 
 (async () => {

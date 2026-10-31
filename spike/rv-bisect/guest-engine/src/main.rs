@@ -26,6 +26,11 @@
 //! (ST_NEED_IMPORT, R4-S2: else its first batch would start a genesis session = wipe the state). A dead
 //! image stays dead (ST_DEAD); recovery is an upgrade to a new image that imports the last good export.
 //! [0x1FFD6..0x1FFE0] are zero in every other run. Event log cap lowered to 0x1FFD6 (EV_CAP).
+//! Loop round 5 (R4-M4): RUNS (.data) counts every run of this image lineage that is not refused as dead = the
+//! rollup height (each height is exactly one run from the previous height's final memory). A live session's
+//! `segs` is set to RUNS before each run; an import sets RUNS = the imported `segs` + 1 (= export height + 1).
+//! OUT[0x1FFE6] = engine height (low word) after the run (0 without a session); in `prod` it equals the rollup
+//! height after every batch run (height binding).
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
 #[cfg(not(target_os = "none"))]
@@ -86,6 +91,9 @@ mod rt {
     /// moved out of its box: SESS points at freed memory), so every later run refuses to execute (ST_DEAD).
     #[link_section = ".data.sess"]
     static mut IN_RUN: u32 = 0;
+    /// loop round 5 (R4-M4): runs of this image lineage (= rollup height), see the module doc
+    #[link_section = ".data.sess"]
+    static mut RUNS: u32 = 0;
     /// loop round 4 (R4-S1): "<digest hex>:<words>" of the export an upgrade image may import (compiled in, so
     /// the image's memory root commits it); None = ordinary image, imports refused
     const IMPORT_DIGEST: Option<&str> = option_env!("MNPILOT_IMPORT_DIGEST");
@@ -161,6 +169,7 @@ mod rt {
     const SEG_START: usize = 0x1FFF0;
     const SEG_END: usize = 0x1FFE8;
     const SEG_N: usize = 0x1FFE7;
+    const ENG_H: usize = 0x1FFE6;
     const SNAP_KIND: usize = 0x1FFD6;
     const SNAP_N: usize = 0x1FFD7;
     const SNAP_DIGEST: usize = 0x1FFD8;
@@ -186,16 +195,22 @@ mod rt {
             put_root(SNAP_DIGEST, &[0; 32]);
             OUT.add(SNAP_N).write_volatile(0);
             OUT.add(SNAP_KIND).write_volatile(0);
+            OUT.add(ENG_H).write_volatile(0);
             if DEAD != 0 || IN_RUN != 0 {
                 DEAD = 1;
                 OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
                 return 0;
             }
             IN_RUN = 1;
+            RUNS += 1;
         }
         let mut sess: Option<mnpilot::Session> = unsafe {
             if SESS == 0 { None } else { Some(*alloc::boxed::Box::from_raw(SESS as *mut mnpilot::Session)) }
         };
+        // R4-M4: a live session's segment count follows the run count (the run itself adds one)
+        if let Some(s) = sess.as_mut() {
+            s.segs = unsafe { RUNS } - 1;
+        }
         let w0 = read_word(0);
         let expect = IMPORT_DIGEST.and_then(mnpilot::parse_expect);
         if w0 == mnpilot::snapshot::EXPORT_MAGIC || w0 == mnpilot::snapshot::SNAP_MAGIC {
@@ -206,6 +221,10 @@ mod rt {
             };
             unsafe {
                 let segs = sess.as_ref().map(|s| s.segs).unwrap_or(0);
+                if w0 == mnpilot::snapshot::SNAP_MAGIC && so.status == mnpilot::ST_OK {
+                    RUNS = segs; // the imported lineage's height (run_import counted this run)
+                }
+                OUT.add(ENG_H).write_volatile(sess.as_ref().map(|s| s.eng.state.height as u32).unwrap_or(0));
                 if let Some(s) = sess {
                     SESS = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(s)) as usize;
                 }
@@ -249,7 +268,7 @@ mod rt {
         let mode = mnpilot::WitMode::Legacy { skip: read_word(3) & 0xFF_FFFF };
         #[cfg(not(any(feature = "nowit", feature = "legacywit")))]
         let mode = mnpilot::WitMode::Incremental;
-        let (h, st, wo) = mnpilot::run_segment(
+        let (h, st, wo) = mnpilot::run_segment_n(
             &mut |i| read_word(i),
             &mut |w| unsafe {
                 // bounded: never reaches the counters at 0x1FFF0.. (cannot trigger within
@@ -271,9 +290,11 @@ mod rt {
             },
             mode,
             &mut sess,
+            mnpilot::SegOpt { run_no: Some(unsafe { RUNS }), bind: cfg!(feature = "prod") },
         );
         unsafe {
             let segs = sess.as_ref().map(|s| s.segs).unwrap_or(0);
+            OUT.add(ENG_H).write_volatile(sess.as_ref().map(|s| s.eng.state.height as u32).unwrap_or(0));
             if let Some(s) = sess {
                 SESS = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(s)) as usize;
             }

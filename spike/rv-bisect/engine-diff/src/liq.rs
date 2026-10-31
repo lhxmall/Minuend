@@ -250,6 +250,7 @@ pub fn liqfuzz(n: u64, ops: u32) -> String {
     let (mut ok, mut units) = (0u64, 0u64);
     let mut cov: std::collections::BTreeMap<String, u64> = Default::default();
     let mut paid = 0u64;
+    let mut liq_fills = 0u64;
     for s in 1..=n {
         let w = liq_batch(s, ops);
         let mut a = Vec::new();
@@ -258,7 +259,18 @@ pub fn liqfuzz(n: u64, ops: u32) -> String {
         let (b, c, wo) = port_roots(&w);
         let same = r.hash == p.hash && r.ev == p.ev && r.applied == p.applied;
         let roots = a == b && b == c && wo.scratch_ok && a.len() == w[2] as usize;
-        if same && roots {
+        // loop round 5 (R4-M2): the same batch as MNP2 (real unit ids as input): unmasked
+        // liquidation taker ids must match too, and state / roots stay equal
+        let w2 = to_v2(&w);
+        let r2 = run_real(&w2);
+        let p2 = run_port(&w2);
+        let (b2, _, _) = port_roots(&w2);
+        let v2 = r2.hash == p2.hash && r2.ev == p2.ev && r2.hash == r.hash && b2 == b;
+        liq_fills += r.ev.iter().filter(|x| **x == mnpilot::LIQ_TAKER_EV).count() as u64;
+        if !v2 {
+            println!("LIQMISMATCH v2 seed {} first_ev {:?}", s, r2.ev.iter().zip(&p2.ev).position(|(x, y)| x != y));
+        }
+        if same && roots && v2 {
             ok += 1;
         } else {
             let first_ev = r.ev.iter().zip(&p.ev).position(|(x, y)| x != y);
@@ -272,7 +284,7 @@ pub fn liqfuzz(n: u64, ops: u32) -> String {
         }
     }
     let cs: Vec<String> = cov.iter().map(|(k, v)| format!("\"{}\":{}", k, v)).collect();
-    format!("{{\"seeds\":{},\"match\":{},\"units\":{},\"funding_clock_armed_batches\":{},\"coverage\":{{{}}}}}", n, ok, units, paid, cs.join(","))
+    format!("{{\"seeds\":{},\"match\":{},\"units\":{},\"liq_fills_unmasked_v2\":{},\"funding_clock_armed_batches\":{},\"coverage\":{{{}}}}}", n, ok, units, liq_fills, paid, cs.join(","))
 }
 
 /// Per-op first event word (EV_APPLIED|fills, a reject code, or EV_HEIGHT).
@@ -414,4 +426,103 @@ pub fn liqedge() -> String {
 }
 fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {
     mnpilot::reason_code(&r)
+}
+
+/// Loop round 5 (R4-M4): height binding. A liqfuzz batch without its SetHeight fixtures is cut
+/// into random segments, each run with a run number (= rollup height) that advances by 1 or
+/// jumps (heights the session did not run a batch in: exports, imports, or simply long gaps;
+/// up to 20 000 to cross REPLAY_WINDOW and the feed staleness) on a height-binding session; the
+/// real engine runs the whole batch with the batch-commit hook (height = run number, prune)
+/// before each segment's first unit. Per-unit roots, events, segment-end state hashes (which
+/// include the height and the withdrawal ledger) must be equal, and the session's segs / height
+/// must equal the run number. Also: SetHeight in a binding session is refused (event 2).
+pub fn hbind(n: u64, ops: u32) -> String {
+    let (mut ok, mut segs_total, mut jumps) = (0u64, 0u64, 0u64);
+    let mut why = String::new();
+    for seed in 1..=n {
+        let w0 = liq_batch(seed, ops);
+        let (n_acc, n0) = (w0[1] as usize, w0[2] as usize);
+        let base = 4 + 8 * n_acc;
+        let mut w: Vec<u32> = w0[..base].to_vec();
+        let mut kept = 0u32;
+        for i in 0..n0 {
+            let o = &w0[base + 8 * i..base + 8 * i + 8];
+            if o[0] & 0xff != 10 {
+                w.extend_from_slice(o);
+                kept += 1;
+            }
+        }
+        w[2] = kept;
+        let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut cuts: Vec<(usize, usize, u32)> = Vec::new();
+        let (mut lo, mut rn) = (0usize, 0u32);
+        while lo < kept as usize || cuts.is_empty() {
+            let hi = (lo + 1 + rng.below(80) as usize).min(kept as usize);
+            let gap = match rng.below(6) { 0 => rng.below(3000) as u32, 1 if rng.below(3) == 0 => 10_000 + rng.below(10_000) as u32, _ => 0 };
+            if gap > 0 {
+                jumps += 1;
+            }
+            rn += 1 + gap;
+            cuts.push((lo, hi, rn));
+            lo = hi;
+        }
+        let mut rroots = Vec::new();
+        let mut rhash = Vec::new();
+        let pre = |i: usize| cuts.iter().find(|c| c.0 == i && c.1 > c.0).map(|c| c.2 as u64);
+        let (rout, _) = run_real_eng_h(&w, &pre, &mut |e| {
+            rroots.push(smt_ref::root(&real_pilot_leaves(e)));
+            rhash.push(real_hash(&e.state));
+        });
+        let mut sess: Option<mnpilot::Session> = None;
+        let mut ev_all = Vec::new();
+        let mut good = true;
+        let mut fail = |c: bool, what: String, good: &mut bool| {
+            if !c && *good {
+                *good = false;
+                if why.is_empty() {
+                    why = format!("seed {}: {}", seed, what);
+                }
+            }
+        };
+        for (k, &(lo, hi, rn)) in cuts.iter().enumerate() {
+            let mut sw = vec![mnpilot::MAGIC, n_acc as u32, (hi - lo) as u32, if k == 0 { w[3] } else { 0 }];
+            sw.extend_from_slice(&w[4..base]);
+            sw.extend_from_slice(&w[base + 8 * lo..base + 8 * hi]);
+            let mut roots = Vec::new();
+            let (h, st, _) = mnpilot::run_segment_n(
+                &mut |i| sw.get(i as usize).copied().unwrap_or(0),
+                &mut |x| ev_all.push(x),
+                &mut |_, s, r| {
+                    assert!(s.oi_ok());
+                    roots.push(*r)
+                },
+                mnpilot::WitMode::Incremental,
+                &mut sess,
+                mnpilot::SegOpt { run_no: Some(rn), bind: true },
+            );
+            let s = sess.as_ref().unwrap();
+            fail(st.status == 0 && roots.as_slice() == &rroots[lo..hi], format!("segment {} roots / status {}", k, st.status), &mut good);
+            if hi > lo {
+                fail(h == rhash[hi - 1], format!("segment {} state hash", k), &mut good);
+                fail(s.eng.state.height == rn as u64, format!("segment {} height {} != run {}", k, s.eng.state.height, rn), &mut good);
+            }
+            fail(s.segs == rn, format!("segment {} segs", k), &mut good);
+        }
+        fail(ev_all == rout.ev, "events".into(), &mut good);
+        // SetHeight under binding: refused, nothing changes
+        let h0 = sess.as_ref().unwrap().eng.state.height;
+        let sh = [mnpilot::MAGIC, n_acc as u32, 1, 0];
+        let mut sw = sh.to_vec();
+        sw.extend_from_slice(&w[4..base]);
+        sw.extend_from_slice(&[10, (h0 + 5) as u32, ((h0 + 5) >> 32) as u32, 0, 0, 0, 0, 0]);
+        let mut ev = Vec::new();
+        let _ = mnpilot::run_segment_n(&mut |i| sw.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(rn + 1), bind: true });
+        let s = sess.as_ref().unwrap();
+        fail(ev == [2] && s.eng.state.height == rn as u64 + 1, format!("SetHeight under binding: ev {:?} height {}", ev, s.eng.state.height), &mut good);
+        segs_total += cuts.len() as u64;
+        if good {
+            ok += 1;
+        }
+    }
+    format!("{{\"seeds\":{},\"ok\":{},\"segments\":{},\"height_jumps\":{},\"why\":\"{}\"}}", n, ok, segs_total, jumps, why)
 }

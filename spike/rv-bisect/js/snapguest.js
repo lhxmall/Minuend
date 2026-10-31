@@ -38,9 +38,12 @@ function runOne(img, words, maxSteps = 2e10) {
     heap: g(12), heap_peak_live: g(0x1FFFA), ms: Date.now() - t0 };
 }
 const words = (f) => { const b = fs.readFileSync(path.join(DIR, f)); const w = []; for (let i = 0; i < b.length / 4; i++) w.push(b.readUInt32LE(4 * i)); return w; };
-function segOk(r, m) {
+// loop round 5 (R4-M4): the manifest's segs after the export are the upgrade path's (the import is a run);
+// an image that runs on without importing is one behind (dseg = 1)
+// (the default image does not bind heights; the prod image's state hash is zero), so only segs differs.
+function segOk(r, m, dseg = 0) {
   const hashOk = process.env.PROD ? r.hash === zero : r.hash === m.hash;
-  return r.halted && r.a0 !== 77 && r.status === m.status && hashOk && r.segs === m.segs && r.start_root === m.start_root &&
+  return r.halted && r.a0 !== 77 && r.status === m.status && hashOk && r.segs === m.segs - dseg && r.start_root === m.start_root &&
     r.end_root === m.end_root && JSON.stringify(r.roots) === JSON.stringify(m.roots) && JSON.stringify(r.ev) === JSON.stringify(m.ev) &&
     r.applied === m.applied && r.snap_kind === 0 && r.snap_digest === zero;
 }
@@ -48,12 +51,13 @@ const ei = man.findIndex(m => m.kind === 'export'); const ex = man[ei];
 const checks = {}; const note = (k, v) => { checks[k] = v; console.log(JSON.stringify({ check: k, ok: v })); };
 let steps = 0;
 // A: uninterrupted, with the export run in between
-{ const A = image(); let ok = true;
+{ const A = image(); let ok = true; let past = false;
   for (const m of man) {
     const r = runOne(A, words(m.file)); steps += r.steps;
     if (m.kind === 'export') ok = ok && r.halted && r.status === 0 && r.snap_kind === 1 && r.snap_digest === m.digest && r.snap_words === m.words &&
       r.start_root === m.root && r.end_root === m.root && r.segs === m.segs;
-    else ok = ok && segOk(r, m);
+    else ok = ok && segOk(r, m, past ? 1 : 0);
+    if (m.kind === 'export') past = true;
     console.log(JSON.stringify({ image: 'A', file: m.file, ok, status: r.status, steps: r.steps, heap: r.heap, ms: r.ms }));
   }
   note('A_uninterrupted_with_export', ok);
@@ -66,7 +70,7 @@ let steps = 0;
 { const B = image(IMPORT_ELF); let ok = true;
   const im = runOne(B, words('snap.bin')); steps += im.steps;
   ok = im.halted && im.status === 0 && im.snap_kind === 2 && im.snap_digest === ex.digest && im.snap_words === ex.words && im.start_root === ex.root &&
-    im.end_root === ex.root && im.segs === ex.segs;
+    im.end_root === ex.root && im.segs === ex.segs + 1;
   console.log(JSON.stringify({ image: 'B', file: 'snap.bin', ok, status: im.status, steps: im.steps, heap: im.heap, ms: im.ms }));
   for (const m of man.slice(ei + 1)) { const r = runOne(B, words(m.file)); steps += r.steps; ok = ok && segOk(r, m);
     console.log(JSON.stringify({ image: 'B', file: m.file, ok, status: r.status, steps: r.steps, heap: r.heap, ms: r.ms })); }

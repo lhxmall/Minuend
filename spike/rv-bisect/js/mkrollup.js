@@ -26,7 +26,9 @@ const state=`
 	}
 	else if ($d.reclaim) var['r' || $st.sid] = 'R';
 	else if ($d.upgrade) {
+		if ($st.clr) var['U' || $st.clr] = false;   // loop round 5 (R5-M1)
 		var['U' || $st.up] = $d.mem;
+		var['uh'] = $st.up;
 		var['top'] = $st.up - 1;
 		response['upgrade'] = $st.up;
 	}

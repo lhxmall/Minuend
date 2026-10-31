@@ -41,9 +41,11 @@ pub struct StateJournal {
 #[derive(Clone, Debug, Default)]
 pub struct Accounts {
     map: BTreeMap<AccountId, Account>,
-    pub oi_long: BTreeMap<MarketId, u128>,
-    pub holders: BTreeMap<MarketId, BTreeSet<AccountId>>,
-    pub dirty: BTreeSet<AccountId>,
+    // loop round 5 (R4-L4): the derived indexes are private; reads go through `oi_long_of` /
+    // `holders_of`, the only writers are the guarded paths below + `mark_dirty` / `drain_dirty`
+    oi_long: BTreeMap<MarketId, u128>,
+    holders: BTreeMap<MarketId, BTreeSet<AccountId>>,
+    dirty: BTreeSet<AccountId>,
 }
 impl core::ops::Deref for Accounts {
     type Target = BTreeMap<AccountId, Account>;
@@ -133,6 +135,19 @@ impl Accounts {
         }
         oi == self.oi_long && h == self.holders
     }
+    /// running sum of positive position qty in `m` (first term of `funding_open_interest`)
+    pub fn oi_long_of(&self, m: MarketId) -> u128 {
+        self.oi_long.get(&m).copied().unwrap_or(0)
+    }
+    /// mark an account's MNWIT1 key dirty (a superset is harmless: an unchanged leaf rehashes
+    /// to the same value)
+    pub fn mark_dirty(&mut self, id: AccountId) {
+        self.dirty.insert(id);
+    }
+    /// move the dirty account keys into `out` (witness commit)
+    pub fn drain_dirty(&mut self, out: &mut BTreeSet<AccountId>) {
+        out.append(&mut self.dirty);
+    }
     /// accounts holding a position in `m`, ascending AccountId (empty iterator if none)
     pub fn holders_of(&self, m: MarketId) -> impl Iterator<Item = AccountId> + '_ {
         self.holders.get(&m).into_iter().flat_map(|s| s.iter().copied())
@@ -216,7 +231,7 @@ impl ChainState {
     /// PILOT (MNWIT1): drain every dirty key (orders / markets + guarded account writes).
     pub fn take_dirty(&mut self) -> crate::wit::WitDirty {
         let mut d = core::mem::take(&mut self.wit_dirty);
-        d.accounts.append(&mut self.accounts.dirty);
+        self.accounts.drain_dirty(&mut d.accounts);
         d
     }
     pub fn journal_account(&self, j: &mut StateJournal, id: AccountId) {
@@ -292,7 +307,7 @@ impl ChainState {
     /// what the unit changed; unchanged leaves rehash to the same value and cost no path).
     pub fn note_journal(&mut self, j: &StateJournal) {
         for (id, _) in &j.accounts {
-            self.accounts.dirty.insert(*id);
+            self.accounts.mark_dirty(*id);
         }
         for (m, _, _) in &j.markets {
             self.wit_dirty.markets.insert(*m);

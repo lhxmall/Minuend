@@ -275,7 +275,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     rec('8b h10 voided (top = 9), fraud flag', [9, 1], [(await vars(ROLL)).top, (await vars(ROLL))['f' + s10]]);
     { const sb = await bal(SEG); rec('8 seg referee solvent: per game it keeps GF, plus MK - refund-unit fee per mids / pick (as rv_game_ref), minus its response-unit fees (2 games, 4 moves)', true, sb > 0 && sb <= 2 * GF + 4 * 2000, { balance: sb }); }
     // 8c witness proofs: h10 whose final memory holds a real MNWIT1 root (engine-diff proofdump of adv5) at the guest's OUT slots
-    const P = JSON.parse(fs.readFileSync(path.join(__dirname, 'testdata/proofs/adv5.json'), 'utf8')); const mem = K.memWithRoot(P.root);
+    const P = JSON.parse(fs.readFileSync(path.join(__dirname, 'testdata/proofs/adv5.json'), 'utf8')); const mem = K.memWithRoot(P.root, 0, {}, 10); // loop round 5: OUT segs = 10 (rv_witbind height proof)
     const N10 = T.batch(H9.mem, 10); const final = ref.H(N10.fpc + ':' + N10.fregs + ':' + mem.root() + ':' + N10.inpRoot + ':' + N10.steps);
     r = await trig(op1, ROLL, sub(N10, 10, H9.final, { fmem: mem.root(), final }), OBOND, 'submit'); rec('8c h10 with the witness memory image', 'ok', r.err || 'ok');
     r = await trig(w, WBIND, K.bindData(mem, 10), 10000, 'bind', 1); rec('8c bind before finalize', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });

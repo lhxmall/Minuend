@@ -628,7 +628,7 @@ impl Engine {
     fn funding_open_interest(&self, market: MarketId, account: AccountId, open_qty: i64) -> Qty {
         // PILOT (loop round 3, S1b): running total instead of iterating every account (same value:
         // ChainState::oi_long = sum of positive qty in `market` over all accounts, see oi_ok).
-        let mut oi: u128 = self.state.accounts.oi_long.get(&market).copied().unwrap_or(0);
+        let mut oi: u128 = self.state.accounts.oi_long_of(market);
         oi += open_qty.unsigned_abs() as u128;
         if let Some(book) = self.state.books.get(&market) {
             let pos_qty = self

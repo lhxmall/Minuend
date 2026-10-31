@@ -31,13 +31,31 @@
 //!     8 ReportPrice:   author = oracle; w2,w3 = price; w7 = market
 //!     9 ExternalPrice: author = source; w2,w3 = price; w6 = source_id (low byte); w7 = market
 //!    10 SetHeight:     the batch-commit hook (minuend-settle: height = prev + 1, prune_withdrawals):
-//!                      w1,w2 = new batch height; `prod` requires exactly current + 1, test builds any
-//!                      height >= current (fixtures); else event 2. Emits EV_HEIGHT, is neither applied
-//!                      nor rejected (no seq), but is a unit for the per-unit roots
+//!                      w1,w2 = new batch height; test builds without height binding: any height >=
+//!                      current (fixtures); refused (event 2) with binding, i.e. always in `prod`
+//!                      (round 5, R4-M4: the hook runs at segment start with the rollup height).
+//!                      Emits EV_HEIGHT, is neither applied nor rejected (no seq), but is a unit for
+//!                      the per-unit roots
 //!   header [3] loop round 4 fixtures: bit 25 = list market 3 as a funding-rate market (the 100x
 //!     listing of upstream's funding tests; account 0 of the table is its external feed), bit 26 =
 //!     accounts 1..=3 of the table are bonded oracles (oracle_bonds = ORACLE_BOND_PERP)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
+//!
+//! Loop round 5 (R4-M2): batch format v2, MAGIC2 "MNP2": identical to MNP1, followed by a unit-id
+//!   table of n_ops x 8 words (the 32-byte upstream unit id of op i, little-endian words, at
+//!   4 + 8*n_accounts + 8*n_ops + 8*i). The unit id is a unit INPUT (like the op words): it feeds
+//!   `liq_order_id(unit id)`, so a liquidation fill's taker id is the real one and the event log
+//!   is no longer masked. MNP1 keeps unit id 0 + LIQ_TAKER_EV (test fixtures); in `prod` an MNP1
+//!   Liquidate is refused (BadAccount): a production liquidation always names its unit.
+//! Loop round 5 (R4-M4): engine height = rollup height. The guest counts its runs in memory (main.rs
+//!   RUNS: the rollup carries the final memory of h-1 into s0 of h, so the n-th run of an image
+//!   lineage IS rollup height n; an upgrade image takes the count from the imported snapshot's
+//!   `segs`, which the export at h-1 wrote) and keeps `Session::segs` equal to it. With
+//!   `Session::bind_height` (always in `prod`) every batch run first runs the batch-commit hook
+//!   with height = segs (> previous height: export / import heights are skipped), so units of
+//!   rollup height h see engine height h, and SetHeight (kind 10) is refused (event 2): the operator
+//!   no longer decides the engine clock. OUT[0x1FFE6] = engine height (low word); rv_witbind binds
+//!   OUT[0x1FFE7] (segs) == h with the segment end root.
 //!
 //! Segments (loop round 3): an upstream batch (<= 200 000 units) is cut into guest runs of
 //! <= MAX_UNITS units. One guest run = one segment = one rollup height. The guest keeps its
@@ -79,6 +97,8 @@ use sha2::Digest;
 use types::*;
 
 pub const MAGIC: u32 = 0x4D4E_5031; // "MNP1"
+/// loop round 5 (R4-M2): MNP1 + a per-op unit-id table after the ops
+pub const MAGIC2: u32 = 0x4D4E_5032; // "MNP2"
 
 /// Event code per op (shared numbering with the host harness).
 pub fn reason_code(r: &RejectReason) -> u32 {
@@ -219,10 +239,12 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
 const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFD6);
 const _: () = assert!(0x03F0_0000 / 4 + 0x20000 + 8 * MAX_UNITS <= 1 << 24);
 const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + MAX_UNITS) < 1 << 24);
+// MNP2: the unit-id table after the ops stays below the input ecall's trap range too
+const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + 2 * MAX_UNITS) < 1 << 24);
 
 /// Header check shared by host and guest. `resumed` = a session already exists (not genesis).
 pub fn check_header_seg(rd: &mut dyn FnMut(u32) -> u32, resumed: bool) -> u32 {
-    if rd(0) != MAGIC {
+    if rd(0) != MAGIC && rd(0) != MAGIC2 {
         ST_BAD_MAGIC
     } else if rd(1) > MAX_ACCOUNTS {
         ST_TOO_MANY_ACCOUNTS
@@ -497,6 +519,19 @@ pub struct Session {
     pub segs: u32,
     /// account cap (MAX_STATE_ACCOUNTS; host tests may lower it; not part of the snapshot)
     pub state_cap: usize,
+    /// loop round 5 (R4-M4): every batch run first sets the engine height to `segs` (the rollup
+    /// height) via the batch-commit hook, and SetHeight ops are refused. Always on in `prod`
+    /// (genesis and import); host tests opt in (`SegOpt::bind`). Not part of the snapshot.
+    pub bind_height: bool,
+}
+/// Options of a segment run (loop round 5).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SegOpt {
+    /// the run's number in the image lineage (guest: main.rs RUNS = the rollup height); None =
+    /// count on (`segs` + 1, genesis 1)
+    pub run_no: Option<u32>,
+    /// a genesis session created by this run binds its height (`Session::bind_height`)
+    pub bind: bool,
 }
 impl Session {
     pub fn genesis(flags: u32, mode: WitMode) -> Self {
@@ -506,7 +541,7 @@ impl Session {
         let mut eng = Engine { state: state::ChainState::genesis_fixture(flags, accts) };
         let w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
         let _ = eng.state.take_dirty();
-        Session { eng, w, mode, segs: 0, state_cap: MAX_STATE_ACCOUNTS }
+        Session { eng, w, mode, segs: 0, state_cap: MAX_STATE_ACCOUNTS, bind_height: cfg!(feature = "prod") }
     }
 }
 
@@ -541,10 +576,29 @@ pub fn run_segment(
     mode: WitMode,
     sess: &mut Option<Session>,
 ) -> ([u8; 32], Stats, WitOut) {
+    run_segment_n(rd, ev, unit, mode, sess, SegOpt::default())
+}
+
+/// The batch-commit hook (minuend-settle: new height, then `prune_withdrawals(height)`; the other
+/// prunes touch unmodelled state).
+pub fn commit_height(s: &mut state::ChainState, height: Height) {
+    s.height = height;
+    s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
+}
+
+/// `run_segment` with options (loop round 5: run number = rollup height, height binding).
+pub fn run_segment_n(
+    rd: &mut dyn FnMut(u32) -> u32,
+    ev: &mut dyn FnMut(u32),
+    unit: &mut dyn FnMut(u32, &state::ChainState, &[u8; 32]),
+    mode: WitMode,
+    sess: &mut Option<Session>,
+    opt: SegOpt,
+) -> ([u8; 32], Stats, WitOut) {
     let mut st = Stats { status: ST_OK, applied: 0, rejected: 0, fills: 0 };
     let mut wo = WitOut { root: [0; 32], start_root: [0; 32], scratch_ok: false, leaves: 0, leaf_updates: 0, node_hashes: 0 };
     if let Some(s) = sess.as_mut() {
-        s.segs += 1;
+        s.segs = opt.run_no.unwrap_or(s.segs + 1);
     }
     st.status = check_header_seg(rd, sess.is_some());
     if st.status != ST_OK {
@@ -561,13 +615,24 @@ pub fn run_segment(
         accts.push(AccountId(id));
     }
     let base = 4 + n_acc * 8;
+    // R4-M2: MNP2 carries the unit ids after the ops
+    let v2 = rd(0) == MAGIC2;
+    let uid_base = base + 8 * n_ops;
     if sess.is_none() {
         let mut s = Session::genesis_with(rd(3), mode, &accts);
-        s.segs = 1;
+        s.segs = opt.run_no.unwrap_or(1);
+        s.bind_height |= opt.bind;
         *sess = Some(s);
     }
-    let Session { eng, w, state_cap, .. } = sess.as_mut().unwrap();
+    let Session { eng, w, state_cap, segs, bind_height, .. } = sess.as_mut().unwrap();
     let state_cap = *state_cap;
+    let bind_height = *bind_height;
+    // R4-M4: the batch-commit hook at the rollup height (before any unit and before the start
+    // root, so the start root is the state the first unit sees; the hook only touches the
+    // withdrawal ledger + height, which MNWIT1 does not commit)
+    if bind_height && (*segs as Height) > eng.state.height {
+        commit_height(&mut eng.state, *segs as Height);
+    }
     if let Some(w) = w.as_mut() {
         wo.root = w.root();
         wo.start_root = wo.root;
@@ -619,8 +684,16 @@ pub fn run_segment(
             },
             BatchOp::Liquidate { acct, target, market } => {
                 let t = if target == LIQ_TARGET_INSURANCE { Some(INSURANCE_ACCOUNT) } else { accts.get(target as usize).copied() };
+                // R4-M2: the unit id from the MNP2 table (MNP1: 0, refused in prod)
+                let mut uid = [0u8; 32];
+                if v2 {
+                    for k in 0..8 {
+                        uid[k * 4..k * 4 + 4].copy_from_slice(&rd(uid_base + i * 8 + k as u32).to_le_bytes());
+                    }
+                }
                 match (acct_of(acct), t) {
-                    (Some(a), Some(t)) => eng.liquidate([0u8; 32], seq, a, t, MarketId(market)),
+                    (Some(_), Some(_)) if !v2 && cfg!(feature = "prod") => Err(RejectReason::BadAccount),
+                    (Some(a), Some(t)) => eng.liquidate(uid, seq, a, t, MarketId(market)),
                     _ => Err(RejectReason::BadAccount),
                 }
             }
@@ -637,16 +710,11 @@ pub fn run_segment(
                 // test builds may jump (peg interval / feed staleness fixtures)
                 // prod: also only as the segment's first unit, so the height advances at most once per
                 // rollup height (each costs an operator bond + a challenge window), R4-H2
-                let ok_h = if cfg!(feature = "prod") {
-                    i == 0 && Some(height) == eng.state.height.checked_add(1)
-                } else {
-                    height >= eng.state.height
-                };
+                // loop round 5 (R4-M4): with height binding (always in prod) the height is the
+                // rollup height, set by the hook at segment start -> SetHeight is always refused
+                let ok_h = !bind_height && !cfg!(feature = "prod") && height >= eng.state.height;
                 if ok_h {
-                    // the batch-commit hook (minuend-settle: height = prev + 1, then
-                    // prune_withdrawals(height)); the other prunes touch unmodelled state
-                    eng.state.height = height;
-                    eng.state.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
+                    commit_height(&mut eng.state, height);
                     height_op = true;
                     Ok(Vec::new())
                 } else {
@@ -664,7 +732,7 @@ pub fn run_segment(
                 ev(EV_APPLIED | fills.len() as u32);
                 for f in &fills {
                     ev(u32::from_le_bytes([f.maker_id.0[0], f.maker_id.0[1], f.maker_id.0[2], f.maker_id.0[3]]));
-                    ev(if f.kind == 2 || f.kind == 3 {
+                    ev(if (f.kind == 2 || f.kind == 3) && !v2 {
                         LIQ_TAKER_EV
                     } else {
                         u32::from_le_bytes([f.taker_id.0[0], f.taker_id.0[1], f.taker_id.0[2], f.taker_id.0[3]])
@@ -786,6 +854,9 @@ pub fn run_import(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>, ex
         // the digest matched, so a decode failure / short read means the image was built for a
         // malformed export: refused all the same
         Ok(mut s) if r.i == *words => {
+            // loop round 5 (R4-M4): the import run is a rollup height of its own (h = export + 1)
+            s.segs += 1;
+            s.bind_height = cfg!(feature = "prod");
             o.words = *words;
             o.digest = d;
             if let Some(w) = s.w.as_mut() {

@@ -266,6 +266,8 @@ struct Out {
     rejected: u32,
     fills: u32,
     ev: Vec<u32>,
+    /// loop round 5 (R4-M2): the real unit id of every op (0 for SetHeight fixtures: no unit)
+    uids: Vec<[u8; 32]>,
 }
 impl Out {
     fn json(&self) -> String {
@@ -288,7 +290,27 @@ fn run_real_eng(w: &[u32]) -> (Out, Engine) {
 
 /// `per_unit(&engine)` runs after every ingested unit (one apply_one each in a linear chain).
 fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine) {
-    assert_eq!(w[0], mnpilot::MAGIC);
+    run_real_eng_h(w, &|_| None, per_unit)
+}
+
+/// MNP1 -> MNP2 (loop round 5, R4-M2): same batch + the real engine's unit id of every op.
+pub fn to_v2(w: &[u32]) -> Vec<u32> {
+    let (r, _) = run_real_eng(w);
+    let mut v = w.to_vec();
+    v[0] = mnpilot::MAGIC2;
+    for u in &r.uids {
+        for k in 0..8 {
+            v.push(u32::from_le_bytes(u[4 * k..4 * k + 4].try_into().unwrap()));
+        }
+    }
+    v
+}
+
+/// `pre(i)` = Some(h): run the batch-commit hook (height h, prune) before op i (loop round 5:
+/// the port's height binding at a segment start).
+fn run_real_eng_h(w: &[u32], pre: &dyn Fn(usize) -> Option<u64>, per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine) {
+    assert!(w[0] == mnpilot::MAGIC || w[0] == mnpilot::MAGIC2);
+    let v2 = w[0] == mnpilot::MAGIC2;
     let n_acc = w[1];
     let n_ops = w[2];
     let ids: Vec<AccountId> = (0..n_acc)
@@ -313,8 +335,15 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
     }
     real_fixtures(&mut eng, w[3], &ids);
     let mut parent = genesis_id();
-    let mut out = Out { hash: [0; 32], applied: 0, rejected: 0, fills: 0, ev: Vec::new() };
+    let mut out = Out { hash: [0; 32], applied: 0, rejected: 0, fills: 0, ev: Vec::new(), uids: Vec::new() };
+    let uid_base = base + 8 * n_ops as usize;
     for i in 0..n_ops as usize {
+        if let Some(h) = pre(i) {
+            if h > eng.state.height {
+                eng.state.height = h;
+                eng.state.prune_withdrawals(h);
+            }
+        }
         let mut ow = [0u32; 8];
         ow.copy_from_slice(&w[base + i * 8..base + i * 8 + 8]);
         let (ai, op) = match mnpilot::decode_op(&ow) {
@@ -372,6 +401,7 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
                     out.rejected += 1;
                     out.ev.push(2);
                 }
+                out.uids.push([0; 32]);
                 per_unit(&eng);
                 continue;
             }
@@ -379,6 +409,13 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
         };
         let u = sign_unit(vec![parent], op, &secret(ai));
         let id = unit_id(&u);
+        if v2 {
+            // the MNP2 table must carry the real unit id (to_v2 builds it from this very chain)
+            for k in 0..8 {
+                assert_eq!(w[uid_base + 8 * i + k], u32::from_le_bytes(id.0[4 * k..4 * k + 4].try_into().unwrap()), "MNP2 unit id of op {}", i);
+            }
+        }
+        out.uids.push(id.0);
         let evs = eng.ingest(u).expect("ingest");
         assert_eq!(evs.len(), 1, "linear chain: one event per unit");
         match &evs[0] {
@@ -389,7 +426,8 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
                 for f in fills {
                     out.ev.push(u32::from_le_bytes(f.maker_id.0[..4].try_into().unwrap()));
                     // loop round 4: liquidation fills carry liq_order_id(unit id); masked on both sides
-                    out.ev.push(if f.kind == 2 || f.kind == 3 { mnpilot::LIQ_TAKER_EV } else { u32::from_le_bytes(f.taker_id.0[..4].try_into().unwrap()) });
+                    // loop round 5: unmasked in MNP2 (the port gets the unit id as input)
+                    out.ev.push(if (f.kind == 2 || f.kind == 3) && !v2 { mnpilot::LIQ_TAKER_EV } else { u32::from_le_bytes(f.taker_id.0[..4].try_into().unwrap()) });
                     out.ev.push(f.price as u32);
                     out.ev.push((f.price >> 32) as u32);
                     out.ev.push(f.qty as u32);
@@ -438,7 +476,7 @@ fn run_port(w: &[u32]) -> Out {
         &mut |i, s, _| assert!(s.books.values().all(|b| b.index_ok() && b.level_ok()) && s.oi_ok(), "order index broken at unit {}", i),
         mnpilot::WitMode::Off,
     );
-    Out { hash, applied: st.applied, rejected: st.rejected, fills: st.fills, ev }
+    Out { hash, applied: st.applied, rejected: st.rejected, fills: st.fills, ev, uids: Vec::new() }
 }
 
 // ---------------------------------------------------------------- generator
@@ -965,11 +1003,15 @@ fn main() {
         Some("snaptest") => println!("{}", snap::snaptest(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("capcheck") => println!("{}", snap::capcheck(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
         Some("statecap") => println!("{}", snap::statecap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
-        Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])),
+        Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5], a.get(6).map(|x| x == "bind").unwrap_or(false))),
+        Some("snapcap") => println!("{}", snap::snapcap()),
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqedge") => println!("{}", liq::liqedge()),
+        Some("hbind") => println!("{}", liq::hbind(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqgen") => {
+            // loop round 5: 5th arg "v2" = MNP2 (real unit ids appended)
             let w = liq::liq_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
+            let w = if a.get(5).map(|x| x == "v2").unwrap_or(false) { to_v2(&w) } else { w };
             write_words(&a[4], &w);
             println!("{{\"ops\":{}}}", w[2]);
         }

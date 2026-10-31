@@ -133,7 +133,12 @@ else if ($d.upgrade) {
 	$h = $d.upgrade;
 	require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');
 	require($isR($d.mem), 'bad root');
-	$st = {up: $h};
+	// loop round 5 (R5-M1): at most ONE pending (unfinalized) upgrade, var uh. Re-scheduling at an earlier (or the same)
+	// height replaces it and clears the old U<uh>: before, a stale later U<h'> survived and height h' would again start
+	// from the old image, whose compiled-in digest can never match the new export at h'-1 (height h' never finalizes)
+	$p = var['uh'] OTHERWISE 0;
+	require($p <= $lf OR $h <= $p, 'upgrade pending at ' || $p);
+	$st = {up: $h, clr: ($p > $lf AND $p != $h) ? $p : 0};
 }
 // ---- loop round 4: xbind {xbind: sid, words: [kind, 8 digest words], wsib: [9 x [24 siblings]]}: proves a
 //      submission's snapshot kind and digest against its final memory root (anyone; once per submission)

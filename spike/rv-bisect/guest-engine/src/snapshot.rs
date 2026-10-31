@@ -554,7 +554,7 @@ pub fn decode(r: &mut SnapR) -> Res<Session> {
     if s.accounts.len() > crate::MAX_STATE_ACCOUNTS {
         return Err(());
     }
-    Ok(Session { eng: crate::engine::Engine { state: s }, w, mode, segs, state_cap: crate::MAX_STATE_ACCOUNTS })
+    Ok(Session { eng: crate::engine::Engine { state: s }, w, mode, segs, state_cap: crate::MAX_STATE_ACCOUNTS, bind_height: cfg!(feature = "prod") })
 }
 
 /// Host / guest export: (digest, words, kept words).
