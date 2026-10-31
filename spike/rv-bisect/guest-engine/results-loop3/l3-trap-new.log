@@ -1,0 +1,8 @@
+{"seg":"seg000.bin","match":true,"status":0,"segs":1,"units":90,"steps":17785157,"heap":149728,"heap_peak_live":133440,"ms":16365}
+{"seg":"seg001.bin","forced_trap_after":5000000,"status":4294901761,"status_hex":"ffff0001","start_root":"0000000000000000000000000000000000000000000000000000000000000000","end_root":"0000000000000000000000000000000000000000000000000000000000000000","prev_end_root":"6ef962b64a80c0611c1fd67ce584c94e663a43a9c71014df2d8c23d137ede882"}
+{"seg":"seg002.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":78}
+{"seg":"seg003.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":75}
+{"seg":"seg004.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":75}
+{"seg":"seg005.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":75}
+{"seg":"seg006.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":75}
+{"dir":"../seg-small","segments":7,"match":1,"steps":17785535}

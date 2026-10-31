@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 14.61s
+    Finished `release` profile [optimized] target(s) in 12.17s
+    Finished `release` profile [optimized] target(s) in 6.33s
+    Finished `release` profile [optimized] target(s) in 5.35s
+    Finished `release` profile [optimized] target(s) in 5.18s
+ecc39ba162f8f72dbccb2bbc5f6ea1a5266b3012  /data/hark/target-l3-host/release/engine-diff
+75d630cb5c538dc0b9ffa02ec5ff44762189612b  /data/hark/target-l3-host-d8/release/engine-diff
+c3711e70ce7df3ba493c3b733965921dca32be6e  /data/hark/target-l3-g/riscv32im-unknown-none-elf/release/rvengine
+77c9f368bb00da126c9b327a145d5e3ace5c4928  /data/hark/target-l3-g-d8/riscv32im-unknown-none-elf/release/rvengine
+f80c572d1faa4d79d27e1ddeea3b9bfa784da37b  /data/hark/target-l3-gembed/riscv32im-unknown-none-elf/release/rvengine
+BUILDDONE

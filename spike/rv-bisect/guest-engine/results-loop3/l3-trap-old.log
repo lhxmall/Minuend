@@ -1,0 +1,8 @@
+{"seg":"seg000.bin","match":true,"status":0,"segs":1,"units":90,"steps":17785129,"heap":149728,"heap_peak_live":133440,"ms":15956}
+{"seg":"seg001.bin","forced_trap_after":5000000,"status":0,"status_hex":"0","start_root":"f2af99c180ed5dcca9c62cc2a53c3461f52bffa5cf364bcb4996095479708ab9","end_root":"6ef962b64a80c0611c1fd67ce584c94e663a43a9c71014df2d8c23d137ede882","prev_end_root":"6ef962b64a80c0611c1fd67ce584c94e663a43a9c71014df2d8c23d137ede882"}
+{"seg":"seg002.bin","after_trap":true,"status":4,"halted":true,"a0":0,"units":0,"steps":1469}
+{"seg":"seg003.bin","after_trap":true,"status":4294901879,"halted":true,"a0":77,"units":0,"steps":3434}
+{"seg":"seg004.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":52}
+{"seg":"seg005.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":52}
+{"seg":"seg006.bin","after_trap":true,"status":5,"halted":true,"a0":0,"units":0,"steps":52}
+{"dir":"../seg-small","segments":7,"match":1,"steps":17790188}

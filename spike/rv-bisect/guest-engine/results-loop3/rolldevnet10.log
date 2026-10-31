@@ -1,0 +1,218 @@
+===== testnet = false
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:635203) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+rundir /data/hark/spike-rv/roll/devnet-testdata10/runid-0001
+[INFO][genesis-node] Child started
+[INFO][obyte-witness-0002] Child started
+[INFO][obyte-witness-0001] Child started
+[INFO][obyte-hub-0001] Child started
+[INFO][headless-wallet-0005] Child started
+[INFO][headless-wallet-0003] Child started
+[INFO][headless-wallet-0006] Child started
+[INFO][headless-wallet-0004] Child started
+[INFO][headless-wallet-0007] Child started
+[INFO][headless-wallet-0001] Child started
+[INFO][headless-wallet-0002] Child started
+MODE max_aa_responses set {"STEP":"7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA","GAME":"W7OQFFFU6446637YBHIA7B74L6X4ZO5B","ROLL":"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC"}
+PASS | deployed rv_step == address baked into the referee | expected "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" | actual "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" 
+PASS | deployed referee == address baked into rv_rollup | expected "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" | actual "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" 
+PASS | deployed rollup == computed address | expected "32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC" | actual "32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC" 
+PASS | loop 3: deployed seg referee == address baked into rv_rollup | expected "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" | actual "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" 
+PASS | loop 3: deployed witbind / witproof == computed | expected ["HC2MLPMDBSIFECGDN6NEXCSGTHKQZOXP","7QKGE3SALABJC7BRXBAN2ZIKTGYPYXSF"] | actual ["HC2MLPMDBSIFECGDN6NEXCSGTHKQZOXP","7QKGE3SALABJC7BRXBAN2ZIKTGYPYXSF"] 
+PASS | race: two h1 submits in flight together -> exactly one wins | expected "bounce+ok" | actual "bounce+ok" {"loserError":{"message":"height taken","formattedContext":"","codeLines":[{"lineNumber":54,"formula":"require($h > $top, 'height taken');"}],"trace":[{"type":"aa","aa":"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC","xpath":"/init","line":54}]}}
+PASS | race: winner recorded at h1 | expected true | actual true 
+PASS | fake s0 (genesis memory) at h2 | expected "bounce" | actual "bounce" 
+PASS | final root not matching its parts | expected "bounce" | actual "bounce" 
+PASS | h2 chained on the race loser | expected "bounce" | actual "bounce" 
+PASS | an AA submits h2 (it could refuse payouts) | expected "bounce" | actual "bounce" {"err":"{\"message\":\"one of secondary AAs bounced with error: \",\"callChain\":{\"address\":\"2524IWQMP7B2QVHVQU77XDEJA7ESEPCK\",\"next\":{\"address\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC\",\"message\":\"an AA cannot be an oper"}
+PASS | honest h2 by op2 | expected "ok" | actual "ok" 
+PASS | finalize h1 before 24 h | expected "bounce" | actual "bounce" {"err":"{\"message\":\"window open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":98,\"formula\":\"require($now >= $r[3] + $WIN, 'window open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC\",\""}
+PASS | griefer opens a game on h1 | expected "ok" | actual "ok" 
+PASS | referee received the open (secondary trigger) | expected true | actual true 
+PASS | referee game record exists | expected true | actual true 
+PASS | rollup forwarded GF to the referee | expected 10000 | actual 10000 
+PASS | finalize h1 with the game open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":99,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC\",\"xpath"}
+PASS | griefer vs honest operator | expected "d" | actual "d" 
+PASS | rollup paid the operator CBOND - GF - FEE (real output) | expected 108000 | actual 108000 
+PASS | rollup game marked d | expected "d" | actual "d" 
+PASS | finalize h1 after the game | expected "ok" | actual "ok" 
+PASS | finalize pays OBOND - FEE (real output) | expected 198000 | actual 198000 
+PASS | fraudulent h3 submitted | expected "ok" | actual "ok" 
+PASS | h4 on bad h3 | expected "ok" | actual "ok" 
+PASS | h5 on h4 | expected "ok" | actual "ok" 
+PASS | honest challenger vs fraudulent h3 | expected "c" | actual "c" 
+PASS | challenger paid CBOND - GF - FEE + OBOND/2 (real output) | expected 208000 | actual 208000 
+PASS | top reset to 2 | expected 2 | actual 2 
+PASS | burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | h3 flagged fraud | expected 1 | actual 1 
+PASS | h2 finalizes | expected "ok" | actual "ok" 
+PASS | finalize voided h3 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"voided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":97,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'voided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVT"}
+PASS | open on voided h5 | expected "bounce" | actual "bounce" 
+PASS | fraudster reclaims h3 | expected "bounce" | actual "bounce" 
+PASS | reclaim voided h4 | expected "ok" | actual "ok" 
+PASS | h4 bond back OBOND - FEE (real output) | expected 198000 | actual 198000 
+PASS | reclaim voided h5 | expected "ok" | actual "ok" 
+PASS | race restarts: honest h3 resubmitted | expected "ok" | actual "ok" 
+PASS | extend the voided chain | expected "bounce" | actual "bounce" 
+PASS | new h3 finalizes | expected "ok" | actual "ok" 
+PASS | 6a honest h4 by op1 | expected "ok" | actual "ok" 
+PASS | 6a ch1 opens on h4 | expected "ok" | actual "ok" 
+PASS | 6a resolve before the move deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"undecided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":64,\"formula\":\"require($w, 'undecided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"W7OQFFFU6446637YBHIA7B74L6X4ZO5B\",\"xpath\":\"/init\",\"line\":"}
+PASS | 6a operator mids after its deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":41,\"formula\":\"require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""}
+PASS | 6a resolve after the deadline | expected "ok" | actual "ok" 
+PASS | 6a rollup game marked c (operator timed out) | expected "c" | actual "c" 
+PASS | 6a challenger paid CBOND - GF - FEE + OBOND/2 (real output) | expected 208000 | actual 208000 
+PASS | 6a operator paid nothing | expected 0 | actual 0 
+PASS | 6a burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | 6a h4 flagged fraud | expected 1 | actual 1 
+PASS | 6a top back to 3 | expected 3 | actual 3 
+PASS | 6a open games on h4 back to 0 | expected 0 | actual 0 
+PASS | 6a timed-out operator reclaims h4 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":110,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"}
+PASS | 6b h4 resubmitted by op1 | expected "ok" | actual "ok" 
+PASS | 6b ch2 opens on h4 | expected "ok" | actual "ok" 
+PASS | 6b operator answered, challenger to move | expected "stopped" | actual "stopped" 
+MEASURE one operator mids sent with 10000 bytes: referee balance delta 1398 operator balance delta -3396
+PASS | 6b referee nets (0, KEEP] from a move (KEEP minus its refund-unit fee) | expected true | actual true {"gdelta":1398}
+PASS | 6b operator move costs KEEP + its unit fee (< KEEP + 3000), not 10000 + fee | expected true | actual true {"odelta":-3396}
+PASS | 6b challenger pick after its deadline | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":49,\"formula\":\"require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""}
+PASS | 6b resolve after the deadline | expected "ok" | actual "ok" 
+PASS | 6b rollup game marked d | expected "d" | actual "d" 
+PASS | 6b operator paid CBOND - GF - FEE (real output) | expected 108000 | actual 108000 
+PASS | 6b challenger paid nothing | expected 0 | actual 0 
+PASS | 6b h4 live, not fraud | expected [4,null] | actual [4,null] 
+PASS | 6c honest h5 by op1 | expected "ok" | actual "ok" 
+PASS | 6c two griefers open on h5 | expected "ok+ok" | actual "ok+ok" 
+PASS | 6c open-games counter = 2 | expected 2 | actual 2 
+PASS | 6c finalize h4 | expected "ok" | actual "ok" 
+PASS | 6c finalize h5 with 2 games open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":99,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC\",\"xpath"}
+PASS | 6c game A -> d | expected "d" | actual "d" 
+PASS | 6c A pays the operator CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6c open-games counter = 1 | expected 1 | actual 1 
+PASS | 6c finalize h5 with game B still open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":99,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC\",\"xpath"}
+PASS | 6c game B -> d | expected "d" | actual "d" 
+PASS | 6c B pays the operator CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6c open-games counter = 0 | expected 0 | actual 0 
+PASS | 6c finalize h5 after both games | expected "ok" | actual "ok" 
+PASS | 6c finalize pays OBOND - FEE | expected 198000 | actual 198000 
+PASS | 6c lf = 5 | expected 5 | actual 5 
+PASS | 6d fraudulent h6 by op2 | expected "ok" | actual "ok" 
+PASS | 6d h7 by op1 on bad h6 | expected "ok" | actual "ok" 
+PASS | 6d ch1 + ch2 open on h6, ch3 (griefer) on h7 | expected "ok+ok+ok" | actual "ok+ok+ok" 
+PASS | 6d open-games counter on h6 = 2 | expected 2 | actual 2 
+PASS | 6d game A (ch1) -> c | expected "c" | actual "c" 
+PASS | 6d first fraud win pays CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS | 6d top = 5 (h6, h7 voided) | expected 5 | actual 5 
+PASS | 6d burned += OBOND/2 | expected 100000 | actual 100000 
+PASS | 6d h6 still has 1 open game | expected 1 | actual 1 
+PASS | 6d reclaim voided h7 while its game is open | expected "bounce" | actual "bounce" {"err":"{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":110,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"}
+PASS | 6d new open on voided h6 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not live\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":80,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'not live');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"32RWV3M5HE3IP3BHSNEUBCUI4M"}
+PASS | 6d honest h6 resubmitted while old games run | expected "ok" | actual "ok" 
+PASS | 6d late game B (ch2) on voided h6 -> c | expected "c" | actual "c" 
+PASS | 6d second win gets only CBOND - GF - FEE (no second slash) | expected 108000 | actual 108000 
+PASS | 6d late c-callback does not void the new h6 | expected [6,"XLEoMIj9zp+a3E0qCWnf7MWNOICGCQM4aDY+VyMn3H8="] | actual [6,"XLEoMIj9zp+a3E0qCWnf7MWNOICGCQM4aDY+VyMn3H8="] 
+PASS | 6d burned unchanged by the second win | expected 100000 | actual 100000 
+PASS | 6d h6 games counter = 0 | expected 0 | actual 0 
+PASS | 6d late griefer game on voided h7 -> d | expected "d" | actual "d" 
+PASS | 6d late d-callback pays op1 CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS | 6d top still 6 after the late d-callback | expected 6 | actual 6 
+PASS | 6d reclaim voided h7 after its game | expected "ok" | actual "ok" 
+PASS | 6d h7 bond back OBOND - FEE | expected 198000 | actual 198000 
+PASS | 6d fraudster reclaims old h6 | expected "bounce" | actual "bounce" 
+PASS | 6d new h6 finalizes | expected "ok" | actual "ok" 
+PASS | 6d lf = 6 | expected 6 | actual 6 
+PASS | 7 submit h7 with OBOND + 50000 | expected "ok" | actual "ok" 
+PASS | 7 submit refund = 50000 - FEE (real output) | expected 48000 | actual 48000 
+PASS | 7 open h7 with CBOND + 30000 | expected "ok" | actual "ok" 
+PASS | 7 open refund = 30000 in full (real output) | expected 30000 | actual 30000 
+PASS | 7 the same response unit pays GF to the referee | expected 10000 | actual 10000 
+PASS | 7 referee received the open (no refund back to the rollup) | expected true | actual true 
+PASS | 7 operator answered the overpaid game, challenger to move | expected "stopped" | actual "stopped" 
+PASS | 7 resolve with RK + 25000 | expected "ok" | actual "ok" 
+PASS | 7 resolve refund = 25000 (real output, same unit as the callback) | expected 25000 | actual 25000 
+PASS | 7 callback payment GB to the rollup | expected 1000 | actual 1000 
+PASS | 7 operator paid CBOND - GF - FEE = 108000 | expected 108000 | actual 108000 
+PASS | 7 finalize h7 | expected "ok" | actual "ok" 
+PASS | 7 finalize pays OBOND - FEE | expected 198000 | actual 198000 
+PASS | 7 submit h8 with OBOND + FEE (kept, no refund unit) | expected ["ok",0] | actual ["ok",0] 
+PASS | 7 direct referee open with GF + 5000 refunds 5000 | expected ["ok",5000] | actual ["ok",5000] 
+PASS | 8 state before: lf = 7, top = 8 | expected [7,8] | actual [7,8] 
+PASS | 8a honest h9 with units = 24 | expected "ok" | actual "ok" 
+PASS | 8a units stored | expected 24 | actual 24 
+PASS | 8a uopen with CBOND only | expected "bounce" | actual "bounce" 
+PASS | 8a griefer uopen h9 (CBOND + GF) | expected "ok" | actual "ok" 
+PASS | 8a the rollup response paid 2 GF to the seg referee | expected 20000 | actual 20000 
+PASS | 8a griefer vs honest operator via layer 1 + layer 2 (real chain) | expected "d" | actual "d" {"unit":[9,10,135,150]}
+PASS | 8a operator paid CBOND - GF - FEE (rollup response to the seg callback) | expected 108000 | actual 108000 
+PASS | 8a no game open on h9 | expected 0 | actual 0 
+PASS | 8a finalize h8 | expected "ok" | actual "ok" 
+PASS | 8a finalize h9 after its layer-1 game | expected "ok" | actual "ok" 
+PASS | 8b fraudulent h10 (units 5) | expected "ok" | actual "ok" 
+PASS | 8b honest challenger uopen h10 | expected "ok" | actual "ok" 
+PASS | 8b fraud proven through layer 1 | expected "c" | actual "c" {"unit":[2,3,24,37]}
+PASS | 8b challenger paid CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS | 8b h10 voided (top = 9), fraud flag | expected [9,1] | actual [9,1] 
+PASS | 8 seg referee solvent: per game it keeps GF, plus MK - refund-unit fee per mids / pick (as rv_game_ref), minus its response-unit fees (2 games, 4 moves) | expected true | actual true {"balance":23701}
+PASS | 8c h10 with the witness memory image | expected "ok" | actual "ok" 
+PASS | 8c bind before finalize | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not finalized\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":21,\"formula\":\"require(is_integer($h) AND $h >= 1 AND $h <= (var[$ROLL]['lf'] OTHERWISE 0), 'not finalized');\"}],\"trace\":[{\"t"}
+PASS | 8c finalize h10 | expected "ok" | actual "ok" 
+PASS | 8c bind with a flipped word bit | expected "bounce" | actual "bounce" 
+PASS | 8c bind h10 | expected "ok" | actual "ok" 
+PASS | 8c W10 = the root | expected "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=" | actual "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=" 
+PASS | 8c memberships proven against finalized h10 | expected 3 | actual 3 
+PASS | 8c absence proven | expected ["ok",1] | actual ["ok",1] 
+PASS | 8c tampered leaf | expected "bounce" | actual "bounce" 
+PASS | 8c R3-W4 prove with 25000 refunds 23000 (real output) | expected ["ok",23000] | actual ["ok",23000] 
+PASS | 8c proof against unbound h9 | expected "bounce" | actual "bounce" 
+PASS | rollup balance >= burned (all bonds settled) | expected true | actual true {"balance":732881,"burned":400000,"lf":10,"top":10}
+FEES {"submit":{"n":9,"avg":1226,"max":1227},"submit+tps":{"n":9,"avg":235,"max":274},"open":{"n":6,"avg":894,"max":946},"open+tps":{"n":6,"avg":303,"max":1021},"mids":{"n":18,"avg":1365,"max":1580},"mids+tps":{"n":18,"avg":202,"max":274},"pick":{"n":16,"avg":924,"max":924},"pick+tps":{"n":16,"avg":154,"max":2240},"step":{"n":8,"avg":2681,"max":3350},"step+tps":{"n":8,"avg":0,"max":0},"resolve":{"n":10,"avg":918,"max":918},"resolve+tps":{"n":10,"avg":646,"max":1574},"uopen":{"n":3,"avg":884,"max":884},"uopen+tps":{"n":3,"avg":564,"max":1021},"smids":{"n":2,"avg":1419,"max":1705},"smids+tps":{"n":2,"avg":112,"max":224},"spick-handoff":{"n":2,"avg":924,"max":924},"spick-handoff+tps":{"n":2,"avg":573,"max":573},"resolve3":{"n":2,"avg":918,"max":918},"resolve3+tps":{"n":2,"avg":5048,"max":8139},"bind":{"n":2,"avg":10428,"max":10428},"bind+tps":{"n":2,"avg":457,"max":457},"prove":{"n":5,"avg":1230,"max":1305},"prove+tps":{"n":5,"avg":0,"max":0}}
+TPS {"submit":{"n":22,"avg":412,"median":224,"max":2240,"max_aa_responses":[1]},"fwd":{"n":1,"avg":5730,"median":5730,"max":5730,"max_aa_responses":[2]},"finalize":{"n":15,"avg":0,"median":0,"max":0,"max_aa_responses":[1]},"open":{"n":12,"avg":1634,"median":1021,"max":5730,"max_aa_responses":[2]},"mids":{"n":21,"avg":184,"median":224,"max":274,"max_aa_responses":[1]},"pick":{"n":19,"avg":190,"median":0,"max":2240,"max_aa_responses":[1,2]},"step":{"n":21,"avg":81,"median":0,"max":1021,"max_aa_responses":[1,2]},"resolve":{"n":13,"avg":1321,"median":672,"max":8139,"max_aa_responses":[2,3]},"reclaim":{"n":7,"avg":160,"median":224,"max":224,"max_aa_responses":[1]},"ropen":{"n":1,"avg":0,"median":0,"max":0,"max_aa_responses":[1]}}
+SUMMARY {"total":149,"pass":149,"fail":0}
+[INFO][headless-wallet-0001] Child exited
+[INFO][headless-wallet-0004] Child exited
+[INFO][headless-wallet-0005] Child exited
+[INFO][obyte-hub-0001] Child exited
+[INFO][headless-wallet-0006] Child exited
+[INFO][headless-wallet-0007] Child exited
+[INFO][genesis-node] Child exited
+[INFO][headless-wallet-0003] Child exited
+[INFO][obyte-witness-0001] Child exited
+[INFO][headless-wallet-0002] Child exited
+[INFO][obyte-witness-0002] Child exited

@@ -1,0 +1,49 @@
+book_limit_buy_crosses_one_sell units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+book_partial_fill_then_rest units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+book_market_buy_eats_two_ask_levels units 5 applied 5 rejected 0 [ok0 ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+book_cancel_resting_then_missing_errors units 4 applied 3 rejected 1 [ok0 ok0 ok0 0xa] fills 0 engine_match true roots_match true
+book_self_trade_cancel_taker units 5 applied 5 rejected 0 [ok0 ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+book_escrowed_self_trade_rejects units 4 applied 2 rejected 2 [ok0 ok0 0x106 0x7] fills 0 engine_match true roots_match true
+book_reject_after_prior_maker_match_preserves_book units 5 applied 4 rejected 1 [ok0 ok0 ok0 ok0 0x106] fills 0 engine_match true roots_match true
+book_price_time_fifo_same_price units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok1 ok1] fills 2 engine_match true roots_match true
+book_full_fill_does_not_disturb_opposite_side units 9 applied 9 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok1 ok1] fills 2 engine_match true roots_match true
+book_cancel_non_head_decrements_cache units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok0 ok0] fills 0 engine_match true roots_match true
+book_cancel_non_head_bid_side_mirror units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok0 ok0] fills 0 engine_match true roots_match true
+acct_close_long_at_profit units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+acct_isolated_bucket_release units 8 applied 8 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok1] fills 3 engine_match true roots_match true
+acct_isolated_bucket_release_blowthrough units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+acct_isolated_bucket_release_rounding units 10 applied 10 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok1 ok0 ok1] fills 4 engine_match true roots_match true
+acct_isolated_release_rounding_odd units 8 applied 8 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok1] fills 3 engine_match true roots_match true
+state_taker_fee_flows_to_insurance units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+state_claw_from_counterparty units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+state_claw_capped_by_counterparty units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+exec_two_crossing_orders_fill units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+exec_r7_one_fill_per_unit units 7 applied 6 rejected 1 [ok0 ok0 ok0 ok0 0x107 ok1 ok1] fills 2 engine_match true roots_match true
+exec_duplicate_client_seq_rejected units 3 applied 2 rejected 1 [ok0 ok0 0x3] fills 0 engine_match true roots_match true
+exec_overflow_place_rejected units 2 applied 1 rejected 1 [ok0 0x7] fills 0 engine_match true roots_match true
+exec_live_order_cap units 66 applied 65 rejected 1 [ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 ok0 0x7] fills 0 engine_match true roots_match true
+exec_flip_position_requires_full_im units 5 applied 4 rejected 1 [ok0 ok0 ok0 ok1 0x7] fills 1 engine_match true roots_match true
+exec_rejected_unit_does_not_consume_seq units 3 applied 2 rejected 1 [ok0 0x3 ok0] fills 0 engine_match true roots_match true
+exec_isolated_escrow_conserved units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+exec_isolated_open_collateral_identity units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+exec_isolated_self_trade_place_rejected units 3 applied 2 rejected 1 [ok0 ok0 0x106] fills 0 engine_match true roots_match true
+exec_place_reject_after_prior_maker_match_is_atomic units 5 applied 4 rejected 1 [ok0 ok0 ok0 ok0 0x106] fills 0 engine_match true roots_match true
+exec_isolated_shields_cross units 8 applied 8 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok1] fills 3 engine_match true roots_match true
+exec_isolated_mode_gates units 14 applied 10 rejected 4 [ok0 ok0 ok0 ok0 ok0 0x7 ok0 ok1 0x7 0x7 ok0 ok1 ok0 0x7] fills 2 engine_match true roots_match true
+exec_isolated_blowthrough_insurance units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+exec_resting_open_im_not_truncated_at_low_prices units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok0] fills 0 engine_match true roots_match true
+exec_resting_im_prices_open_only units 7 applied 7 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok0 ok0] fills 1 engine_match true roots_match true
+exec_r2e6_isolated_taker_fee_no_cushion units 4 applied 3 rejected 1 [ok0 ok0 ok0 0x7] fills 0 engine_match true roots_match true
+exec_r2e6_isolated_taker_fee_cushion units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true
+exec_r2e9_resting_open_im_does_not_overflow units 3 applied 1 rejected 2 [ok0 0x7 0x7] fills 0 engine_match true roots_match true
+exec_r6h1_qty_cap_counts_position_and_orders units 8 applied 3 rejected 5 [ok0 ok0 0x7 0x7 0x7 0x7 0x7 ok0] fills 0 engine_match true roots_match true
+exec_r3e4_fee_check_sees_earlier_claws_bankrupt units 9 applied 9 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok1 ok0 ok0 ok1] fills 2 engine_match true roots_match true
+exec_r3e4_fee_check_sees_earlier_claws_solvent units 9 applied 9 rejected 0 [ok0 ok0 ok0 ok0 ok0 ok1 ok0 ok0 ok1] fills 2 engine_match true roots_match true
+exec_negative_price_short_lifecycle units 6 applied 6 rejected 0 [ok0 ok0 ok0 ok1 ok0 ok1] fills 2 engine_match true roots_match true
+bnd_isolated_margin_equals_equity units 7 applied 6 rejected 1 [ok0 ok0 ok0 ok0 ok0 ok0 0x7] fills 0 engine_match true roots_match true
+bnd_fee_guard_equity_clause units 9 applied 8 rejected 1 [ok0 ok0 ok0 ok0 ok1 ok0 ok1 ok0 0x7] fills 2 engine_match true roots_match true
+bnd_fee_guard_equity_zero units 9 applied 8 rejected 1 [ok0 ok0 ok0 ok0 ok1 ok0 ok1 ok0 0x7] fills 2 engine_match true roots_match true
+bnd_fee_guard_equity_at_fee units 9 applied 9 rejected 0 [ok0 ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok1] fills 3 engine_match true roots_match true
+bnd_claw_both_negative units 10 applied 10 rejected 0 [ok0 ok0 ok0 ok0 ok1 ok0 ok1 ok0 ok0 ok1] fills 3 engine_match true roots_match true
+{"scenarios":47,"match":47,"units":355,"fills":59,"rejected":27}
+NATDONE

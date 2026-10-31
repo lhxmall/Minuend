@@ -1,0 +1,16 @@
+{"batch":"acc_at_limit.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4065765565,"units":66,"applied":0,"rejected":66,"steps":636627,"heap":139296,"heap_peak_live":139072,"ms":2487}
+{"batch":"acc_over_limit.bin","match":true,"status":2,"host_status":2,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":650,"heap":0,"heap_peak_live":0,"ms":6}
+{"batch":"acc_u32max.bin","match":true,"status":2,"host_status":2,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":650,"heap":0,"heap_peak_live":0,"ms":1}
+{"batch":"acc_zero_ops_shift.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4065765565,"units":66,"applied":0,"rejected":66,"steps":239944,"heap":8224,"heap_peak_live":8000,"ms":831}
+{"batch":"acc_zero_ops_zero.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4065765565,"units":0,"applied":0,"rejected":0,"steps":206951,"heap":8224,"heap_peak_live":8000,"ms":1416}
+{"batch":"bad_magic.bin","match":true,"status":1,"host_status":1,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":644,"heap":0,"heap_peak_live":0,"ms":19}
+{"batch":"garbage_ops.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4173001455,"units":66,"applied":39,"rejected":27,"steps":9412813,"heap":54304,"heap_peak_live":47456,"ms":42650}
+{"batch":"insurance_author.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":1173174383,"units":66,"applied":51,"rejected":15,"steps":12037841,"heap":59648,"heap_peak_live":54256,"ms":55757}
+{"batch":"ok_base.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":1102632305,"units":66,"applied":53,"rejected":13,"steps":13203522,"heap":62112,"heap_peak_live":56832,"ms":39943}
+{"batch":"ops_over_limit.bin","match":true,"status":3,"host_status":3,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":655,"heap":0,"heap_peak_live":0,"ms":0}
+{"batch":"ops_u32max.bin","match":true,"status":3,"host_status":3,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":655,"heap":0,"heap_peak_live":0,"ms":0}
+{"batch":"ops_zero.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4065765565,"units":0,"applied":0,"rejected":0,"steps":209020,"heap":9248,"heap_peak_live":9024,"ms":489}
+{"batch":"trailing_junk.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":1102632305,"units":66,"applied":53,"rejected":13,"steps":13203522,"heap":62112,"heap_peak_live":56832,"ms":36809}
+{"batch":"truncated.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":2744697230,"units":66,"applied":30,"rejected":36,"steps":5481379,"heap":49440,"heap_peak_live":45248,"ms":16469}
+{"batch":"truncated_max_units.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":4065765565,"units":16384,"applied":0,"rejected":16384,"steps":8188121,"heap":9248,"heap_peak_live":9024,"ms":17127}
+{"batches":15,"match":15}

@@ -1,0 +1,10 @@
+crowd168 {"status":0,"units":168,"applied":168,"leaves":171,"sizeclass_highwater":213040,"peak_live":188736,"sum_class_peaks":212992,"bump_total":534352,"guest_heap_limit":50200576}
+crowd1800 {"status":0,"units":1830,"applied":1830,"leaves":1833,"sizeclass_highwater":2288432,"peak_live":2026560,"sum_class_peaks":2288384,"bump_total":5963008,"guest_heap_limit":50200576}
+crowdmax {"status":0,"units":16384,"applied":16384,"leaves":16387,"sizeclass_highwater":22432560,"peak_live":19287104,"sum_class_peaks":22432512,"bump_total":55991560,"guest_heap_limit":50200576}
+genmax {"status":0,"units":14228,"applied":9946,"leaves":1001,"sizeclass_highwater":1274304,"peak_live":1135424,"sum_class_peaks":1273312,"bump_total":36363476,"guest_heap_limit":50200576}
+advmax {"status":0,"units":16004,"applied":4156,"leaves":45,"sizeclass_highwater":79680,"peak_live":67776,"sum_class_peaks":79552,"bump_total":13330271,"guest_heap_limit":50200576}
+frag {"status":0,"units":16384,"applied":16384,"leaves":131,"sizeclass_highwater":5960976,"peak_live":5113600,"sum_class_peaks":5960896,"bump_total":26605212,"guest_heap_limit":50200576}
+frag16 {"status":0,"units":6000,"applied":6000,"leaves":131,"sizeclass_highwater":1730000,"peak_live":1446912,"sum_class_peaks":1729952,"bump_total":14448460,"guest_heap_limit":50200576}
+crowdcmax {"status":0,"units":16384,"applied":16384,"leaves":16371,"sizeclass_highwater":19270016,"peak_live":17173152,"sum_class_peaks":19269984,"bump_total":51777240,"guest_heap_limit":50200576}
+crowdc4k {"status":0,"units":4168,"applied":4168,"leaves":4155,"sizeclass_highwater":5658496,"peak_live":4872352,"sum_class_peaks":5658464,"bump_total":14165880,"guest_heap_limit":50200576}
+limit {"status":0,"units":16384,"applied":5444,"leaves":3351,"sizeclass_highwater":4401520,"peak_live":3877488,"sum_class_peaks":4401456,"bump_total":8942142,"guest_heap_limit":50200576}

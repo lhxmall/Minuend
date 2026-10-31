@@ -1,0 +1,11 @@
+{"ok":true,"segments":2,"units":25012,"why":""}
+
+thread 'main' (638933) panicked at src/main.rs:74:24:
+write batch: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' (638937) panicked at src/main.rs:74:24:
+write batch: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+{"ok":true,"segments":7,"units":25012,"why":""}
+{"ok":true,"segments":27,"units":25012,"why":""}
