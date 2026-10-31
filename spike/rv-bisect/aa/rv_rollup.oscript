@@ -46,6 +46,15 @@ $d = exists(trigger.data.xbind) ? {} : trigger.data;
 $now = timestamp;
 $top = var['top'] OTHERWISE 0;       // highest live height
 $lf = var['lf'] OTHERWISE 0;         // last finalized height
+// Loop round 12 (R11-M1, adopted 2026-11-01): a GLOBAL fraud-void counter V (var V, +1 per fraud void at any height),
+// decaying by 1 per VDECAY s since the last fraud void (var Vt), enters the exponent as max(v_h, V): a fraudster that
+// moves up one height per cycle also pays a doubling bond. During an attack honest operators post the escalated bond
+// too; it is stored as b<sid> and paid back in full (minus FEE) at finalize / reclaim, overpayment refunded at submit.
+// Must come after $now (an Oscript local defined before $now = timestamp would read it as 0).
+$VDECAY = 86400;
+$Vdec = floor(($now - (var['Vt'] OTHERWISE 0)) / $VDECAY);
+$Vraw = var['V'] OTHERWISE 0;
+$Vnow = $Vraw > $Vdec ? $Vraw - $Vdec : 0;
 $isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) == '=' AND !contains($x, ':') AND !contains($x, ',');
 // submission s<sid> = h:operator:final_root:submitted_at:steps:s0:input_root:prev_root ; sid = submit unit
 // a submission is live while it is the current winner of its height and that height is not voided (h <= top)
@@ -84,7 +93,9 @@ else if ($d.submit) {
 	require($h > $top, 'height taken');
 	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
 	$paid = trigger.output[[asset=base]];
-	$bond = $OBOND * 2^min(var['v' || $h] OTHERWISE 0, $MAXESC);   // loop round 11 (R10-M1)
+	$vh = var['v' || $h] OTHERWISE 0;
+	$ex = $vh > $Vnow ? $vh : $Vnow;
+	$bond = $OBOND * 2^min($ex, $MAXESC);   // loop round 11 (R10-M1) + round 12 (R11-M1: max with the global V)
 	require($paid >= $bond, 'bond ' || $bond);
 	$pw = split(var['p' || $h] OTHERWISE '', ':');
 	require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]);

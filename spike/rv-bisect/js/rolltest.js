@@ -35,8 +35,8 @@ async function S(C, from, to, amt, data) { data = prep(C, data); const r = await
 const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (const k in sv[a]) o[a][k] = { ...sv[a][k] }; } return o; };
 const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
 const subData = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
-// loop round 11 (R10-M1): the bond the next submission of h must post = OBOND * 2^min(fraud voids at h, MAXESC)
-const bondFor = (C, h) => OBOND * 2 ** Math.min(+(C.r('v' + h) || 0), MAXESC);
+// loop round 11 (R10-M1) + 12 (R11-M1): bond = OBOND * 2^min(max(fraud voids at h, global V decayed 1 per 86400 s), MAXESC)
+const bondFor = (C, h) => { const V = Math.max(0, +(C.r('V') || 0) - Math.floor((C.ts - +(C.r('Vt') || 0)) / 86400)); return OBOND * 2 ** Math.min(Math.max(+(C.r('v' + h) || 0), process.env.NOR11 ? 0 : V), MAXESC); };
 async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, Number.isInteger(h) && h >= 1 ? bondFor(C, h) : OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
 async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
 const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
@@ -327,21 +327,42 @@ groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.e
       bnc(await S(C3, OP1, ROLL, OBOND * 1024, subData(T.batch(G0, 1), 1, 'genesis')))]); }
 };
 
-// ---------- loop round 11 review (R11-M1 PoC): the per-height escalation does not cover a fraudster that moves up one
-//            height per cycle: it wins the top+1 race once per game, every fraud is the FIRST at its height (bond OBOND),
-//            and each height still waits ~ one slow game before its honest submission can even start its 24 h window.
+// ---------- loop round 11 review (R11-M1 PoC) -> loop round 12 fix: a fraudster that moves up one height per cycle wins
+//            the top+1 race once per game; every fraud is the FIRST at its height (v_h = 0), so before round 12 it posted
+//            OBOND every cycle. Round 12 adds the global decaying counter V (max(v_h, V) in the exponent): the moving-height
+//            bonds double, honest operators post the escalated bond during the attack and get it back in full (- FEE) at
+//            finalize, and V decays by 1 per 24 h after the last fraud void. NOR11=1 reproduces the round-11 numbers.
 groups.stall11 = async () => { const g = 'stall moving height (R11-M1)'; const X = +(process.env.EXTRA || 4000); const CYC = +(process.env.CYCLES || 4);
-  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'); const x0 = C.b(OPX); let prev = { mem: G0, final: 'genesis' }, bonds = [], hours = [], subAt = [];
+  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'); const x0 = C.b(OPX); let prev = { mem: G0, final: 'genesis' }, bonds = [], hbonds = [], hours = [], hon = [];
   for (let c = 0; c < CYC; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { extra: X, k: 1 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h, { extra: X });
     const ts0 = C.ts; bonds.push(bondFor(C, h));
-    rec(g, 'cycle ' + c + ': fraudster wins the race for h' + h + ' at the base bond', ['accepted', OBOND], [bnc(await submit(C, OPX, h, L, prev.final)), bonds[c]]);
+    rec(g, 'cycle ' + c + ': fraudster wins the race for h' + h + ' at OBOND x 2^c (global V = c)', ['accepted', OBOND * 2 ** c], [bnc(await submit(C, OPX, h, L, prev.final)), bonds[c]]);
+    if (c > 0) rec(g, 'cycle ' + c + ': the base bond (and 2^c - 1 x OBOND short) bounces', 'bounce', bnc(await S(C, OPX, ROLL, OBOND * 2 ** c - 1, subData(T.batch(prev.mem, h, { extra: X, k: 9 + c, mut: T.MUT.mem }), h, prev.final)), /bond|height taken/));
     const o = await open(C, CH1, L.sid); const gm = game(o, L, H, H, { defDelay: 'slow', chDelay: 60 }); await playAll(C, [gm]);
-    rec(g, 'cycle ' + c + ': fraud proven, h' + h + ' voided', ['c', h - 1], [gm.winner, +(C.r('top') || 0)]);
-    rec(g, 'cycle ' + c + ': the winner re-submits the honest h' + h, 'accepted', bnc(await submit(C, CH1, h, H, prev.final)));
-    subAt.push(C.ts); hours.push(+((C.ts - ts0) / 3600).toFixed(2)); prev = H; }
-  rec(g, 'every fraud posted only OBOND (no escalation across heights)', true, bonds.every(b => b === OBOND), { bonds });
-  rec(g, 'honest heights enter their 24 h window one game apart (throughput <= 1 height per slow game)', true, hours.every(x => x >= 2.5), { hoursPerHeight: hours });
-  rec(g, 'fraudster cost per cycle = OBOND (no puppet)', CYC * OBOND, x0 - C.b(OPX)); };
+    rec(g, 'cycle ' + c + ': fraud proven, h' + h + ' voided, V = ' + (c + 1), ['c', h - 1, c + 1], [gm.winner, +(C.r('top') || 0), +C.r('V')]);
+    hbonds.push(bondFor(C, h));
+    rec(g, 'cycle ' + c + ': the winner re-submits the honest h' + h + ' posting OBOND x 2^' + (c + 1), ['accepted', OBOND * 2 ** (c + 1)], [bnc(await submit(C, CH1, h, H, prev.final)), hbonds[c]]);
+    rec(g, 'cycle ' + c + ': b<sid> stores the escalated honest bond', OBOND * 2 ** (c + 1), +C.r('b' + H.sid));
+    hon.push(H); hours.push(+((C.ts - ts0) / 3600).toFixed(2)); prev = H; }
+  rec(g, 'fraud bonds double across heights', true, bonds.every((b, i) => b === OBOND * 2 ** i), { bonds });
+  const cost = x0 - C.b(OPX), want = OBOND * (2 ** CYC - 1) + (CYC - 1) * 10000;   // + the test's short-bond bounce fees
+  rec(g, 'fraudster cost = OBOND x (2^cycles - 1) (was cycles x OBOND)', want, cost, { cost, before: CYC * OBOND });
+  // refunds: every honest height finalizes and its operator gets the escalated bond back minus FEE
+  C.ts += WIN; const ch0 = C.b(CH1); let fin = [];
+  for (let c = 0; c < CYC; c++) fin.push(ok(await S(C, W, ROLL, 0, { finalize: c + 1 })));
+  rec(g, 'honest heights finalize after the window', Array(CYC).fill('ok'), fin);
+  rec(g, 'honest operator refunded the escalated bonds in full (- FEE each)', hbonds.reduce((a, b) => a + b, 0) - CYC * FEE, C.b(CH1) - ch0, { hbonds });
+  // decay: 1 per 24 h after the last fraud void (the WIN above already elapsed one day)
+  const vNow = () => Math.max(0, +C.r('V') - Math.floor((C.ts - +C.r('Vt')) / 86400));
+  rec(g, 'decay: one day after the last void the next height posts OBOND x 2^(V-1)', OBOND * 2 ** (CYC - 1), bondFor(C, CYC + 1));
+  const Hn = T.batch(prev.mem, CYC + 1); C.ts += 61;
+  rec(g, 'decay: OBOND x 2^(V-1) - 1 bounces, exact accepted', ['bounce', 'accepted'], [bnc(await S(C, OP2, ROLL, OBOND * 2 ** (CYC - 1) - 1, subData(Hn, CYC + 1, prev.final)), /bond/), bnc(await submit(C, OP2, CYC + 1, Hn, prev.final))]);
+  C.ts += 86400 * CYC; rec(g, 'decay: after V days the bond is back to OBOND', [0, OBOND], [vNow(), bondFor(C, CYC + 2)]);
+  { const h = CYC + 2, L = T.batch(Hn.mem, h, { extra: X, k: 3, mut: T.MUT.mem }), H = T.batch(Hn.mem, h, { extra: X });
+    rec(g, 'after decay: a new fraud posts OBOND', 'accepted', bnc(await submit(C, OPX, h, L, Hn.final)));
+    const o = await open(C, CH1, L.sid); const gm = game(o, L, H, H, { defDelay: 'slow', chDelay: 60 }); await playAll(C, [gm]);
+    rec(g, 'after decay: the new fraud void sets V = decayed value + 1 = 1 (not ' + (CYC + 1) + ')', ['c', 1, 2 * OBOND], [gm.winner, +C.r('V'), bondFor(C, h)]); }
+  rec(g, 'throughput unchanged per cycle (still one slow game per height; the attack is now geometric in cost)', true, hours.every(x => x >= 2.5), { hoursPerHeight: hours }); };
 
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const b2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, b2, b1.final);

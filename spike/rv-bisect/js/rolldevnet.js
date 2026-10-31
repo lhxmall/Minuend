@@ -89,8 +89,12 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     }
     return 'unfinished';
   }
-  // loop round 11 (R10-M1): bond the next submission of h on `aa` must post
-  const bondAt = async (h, aa) => OBOND * 2 ** Math.min(+((await vars(aa || ROLL))['v' + h] || 0), 10);
+  // loop round 11 (R10-M1) + 12 (R11-M1): bond the next submission of h on `aa` must post =
+  // OBOND * 2^min(max(v<h>, V decayed by 1 per 86400 s since Vt), 10); the devnet clock (getTime follows timetravel).
+  // In sections 3-8 every new fraud comes >= one WIN after the previous void, so V has decayed to 0 and max(v_h, V) = v_h.
+  const Vat = async aa => { const v = await vars(aa || ROLL); const now = Math.floor((await w.getTime()).time / 1000);
+    return Math.max(0, +(v.V || 0) - Math.floor((now - +(v.Vt || 0)) / 86400)); };
+  const bondAt = async (h, aa) => OBOND * 2 ** Math.min(Math.max(+((await vars(aa || ROLL))['v' + h] || 0), await Vat(aa)), 10);
   if (!ONLY9 && !ONLY10) { // loop round 10: ONLY9=1 runs only section 9 (R9-T1)
   const G0 = T.genesis(); const b1 = T.batch(G0, 1), x1 = T.batch(G0, 7);
   // 1. race tie: two operators submit h1 before the witness stabilizes either unit
@@ -389,7 +393,11 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(op1, R3, sub(Hn, 1, 'genesis'), 2 * OBOND); rec('10 op1 inside the priority window', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
     r = await trig(ch1, R3, sub(T.batch(G0, 1), 1, 'genesis'), OBOND); rec('10 the winner with only OBOND', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
     r = await trig(ch1, R3, sub(Hn, 1, 'genesis'), 2 * OBOND, 'submit'); v = await vars(R3); rec('10 the winner submits the honest h1 with 2 x OBOND (b<sid> stored)', ['ok', 2 * OBOND], [r.err || 'ok', +v['b' + r.unit]]);
+    // loop round 12 (R11-M1): the global counter V = 1 also escalates ANOTHER height (h2) until it decays
+    r = await trig(op1, R3, sub(T.batch(Hn.mem, 2), 2, Hn.final), OBOND); v = await vars(R3);
+    rec('10 R11-M1: V = 1 after the void; h2 (another height) with only OBOND bounces, bond 2 x OBOND', ['bounce', 1, 2 * OBOND], [r.err ? 'bounce' : 'ok', +v.V, await bondAt(2, R3)], { err: r.err });
     await net.timetravel({ shift: WIN + 's' }); r = await trig(w, R3, { finalize: 1 }); rec('10 h1 finalizes; pays 2 x OBOND - FEE (real output)', ['ok', 2 * OBOND - FEE], [r.err || 'ok', await paidTo(r.response, A.ch1)]);
+    rec('10 R11-M1: one day after the void V has decayed to 0 (h2 bond back to OBOND)', [0, OBOND], [await Vat(R3), await bondAt(2, R3)]);
     // after the window anyone may submit, at the escalated bond: fraud at h2, ch2 wins, the window passes, op1 submits
     const L2 = T.batch(Hn.mem, 2, { k: 31, mut: T.MUT.mem }), H2 = T.batch(Hn.mem, 2);
     r = await trig(op2, R3, sub(L2, 2, Hn.final), OBOND); const s2 = r.unit; const o2 = await trig(ch2, R3, { open: s2 }, CBOND);

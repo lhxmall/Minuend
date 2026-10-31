@@ -13,7 +13,7 @@
 //  the engine height to that counter).
 //  Separate AA from rv_witproof: ocore's static budget is per AA (ops 2000 summed over all branches); bind + verifier
 //  together measured 2 935 ops.
-$ROLL = 'UWCO3ZAMHVNCCDWM2KM5RJD2LV3BTCZN';   // mkwitproof.js bakes chash160(rv_rollup.aa)
+$ROLL = 'BBU2Y2K2VPZNQ6OANED5UUWICNUJKCP2';   // mkwitproof.js bakes chash160(rv_rollup.aa)
 $MK = 2000;   // R3-W4: keep MK of the (>= 10 000-byte bounce-fee) trigger for the refund unit, refund the rest (as rv_game_ref moves)
 $rf = max(trigger.output[[asset=base]] - $MK, 0);
 $MD = 24;                          // memory tree depth (rv_step $D)

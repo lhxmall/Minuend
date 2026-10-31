@@ -55,6 +55,8 @@ const state=`
 		if ($st.void) {
 			var['top'] = $st.h - 1;
 			var['v' || $st.h] += 1;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
+			var['V'] = $Vnow + 1;     // loop round 12 (R11-M1): global counter (decayed value + 1), decay restarts now
+			var['Vt'] = $now;
 			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO);   // ... and only this winner may submit h for PRIO s
 		}
 		response['result'] = $d.w;
