@@ -185,6 +185,60 @@ mod rt {
             unsafe { OUT.add(at + k).write_volatile(u32::from_le_bytes([r[4 * k], r[4 * k + 1], r[4 * k + 2], r[4 * k + 3]])) };
         }
     }
+    /// loop round 14: stateless segment run. Input: [0] SL_MAGIC, [1] B = batch words, [2] W = witness bytes,
+    /// [3 .. 3+B) the MNP1/MNP2 batch (flags 0), then the witness bytes packed little-endian. OUT as a batch run:
+    /// [0..8] = end root, [8] events, [9..12] counters, [13..] events, SEG_START / SEG_END roots (zero unless
+    /// status 0), [ROOTS-7] status (mnpilot ST_* or stateless ST_SL_*), [ROOTS-3] leaves verified,
+    /// [ROOTS-4] leaf hashes, [ROOTS-5] node hashes, [ROOTS-6] peak live heap.
+    #[cfg(feature = "stateless")]
+    fn sl_run() -> u32 {
+        let b = read_word(1);
+        let wn = read_word(2) as usize;
+        if b > 4 + 8 * (mnpilot::MAX_ACCOUNTS + 2 * mnpilot::MAX_UNITS) + 1 + mnpilot::MAX_EXT || wn > 1 << 26 {
+            unsafe { OUT.add(ROOTS - 7).write_volatile(mnpilot::stateless::ST_SL_BADWIT) };
+            return 0;
+        }
+        let mut wit = alloc::vec::Vec::with_capacity(wn);
+        let base = 3 + b;
+        for k in 0..wn.div_ceil(4) {
+            let x = read_word(base + k as u32).to_le_bytes();
+            for (j, c) in x.iter().enumerate() {
+                if 4 * k + j < wn {
+                    wit.push(*c);
+                }
+            }
+        }
+        let mut n_ev: u32 = 0;
+        let o = mnpilot::stateless::run_stateless(
+            &mut |i| if i < b { read_word(3 + i) } else { 0 },
+            &wit,
+            &mut |w| unsafe {
+                if n_ev < mnpilot::EV_CAP {
+                    OUT.add(13 + n_ev as usize).write_volatile(w);
+                }
+                n_ev += 1;
+            },
+        );
+        unsafe {
+            if o.status == mnpilot::ST_OK {
+                put_root(SEG_START, &o.start_root);
+                put_root(SEG_END, &o.end_root);
+            }
+            put_root(0, &o.end_root);
+            OUT.add(8).write_volatile(n_ev);
+            OUT.add(9).write_volatile(o.applied);
+            OUT.add(10).write_volatile(o.rejected);
+            OUT.add(11).write_volatile(o.fills);
+            OUT.add(12).write_volatile((HEAP - HEAP0) as u32);
+            OUT.add(ROOTS - 3).write_volatile(o.leaves_verified);
+            OUT.add(ROOTS - 4).write_volatile(o.leaf_hashes as u32);
+            OUT.add(ROOTS - 5).write_volatile(o.node_hashes as u32);
+            OUT.add(ROOTS - 6).write_volatile(PEAK as u32);
+            OUT.add(ROOTS - 7).write_volatile(o.status);
+            OUT.add(ROOTS - 8).write_volatile((n_ev > mnpilot::EV_CAP) as u32);
+        }
+        o.status
+    }
     #[no_mangle]
     extern "C" fn rmain(ts: u32) -> u32 {
         let mut n_ev: u32 = 0;
@@ -204,6 +258,11 @@ mod rt {
             OUT.add(SNAP_N).write_volatile(0);
             OUT.add(SNAP_KIND).write_volatile(0);
             OUT.add(ENG_H).write_volatile(0);
+            // loop round 14 (feature `stateless`): a witness-fed run keeps no session; DEAD / RUNS do not apply
+            #[cfg(feature = "stateless")]
+            if read_word(0) == mnpilot::stateless::SL_MAGIC {
+                return sl_run();
+            }
             if DEAD != 0 || IN_RUN != 0 {
                 DEAD = 1;
                 OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);

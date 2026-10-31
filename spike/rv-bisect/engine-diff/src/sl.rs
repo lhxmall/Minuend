@@ -154,14 +154,38 @@ fn hx(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 
-pub fn slfuzz(n: u64, ord: u32, adv: bool) -> String {
+/// "ora" workload (round 14): a gen batch whose genesis bonds oracles 1..3 (header bit 26) and whose first ops are
+/// three ReportPrice units -> the first segment is unsupported (skipped: session only), every later segment runs
+/// statelessly on a pre-state with oracle reports / last_index (the mkx: oracle facts of the fill mark rule).
+pub fn ora_batch(seed: u64, ord: u32) -> Vec<u32> {
+    let makers = 4 + (seed % 9) as u32;
+    let levels = 1 + (seed % 25) as u32;
+    let per = 1 + (seed % 3) as u32;
+    let mut w = gen(seed, makers, levels, per, ord, seed % 2 == 0).0;
+    w[3] = mnpilot::ORACLES_FLAG;
+    let base = 4 + 8 * w[1] as usize;
+    let mut ins = Vec::new();
+    for (k, a) in [1u32, 2, 3].iter().enumerate() {
+        let px = MID + (k as i64 - 1) * DOLLAR;
+        ins.extend_from_slice(&[8 | (a << 8), 0, px as u32, (px >> 32) as u32, 0, 0, 0, 1]);
+    }
+    w.splice(base..base, ins);
+    w[2] += 3;
+    w
+}
+
+pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
+    let adv = mode == "adv";
     let (mut ok, mut segs, mut units, mut bad) = (0u64, 0u64, 0u64, 0u64);
     let (mut wbytes, mut verified, mut nodes, mut hashes, mut sess_hashes, mut iters) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut maxw = 0usize;
+    let mut unsupported = 0u64;
     let mut first_bad = String::new();
     for s in 1..=n {
         let w = if adv {
             adv::adv_batch(s, ord)
+        } else if mode == "ora" {
+            ora_batch(s, ord)
         } else {
             let makers = 4 + (s % 9) as u32;
             let levels = 1 + (s % 25) as u32;
@@ -177,6 +201,10 @@ pub fn slfuzz(n: u64, ord: u32, adv: bool) -> String {
             units += r.seg[2] as u64;
             let b = WitBuilder::new(&r.pre);
             let res = operate(&b, &r.seg);
+            if matches!(&res, Ok((_, _, o, _, _)) if o.status == sl::ST_SL_UNSUPPORTED) {
+                unsupported += 1;
+                continue;
+            }
             let why = match &res {
                 Err(e) => Some(e.clone()),
                 Ok((_, wit, o, ev, it)) => {
@@ -215,8 +243,8 @@ pub fn slfuzz(n: u64, ord: u32, adv: bool) -> String {
         }
     }
     format!(
-        "{{\"batches\":{},\"ok\":{},\"bad_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"first_bad\":\"{}\"}}",
-        n, ok, bad, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, first_bad
+        "{{\"mode\":\"{}\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"first_bad\":\"{}\"}}",
+        mode, n, ok, bad, unsupported, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, first_bad
     )
 }
 
@@ -271,6 +299,12 @@ pub fn layout(wit: &[u8]) -> Layout {
             3 => {
                 skip(w, i);
                 skip(w, i);
+            }
+            4 => {
+                let kl = u16::from_le_bytes([w[*i], w[*i + 1]]) as usize;
+                *i += 2 + kl;
+                let rl = u16::from_le_bytes([w[*i], w[*i + 1]]) as usize;
+                *i += 2 + rl;
             }
             _ => panic!("tag"),
         }
@@ -348,7 +382,7 @@ pub fn sladv(n: u64, ord: u32) -> String {
                 let i = lo + rng.below((hi - lo) as u64) as usize;
                 w2[i] ^= 1 << rng.below(8);
                 let (o4, ev4) = run_sl(&r.seg, &w2);
-                a.rec(if t % 2 == 0 { "flip:records" } else { "flip:tree" }, r, &o4, &ev4, true);
+                a.rec(if t % 2 == 0 { "flip:records" } else { "flip:tree" }, r, &o4, &ev4, false);
             }
             // A4 truncated / extended witness
             let (o5, ev5) = run_sl(&r.seg, &wit[..wit.len() - 1]);
@@ -508,6 +542,41 @@ pub fn sladv(n: u64, ord: u32) -> String {
                 let (ol, evl) = run_sl(&r.seg, &wl);
                 a.rec("limit:accounts", r, &ol, &evl, true);
             }
+            // A12 (R14-C1 PoC): exclusion proof through a hash-only leaf with a forged key. An author X that
+            // exists is claimed ABSENT: the records come from a state without X, the tree is the honest one with
+            // the deep bits of X's acct: / apos: / cseq: leaf keys flipped (the path only constrains the first d
+            // bits; the leaf hash is unchanged, so the root still matches).
+            if let Some(x) = needs.iter().find_map(|n| match n {
+                Need::Account(id) if *id != mnpilot::types::INSURANCE_ACCOUNT && r.pre.accounts.contains_key(id) => Some(*id),
+                _ => None,
+            }) {
+                let mut pre2 = r.pre.clone();
+                pre2.del_account(&x);
+                pre2.perp_balances.remove(&x);
+                pre2.withdrawn_total.remove(&x);
+                pre2.seen_client_seq.remove(&x);
+                let f = WitBuilder::new(&pre2).build(&needs);
+                let lf = layout(&f);
+                let mut tree = wit[..lay.tree_end].to_vec();
+                let mut bb = mnpilot::wit::Buf::new();
+                let mut ks = vec![mnpilot::wit::acct_key(&x)];
+                sl::apos_kid(&mut bb, &x);
+                ks.push(mnpilot::wit::key_of(&bb.b[..bb.kid]));
+                sl::cseq_kid(&mut bb, &x);
+                ks.push(mnpilot::wit::key_of(&bb.b[..bb.kid]));
+                let mut flipped = 0;
+                for k in &ks {
+                    if let Some(i) = tree.windows(33).position(|w| w[0] == 2 && &w[1..] == k) {
+                        tree[i + 32] ^= 1;
+                        flipped += 1;
+                    }
+                }
+                if flipped >= 2 {
+                    tree.extend_from_slice(&f[lf.tree_end..]);
+                    let (ox, evx) = run_sl(&r.seg, &tree);
+                    a.rec("forge:absent-via-leaf-key", r, &ox, &evx, true);
+                }
+            }
             prev_pre = Some(r.pre.clone());
             if done_segs >= 400 {
                 break;
@@ -524,4 +593,47 @@ pub fn sladv(n: u64, ord: u32) -> String {
         cs.join(","),
         a.unsound.iter().take(8).collect::<Vec<_>>()
     )
+}
+
+/// sldump <seed> <orders> <S> <dir> [adv]: session segments (seg%03d.bin) + stateless inputs (sl%03d.bin:
+/// [SL_MAGIC, B, W, batch words, witness bytes packed LE]) + manifest.json (expected events, MNWIT-S roots,
+/// witness size) for js/slsteps.js (riscv32im steps per segment, session vs stateless).
+pub fn sldump(seed: u64, ord: u32, size: u32, dir: &str, adv: bool) -> String {
+    let w = if adv {
+        adv::adv_batch(seed, ord)
+    } else {
+        let makers = 4 + (seed % 9) as u32;
+        let levels = 1 + (seed % 25) as u32;
+        let per = 1 + (seed % 3) as u32;
+        gen(seed, makers, levels, per, ord, seed % 2 == 0).0
+    };
+    fs::create_dir_all(dir).unwrap();
+    let refs = session_refs(&w, size);
+    let mut man = Vec::new();
+    for (k, r) in refs.iter().enumerate() {
+        let b = WitBuilder::new(&r.pre);
+        let (needs, wit, o, ev, it) = operate(&b, &r.seg).expect("operator");
+        assert!(o.status == 0 && o.end_root == r.post_root && ev == r.ev, "segment {} differs", k);
+        // session segment: first keeps the batch's genesis flags
+        let mut sw = r.seg.clone();
+        if k == 0 {
+            sw[3] = w[3];
+        }
+        write_words(&format!("{}/seg{:03}.bin", dir, k), &sw);
+        let mut x = vec![sl::SL_MAGIC, r.seg.len() as u32, wit.len() as u32];
+        x.extend_from_slice(&r.seg);
+        for c in wit.chunks(4) {
+            let mut q = [0u8; 4];
+            q[..c.len()].copy_from_slice(c);
+            x.push(u32::from_le_bytes(q));
+        }
+        write_words(&format!("{}/sl{:03}.bin", dir, k), &x);
+        man.push(format!(
+            "{{\"seg\":\"seg{:03}.bin\",\"sl\":\"sl{:03}.bin\",\"units\":{},\"s_start\":\"{}\",\"s_end\":\"{}\",\"witness_bytes\":{},\"needs\":{},\"iterations\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"ev\":[{}]}}",
+            k, k, r.seg[2], hx(&b.root), hx(&r.post_root), wit.len(), needs.len(), it, o.leaves_verified, o.tree_nodes,
+            r.ev.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        ));
+    }
+    fs::write(format!("{}/manifest.json", dir), format!("[{}]", man.join(",\n"))).unwrap();
+    format!("{{\"segments\":{},\"dir\":\"{}\"}}", refs.len(), dir)
 }

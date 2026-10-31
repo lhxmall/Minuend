@@ -1338,7 +1338,9 @@ fn main() {
             println!("{}", witfuzz(p(2, 300), p(3, 300) as u32, p(4, 300)));
         }
         #[cfg(feature = "stateless")]
-        Some("slfuzz") => println!("{}", sl::slfuzz(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x == "adv").unwrap_or(false))), // loop round 14
+        Some("slfuzz") => println!("{}", sl::slfuzz(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x.as_str()).unwrap_or("gen"))), // loop round 14
+        #[cfg(feature = "stateless")]
+        Some("sldump") => println!("{}", sl::sldump(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5], a.get(6).map(|x| x == "adv").unwrap_or(false))), // loop round 14
         #[cfg(feature = "stateless")]
         Some("sladv") => println!("{}", sl::sladv(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 14
         Some("fuzz") => {

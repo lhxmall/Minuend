@@ -12,7 +12,10 @@
 //!   cseq:<acct hex>:<last client_seq>                       seen_client_seq (absent = 0)
 //!   apos:<acct hex>:<flags>:<m>,<m>,...                     map membership (bit0 Account entry, bit1 PERP
 //!                                                           entry, bit2 W entry) + markets with a position
-//!   mkx:<m>:<spot 0|1>:<funding 0|1>:<symbol hex>           MarketParams fields MNWIT1 does not commit
+//!   mkx:<m>:<spot 0|1>:<funding 0|1>:<symbol hex>:<last_index>:<oracled 0|1>
+//!                                                           MarketParams fields MNWIT1 does not commit + the two
+//!                                                           oracle facts the fill path's mark rule reads
+//!                                                           (last_index[m] != 0; a bonded reporter for m exists)
 //!   lvl:<m>:<side>:<price>:<n>:<sha256(ids FIFO) hex>       one price level (live order ids, FIFO)
 //!   bmp:<m>:<side>:<d>:<prefix hex>:<256-bit map hex>       price-level trie (fanout 256, depth 8 over the
 //!                                                           order-preserving biased price u = p ^ 2^63)
@@ -97,10 +100,20 @@ pub fn mkx_kid(b: &mut Buf, m: MarketId) {
     let _ = write!(b, "mkx:{}", m.0);
     mark(b);
 }
-pub fn mkx_leaf(b: &mut Buf, m: MarketId, p: &MarketParams) {
+pub fn mkx_leaf(b: &mut Buf, m: MarketId, p: &MarketParams, last_index: Price, oracled: bool) {
     mkx_kid(b, m);
     let _ = write!(b, ":{}:{}:", p.spot_only as u8, p.funding_rate as u8);
     hexw(b, &p.symbol);
+    let _ = write!(b, ":{}:{}", last_index, oracled as u8);
+}
+/// the fill path's oracle predicate (state.rs apply_fill_pair: a bonded reporter has a report for m)
+pub fn oracled(s: &ChainState, m: MarketId) -> bool {
+    s.oracle_reports.keys().any(|(mm, o)| *mm == m && s.oracle_bonds.contains_key(o))
+}
+/// stand-in reporter the loader inserts for an `oracled` market (oracle_reports / bonds are not
+/// committed: only the predicate above is, and nothing on the prototype's paths reads more)
+pub fn pseudo_oracle() -> AccountId {
+    AccountId(crate::types::sha256(b"MNSW pseudo oracle"))
 }
 pub fn lvl_kid(b: &mut Buf, m: MarketId, side: u8, price: Price) {
     b.n = 0;
@@ -272,7 +285,7 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         push(&b);
         wit::meta_leaf(&mut b, *m, p, s.marks.get(m).copied().unwrap_or(0));
         push(&b);
-        mkx_leaf(&mut b, *m, p);
+        mkx_leaf(&mut b, *m, p, s.last_index.get(m).copied().unwrap_or(0), oracled(s, *m));
         push(&b);
     }
     glob_leaf(&mut b, s.seq, s.height);
@@ -310,8 +323,13 @@ pub enum P {
     E,
     /// unexpanded subtree (hash only)
     O(H),
-    /// leaf (key, leaf hash); the leaf string itself is not needed for a hash-only leaf
-    L(H, H),
+    /// leaf (key, leaf hash, key verified). R14-C1 fix: a hash-only leaf (tag 2) carries an UNVERIFIED key --
+    /// the path fixes only its first d bits and the root only its hash -- so it may serve for hashing, for a
+    /// canonical collapse (lift) and for an inclusion check (the caller recomputes the leaf hash from its own
+    /// record, which binds hex(key)), but never as an exclusion witness, an insertion split point, an update or
+    /// a deletion target. A verified leaf (tag 4: kid + rest of the leaf string, key and hash recomputed) and a
+    /// leaf whose inclusion was checked are verified.
+    L(H, H, bool),
     N(u32),
 }
 pub enum Look {
@@ -334,7 +352,8 @@ fn kbit(k: &H, d: usize) -> usize {
     ((k[d >> 3] >> (7 - (d & 7))) & 1) as usize
 }
 impl PTree {
-    /// Preorder decode: tag 0 E, 1 O(h32), 2 L(key32, lh32), 3 N(left, right). Rejects (None): bad tags,
+    /// Preorder decode: tag 0 E, 1 O(h32), 2 L(key32, lh32) unverified, 3 N(left, right), 4 L verified (kid u16 +
+    /// bytes, rest u16 + bytes; key = key_of(kid), hash = leaf_hash(key, kid || rest)). Rejects (None): bad tags,
     /// depth > 256, > SL_MAX_TREE_NODES nodes, a leaf whose key is not on its path, non-canonical
     /// nodes N(E,E) / N(E,L) / N(L,E). O(EMPTY) is read as E.
     pub fn decode(r: &mut Rd) -> Option<PTree> {
@@ -361,7 +380,33 @@ impl PTree {
                         return None;
                     }
                 }
-                Some(P::L(k, lh))
+                Some(P::L(k, lh, false))
+            }
+            4 => {
+                let kl = r.u16()? as usize;
+                if kl == 0 || kl > 384 {
+                    return None;
+                }
+                let kid = r.take(kl)?;
+                let rl = r.u16()? as usize;
+                if rl > 384 {
+                    return None;
+                }
+                let rest = r.take(rl)?;
+                let k = wit::key_of(kid);
+                let mut h = Sha256::new();
+                h.update(b"~L1:");
+                h.update(wit::hex32(&k));
+                h.update(b":");
+                h.update(kid);
+                h.update(rest);
+                let lh: H = h.finalize().into();
+                for i in 0..d {
+                    if kbit(&k, i) != kbit(path, i) {
+                        return None;
+                    }
+                }
+                Some(P::L(k, lh, true))
             }
             3 => {
                 if d >= 256 {
@@ -389,7 +434,7 @@ impl PTree {
         match p {
             P::E => EMPTY,
             P::O(h) => h,
-            P::L(_, lh) => lh,
+            P::L(_, lh, _) => lh,
             P::N(i) => {
                 if let Some(h) = self.nodes[i as usize].h {
                     return h;
@@ -415,7 +460,8 @@ impl PTree {
             match p {
                 P::E => return Look::Absent,
                 P::O(_) => return Look::Unknown,
-                P::L(k, lh) => return if &k == key { Look::Present(lh) } else { Look::Absent },
+                // an unverified leaf proves nothing about other keys (R14-C1)
+                P::L(k, lh, v) => return if &k == key { Look::Present(lh) } else if v { Look::Absent } else { Look::Unknown },
                 P::N(i) => {
                     p = self.nodes[i as usize].ch[kbit(key, d)];
                     d += 1;
@@ -431,7 +477,10 @@ impl PTree {
             match p {
                 P::E => return Ok(Some(d)),
                 P::O(_) => return Err(()),
-                P::L(k2, _) => {
+                P::L(k2, _, v) => {
+                    if !v {
+                        return Err(());
+                    }
                     if &k2 == key {
                         return Ok(None);
                     }
@@ -448,6 +497,30 @@ impl PTree {
             }
         }
     }
+    /// R14-C1: after an inclusion check recomputed the leaf hash from a record, the leaf's key is verified
+    pub fn mark_verified(&mut self, key: &H) {
+        let mut p = self.root;
+        let mut d = 0;
+        let mut slot: Option<(u32, usize)> = None;
+        loop {
+            match p {
+                P::L(k, lh, false) if &k == key => {
+                    match slot {
+                        None => self.root = P::L(k, lh, true),
+                        Some((i, b)) => self.nodes[i as usize].ch[b] = P::L(k, lh, true),
+                    }
+                    return;
+                }
+                P::N(i) => {
+                    let b = kbit(key, d);
+                    slot = Some((i, b));
+                    p = self.nodes[i as usize].ch[b];
+                    d += 1;
+                }
+                _ => return,
+            }
+        }
+    }
     fn new_node(&mut self, ch: [P; 2]) -> P {
         self.nodes.push(PN { ch, h: None });
         P::N((self.nodes.len() - 1) as u32)
@@ -459,11 +532,12 @@ impl PTree {
     }
     fn ins(&mut self, p: P, d: usize, key: &H, lh: &H) -> Result<P, ()> {
         match p {
-            P::E => Ok(P::L(*key, *lh)),
+            P::E => Ok(P::L(*key, *lh, true)),
             P::O(_) => Err(()),
-            P::L(k2, lh2) => {
+            P::L(_, _, false) => Err(()),
+            P::L(k2, lh2, true) => {
                 if &k2 == key {
-                    Ok(P::L(k2, *lh))
+                    Ok(P::L(k2, *lh, true))
                 } else {
                     Ok(self.split(d, (k2, lh2), (*key, *lh)))
                 }
@@ -483,8 +557,8 @@ impl PTree {
         let bb = kbit(&b.0, d);
         let mut ch = [P::E, P::E];
         if ba != bb {
-            ch[ba] = P::L(a.0, a.1);
-            ch[bb] = P::L(b.0, b.1);
+            ch[ba] = P::L(a.0, a.1, true);
+            ch[bb] = P::L(b.0, b.1, true);
         } else {
             ch[ba] = self.split(d + 1, a, b);
         }
@@ -502,7 +576,8 @@ impl PTree {
         match p {
             P::E => Ok((P::E, false)),
             P::O(_) => Err(()),
-            P::L(k, _) => Ok(if &k == key { (P::E, true) } else { (p, false) }),
+            P::L(_, _, false) => Err(()),
+            P::L(k, _, true) => Ok(if &k == key { (P::E, true) } else { (p, false) }),
             P::N(i) => {
                 let b = kbit(key, d);
                 let c = self.nodes[i as usize].ch[b];
@@ -516,7 +591,7 @@ impl PTree {
                 self.nodes[i as usize].h = None;
                 match self.nodes[i as usize].ch {
                     [P::E, P::E] => Ok((P::E, true)),
-                    [P::L(k, h), P::E] | [P::E, P::L(k, h)] => Ok((P::L(k, h), true)),
+                    [P::L(k, h, v), P::E] | [P::E, P::L(k, h, v)] => Ok((P::L(k, h, v), true)),
                     // a lone unexpanded sibling may be a single (collapsed) leaf: unknown shape
                     [P::O(_), P::E] | [P::E, P::O(_)] => Err(()),
                     _ => Ok((p, true)),
@@ -649,7 +724,10 @@ impl Sl {
         self.leaf_hashes += 1;
         self.verified += 1;
         match (self.t.get(&k), present) {
-            (Look::Present(h), true) if h == lh => Ok(()),
+            (Look::Present(h), true) if h == lh => {
+                self.t.mark_verified(&k);
+                Ok(())
+            }
             (Look::Absent, false) => Ok(()),
             _ => Err(ST_SL_BADWIT),
         }
@@ -730,15 +808,24 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
         if present {
             let p = bad!(read_params(&mut r));
             let mk = bad!(r.i64());
+            let li = bad!(r.i64());
+            let orc = bad!(r.bool());
             wit::band_leaf(&mut b, m, &p);
             sl.check(&b, true)?;
             wit::meta_leaf(&mut b, m, &p, mk);
             sl.check(&b, true)?;
-            mkx_leaf(&mut b, m, &p);
+            mkx_leaf(&mut b, m, &p, li, orc);
             sl.check(&b, true)?;
             s.markets.insert(m, p);
             if mk != 0 {
                 s.marks.insert(m, mk);
+            }
+            if li != 0 {
+                s.last_index.insert(m, li);
+            }
+            if orc {
+                s.oracle_bonds.insert(pseudo_oracle(), 1);
+                s.oracle_reports.insert((m, pseudo_oracle()), 0);
             }
         } else {
             wit::band_leaf(&mut b, m, &genesis_params());
@@ -1082,6 +1169,12 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
             }
             need_acct(sl, s, &INSURANCE_ACCOUNT).map_err(Ok)?;
             need_aord_full(sl, &author).map_err(Ok)?;
+            // resting_open_im walks every book of the state and reads its market's params
+            for m in s.books.keys() {
+                if !sl.markets.contains_key(&m.0) {
+                    return Err(Ok(Need::Market(m.0)));
+                }
+            }
             // a funding-rate market anywhere in the author's exposure reads global OI: unsupported
             for m in sl.markets.keys() {
                 if s.markets.get(&MarketId(*m)).is_some_and(|p| p.funding_rate) && s.accounts.get(&author).is_some_and(|a| a.positions.contains_key(&MarketId(*m))) {
@@ -1348,7 +1441,7 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
             puts.push(kh(&b));
             wit::meta_leaf(&mut b, MarketId(*m), p, s.marks.get(&MarketId(*m)).copied().unwrap_or(0));
             puts.push(kh(&b));
-            mkx_leaf(&mut b, MarketId(*m), p);
+            mkx_leaf(&mut b, MarketId(*m), p, s.last_index.get(&MarketId(*m)).copied().unwrap_or(0), oracled(s, MarketId(*m)));
             puts.push(kh(&b));
         }
     }
@@ -1424,6 +1517,8 @@ pub struct WitBuilder<'a> {
     pub s: &'a ChainState,
     /// sorted (key, leaf hash) of the full MNWIT-S leaf set
     pub leaves: Vec<(H, H)>,
+    /// leaf strings (kid length, bytes), parallel to `leaves` (verified-leaf form, R14-C1)
+    pub strs: Vec<(usize, Vec<u8>)>,
     pub root: H,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
@@ -1442,14 +1537,20 @@ fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
 }
 impl<'a> WitBuilder<'a> {
     pub fn new(s: &'a ChainState) -> Self {
-        let mut leaves = s_leaves(s);
-        leaves.sort();
+        let mut all: Vec<(H, H, usize, Vec<u8>)> = Vec::new();
+        s_leaves_with(s, &mut |b: &Buf| {
+            let (k, lh) = kh(b);
+            all.push((k, lh, b.kid, b.as_bytes().to_vec()))
+        });
+        all.sort_by(|x, y| x.0.cmp(&y.0));
         let mut t = wit::Smt::new();
-        for (k, lh) in &leaves {
+        for (k, lh, _, _) in &all {
             t.set(*k, *lh);
         }
         let root = t.root();
-        WitBuilder { s, leaves, root }
+        let leaves = all.iter().map(|x| (x.0, x.1)).collect();
+        let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
+        WitBuilder { s, leaves, strs, root }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -1490,6 +1591,7 @@ impl<'a> WitBuilder<'a> {
                 },
                 Need::Level(m, sd, p) => {
                     levels.insert((m, sd, p));
+                    mkts.insert(m);
                 }
                 Need::Bmp(m, sd, d, p) => {
                     bmps.insert((m, sd, d, p));
@@ -1510,6 +1612,7 @@ impl<'a> WitBuilder<'a> {
             for d in 0..8u8 {
                 bmps.insert((*m, *sd, d, pfx(u, d)));
             }
+            mkts.insert(*m);
         }
         let levels = lv2;
         // collect the keys to expand and serialize records
@@ -1532,6 +1635,8 @@ impl<'a> WitBuilder<'a> {
                     rec.extend_from_slice(&m.to_le_bytes());
                     put_params(&mut rec, p);
                     rec.extend_from_slice(&s.marks.get(&mid).copied().unwrap_or(0).to_le_bytes());
+                    rec.extend_from_slice(&s.last_index.get(&mid).copied().unwrap_or(0).to_le_bytes());
+                    rec.push(oracled(s, mid) as u8);
                 }
                 None => {
                     rec.push(0);
@@ -1678,9 +1783,21 @@ impl<'a> WitBuilder<'a> {
         match hi - lo {
             0 => o.push(0),
             1 => {
-                o.push(2);
-                o.extend_from_slice(&self.leaves[lo].0);
-                o.extend_from_slice(&self.leaves[lo].1);
+                // a key whose path ends at ANOTHER leaf needs that leaf verified (exclusion / split, R14-C1);
+                // so does a single-leaf sibling of a path: a deletion on the path may lift it to where a later
+                // insertion must split it
+                if sib || keys.iter().any(|k| *k != self.leaves[lo].0) {
+                    let (kl, st) = &self.strs[lo];
+                    o.push(4);
+                    o.extend_from_slice(&(*kl as u16).to_le_bytes());
+                    o.extend_from_slice(&st[..*kl]);
+                    o.extend_from_slice(&((st.len() - kl) as u16).to_le_bytes());
+                    o.extend_from_slice(&st[*kl..]);
+                } else {
+                    o.push(2);
+                    o.extend_from_slice(&self.leaves[lo].0);
+                    o.extend_from_slice(&self.leaves[lo].1);
+                }
             }
             _ => {
                 let mid = lo + self.leaves[lo..hi].partition_point(|(k, _)| kbit(k, d) == 0);
