@@ -54,10 +54,14 @@ pub fn session_refs(w: &[u32], s: u32) -> Vec<SegRef> {
     out
 }
 
-pub fn run_sl(seg: &[u32], wit: &[u8]) -> (sl::SlOut, Vec<u32>) {
+/// run with the chain binding of main.rs (R14-H2): `expect` = the last good end root (the honest pre-state root)
+pub fn run_sl_x(seg: &[u32], wit: &[u8], expect: Option<&[u8; 32]>) -> (sl::SlOut, Vec<u32>) {
     let mut ev = Vec::new();
-    let o = sl::run_stateless(&mut |i| seg.get(i as usize).copied().unwrap_or(0), wit, &mut |x| ev.push(x));
+    let o = sl::run_stateless(&mut |i| seg.get(i as usize).copied().unwrap_or(0), wit, expect, &mut |x| ev.push(x));
     (o, ev)
+}
+pub fn run_sl(seg: &[u32], wit: &[u8]) -> (sl::SlOut, Vec<u32>) {
+    run_sl_x(seg, wit, None)
 }
 
 /// initial operator guess from the segment's ops (author, own order set, market, insurance)
@@ -103,7 +107,7 @@ pub fn operate(b: &WitBuilder, seg: &[u32]) -> Result<(BTreeSet<Need>, Vec<u8>, 
     let mut needs = guess(seg);
     for it in 0..20_000u32 {
         let wit = b.build(&needs);
-        let (o, ev) = run_sl(seg, &wit);
+        let (o, ev) = run_sl_x(seg, &wit, Some(&b.root));
         if o.status == sl::ST_SL_MISSING {
             let n = o.need.unwrap();
             if !needs.insert(n) {
@@ -314,6 +318,67 @@ pub fn layout(wit: &[u8]) -> Layout {
     Layout { tree_end: i }
 }
 
+/// A13 helper: the honest witness with its k-th single leaf (tag 2 or 4) replaced by O(leaf hash) -- same root. A
+/// lone O sibling left by a deletion may hide a single leaf, which canonical form would lift (PTree::del must refuse).
+pub fn leaf_to_opaque(wit: &[u8], k: usize) -> Option<Vec<u8>> {
+    fn go(w: &[u8], i: &mut usize, o: &mut Vec<u8>, k: usize, seen: &mut usize) {
+        let t = w[*i];
+        *i += 1;
+        match t {
+            0 => o.push(0),
+            1 => {
+                o.push(1);
+                o.extend_from_slice(&w[*i..*i + 32]);
+                *i += 32;
+            }
+            2 | 4 => {
+                let (raw, lh) = if t == 2 {
+                    let mut lh = [0u8; 32];
+                    lh.copy_from_slice(&w[*i + 32..*i + 64]);
+                    let raw = w[*i..*i + 64].to_vec();
+                    *i += 64;
+                    (raw, lh)
+                } else {
+                    let st = *i;
+                    let kl = u16::from_le_bytes([w[*i], w[*i + 1]]) as usize;
+                    let kid = w[*i + 2..*i + 2 + kl].to_vec();
+                    *i += 2 + kl;
+                    let rl = u16::from_le_bytes([w[*i], w[*i + 1]]) as usize;
+                    let rest = w[*i + 2..*i + 2 + rl].to_vec();
+                    *i += 2 + rl;
+                    let key = mnpilot::wit::key_of(&kid);
+                    let mut leaf = kid.clone();
+                    leaf.extend_from_slice(&rest);
+                    (w[st..*i].to_vec(), mnpilot::wit::leaf_hash(&key, &leaf))
+                };
+                if *seen == k {
+                    o.push(1);
+                    o.extend_from_slice(&lh);
+                } else {
+                    o.push(t);
+                    o.extend_from_slice(&raw);
+                }
+                *seen += 1;
+            }
+            3 => {
+                o.push(3);
+                go(w, i, o, k, seen);
+                go(w, i, o, k, seen);
+            }
+            _ => panic!("tag"),
+        }
+    }
+    let mut o = wit[..36].to_vec();
+    let mut i = 36;
+    let mut seen = 0;
+    go(wit, &mut i, &mut o, k, &mut seen);
+    if k >= seen {
+        return None;
+    }
+    o.extend_from_slice(&wit[i..]);
+    Some(o)
+}
+
 pub fn sladv(n: u64, ord: u32) -> String {
     let mut a = Adv { cases: 0, sound: 0, unsound: Vec::new(), counts: Default::default() };
     let mut done_segs = 0u64;
@@ -395,6 +460,12 @@ pub fn sladv(n: u64, ord: u32) -> String {
             if let Some(pp) = &prev_pre {
                 let bw = WitBuilder::new(pp);
                 let wrong = bw.build(&needs);
+                // R14-H2 fix: with the chain binding (expect = honest root) the run must be refused
+                let (ob, evb) = run_sl_x(&r.seg, &wrong, Some(&b.root));
+                if ob.status != sl::ST_SL_BADROOT && wrong[4..36] != b.root {
+                    a.unsound.push(format!("wrong-root with binding: status {}", ob.status));
+                }
+                a.rec("wrong-root:bound", r, &ob, &evb, wrong[4..36] != b.root);
                 let (o7, ev7) = run_sl(&r.seg, &wrong);
                 // the guest may accept its own claimed root (status 0) -- the ROLLUP must refuse a start root
                 // that is not the previous end root; record whether start_root != reference
@@ -425,7 +496,9 @@ pub fn sladv(n: u64, ord: u32) -> String {
                 wf.extend_from_slice(&forged[lay_f.tree_end..]);
                 let (o8, ev8) = run_sl(&r.seg, &wf);
                 a.rec("forge:account", r, &o8, &ev8, true);
-                // forged tree + forged root (self-consistent) -> start_root != chain root
+                // forged tree + forged root (self-consistent) -> start_root != chain root; with the binding: refused
+                let (ob, evb) = run_sl_x(&r.seg, &forged, Some(&b.root));
+                a.rec("forge:self-consistent:bound", r, &ob, &evb, true);
                 let (o9, _) = run_sl(&r.seg, &forged);
                 a.cases += 1;
                 let e = a.counts.entry("forge:self-consistent".into()).or_insert((0, 0, 0));
@@ -576,6 +649,12 @@ pub fn sladv(n: u64, ord: u32) -> String {
                     let (ox, evx) = run_sl(&r.seg, &tree);
                     a.rec("forge:absent-via-leaf-key", r, &ox, &evx, true);
                 }
+            }
+            // A13: hide each single leaf as an opaque hash (root unchanged); refusals or correct results only
+            for k in 0..48 {
+                let Some(w13) = leaf_to_opaque(&wit, k) else { break };
+                let (ox, evx) = run_sl(&r.seg, &w13);
+                a.rec("tree:leaf-as-opaque", r, &ox, &evx, false);
             }
             prev_pre = Some(r.pre.clone());
             if done_segs >= 400 {

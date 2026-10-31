@@ -22,6 +22,11 @@ MUTS = [
                         return Err(Need::Level(mm, sd, p));
                     }''', ''),
   ('oracled-not-loaded', 'if orc {', 'if orc && false {'),
+  # both resting-level checks (the GTC pre-guard makes the post check alone redundant: equivalent mutant)
+  ('resting-level-checks-off', [('''                if price != 0 && !sl.levels.contains_key(&(market, side.as_u8(), price)) {''', '''                if false && price != 0 && !sl.levels.contains_key(&(market, side.as_u8(), price)) {'''),
+      ('''                    if trie_has(&sl, mm, sd, p)? {
+                        return Err(Need::Level(mm, sd, p));
+                    }''', '')], None),
   ('C1-unverified-absent', 'else if v { Look::Absent } else { Look::Unknown }', 'else { Look::Absent }'),
   ('lvl-digest-skipped', '''        lvl_leaf(&mut b, m, sd, price, &ids);
         sl.leaf_hashes += k as u64 / 2; // ids digest (64 B per 2 ids ~ one compression each)
@@ -44,9 +49,14 @@ try:
         if sel and name not in sel.split(','):
             continue
         n += 1
-        if ORIG.count(a) != 1:
-            print(f'{name}: PATTERN COUNT {ORIG.count(a)}', flush=True); continue
-        open(SRC, 'w').write(ORIG.replace(a, b))
+        pairs = a if isinstance(a, list) else [(a, b)]
+        bad = [x for x, _ in pairs if ORIG.count(x) != 1]
+        if bad:
+            print(f'{name}: PATTERN COUNT {[ORIG.count(x) for x in bad]}', flush=True); continue
+        src = ORIG
+        for x, y in pairs:
+            src = src.replace(x, y)
+        open(SRC, 'w').write(src)
         r = subprocess.run(['cargo', 'build', '--release', '--features', 'stateless'], cwd=os.path.join(W, 'engine-diff'), env=ENV, capture_output=True, text=True)
         if r.returncode != 0:
             print(f'{name}: BUILD FAILED {r.stderr[-400:]}', flush=True); continue

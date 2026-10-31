@@ -190,6 +190,31 @@ mod rt {
     /// [0..8] = end root, [8] events, [9..12] counters, [13..] events, SEG_START / SEG_END roots (zero unless
     /// status 0), [ROOTS-7] status (mnpilot ST_* or stateless ST_SL_*), [ROOTS-3] leaves verified,
     /// [ROOTS-4] leaf hashes, [ROOTS-5] node hashes, [ROOTS-6] peak live heap.
+    /// loop round 14 (R14-H2 fix): the last good MNWIT-S end root of this image lineage, in the carried memory (.data):
+    /// a stateless run must start from it; only a status-0 run moves it (a failed height changes nothing).
+    #[cfg(feature = "stateless")]
+    #[link_section = ".data.sess"]
+    static mut SL_ROOT: [u8; 32] = [0; 32];
+    #[cfg(feature = "stateless")]
+    #[link_section = ".data.sess"]
+    static mut SL_INIT: u32 = 0;
+    /// the MNWIT-S root the first stateless run of an image must start from (compiled in, so the image's memory root
+    /// commits it -- like MNPILOT_IMPORT_DIGEST); required in `prod`
+    #[cfg(feature = "stateless")]
+    const SL_GENESIS: Option<&str> = option_env!("MNPILOT_SL_GENESIS");
+    #[cfg(feature = "stateless")]
+    fn sl_hex32(h: &str) -> Option<[u8; 32]> {
+        let b = h.as_bytes();
+        if b.len() != 64 {
+            return None;
+        }
+        let v = |c: u8| match c { b'0'..=b'9' => Some(c - b'0'), b'a'..=b'f' => Some(c - b'a' + 10), _ => None };
+        let mut o = [0u8; 32];
+        for i in 0..32 {
+            o[i] = (v(b[2 * i])? << 4) | v(b[2 * i + 1])?;
+        }
+        Some(o)
+    }
     #[cfg(feature = "stateless")]
     fn sl_run() -> u32 {
         let b = read_word(1);
@@ -209,9 +234,24 @@ mod rt {
             }
         }
         let mut n_ev: u32 = 0;
+        let expect: Option<[u8; 32]> = unsafe {
+            if SL_INIT != 0 {
+                Some(SL_ROOT)
+            } else {
+                match SL_GENESIS.map(sl_hex32) {
+                    Some(Some(g)) => Some(g),
+                    // malformed compiled-in root: refuse everything
+                    Some(None) => Some([0xFF; 32]),
+                    // no genesis root: test images accept the first claimed root; `prod` refuses
+                    None if cfg!(feature = "prod") => Some([0xFF; 32]),
+                    None => None,
+                }
+            }
+        };
         let o = mnpilot::stateless::run_stateless(
             &mut |i| if i < b { read_word(3 + i) } else { 0 },
             &wit,
+            expect.as_ref(),
             &mut |w| unsafe {
                 if n_ev < mnpilot::EV_CAP {
                     OUT.add(13 + n_ev as usize).write_volatile(w);
@@ -223,6 +263,8 @@ mod rt {
             if o.status == mnpilot::ST_OK {
                 put_root(SEG_START, &o.start_root);
                 put_root(SEG_END, &o.end_root);
+                SL_ROOT = o.end_root;
+                SL_INIT = 1;
             }
             put_root(0, &o.end_root);
             OUT.add(8).write_volatile(n_ev);

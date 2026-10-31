@@ -43,6 +43,9 @@ pub const ST_SL_BADWIT: u32 = 12;
 pub const ST_SL_MISSING: u32 = 13;
 /// op kind / market kind / feature not covered by the prototype
 pub const ST_SL_UNSUPPORTED: u32 = 14;
+/// R14-H2 fix: the witness's claimed start root is not the chain's last good end root (main.rs keeps it in the carried
+/// memory: the rollup builds s0(h) on the final memory of h-1)
+pub const ST_SL_BADROOT: u32 = 15;
 /// per-segment touched-set limits (the ONLY caps; consensus constants of the stateless image)
 /// round 14 review (R14-M3): ~2 SHA-256 compressions per node hash -> <= ~2e9 steps of tree hashing
 pub const SL_MAX_TREE_NODES: usize = 1 << 18;
@@ -1222,7 +1225,8 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
 // ------------------------------------------------------------------------------------------------
 /// Run one segment statelessly: `rd` = the MNP1/MNP2 batch words (flags must be 0), `wit` = the witness
 /// bytes. Events as `run_segment`. Status 0 => end_root is the MNWIT-S root after the segment.
-pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], ev: &mut dyn FnMut(u32)) -> SlOut {
+/// `expect`: the chain's last good end root (None = not bound: host tests of other properties, non-prod first run).
+pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: Option<&H>, ev: &mut dyn FnMut(u32)) -> SlOut {
     let mut out = SlOut { status: 0, start_root: EMPTY, end_root: EMPTY, applied: 0, rejected: 0, fills: 0, need: None, leaves_verified: 0, tree_nodes: 0, node_hashes: 0, leaf_hashes: 0, puts: Vec::new(), dels: Vec::new() };
     out.status = crate::check_header_seg(rd, true);
     if out.status != crate::ST_OK {
@@ -1237,6 +1241,10 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], ev: &mut 
     };
     out.start_root = claimed;
     out.tree_nodes = sl.t.nodes.len() as u32;
+    if expect.is_some_and(|e| *e != claimed) {
+        out.status = ST_SL_BADROOT;
+        return out;
+    }
     let mut eng = Engine { state: s };
     let n_acc = rd(1);
     let n_ops = rd(2);

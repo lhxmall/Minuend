@@ -19,10 +19,12 @@ function runOn(mem, entry, file, maxSteps = 4e10) {
     heap: g(12), peak: g(0x1FFFA), verified: g(0x1FFFD), leaf_hashes: g(0x1FFFC), node_hashes: g(0x1FFFB) };
 }
 const memS = new FastMem(); const entryS = load(ELF_S, memS);
+const memL = new FastMem(); const entryL = load(ELF_L, memL);
 let ok = 0, tS = 0, tL = 0, units = 0; const rows = [];
 for (const m of man) {
   const s = runOn(memS, entryS, path.join(DIR, m.seg));
-  const memL = new FastMem(); const entryL = load(ELF_L, memL);
+  // stateless heights also carry the memory (rv_rollup builds s0(h) on m(h-1)): the image keeps only its last good
+  // end root there (R14-H2 binding), no engine state
   const l = runOn(memL, entryL, path.join(DIR, m.sl));
   const evOk = JSON.stringify(s.ev) === JSON.stringify(m.ev) && JSON.stringify(l.ev) === JSON.stringify(m.ev);
   const good = s.halted && l.halted && s.status === 0 && l.status === 0 && evOk && l.start_root === m.s_start && l.end_root === m.s_end;
