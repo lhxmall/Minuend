@@ -11,6 +11,7 @@ const mk = (name, body) => { const aa = `["autonomous agent", {
 ${esc(body)}
 }\`,
  messages: [
+  {if: \`{$st.rf}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{trigger.address}\`, amount: \`{$st.rf}\`}]}},
   {app: 'state', state: \`{${esc(state)}}\`}
  ]
 }]`; fs.writeFileSync(__dirname + '/../aa/' + name + '.aa', aa); return { body, state, addr: M.ref.chashOf(aa) }; };

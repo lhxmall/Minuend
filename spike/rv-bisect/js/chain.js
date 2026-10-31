@@ -28,8 +28,8 @@ const AAS = {
 };
 // loop round 3: rv_witbind / rv_witproof (state only, no payments)
 const WP = require('./mkwitproof.js'); const BIND = WP.bind.addr, PROOF = WP.proof.addr;
-AAS[BIND] = { f: WP.bind.body + '\n' + WP.bind.state, out: () => [] };
-AAS[PROOF] = { f: WP.proof.body + '\n' + WP.proof.state, out: () => [] };
+AAS[BIND] = { f: WP.bind.body + '\n' + WP.bind.state, out: (st, L, from) => +st.rf > 0 ? [{ to: from, amt: +st.rf }] : [] }; // R3-W4 refund
+AAS[PROOF] = { f: WP.proof.body + '\n' + WP.proof.state, out: (st, L, from) => +st.rf > 0 ? [{ to: from, amt: +st.rf }] : [] };
 // an AA that bounces every trigger (used as a hostile operator / challenger that refuses payouts)
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const BOUNCER = require(OCP + '/object_hash.js').getChash160(['autonomous agent', { init: "{ bounce('no payouts please'); }" }]);

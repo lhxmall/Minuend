@@ -296,3 +296,28 @@ the initial memory image must (A4).
 
 **New tools:** `engine-diff frag | grind | depth8 | proofdump | depthsel`, `js/smtverify.js` (measure | run | synth),
 `scripts/loop2-suite.sh`, `scripts/loop2-mut.sh`. Results: `results-loop2/`, `work/rv-rollup-notes.md` → "Loop round 2".
+
+## 9. Attack → fix, loop round 3 (2026-10-31)
+
+Findings: `../findings/rv-loop-3.md` (C 0 · H 0 · M 3 · L 9 · I 6); design §7.6 (zh). Work items:
+
+1. **S1b** — price level = `BTreeMap<u64 arrival, OrderId>` + `arr: OrderId → arrival` (cancel O(log n); FIFO and
+   commitment bytes unchanged; rollback restores arrivals and `next_arr`); `ChainState::oi_long` running per-market
+   long open interest (`put_account` / `del_account`). Host runs assert `level_ok` + `oi_ok` after every unit.
+   `engine-diff crowdc <acc> <per> <tail> <out>` = crowd + `tail` cancels in the middle of the level; `js/unitsteps.js`
+   prints per-unit steps.
+2. **Production guest + segments** — feature `prod`: header flags must be 0 (status 4; also on any resumed session);
+   `_start` zeroes `.bss`; `mnpilot::Session` + `run_segment` (engine state carried from run to run in guest memory,
+   one run = one rollup height); OUT[0x1FFF0..8] segment start root, OUT[0x1FFE8..8] end root, OUT[0x1FFE7] segments
+   run; status 0xFFFF0001 while running, 5 (= ST_DEAD) on every run after a run that did not exit cleanly (panic, OOM
+   or trap). `engine-diff segrun <batch> <S> [dir] [k]` / `segfuzz <n> <orders>` check segments against the real engine
+   over the whole batch; `js/segguest.js <elf> <dir>` runs them through the guest on one memory image (`TRAP=k:n`
+   forces a trap for the R3-G1/G2 PoC).
+3. **Layer-1 game + proofs (AAs)** — `aa/rv_seg_ref.oscript` (bisection over unit-boundary `(step, machine root)`
+   points, then rv_game_ref on one unit), `rv_rollup` `units` + `uopen`, `aa/rv_witbind.oscript` / `rv_witproof.oscript`
+   (depth-64 SMT verifier against a finalized height's segment end root). Tests: `js/rolltest.js` groups
+   `l1flow l1deep l1bnd l1edges witproof`, `js/rolldevnet.js` section 8, `js/witproofe2e.js` (real guest memory image →
+   bind → prove).
+
+Suite: `scripts/loop3-suite.sh` (logs `/data/hark/logs/rv/l3-*`, copies in `results-loop3/`), mutation
+`scripts/loop3-mut.sh` (10 new mutants + round-2's 34; extra checks `depth8 5` and `segfuzz 30`).

@@ -288,6 +288,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     rec('8c memberships proven against finalized h10', P.members.length, okm);
     r = await trig(w, WPROOF, { prove: 10, leaf: P.absent.term, sib: P.absent.sib, key: P.absent.key }, 10000, 'prove', 1); rec('8c absence proven', ['ok', 1], [r.err || 'ok', (await vars(WPROOF))['A10:' + P.absent.key]]);
     r = await trig(w, WPROOF, { prove: 10, leaf: P.members[0].leaf + '1', sib: P.members[0].sib }, 10000, undefined, 1); rec('8c tampered leaf', 'bounce', r.err ? 'bounce' : 'ok');
+    r = await trig(w, WPROOF, { prove: 10, leaf: P.members[0].leaf, sib: P.members[0].sib }, 25000, 'prove', 1); rec('8c R3-W4 prove with 25000 refunds 23000 (real output)', ['ok', 23000], [r.err || 'ok', await paidTo(r.response, A.w)]);
     r = await trig(w, WPROOF, { prove: 9, leaf: P.members[0].leaf, sib: P.members[0].sib }, 10000, undefined, 1); rec('8c proof against unbound h9', 'bounce', r.err ? 'bounce' : 'ok'); }
   // 5. accounting: the rollup holds exactly burned + kept FEEs + GB refunds + bounce fees, no bond is outstanding
   { const v = await vars(ROLL); const b = await bal(ROLL); rec('rollup balance >= burned (all bonds settled)', true, b >= (v.burned || 0), { balance: b, burned: v.burned, lf: v.lf, top: v.top }); }

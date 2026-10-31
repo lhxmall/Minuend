@@ -576,6 +576,8 @@ groups.witproof = async () => { const K = require('./witkit.js'); const dir = __
       // R3-W1: canonical path bits but an upper-case tail -> must not be recorded under a non-canonical name
       const nc = a.key.slice(0, 16) + a.key.slice(16).toUpperCase(); if (nc !== a.key) { ncTries++; const q = await S(C, W, PROOF, 0, { prove: h, leaf: a.term, sib: a.sib, key: nc }); if (!q.err) ncAccepted++; } } }
   rec('witproof', 'R3-W1: absence under a non-canonical key (upper-case tail, same path bits) refused', 0, ncAccepted, { tries: ncTries });
+  { const w0 = C.b(W); const m = sets[0].members[0]; await S(C, W, PROOF, 15000, { prove: sets[0].H.h, leaf: m.leaf, sib: m.sib });
+    rec('witproof', 'R3-W4: a proof costs the caller MK = 2000 (the rest of the trigger is refunded)', 2000, w0 - C.b(W)); }
   rec('witproof', 'memberships accepted (and recorded L<h>:<kid> = leaf); synthetic depth 65 refused', mn, mok, { maxDepth: maxd });
   rec('witproof', 'absences accepted (A<h>:<key> = 1)', an, aok);
   rec('witproof', 'forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height)', 0, forged, { tries });

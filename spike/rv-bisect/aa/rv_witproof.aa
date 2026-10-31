@@ -8,7 +8,9 @@
 //  membership of leaf (no key) -> var L<h>:<kid> = leaf; absence of key (64 lowercase hex; leaf = the terminal leaf
 //  text, or '' for an EMPTY terminal) -> var A<h>:<key> = 1. A vault / bridge AA reads these vars (a withdrawal =
 //  membership of the account's acct: leaf in a finalized root).
-$BIND = 'BIU4BXUHLO26265ANIJUGQGUV6QRXN4R';   // mkwitproof.js bakes chash160(rv_witbind.aa)
+$BIND = 'HC2MLPMDBSIFECGDN6NEXCSGTHKQZOXP';   // mkwitproof.js bakes chash160(rv_witbind.aa)
+$MK = 2000;   // R3-W4: keep MK of the (>= 10 000-byte bounce-fee) trigger for the refund unit, refund the rest (as rv_game_ref moves)
+$rf = max(trigger.output[[asset=base]] - $MK, 0);
 // trigger.data is read in place: a local copy of a ~10 KB proof object exceeds ocore's local-variable size limit
 if (exists(trigger.data.prove)) {
 	$h = trigger.data.prove;
@@ -56,12 +58,13 @@ if (exists(trigger.data.prove)) {
 	require(!contains($bits, 'x'), 'key');
 	$root = reduce(trigger.data.sib, 64, ($acc, $i, $s) => sha256('~N1:' || ((substring($bits, $n - 1 - $i, 1) == '0') ? $acc || $s : $s || $acc), 'base64'), $h0);
 	require($root == $WR, 'root');
-	$st = $abs ? {k: 'A' || $h || ':' || trigger.data.key, v: 1} : {k: 'L' || $h || ':' || $kid($t), v: $t};
+	$st = $abs ? {k: 'A' || $h || ':' || trigger.data.key, v: 1, rf: $rf} : {k: 'L' || $h || ':' || $kid($t), v: $t, rf: $rf};
 }
 else bounce('unknown command');
 
 }`,
  messages: [
+  {if: `{$st.rf}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{trigger.address}`, amount: `{$st.rf}`}]}},
   {app: 'state', state: `{
 	var[$st.k] = $st.v;
 	response['proven'] = $st.k;

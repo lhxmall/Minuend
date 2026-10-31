@@ -150,3 +150,13 @@ Details, tables and reproduction: `guest-engine/README.md`; raw results `guest-e
   R × 3372 + 11 467 = 28.3k–35.1k bytes (≥ +69.5k margin on the 108 000 payout). One unit alone: R = 5.
 - **Not included and dominant in a full port**: `wit_root` per unit ≈ 5.7 sha256 blocks ≈ 20k steps per live order
   (5M at L=200, 20M at L=1 000) → recommend an incremental witness commitment before porting further.
+
+## Loop round 3 (2026-10-31) — segments, layer-1 game, proof AAs
+
+`findings/rv-loop-3.md`, design §7.6, `guest-engine/README.md` §9. Cancel O(log n) + running OI (S1b, results
+unchanged vs the real engine); production guest (flags = 0, `.bss` zeroed); upstream batches cut into ≤ 16 384-unit
+segments, one per rollup height, engine state kept in guest memory, segment start / end MNWIT1 roots at fixed OUT
+slots; layer-1 referee `aa/rv_seg_ref.oscript` (bisection over unit-boundary machine roots, then the instruction game
+on one unit) with `rv_rollup` `uopen`; `aa/rv_witbind.oscript` + `aa/rv_witproof.oscript` wire the depth-64 SMT
+verifier to finalized heights.
+

@@ -549,13 +549,44 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 
 **事件日志上限能不能藏住分歧？** 不能：每个 unit 最多 7 个字（`MultiFill` 保证每个 unit 最多一笔成交），`13 + 7 × MAX_UNITS ≤ 0x1FFF0` 编译期断言，上限内溢出标志恒为 0；而且争议博弈二分的是整个机器状态（每一步的内存 Merkle 根），事件计数和溢出标志本身也是内存里的字。
 
+### 7.6 攻击→修复 第 3 轮（loop round 3，2026-10-31）：撤单 O(log n)、分段、第 1 层博弈、证明 AA
+
+详细报告：`findings/rv-loop-3.md`（C 0 · H 0 · M 3 · L 9 · I 6）。
+
+**① S1b：撤单不再随价位变长。** 每个价位原来是 `VecDeque<订单 id>`，撤单要从头找到这个 id 再删，价位上排了 1.6 万单就要扫 1.6 万次。现在价位是「到达序号 → 订单 id」的有序 map，另有「订单 id → 到达序号」的索引，撤单 = 查索引 + 删一项，O(log n)。遍历顺序还是到达顺序（= 原来的先进先出），所以撮合、承诺字节、所有事件都和真实引擎一样（fuzz / advfuzz / witfuzz / scen / segfuzz 全部一致）。资金费率市场的持仓总量改成每个市场一个累计值（只在替换账户的两个入口 `put_account` / `del_account` 里加减），宿主测试每个 unit 后都和全量重算比一次。代价：小价位多用一点堆（最坏 frag 4.08 → 5.96 MB，仍不到 50 MB 堆的一半）。
+
+**② 生产 guest 加固 + 分段。**
+- 头部 flags（第 3 个字）只给测试夹具用；`prod` 构建（rollup 承诺的镜像必须是它）要求 flags = 0，否则状态 4；接续运行（见下）也一律要求 0。
+- `_start` 先把 `.bss` 清零；要跨运行保留的东西（分配器状态、会话指针）都放进 `.data`。
+- **分段**：上游一批最多 20 万个 unit，guest 一次最多跑 16 384 个，所以一批要切成多段，**一段 = 一次 guest 运行 = 一个 rollup 高度**。rollup 本来就把上一个高度的最终内存带进下一个高度的 s0，所以引擎状态直接留在 guest 内存里（`Session`：引擎 + witness 树 + 分配器），下一次从 pc 0 启动时接着用，不用重新加载前状态。
+- **段边界承诺**：每次运行在 OUT[0x1FFF0..8] 写「本段第一个 unit 之前」的 MNWIT1 根，在 OUT[0x1FFE8..8] 写「最后一个 unit 之后」的根；规则：第 k 段的起始根 = 第 k−1 段的结束根，第 0 段的起始根 = 创世根。`engine-diff segrun / segfuzz` 用**真实引擎**跑整批，逐 unit 比根、比事件、每段末比状态哈希，中间插一段头部非法的（状态 4，什么也不执行，会话不变）；`js/segguest.js` 用**同一份内存**连续跑各段，和 rollup 的做法一样。
+- 运行中途 panic / 内存不够 / **trap** 的，会话作废：之后每个高度都返回状态 5、什么也不做（R3-G1：以前 trap 后下一次会从已释放的内存里接着跑；R3-G2：以前 trap 会把上一段的状态 0 和结束根留在 OUT 里，可能被当成本高度的根绑定）。代价：作废后 rollup 只能靠升级 guest 恢复（R3-H2，还没设计）。
+
+**③ 第 1 层博弈（`aa/rv_seg_ref.oscript`）。** 挑战者现在可以选两种局：`open`（原来的整段指令博弈）或 `uopen`（第 1 层）。第 1 层：
+1. operator 提交时多报一个 `units`（本段 unit 数，1 ≤ units ≤ steps，≤ 16 384）。
+2. 博弈先在「unit 边界」上 16 叉二分：operator 给出若干个点 `(步数, 机器状态根)`，步数必须严格递增；挑战者挑第一段它不同意的。
+3. 缩到只剩一个 unit 时，rv_seg_ref 自己去 rv_game_ref 开一局普通指令博弈（范围就是这个 unit 的指令），结果回调给 rv_seg_ref，再转给 rv_rollup。超时规则一样：轮到谁走、谁超时谁输。
+- **为什么点是机器状态根而不是 MNWIT1 根**：最后要交给指令博弈的是「从哪一步到哪一步」，MNWIT1 根说不清对应哪个机器状态；机器状态根承诺整份内存，里面已经有这个 unit 的 MNWIT1 根（OUT+0x20000 + 8u），所以 witness 也一起带上了。operator 报的边界不一定真是 unit 结束的地方也没关系：每个点都是对「同一条执行轨迹第几步的状态」的声明，总有一段起点真、终点假（`l1bnd` 测试随机边界 4/4）。
+- **好处在链下**：只需要给一个 unit（10^5–3·10^6 步）算每一步的内存 Merkle 根，不用给整段（最多约 5·10^10 步）算。链上轮数差不多（第 1 层 ≤ 4 轮 + 第 2 层 ≤ 6 轮）。
+- 费用：`uopen` 要付 CBOND + GF（rv_seg_ref 要一份 GF 付自己的回调、一份 GF 开第 2 层），赔付和 `open` 一样。第 2 层 resolve 的响应链是 3 个 AA（game → seg → rollup），客户端要设 `max_aa_responses = 3`。
+- R3-L1（设计时发现并修好）：第 2 层局的编号如果直接用 opener 的 ref，任何人都能用同一个 ref 先开一个 seg 局把编号占掉，诚实那局交接时 bounce、挑战者超时输。现在编号 = sha256(opener ‖ ref)。
+
+**④ 深度 64 的 SMT 验证器接到 rollup 上（`rv_witbind` + `rv_witproof`）。**
+- `bind`：高度 h 已 finalize 后，任何人用 9 条内存 Merkle 证明（OUT[0x1FFE8..8] 的 8 个字 + OUT[0x1FFF9] 状态 = 0）对这个高度的最终内存根证明它的段结束根，AA 存成 `W<h>`（base64）。状态不为 0 的高度没有根，不能绑定。
+- `prove`：第 2 轮的验证器（D = 64，kid 用 index_of / substring 取）对 `W<h>` 验存在 / 不存在证明，记 `L<h>:<kid> = 叶子` 或 `A<h>:<key> = 1`，给金库 / 跨链桥 AA 读（提现 = 证明账户的 `acct:` 叶子在已 finalize 的根里）。
+- 为什么拆成两个 AA：ocore 的静态成本按整个 AA 算，合在一起 2 935 ops > 2 000。拆开后 rv_witbind 15 / 1 406，rv_witproof 69 / 1 604。
+- 两个坑：① `$T = trigger.data` 把 ~10 KB 的证明对象复制到局部变量会报「resulting object is too big」，要直接读 `trigger.data`；② 不存在证明的 key 必须整串校验成 64 位小写 hex（R3-W1），否则能在「非规范名字」下记一条不存在。
+- 两个 AA 都把触发交易里多余的钱退回（留 MK = 2 000）。
+
+**静态成本**（ocore 0.4.8，上限 100 / 2 000）：rv_step 10 / 1 850，rv_game_ref 10 / 848，rv_seg_ref 18 / 1 443，rv_rollup 44 / 829，rv_witbind 15 / 1 406，rv_witproof 69 / 1 604。
+
 ## 8. 已知的缺口（诚实列出）
 
 1. ~~多付的钱不退~~ 已修（5b）。剩下：finalize / reclaim 触发交易里的 10 000（bounce_fees 下限）仍全部留在 rollup；submit 多付 ≤ FEE 不退。
 2. **烧掉的钱取不出来**：这是**有意的**（5c）：`burned` 永久锁定，不设 treasury 或奖励池。
 3. **反复作废的代价只有 OBOND/2**：骗子可以用自己的马甲当「第一个挑战者」拿回一半保证金。所以每作废一次整条链（h..最新），骗子只亏 100 000 + 手续费。被连带作废的诚实 operator 要 reclaim 再重新提交，浪费时间。
 4. **数据可用性（DA）没解决**：AA 读不到批次数据本身。挑战者拿不到输入数据就没法算根。「按块揭示」的 DA 挑战还没写。
-5. **单批上限 2^40 步**（MAXSTEPS）。guest 每次运行最多 16 384 个 unit（7.4），上游一批 200 000 个 unit 要由第 1 层博弈切段；完整 guest 加载前状态后，撤单仍是 O(价位订单数)、资金费率市场的持仓总量遍历所有账户——需要 7.5 S1b 的两处语义不变的改法（价位队列换有序 map、持仓总量累计值）。
+5. **单批上限 2^40 步**（MAXSTEPS）。guest 每次运行最多 16 384 个 unit；上游一批按 7.6 切段、一段一个高度，状态留在 guest 内存里；撤单和持仓总量已按 S1b 改成和状态大小无关（7.6）。剩下：每段末尾的从头重建自检和状态哈希仍是 O(状态)；guest 一旦 trap / 内存不够就永久作废，升级路径没设计；会话常驻内存，长期运行的堆上界（账户永不删除）没算。
 6. **operator 和挑战者都不能是 AA**（`is_aa` 禁止）。用多签 AA 当 operator 的方案目前不行。
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
 8. ~~没和 sail-riscv 对拍~~ 已做（7.1）：sail-riscv 0.16，0 处真不一致。剩下：对拍只覆盖单步语义；trap 的具体种类（mcause 等）rv_step 不建模，只比「都 trap 了」。
@@ -574,6 +605,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 - `js/rolltest.js` —— 求值器测试；`js/rolldevnet.js` —— devnet 测试
 - `js/tpsdiag.js` —— tps fee 诊断
 - `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
+- 第 3 轮：`aa/rv_seg_ref.oscript` + `js/mksegref.js`（第 1 层博弈）；`aa/rv_witbind.oscript`、`aa/rv_witproof.oscript` + `js/mkwitproof.js`（证明 AA）；`js/witkit.js`、`js/witproofe2e.js`、`js/segguest.js`、`js/unitsteps.js`、`js/aacost.js`；`engine-diff/src/seg.rs`（segrun / segfuzz）；`guest-engine/scripts/loop3-suite.sh`、`loop3-mut.sh`
 - `guest-engine/` —— 真实引擎移植试点（no_std guest，`rvengine`）；`engine-diff/` —— 真实引擎 vs 移植版对拍、批次生成、`witstat`；`js/pilotrun.js`、`pilotbench.js`、`pilotprof.js`、`xval/pilotsail.js`
 - `guest-engine/src/wit.rs` —— 增量 witness 承诺 MNWIT1（7.3）；`engine-diff/src/smt_ref.rs` —— 独立的从头重建参考实现；`engine-diff` 子命令 `wroots` / `portroots` / `witfuzz` / `scen` / `genesis`；`engine-diff/scenarios/upstream.scn` —— 上游 `#[test]` 场景回放；`js/witrun.js`、`witbench.js`、`witscen.js`；`xval/witsail.js`；`guest-engine/scripts/wit-mut.sh`
 - `xval/` —— 和 sail-riscv 对拍：`mkconfig.py`（生成 sail 配置）、`rv32im-strict.json` / `rv32im-relaxed.json`、`lib.js`（跑 sail、解析轨迹、写 ELF、逐步比较）、`xtests.js`（riscv-tests）、`xfuzz.js`（随机单步）、`mutants.sh`（埋 bug 自测）、`summarize.js`、`run-xval.sh`（全套）
