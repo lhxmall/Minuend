@@ -31,6 +31,7 @@ use std::fs;
 mod smt_ref;
 mod adv;
 mod heapsim;
+mod l2;
 #[global_allocator]
 static GA: heapsim::Sim = heapsim::Sim;
 
@@ -280,7 +281,13 @@ fn witstat(w: &[u32]) -> String {
 
 fn run_port(w: &[u32]) -> Out {
     let mut ev = Vec::new();
-    let (hash, st) = mnpilot::run_batch(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x));
+    // loop round 2 (S1): the per-account order index must match the books after every unit
+    let (hash, st, _) = mnpilot::run_batch_wit(
+        &mut |i| w.get(i as usize).copied().unwrap_or(0),
+        &mut |x| ev.push(x),
+        &mut |i, s, _| assert!(s.books.values().all(|b| b.index_ok()), "order index broken at unit {}", i),
+        mnpilot::WitMode::Off,
+    );
     Out { hash, applied: st.applied, rejected: st.rejected, fills: st.fills, ev }
 }
 
@@ -496,7 +503,8 @@ fn port_roots(w: &[u32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, mnpilot::WitOut) {
     let (_, _, wo) = mnpilot::run_batch_wit(
         &mut |i| w.get(i as usize).copied().unwrap_or(0),
         &mut |_| {},
-        &mut |_, st, r| {
+        &mut |i, st, r| {
+            assert!(st.books.values().all(|b| b.index_ok()), "order index broken at unit {}", i);
             inc.push(*r);
             scratch.push(smt_ref::root(&mnpilot::wit::all_leaves(st)));
         },
@@ -791,9 +799,34 @@ fn main() {
             let (_, st, wo) = mnpilot::run_batch_wit(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |_| {}, &mut |_, _, _| {}, mnpilot::WitMode::Incremental);
             heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
             let (top, peak, bump) = heapsim::read();
-            println!("{{\"status\":{},\"units\":{},\"applied\":{},\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"bump_total\":{},\"guest_heap_limit\":{}}}",
-                st.status, w[2], st.applied, wo.leaves, top, peak, bump, 0x0300_0000u32 - 0x0002_0000);
+            println!("{{\"status\":{},\"units\":{},\"applied\":{},\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"bump_total\":{},\"guest_heap_limit\":{}}}",
+                st.status, w[2], st.applied, wo.leaves, top, peak, heapsim::sum_class_peaks(), bump, 0x0300_0000u32 - 0x0002_0000);
         }
+        Some("frag") => {
+            let w = l2::frag();
+            write_words(&a[2], &w);
+            println!("{{\"ops\":{}}}", w[2]);
+        }
+        Some("grind") => {
+            let (w, info) = l2::grind(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4] == "any");
+            write_words(&a[5], &w);
+            println!("{}", info);
+        }
+        Some("depth8") => {
+            // a[2] = n batches, a[3] = out dir (batches written for the guest check)
+            let n: u64 = a[2].parse().unwrap();
+            let mut ok = 0;
+            for s in 1..=n {
+                let w = l2::depth8_batch(s);
+                if let Some(d) = a.get(3) { write_words(&format!("{}/depth8_{}.bin", d, s), &w); }
+                let (good, info) = l2::depth8_check(&w);
+                if good { ok += 1; }
+                println!("seed {} {}", s, info);
+            }
+            println!("{{\"depth8_batches\":{},\"ok\":{},\"max_wit_depth\":{}}}", n, ok, mnpilot::wit::MAX_WIT_DEPTH);
+        }
+        Some("proofdump") => println!("{}", l2::proofdump(&read_words(&a[2]))),
+        Some("depthsel") => println!("{}", l2::depthsel()),
         Some("portout") => println!("{}", adv::portout(&read_words(&a[2]))),
         Some("scen") => println!("{}", scen(&a[2], a.get(3).map(|x| x.as_str()))),
         Some("witfuzz") => {

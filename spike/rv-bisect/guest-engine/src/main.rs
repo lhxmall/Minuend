@@ -59,6 +59,10 @@ mod rt {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             if HEAP == 0 { HEAP = &_heap_start as *const u8 as usize; HEAP0 = HEAP; }
             let Some(c) = class(&l) else { return core::ptr::null_mut() };
+            // loop round 2 (A1): every block of a class is aligned to min(size, 64), so an
+            // alignment above 64 is refused up front -- before, only the carve path refused it and
+            // a free-list hit returned a block aligned to 64 only (latent: no such type here)
+            if l.align() > 64 { return core::ptr::null_mut(); }
             let sz = 16usize << c;
             let p = if FREE[c] != 0 {
                 let p = FREE[c];
@@ -66,8 +70,7 @@ mod rt {
                 p
             } else {
                 // blocks are aligned to min(size, 64): every class's blocks satisfy any align <= 64
-                let a = sz.min(64);
-                if l.align() > a { return core::ptr::null_mut(); }
+                let a = sz.min(64); // >= l.align(): sz >= align and align <= 64
                 let p = (HEAP + a - 1) & !(a - 1);
                 if p + sz > HEAP_END { return core::ptr::null_mut(); }
                 HEAP = p + sz;

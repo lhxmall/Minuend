@@ -99,6 +99,32 @@ pub const ST_OK: u32 = 0;
 pub const ST_BAD_MAGIC: u32 = 1;
 pub const ST_TOO_MANY_ACCOUNTS: u32 = 2;
 pub const ST_TOO_MANY_UNITS: u32 = 3;
+/// Event code of a unit rejected by the MNWIT1 depth rule (wit::MAX_WIT_DEPTH, loop round 2 W2);
+/// outside the engine's RejectReason codes (1..17, 0x100+).
+pub const WIT_DEPTH_CODE: u32 = 18;
+
+/// MNWIT1 depth rule (W2): every key this op could newly create *for its own author* -- the
+/// author's `acct:` key if the account does not exist yet (deposit / place), the order's `ord:` key
+/// and the author's `pos:` key in the order's market if it has no position there (place) -- must
+/// land at depth <= MAX_WIT_DEPTH. Checked against the tree BEFORE the op runs, independent of
+/// whether the order then rests or fills (a deterministic, cheap pre-check; no rollback needed).
+/// Side-effect insertions (the maker's first `pos:` at a fill) are not checked: making one deep
+/// needs a targeted 2^MAX_WIT_DEPTH prefix grind, see wit::MAX_WIT_DEPTH.
+pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: AccountId) -> bool {
+    let ok = |k: &wit::H| w.smt.insert_depth(k).map(|d| d <= wit::MAX_WIT_DEPTH).unwrap_or(true);
+    let new_acct = !s.accounts.contains_key(&author);
+    match *op {
+        BatchOp::Deposit { .. } => !new_acct || ok(&wit::acct_key(&author)),
+        BatchOp::Place { market, client_seq, .. } => {
+            let m = MarketId(market);
+            let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
+            (!new_acct || ok(&wit::acct_key(&author)))
+                && ok(&wit::ord_key(&order_id(author, m, client_seq)))
+                && (has_pos || ok(&wit::pos_key(&author, m)))
+        }
+        _ => true,
+    }
+}
 const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFF0);
 const _: () = assert!(0x03F0_0000 / 4 + 0x20000 + 8 * MAX_UNITS <= 1 << 24);
 const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + MAX_UNITS) < 1 << 24);
@@ -300,7 +326,17 @@ pub fn run_batch_wit(
         let seq = eng.state.seq;
         // INSURANCE_ACCOUNT can never author a signed unit upstream (ids are pubkey hashes).
         let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
-        let res = match decode_op(&ow) {
+        let op = decode_op(&ow);
+        let author = match op {
+            BatchOp::Deposit { acct, .. } | BatchOp::Place { acct, .. } | BatchOp::Cancel { acct, .. } => acct_of(acct),
+            BatchOp::Bad => None,
+        };
+        // W2 depth rule (only where the tree exists: Incremental mode; Off/Legacy are bench builds)
+        let too_deep = match (w.as_ref(), author) {
+            (Some(w), Some(a)) => !wit_depth_ok(w, &eng.state, &op, a),
+            _ => false,
+        };
+        let res = if too_deep { Err(None) } else { match op {
             BatchOp::Deposit { acct, amount } => match acct_of(acct) {
                 Some(a) => eng.deposit(a, amount as Usd),
                 None => Err(RejectReason::BadAccount),
@@ -314,7 +350,7 @@ pub fn run_batch_wit(
                 None => Err(RejectReason::BadAccount),
             },
             BatchOp::Bad => Err(RejectReason::BadAccount),
-        };
+        }.map_err(Some) };
         match res {
             Ok(fills) => {
                 eng.state.seq += 1;
@@ -332,7 +368,7 @@ pub fn run_batch_wit(
             }
             Err(r) => {
                 st.rejected += 1;
-                ev(reason_code(&r));
+                ev(r.as_ref().map(reason_code).unwrap_or(WIT_DEPTH_CODE));
             }
         }
         let root = match mode {

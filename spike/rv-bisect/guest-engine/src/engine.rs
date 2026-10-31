@@ -137,7 +137,7 @@ impl Engine {
             .state
             .books
             .values()
-            .map(|b| b.live_orders().filter(|o| o.account == account).count())
+            .map(|b| b.live_orders_of(account).count())
             .sum::<usize>();
         if live_count >= MAX_LIVE_ORDERS_PER_ACCOUNT {
             return Err(RejectReason::Risk);
@@ -162,8 +162,7 @@ impl Engine {
                 .books
                 .get(&market)
                 .map(|b| {
-                    b.live_orders()
-                        .filter(|o| o.account == account)
+                    b.live_orders_of(account) // PILOT (S1): per-account index
                         .map(|o| u128::from(o.remaining))
                         .sum()
                 })
@@ -560,7 +559,7 @@ impl Engine {
         self.state
             .books
             .get(&market)
-            .and_then(|b| b.live_orders().find(|o| o.account == account))
+            .and_then(|b| b.live_orders_of(account).next())
             .map(|o| o.isolated)
     }
 
@@ -584,7 +583,7 @@ impl Engine {
             .state
             .books
             .iter()
-            .any(|(m, b)| !is_spot(m) && b.live_orders().any(|o| o.account == account))
+            .any(|(m, b)| !is_spot(m) && b.live_orders_of(account).next().is_some())
     }
 
     /// R2-E-8: does `account` hold a CROSS position or a live cross order on
@@ -608,7 +607,7 @@ impl Engine {
             })
             .unwrap_or(false);
         pos || self.state.books.iter().any(|(m, b)| {
-            is_spot(m) && b.live_orders().any(|o| o.account == account && !o.isolated)
+            is_spot(m) && b.live_orders_of(account).any(|o| !o.isolated)
         })
     }
 
@@ -645,7 +644,7 @@ impl Engine {
                 .unwrap_or(0);
             let mut bid_qty: u128 = 0;
             let mut ask_qty: u128 = 0;
-            for o in book.live_orders().filter(|o| o.account == account) {
+            for o in book.live_orders_of(account) {
                 match o.side {
                     Side::Bid => bid_qty += o.remaining as u128,
                     Side::Ask => ask_qty += o.remaining as u128,
@@ -745,7 +744,7 @@ impl Engine {
             // each overflow an i64 sum (debug panic / release wrap to a
             // zero reserve).
             let mut acc = [[(0i128, 0 as Usd, 0 as Usd); 2]; 2];
-            for o in book.live_orders().filter(|o| o.account == account) {
+            for o in book.live_orders_of(account) {
                 // Funding-rate books rest at encoded rates: their margin is
                 // the multiplier notional, not a dollar price.
                 let n = match self.state.markets.get(market) {

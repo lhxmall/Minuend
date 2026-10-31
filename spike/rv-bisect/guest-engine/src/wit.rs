@@ -28,6 +28,21 @@ use sha2::{Digest, Sha256};
 pub type H = [u8; 32];
 pub const EMPTY: H = [0u8; 32];
 
+/// Loop round 2 (W2): consensus bound on the proof depth (number of siblings) of any leaf a
+/// *checked* insertion creates. A unit that would insert an `acct:` key (new account), its order's
+/// `ord:` key, or its own `pos:` key for the order's market (account without a position there) at a
+/// depth > MAX_WIT_DEPTH is rejected (event code `WIT_DEPTH_CODE`) before it executes; the depth an
+/// insertion gets is 1 + the common-prefix length with the closest existing key (or the depth of the
+/// empty slot it fills). Pushing a key past 64 bits needs ~2^64 / n work against the n existing keys
+/// and only gets the grinder's own unit rejected; making an *unchecked* side-effect insertion (a
+/// maker's first `pos:` leaf at a fill) or a victim's future key deep needs a targeted 2^64 preimage
+/// prefix. The AA verifier therefore unrolls exactly MAX_WIT_DEPTH levels (docs §7.5).
+#[cfg(not(feature = "depth8"))]
+pub const MAX_WIT_DEPTH: usize = 64;
+/// test build: small bound so grinding on a laptop exercises the rule
+#[cfg(feature = "depth8")]
+pub const MAX_WIT_DEPTH: usize = 8;
+
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 pub fn b64_32(h: &H) -> [u8; 44] {
     let mut o = [b'='; 44];
@@ -162,6 +177,25 @@ pub fn node_hash(l: &H, r: &H) -> H {
     h.update(b64_32(r));
     h.finalize().into()
 }
+/// MNWIT1 keys of the kids a unit can create (W2 depth rule).
+pub fn acct_key(id: &AccountId) -> H {
+    let mut b = Buf::new();
+    acct_leaf(&mut b, id, 0, 0, 0);
+    key_of(&b.b[..b.kid])
+}
+pub fn pos_key(id: &AccountId, m: MarketId) -> H {
+    let mut b = Buf::new();
+    pos_leaf(&mut b, id, m, 0, 0, false, 0);
+    key_of(&b.b[..b.kid])
+}
+pub fn ord_key(oid: &OrderId) -> H {
+    let mut b = Buf::new();
+    b.raw(b"ord:");
+    b.hex(&oid.0);
+    b.mark_kid();
+    key_of(&b.b[..b.kid])
+}
+
 /// (key, leaf hash) of the leaf in `b`.
 pub fn key_and_hash(b: &Buf) -> (H, H) {
     let k = key_of(&b.b[..b.kid]);
@@ -247,6 +281,46 @@ impl Smt {
                 }
             }
         }
+    }
+    /// Depth (proof length) a NEW leaf with `key` would get if inserted now; None if the key is
+    /// already present (an update does not change the shape).
+    pub fn insert_depth(&self, key: &H) -> Option<usize> {
+        let mut r = self.root;
+        let mut d = 0;
+        loop {
+            match r {
+                R::E => return Some(d),
+                R::L(i) => {
+                    let k2 = &self.leaves[i as usize].key;
+                    if k2 == key {
+                        return None;
+                    }
+                    let mut c = d;
+                    while c < 256 && bit(k2, c) == bit(key, c) {
+                        c += 1;
+                    }
+                    return Some(c + 1);
+                }
+                R::N(n) => {
+                    r = self.nodes[n as usize].ch[bit(key, d)];
+                    d += 1;
+                }
+            }
+        }
+    }
+    /// Max depth over all leaves (stats / tests).
+    pub fn max_depth(&self) -> usize {
+        fn go(t: &Smt, r: R, d: usize) -> usize {
+            match r {
+                R::E => 0,
+                R::L(_) => d,
+                R::N(n) => {
+                    let [a, b] = t.nodes[n as usize].ch;
+                    go(t, a, d + 1).max(go(t, b, d + 1))
+                }
+            }
+        }
+        go(self, self.root, 0)
     }
     /// Insert or update. No-op (no dirty path) when the leaf hash is unchanged.
     pub fn set(&mut self, key: H, lh: H) {

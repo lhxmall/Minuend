@@ -128,8 +128,13 @@ pub enum Term {
     /// a leaf string (its key and leaf hash are recomputed by the verifier)
     Leaf(String),
 }
-/// Max proof depth a verifier accepts (keys are 256 bits).
-pub const MAX_DEPTH: usize = 256;
+/// Max proof depth a verifier accepts: the MNWIT1 depth rule (loop round 2, W2; design §7.5)
+/// guarantees every leaf a checked insertion creates sits at depth <= 64, and the AA verifier
+/// unrolls exactly that many levels. (Round 1 had 256 = key length.)
+#[cfg(not(feature = "depth8"))]
+pub const MAX_DEPTH: usize = 64;
+#[cfg(feature = "depth8")]
+pub const MAX_DEPTH: usize = 8;
 
 /// Path of `k` in the canonical tree over `leaves`: siblings from the ROOT down
 /// (s_0 = sibling at depth 0) and the terminal.

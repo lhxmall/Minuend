@@ -198,6 +198,9 @@ pub fn robust(dir: &str) -> String {
     let mut b = base.clone(); b[2] = mnpilot::MAX_UNITS + 1; cases.push(("ops_over_limit".into(), b));
     let mut b = base.clone(); b[2] = u32::MAX; cases.push(("ops_u32max".into(), b));
     let mut b = base.clone(); b[2] = 0; cases.push(("ops_zero".into(), b));
+    // loop round 2: exactly at the limits (accepted: status 0)
+    let mut b = base.clone(); b[1] = mnpilot::MAX_ACCOUNTS; cases.push(("acc_at_limit".into(), b));
+    let mut b = base.clone(); b[1] = 0; b[2] = 0; cases.push(("acc_zero_ops_zero".into(), b));
     let mut b = base.clone(); b[1] = 0; cases.push(("acc_zero_ops_shift".into(), b)); // ops read from the id table
     // truncated: header claims all ops, words stop halfway (missing words read as 0)
     let mut b = base.clone(); b.truncate(4 + 8 * n_acc + 8 * (base[2] as usize / 2) + 3); cases.push(("truncated".into(), b));
@@ -330,6 +333,9 @@ pub fn selftest(dir: &str) -> String {
     }
     chk("insurance_author", st == 0 && e0 == 2);
     let (_, ev, _, _) = run("garbage_ops"); chk("garbage_ops_nonempty", !ev.is_empty());
+    let (st, ev, ap, _) = run("acc_at_limit"); chk("acc_at_limit", st == 0 && !ev.is_empty() && ev.iter().all(|&e| e == 2) && ap == 0);
+    let (st, ev, _, h) = run("acc_zero_ops_zero"); chk("acc_zero_ops_zero", st == 0 && ev.is_empty() && h != [0; 32]);
+    let ds = super::l2::depthsel(); chk(&ds, ds.contains("\"depthsel_fail\":[]"));
     let a = run("ok_base"); let b = run("trailing_junk"); chk("trailing_junk", a.1 == b.1 && a.3 == b.3);
     format!("{{\"selftest_fail\":[{}]}}", fails.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>().join(","))
 }

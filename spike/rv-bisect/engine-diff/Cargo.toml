@@ -16,6 +16,10 @@ ed25519-dalek = "3"
 sha2 = "0.10"
 mnpilot = { path = "../guest-engine" }
 
+[features]
+# loop round 2 (W2) test build: MNWIT1 MAX_WIT_DEPTH = 8 in the port and the reference verifier
+depth8 = ["mnpilot/depth8"]
+
 [profile.release]
 opt-level = 3
 debug = false

@@ -19,6 +19,8 @@ embed = []
 nowit = []
 # legacy full witness rebuild (sort + Obyte merkle) after every unit >= input word 3 (cost comparison)
 legacywit = []
+# test build: MNWIT1 MAX_WIT_DEPTH = 8 instead of 64 (loop round 2, W2: grind-able on a laptop)
+depth8 = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
