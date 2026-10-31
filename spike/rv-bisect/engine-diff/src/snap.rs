@@ -426,11 +426,12 @@ pub fn snapcap() -> String {
 /// oracle_report_history ring of depth 8 per (market, oracle)). MNWIT1 tree committed after every account.
 /// Real engine entry points only (gov_deposit / create_market / stake_oracle / report_price / place), so every
 /// state reached here is reachable by units. Prints the host heap simulation (64-bit sizes).
+#[allow(dead_code)]
 pub fn mktcap(n: u32, m: u32, r: u32) -> String {
     mktcap_full(n, m, r, 0, 0)
 }
 /// `mktcap n m r orders wd`: + per account `orders` resting bids (<= MAX_LIVE_ORDERS_PER_ACCOUNT, spread over the
-/// markets, every third isolated) and `wd` pending withdrawals, positions in even markets isolated (isolated_margin
+/// markets; isolated in even markets like the positions) and `wd` pending withdrawals, positions in even markets isolated (isolated_margin
 /// entries): every per-account state kind at once = the whole-state heap bound at the caps.
 pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
     use mnpilot::types::{AccountId as A, MarketId as M, OrderType, Side as S, TimeInForce as T};
@@ -487,6 +488,26 @@ pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
                 ok(r3, e);
             }
         }
+        if i < r {
+            let r4 = e.gov_deposit(a, minuend_types::ORACLE_BOND_PERP);
+            ok(r4, e);
+            let r5 = e.stake_oracle(a);
+            ok(r5, e);
+            for &mk in &markets {
+                for k in 0..8i64 {
+                    let r6 = e.report_price(a, M(mk), MID + k * DOLLAR);
+                    ok(r6, e);
+                }
+            }
+        }
+        if let Some(w) = sess.w.as_mut() {
+            w.commit(&mut sess.eng.state);
+        }
+    }
+    // second pass (after every trade: the live-order cap would otherwise refuse the counterparties' asks)
+    for i in 0..n {
+        let a = id(i);
+        let e = &mut sess.eng;
         for j in 0..orders {
             let seq = e.state.seq;
             let cs = e.state.seen_client_seq.get(&a).copied().unwrap_or(0) + 1;
@@ -499,18 +520,6 @@ pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
         for k in 0..wd {
             let r8 = e.withdraw(a, USD_SCALE as i128, k as u64 + 1);
             ok(r8, e);
-        }
-        if i < r {
-            let r4 = e.gov_deposit(a, minuend_types::ORACLE_BOND_PERP);
-            ok(r4, e);
-            let r5 = e.stake_oracle(a);
-            ok(r5, e);
-            for &mk in &markets {
-                for k in 0..8i64 {
-                    let r6 = e.report_price(a, M(mk), MID + k * DOLLAR);
-                    ok(r6, e);
-                }
-            }
         }
         if let Some(w) = sess.w.as_mut() {
             w.commit(&mut sess.eng.state);

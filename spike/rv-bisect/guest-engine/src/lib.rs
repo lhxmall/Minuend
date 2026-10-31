@@ -229,6 +229,10 @@ pub const MAX_ZERO_VOTERS: usize = 64;
 /// x 32 markets positions, 256 oracles x 32 markets, 64 orders + 64 withdrawals per account) is measured by
 /// `mktcap 256 32 256 64 64` (findings/rv-loop-10.md). Counts delisted markets too (R7-L4).
 pub const MAX_STATE_MARKETS: usize = 32;
+/// Loop round 10 (R10-H1): bonded oracles (incl. ones unbonding, until released). Each holds a report + an 8-deep
+/// ring per market (~1.2 KB per (market, oracle) pair measured); 32 x 32 markets keeps that term near 1 MB. A Stake by
+/// a new oracle at the cap is refused (STATE_CAP_CODE); upstream has no limit (pilot rule like the other caps).
+pub const MAX_STATE_ORACLES: usize = 32;
 /// Units that can create an account for their author (deposit; liquidate: the keeper reward
 /// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
 /// already holds `cap` accounts (the insurance account included).
@@ -267,6 +271,8 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
         // the heap they hold is real; filling the cap burns (MAX_STATE_MARKETS - 1) x CREATE_MARKET_FEE_PERP and the recovery is an upgrade
         // image with a larger cap (rv_rollup `upgrade`), not a state rule
         BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
+        // loop round 10 (R10-H1): bonded oracles (an already bonded id keeps upstream's AlreadyBonded)
+        BatchOp::Stake { .. } => s.oracle_bonds.contains_key(&author) || s.oracle_bonds.len() < MAX_STATE_ORACLES,
         _ => true,
     }
 }

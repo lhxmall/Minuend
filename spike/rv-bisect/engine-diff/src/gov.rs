@@ -315,7 +315,15 @@ pub fn pilot_gov_refused(eng: &Engine, d: &B, ids: &[AccountId], rx: &dyn Fn(u32
     // loop round 8 (R7-M2): the commit bond, the same predicate over the real engine's balance / live commits
     let bal = || eng.state.perp_balances.get(author).copied().unwrap_or(0);
     let live = || eng.state.commits.values().filter(|e| e.account == *author).count();
-    let zero_new = |x: &B| (matches!(x, B::GovWithdraw { amount: 0, .. }) && !eng.state.perp_balances.contains_key(author)) || !mnpilot::commit_bond_ok(x, bal, live);
+    // loop round 10 (R10-H1): the market / oracle caps, mirrored on the real engine's state (both sides list the same
+    // markets and bond the same oracles up to the cap; the real engine has no caps) so differential runs that reach
+    // them stay comparable; govedge `cap:markets` / `r10:oracles` check the port's own predicate absolutely
+    let caps = |x: &B| match x {
+        B::CreateMarket { .. } => eng.state.markets.len() >= mnpilot::MAX_STATE_MARKETS,
+        B::Stake { .. } => !eng.state.oracle_bonds.contains_key(author) && eng.state.oracle_bonds.len() >= mnpilot::MAX_STATE_ORACLES,
+        _ => false,
+    };
+    let zero_new = |x: &B| (matches!(x, B::GovWithdraw { amount: 0, .. }) && !eng.state.perp_balances.contains_key(author)) || caps(x) || !mnpilot::commit_bond_ok(x, bal, live);
     zero_new(d)
         || match d {
             B::Reveal { ext, .. } => rx(*ext, mnpilot::EXT_REVEAL_LEN).is_some_and(|e| {
@@ -1150,6 +1158,29 @@ pub fn govedge() -> String {
         let pe = run_port(&g.words());
         expect("r8:port_events", pe.ev == g.ev, &mut fails);
         run("r7", &g, &mut fails);
+    }
+    // 9. loop round 10 (R10-H1): the bonded-oracle cap -- stakes by new ids succeed up to MAX_STATE_ORACLES (the
+    //    fixture already bonds accounts 1..=3), the next new id is refused (19), an already bonded id still gets
+    //    upstream's AlreadyBonded (not 19), and the port's events equal the harness's
+    {
+        cases += 1;
+        let n = mnpilot::MAX_STATE_ORACLES as u32 + 8;
+        let mut g = GB::new(20 + n, flags);
+        let base = g.eng.state.oracle_bonds.len() as u32;
+        let mut ev = Vec::new();
+        for k in 0..=(mnpilot::MAX_STATE_ORACLES as u32 - base) {
+            g.op(GB::w_gdep(20 + k, mnpilot::types::ORACLE_BOND_PERP as u64));
+            ev.push(g.op([11 | ((20 + k) << 8), 0, 0, 0, 0, 0, 0, 0]));
+        }
+        let free = (mnpilot::MAX_STATE_ORACLES as u32 - base) as usize;
+        expect("r10:oracles_below_cap", ev[..free].iter().all(|e| *e == OK), &mut fails);
+        expect("r10:oracles_at_cap", ev[free] == mnpilot::STATE_CAP_CODE, &mut fails);
+        g.op(GB::w_gdep(20, mnpilot::types::ORACLE_BOND_PERP as u64));
+        let again = g.op([11 | (20 << 8), 0, 0, 0, 0, 0, 0, 0]);
+        expect("r10:oracles_rebond_not_cap", again != OK && again != mnpilot::STATE_CAP_CODE, &mut fails);
+        let pe = run_port(&g.words());
+        expect("r10:port_events", pe.ev == g.ev, &mut fails);
+        run("r10", &g, &mut fails);
     }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
     format!("{{\"cases\":{},\"ok\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, fj.join(","))

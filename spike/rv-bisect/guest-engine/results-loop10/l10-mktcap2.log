@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 1m 06s
+mktcap 16 16 0 {"accounts":17,"markets":16,"marks":16,"positions":256,"oracles":1,"oracle_reports":15,"history_samples":15,"rejected_ops":0,"why":"{}","leaves":306,"sizeclass_highwater":308096,"peak_live":250752,"sum_class_peaks":307936,"snapshot_words":3578,"guest_heap_limit":50200576}
+mktcap 64 64 0 {"accounts":65,"markets":64,"marks":64,"positions":4096,"oracles":1,"oracle_reports":63,"history_samples":63,"rejected_ops":0,"why":"{}","leaves":4290,"sizeclass_highwater":3159552,"peak_live":2316992,"sum_class_peaks":3159392,"snapshot_words":35690,"guest_heap_limit":50200576}
+mktcap 128 128 0 {"accounts":129,"markets":128,"marks":128,"positions":16384,"oracles":1,"oracle_reports":127,"history_samples":127,"rejected_ops":0,"why":"{}","leaves":16770,"sizeclass_highwater":11885632,"peak_live":8675328,"sum_class_peaks":11885472,"snapshot_words":128682,"guest_heap_limit":50200576}
+mktcap 256 64 0 {"accounts":257,"markets":64,"marks":64,"positions":16384,"oracles":1,"oracle_reports":63,"history_samples":63,"rejected_ops":0,"why":"{}","leaves":16770,"sizeclass_highwater":11528704,"peak_live":8303568,"sum_class_peaks":11528544,"snapshot_words":127082,"guest_heap_limit":50200576}
+mktcap 256 128 0 {"accounts":257,"markets":128,"marks":128,"positions":32768,"oracles":1,"oracle_reports":127,"history_samples":127,"rejected_ops":0,"why":"{}","leaves":33282,"sizeclass_highwater":23085632,"peak_live":16650256,"sum_class_peaks":23085472,"snapshot_words":246954,"guest_heap_limit":50200576}
+mktcap 256 256 0 {"accounts":257,"markets":256,"marks":256,"positions":65536,"oracles":1,"oracle_reports":255,"history_samples":255,"rejected_ops":0,"why":"{}","leaves":66306,"sizeclass_highwater":46054080,"peak_live":33331072,"sum_class_peaks":46053920,"snapshot_words":486698,"guest_heap_limit":50200576}
+mktcap 256 256 256 
+MKDONE

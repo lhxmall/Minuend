@@ -1,5 +1,5 @@
 #!/bin/bash
-# loop round 10 (R10-H1 fix: MAX_STATE_MARKETS 32): host default + govwit builds, guest default + prod builds of loop10h,
+# loop round 10 (R10-H1 fix: MAX_STATE_MARKETS 32, MAX_STATE_ORACLES 32): host default + govwit builds, guest default + prod builds of loop10h,
 # then the tests the cap touches: govedge (cap:markets), govcap, govfuzz / xfuzz, capcheck, snaptest, liqedge, govwit leaf-flip;
 # govgen batches through the JS guest (default image); prodheight on the prod image.
 . /data/hark/spike-rv/env.sh
@@ -18,4 +18,5 @@ for b in $B $BW; do echo "== $b"; $b govedge; $b govcap; $b govfuzz 100 300 | ta
 mkdir -p $W/govg && rm -f $W/govg/*.bin; for s in 31 32 33; do $B govgen $s 300 $W/govg/gov$s.bin > /dev/null; done
 (cd $W/js && node witscen.js $B $P-g/$G/release/rvengine $W/govg > $L/l10h-govguest.log 2>&1; tail -n 2 $L/l10h-govguest.log >> $O)
 (cd $W/js && node prodheight.js $P-gprod/$G/release/rvengine $P-g/$G/release/rvengine > $L/l10h-prodheight.log 2>&1; tail -n 1 $L/l10h-prodheight.log >> $O)
+echo "mktcap 256 32 32 64 64 $($B mktcap 256 32 32 64 64)" >> $O   # whole state at the round-10 caps (engine-direct, caps not applied: 32 markets x 32 oracles)
 echo HDONE >> $O

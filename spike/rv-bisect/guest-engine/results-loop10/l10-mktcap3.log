@@ -1,0 +1,9 @@
+warning: function `mktcap` is never used
+   --> src/snap.rs:429:8
+warning: `engine-diff` (bin "engine-diff") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 1m 23s
+mktcap 256 0 0 64 64 {"accounts":257,"markets":1,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":0,"marks":1,"positions":0,"oracles":1,"oracle_reports":0,"history_samples":0,"rejected_ops":510,"why":"{'Risk': 510}","leaves":16644,"sizeclass_highwater":21456384,"peak_live":18211360,"sum_class_peaks":21456240,"snapshot_words":962874,"guest_heap_limit":50200576}
+mktcap 256 32 256 64 64 {"accounts":257,"markets":32,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":0,"marks":32,"positions":0,"oracles":257,"oracle_reports":8223,"history_samples":8223,"rejected_ops":16320,"why":"{'Risk': 16320}","leaves":16706,"sizeclass_highwater":31184256,"peak_live":27547408,"sum_class_peaks":31184128,"snapshot_words":1215613,"guest_heap_limit":50200576}
+mktcap 256 16 256 64 64 {"accounts":257,"markets":16,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":0,"marks":16,"positions":0,"oracles":257,"oracle_reports":4111,"history_samples":4111,"rejected_ops":8160,"why":"{'Risk': 8160}","leaves":16674,"sizeclass_highwater":27297472,"peak_live":23849040,"sum_class_peaks":27297344,"snapshot_words":1109613,"guest_heap_limit":50200576}
+mktcap 256 64 256 64 64 {"accounts":257,"markets":64,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":0,"marks":64,"positions":0,"oracles":257,"oracle_reports":16447,"history_samples":16447,"rejected_ops":32640,"why":"{'Risk': 32640}","leaves":16770,"sizeclass_highwater":35330880,"peak_live":31523792,"sum_class_peaks":35330752,"snapshot_words":1382589,"guest_heap_limit":50200576}
+MKDONE
