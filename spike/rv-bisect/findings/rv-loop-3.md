@@ -71,7 +71,7 @@ of one crowded level; old = round-2 binary, new = this round):
 |---|---|---|
 | crowdc256 (256) | 96 537 – 126 966 | 91 890 – 122 748 |
 | crowdc4k (4 096) | 233 524 – 263 966 | 123 804 – 155 336 |
-| crowdcmax (16 128, the MAX_UNITS cap) | run stopped (CPU; > 2 h in the JS model) | `l3-s1b-max-new.log` if it finished (loop 4 kept it running), else extrapolated: flat in the level length (crowdc256 → crowdc4k barely moves) |
+| crowdcmax (16 128, the MAX_UNITS cap) | run stopped (CPU; > 2 h in the JS model) | 153 086 – 175 007 (`l3-s1b-max-new.log`: 16 384 units, 6.63 G steps, heap 18.9 MB) |
 
 (The remaining per-cancel cost is the MNWIT1 commit of the touched leaves, ~90 k steps; the level scan was ~35 steps per
 order ahead of the cancelled one.)

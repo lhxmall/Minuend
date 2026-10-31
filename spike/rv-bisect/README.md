@@ -163,7 +163,7 @@ verifier to finalized heights.
 
 ## Loop round 4 (2026-10-31) — liquidation / oracle port, session export / import, upgrade path
 
-`findings/rv-loop-4.md` (C 1 · H 3 · M 6 · L 3 · I 5), design §7.7, results `guest-engine/results-loop4/`. Ported
+`findings/rv-loop-4.md` (C 1 · H 3 · M 6 · L 4 · I 5), design §7.7, results `guest-engine/results-loop4/`. Ported
 Withdraw, Liquidate (book IOC + ADL + funding-rate off-book close + haircut + keeper), ReportPrice, UpdateExternalPrice,
 the funding peg and the funding-rate mark block (batch kinds 6–10, header fixture bits 25 / 26; `engine-diff liqfuzz`
 vs the real engine); guarded account map (`Accounts` / `AcctMut`: OI, holders and dirty set kept by the type system);

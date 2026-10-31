@@ -28,7 +28,7 @@ Severity as in rounds 1–3: **C** = honest party loses / wrong verdict on reach
 undefined guest outcome, or a protocol-reachable state loss / halt; **M** = design/spec gap with a concrete failure
 mode or a defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
 
-Totals: **C 1 · H 3 · M 6 · L 3 · I 5**. No real-engine ↔ port divergence (fuzz / advfuzz / witfuzz / scen / segfuzz /
+Totals: **C 1 · H 3 · M 6 · L 4 · I 5**. No real-engine ↔ port divergence (fuzz / advfuzz / witfuzz / scen / segfuzz /
 liqfuzz all equal after the changes).
 
 | id | sev | area | title | status |
@@ -46,6 +46,7 @@ liqfuzz all equal after the changes).
 | R4-L1 | L | snapshot | `run_import` hashes the snapshot words twice (once before decode, once in `SnapR`) | accepted: one SHA-256 pass over ≤ 13 k words is ~10^6 steps |
 | R4-L2 | L | tests | round-3 mutants 15 / 18 / 20 (report band, liquidatable, ADL collateral) survived because those paths were not ported | ported in round 4; see the round-4 mutation table |
 | R4-L3 | L | harness | `SetHeight`'s `prod` rule is not visible to the host differential harness (host builds are non-prod) | covered by `js/prodheight.js` on the prod image (6 / 6) |
+| R4-L4 | L | Accounts guard | the derived index fields `Accounts::oi_long / holders / dirty` are `pub`: the type system stops in-place edits of positions, but not a direct write to an index | open (documented): no writer outside `state.rs` today (grep); make them private with read accessors when porting for real |
 | R4-I1 | I | Accounts guard | can a path change positions without re-indexing? | no: `accounts` has no `DerefMut`; every mutable path goes through `AcctMut` (re-index on drop) or `insert` / `remove`; host runs assert `idx_ok` after every unit (first run found and fixed an insert-before-remove ordering bug in `insert`) |
 | R4-I2 | I | account cap | can any unit other than deposit / liquidate create an account, or the insurance account push the count over? | no: the insurance account exists from genesis and is never removed; escrow / refund paths touch existing accounts; a failed unit's journal rollback deletes accounts it created; `capcheck` asserts accounts ≤ cap after every unit and that code 19 fires only for a new deposit / liquidate author at the cap |
 | R4-I3 | I | snapshot | can a flipped / truncated snapshot be imported? | no: snaptest 300 × 300 — truncations and 8 random bit flips per batch all refused (flips that still decode as a valid snapshot of another state are refused by the digest) |
