@@ -36,6 +36,12 @@ const state=`
 		var['top'] = $st.up - 1;
 		response['upgrade'] = $st.up;
 	}
+	else if ($st.cx) {
+		var['U' || $st.cx] = false;   // loop round 9 (R9-H1): cancel the pending upgrade
+		var['uh'] = false;
+		var['top'] = $st.ctop;
+		response['cancel'] = $st.cx;
+	}
 	else if ($st.xb) {
 		var['x' || $st.xb] = $st.v;
 		response['xbind'] = $st.v;

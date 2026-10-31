@@ -656,6 +656,33 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
     const i3 = await sub(C, 3, UM2, memX(2, D, 33), h2.final, 33); rec('upgrade', 'R5-M1: import height 3 from the new image', 'accepted', bnc(i3));
     const n4 = await sub(C, 4, i3.fm.root(), memX(0, D, 4), i3.final, 4); rec('upgrade', 'R5-M1: height 4 chains on m(3) (no stale image)', 'accepted', bnc(n4));
     rec('upgrade', 'R5-M1: a second upgrade above the pending one refused', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 5, mem: UM }), /upgrade pending at 3/)); }
+  { const C = new Chain(); // loop round 9 (R9-H1): upgrade at h whose h-1 is NOT an export run -> bricked before; cancel recovers
+    const g9 = 'upgrade R9-H1';
+    const h1 = await sub(C, 1, G, memX(0, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM });
+    const i2 = await sub(C, 2, UM, memX(2, D, 2), h1.final, 2); C.ts += WIN;
+    rec(g9, 'non-export height 1 finalizes', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 1 })));
+    rec(g9, 'xbind of height 1 refused (kind 0: no export)', 'bounce', bnc(await S(C, W, ROLL, 0, xb(h1.fm, h1.unit)), /kind/));
+    await S(C, W, ROLL, 0, xb(i2.fm, i2.unit));
+    rec(g9, 'import height 2 can never finalize', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    rec(g9, 'PoC: a re-schedule above the stuck one is refused', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM }), /upgrade pending at 2/));
+    rec(g9, 'PoC: re-scheduling at the same height keeps U2 (still stuck)', ['accepted', UM], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM })), C.r('U2')]);
+    rec(g9, 'cancel from a non-governance address', 'bounce', bnc(await S(C, OP1, ROLL, 0, { cancel: 1 }), /not governance/));
+    const i2b = await sub(C, 2, UM, memX(2, D, 23), h1.final, 23); const n3 = await sub(C, 3, i2b.fm.root(), memX(0, D, 3), i2b.final, 3);
+    rec(g9, 'cancel by governance: U2 / uh cleared, live heights >= 2 voided (top = 1)', ['accepted', false, false, 1], [bnc(await S(C, GOV, ROLL, 0, { cancel: 1 })), !!C.r('U2'), !!C.r('uh'), +C.r('top')]);
+    rec(g9, 'cancel without a pending upgrade', 'bounce', bnc(await S(C, GOV, ROLL, 0, { cancel: 1 }), /no pending upgrade/));
+    rec(g9, 'voided import height 2 bond reclaimable', 'accepted', bnc(await S(C, OP1, ROLL, 0, { reclaim: i2b.unit })));
+    rec(g9, 'voided height 3 bond reclaimable', 'accepted', bnc(await S(C, OP1, ROLL, 0, { reclaim: n3.unit })));
+    rec(g9, 'height 2 from the new image now refused (no upgrade)', 'bounce', bnc(await sub(C, 2, UM, memX(2, D, 24), h1.final, 24), /bad s0/));
+    const x2 = await sub(C, 2, h1.fm.root(), memX(1, D, 25), h1.final, 25); rec(g9, 'height 2 chained on m(1) (an export run) accepted', 'accepted', bnc(x2));
+    C.ts += WIN; rec(g9, 'height 2 finalizes as a normal height', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 2 })));
+    rec(g9, 'upgrade re-scheduled at 3 (2 is an export run)', 'accepted', bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM })));
+    const i3 = await sub(C, 3, UM, memX(2, D, 3), x2.final, 3); C.ts += WIN; await S(C, W, ROLL, 0, xb(x2.fm, x2.unit)); await S(C, W, ROLL, 0, xb(i3.fm, i3.unit));
+    rec(g9, 'the re-scheduled upgrade finalizes', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 3 })));
+    rec(g9, 'cancel after the upgrade finalized', 'bounce', bnc(await S(C, GOV, ROLL, 0, { cancel: 1 }), /no pending upgrade/)); }
+  { const C = new Chain(); // R9-H1: cancel when a fraud void already lowered top below uh - 1 keeps top
+    const h1 = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); const h2 = await sub(C, 2, h1.fm.root(), memX(1, D, 2), h1.final, 2);
+    await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM }); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM });
+    rec('upgrade R9-H1', 'cancel at uh = 2 with top = 1 keeps top 1', ['accepted', 1], [bnc(await S(C, GOV, ROLL, 0, { cancel: 1 })), +C.r('top')]); }
 };
 
 // ---------- loop round 7 (R6-M2): per-height timestamp bound into s0 (register x10 = ts)

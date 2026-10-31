@@ -154,6 +154,17 @@ else if ($d.upgrade) {
 	require($p <= $lf OR $h <= $p, 'upgrade pending at ' || $p);
 	$st = {up: $h, clr: ($p > $lf AND $p != $h) ? $p : 0};
 }
+// ---- loop round 9 (R9-H1): governance cancels the pending upgrade (escape hatch). The import at uh can only finalize
+//      on an export proven at uh - 1; if uh - 1 is not an export run (scheduled too early, or re-submitted as a normal run
+//      after a fraud void) and it finalizes, no height >= uh could ever finalize and a re-schedule must stay <= uh: the
+//      rollup was bricked. cancel clears U<uh> and uh and voids the live heights >= uh (top = min(top, uh - 1); not
+//      fraud: bonds reclaimable), so the heights are re-submitted from m(uh - 1) and the upgrade can be scheduled again.
+else if ($d.cancel) {
+	require(trigger.address == $GOV, 'not governance');
+	$p = var['uh'] OTHERWISE 0;
+	require($p > $lf, 'no pending upgrade');
+	$st = {cx: $p, ctop: min($top, $p - 1)};
+}
 // ---- loop round 4: xbind {xbind: sid, words: [kind, 8 digest words], wsib: [9 x [24 siblings]]}: proves a
 //      submission's snapshot kind and digest against its final memory root (anyone; once per submission)
 else if (exists(trigger.data.xbind)) {
@@ -203,6 +214,12 @@ else bounce('unknown command');
 		var['uh'] = $st.up;
 		var['top'] = $st.up - 1;
 		response['upgrade'] = $st.up;
+	}
+	else if ($st.cx) {
+		var['U' || $st.cx] = false;   // loop round 9 (R9-H1): cancel the pending upgrade
+		var['uh'] = false;
+		var['top'] = $st.ctop;
+		response['cancel'] = $st.cx;
 	}
 	else if ($st.xb) {
 		var['x' || $st.xb] = $st.v;
