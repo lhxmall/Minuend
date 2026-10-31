@@ -430,6 +430,20 @@ groups.r13 = async () => { const g = 'r13 separate global cap'; const G0 = T.gen
     rec(g, '(c) after 6 days a new height posts OBOND on chain', ['accepted', undefined], [bnc(await submit(C, OP2, CYC + 1, Hn, prev.final)), C.r('b' + Hn.sid)]);
     // honest-locked vs attacker burn at the plateau, per 24 h with a puppet first winner: N x 12.8 M locked vs 6.412 M burned
     const N = 3; rec(g, '(a) plateau economics (N = 3 heights / day): honest locked N x 12.8 M, attacker burn 6.412 M / day (puppet first winner)', [N * OBOND * 64, OBOND * 32 + GF + FEE], [N * OBOND * 2 ** VCAP, OBOND * 2 ** (VCAP - 1) + GF + FEE]); }
+  // (d) R13-L2 / R13-I1 (documented): a voided (not fraudulent) escalated submission must still be defended; a silent
+  //     defender loses on the timeout, its stored bond is split (bd/2 to the griefer, bd/2 burned) and reclaim is refused.
+  //     And a defender-timeout win on a LIVE honest submission is a fraud void: it bumps v_h and V like a step proof.
+  { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(3) }, Vt: { value: new D(C.ts) } }; const L1 = T.batch(G0, 1, { k: 5, mut: T.MUT.mem }), H1 = T.batch(G0, 1);
+    await submit(C, OPX, 1, L1, 'genesis'); C.ts += 61; const h2 = T.batch(L1.mem, 2); await submit(C, OP2, 2, h2, L1.final); const bd = +C.r('b' + h2.sid); rec(g, '(d) setup: the honest h2 posts OBOND x 2^3 (V = 3)', OBOND * 8, bd);
+    const og = await open(C, CH3, h2.sid); const of = await open(C, CH1, L1.sid);
+    await playAll(C, [game(of, L1, H1, H1)]); rec(g, '(d) fraud at h1 proven: h1 and the honest h2 voided (top 0), V = 4', [0, 4], [+(C.r('top') || 0), +C.r('V')]);
+    const c3 = C.b(CH3), b0 = +(C.r('burned') || 0);
+    await playAll(C, [game(og, h2, T.batch(L1.mem, 2, { k: 6, mut: T.MUT.reg }), h2, { defSilent: true })]);
+    rec(g, '(d) R13-L2: the voided honest h2 defender stays silent -> griefer wins, gets CBOND - GF - FEE + bd/2, burned += bd/2', [CBOND - GF - FEE + bd / 2, bd / 2], [C.b(CH3) - c3, +C.r('burned') - b0]);
+    rec(g, '(d) R13-L2: reclaim of h2 refused (fraud flag); V not bumped by a result on a voided submission', ['bounce', 4], [bnc(await S(C, OP2, ROLL, 0, { reclaim: h2.sid }), /cannot reclaim/), +C.r('V')]); }
+  { const C = new Chain(); const h1 = T.batch(G0, 1); await submit(C, OP1, 1, h1, 'genesis'); const og = await open(C, CH3, h1.sid);
+    await playAll(C, [game(og, h1, T.batch(G0, 1, { k: 7, mut: T.MUT.reg }), h1, { defSilent: true })]);
+    rec(g, '(d) R13-I1: an honest live h1 whose operator goes silent vs a griefer is voided like fraud: top 0, v1 = 1, V = 1', [0, 1, 1], [+(C.r('top') || 0), +C.r('v1'), +C.r('V')]); }
   // (b) the per-height escalation is not capped by VCAP: with V = 6 stored, v1 = 3 -> 2^6, v1 = 8 -> 2^8, v1 = 15 -> 2^10
   for (const [v1, ex] of [[3, 6], [8, 8], [15, 10]]) { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(VCAP) }, Vt: { value: new D(C.ts) }, v1: { value: new D(v1) } };
     const b = OBOND * 2 ** ex;

@@ -196,3 +196,15 @@ honest operators post the escalated bond during an attack and get it back in ful
 Upgrade / cancel voids and late results on voided submissions do not count. `rv_rollup` 86 / 1 699.
 Residual R12-M1 (M, owner): at V = 10 every height locks 204.8 M bytes for its window (capital amplification ≈ 2 × heights
 per day vs the attacker's daily burn). rolltest 444/444; AA mutants `js/aamut-l12.py` 26/26 killed.
+
+## Loop round 13 (2026-11-01) — R12-M1 fixed: global term capped separately (rv_rollup rule change)
+
+`findings/rv-loop-13.md`, design §8 item 3. Decision (2026-11-01, by the assistant per the owner's brief; owner may
+override): **bond_h = OBOND × 2^min(max(v_h, min(V, 6)), 10)**, V stored capped at VCAP = 6. The per-height escalation
+still reaches 2^10 at a repeatedly attacked height; the global term every honest height pays during an attack is at most
+64 × OBOND = 12.8 M (was 204.8 M) and fully decays in 6 days. Residual R13-L1 (accepted): at the plateau a moving-height
+stall costs 6.412 M per cycle with a puppet first winner. End-to-end review of a fraudulent height (submit → uopen →
+layer 1 → layer 2 → rv_step → void → resubmit → finalize, every timeout path): no C / H / M; R13-L2 (a voided honest
+submission must keep defending games opened while live) documented with a PoC. `rv_rollup` 86 / 1 707. rolltest
+475/475; AA mutants `js/aamut-l13.py` 32/32 killed; rolldevnet section 11 (ONLY11) on the box.
+
