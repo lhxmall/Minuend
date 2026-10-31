@@ -1052,7 +1052,10 @@ pub fn govedge() -> String {
         let first19 = pe.iter().position(|e| *e == mnpilot::STATE_CAP_CODE).unwrap_or(pe.len());
         expect("cap:not_early", pe[..first19] == g.ev[..first19], &mut fails);
     }
-    // 8. loop round 7 review R7-M1: a gov withdraw of 0 by an id without a PERP ledger entry is refused (code 19) at
+    // 8. loop round 8 (R7-M2) r8:* -- the commit bond: no PERP no commit, (live + 1) x bond, the reserve blocks
+    //    withdraw / listing fee / oracle stake (also as a Reveal's inner op), a revealed commit keeps its bond, release
+    //    at the TTL prune.
+    //    loop round 7 review R7-M1: a gov withdraw of 0 by an id without a PERP ledger entry is refused (code 19) at
     //    any ledger size -- also as a Reveal's inner op -- and adds nothing; by a holder (incl. a zero balance) it
     //    applies; amount > 0 by a fresh id keeps the upstream rejection. PoC of the old behaviour: 249 such units
     //    filled the shared ledger cap, then a slash by a new challenger was refused (code 19).
@@ -1095,10 +1098,15 @@ pub fn govedge() -> String {
         expect("r8:reveal_inner_reserved", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
         // CreateMarket fee and oracle Stake bond against the reserve
         g.op(GB::w_gdep(15, 10_500));
-        let inner15 = GB::w_vote(15, 1, true);
+        let inner15 = GB::w_gwd(15, 0, 1);
         let h15 = g.commit_hash(&inner15, &salt);
         let w = g.w_commit(15, &h15, 5);
         expect("r8:commit15", g.op(w) == OK, &mut fails);
+        // a REVEALED commit keeps its bond until it is pruned at its TTL (it stays in `commits`)
+        let cu15 = *g.uids.last().unwrap();
+        let p1 = g.last();
+        let w = g.w_reveal(15, &h15, &salt, &inner15, p1, cu15);
+        expect("r8:reveal15", g.op(w) == OK, &mut fails);
         let w = g.w_market(15, &listing_regular("BOND"));
         expect("r8:market_reserved", g.op(w) == mnpilot::STATE_CAP_CODE, &mut fails);
         g.op(GB::w_gdep(12, mnpilot::types::ORACLE_BOND_PERP as u64 + 500));

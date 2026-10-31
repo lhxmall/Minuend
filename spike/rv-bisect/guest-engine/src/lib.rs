@@ -256,7 +256,10 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
             Some(p) => p.weight_snapshot.contains_key(&author) || p.voted.contains(&author) || p.voted.len() < p.weight_snapshot.len() + MAX_ZERO_VOTERS,
             None => true,
         },
-        // R6-M1: listings are bounded only by the burned fee upstream
+        // R6-M1: listings are bounded only by the burned fee upstream. Loop round 8 (R7-L4, accepted pilot limit): the cap
+        // counts delisted markets too -- upstream never removes a market (its params, marks and book indexes stay), so
+        // the heap they hold is real; filling the cap burns 255 x CREATE_MARKET_FEE_PERP and the recovery is an upgrade
+        // image with a larger cap (rv_rollup `upgrade`), not a state rule
         BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
         _ => true,
     }
@@ -287,7 +290,8 @@ pub fn commit_bond_ok(op: &BatchOp, balance: impl FnOnce() -> u128, live: impl F
     let (balance, reserved) = (balance(), live() as u128 * COMMIT_BOND_PERP);
     match debit {
         None => balance >= reserved + COMMIT_BOND_PERP,
-        Some(d) => reserved == 0 || d > balance || balance - d >= reserved,
+        // a debit above the balance keeps upstream's Insufficient (checked_sub None); otherwise the rest must cover it
+        Some(d) => balance.checked_sub(d).is_none_or(|rest| rest >= reserved),
     }
 }
 
