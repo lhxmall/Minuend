@@ -128,6 +128,122 @@ impl OrderBook {
         lvl.insert(a, id);
         arr.insert(id, a);
     }
+    /// PILOT (loop round 4, snapshot.rs): canonical export. Orders map (id order), ask levels
+    /// ascending then bid levels descending (each: price, count, ids in FIFO order), then the
+    /// two visible-qty caches. Arrival numbers are not exported (only their order matters).
+    pub fn snap_write(&self, w: &mut crate::snapshot::SnapW) {
+        w.len(self.orders.len());
+        for o in self.orders.values() {
+            crate::snapshot::w_order(w, o);
+        }
+        w.len(self.asks.len());
+        for (p, l) in &self.asks {
+            w.i64(*p);
+            w.len(l.len());
+            for id in l.values() {
+                w.id(&id.0);
+            }
+        }
+        w.len(self.bids.len());
+        for (p, l) in &self.bids {
+            w.i64(p.0);
+            w.len(l.len());
+            for id in l.values() {
+                w.id(&id.0);
+            }
+        }
+        w.len(self.ask_qty.len());
+        for (p, q) in &self.ask_qty {
+            w.i64(*p);
+            w.u64(*q);
+        }
+        w.len(self.bid_qty.len());
+        for (p, q) in &self.bid_qty {
+            w.i64(p.0);
+            w.u64(*q);
+        }
+    }
+    /// Inverse of `snap_write`; refuses non-canonical input (keys not strictly in iteration
+    /// order, an order of another market, a level id twice or without an order, empty levels).
+    /// Arrival numbers are reassigned 0.. in export order (asks, then bids), so re-exporting the
+    /// result gives the same words.
+    pub fn snap_read(r: &mut crate::snapshot::SnapR, market: MarketId) -> Result<Self, ()> {
+        let mut b = Self::new(market);
+        let mut prev: Option<OrderId> = None;
+        for _ in 0..r.len()? {
+            let o = crate::snapshot::r_order(r)?;
+            if prev.is_some_and(|p| o.id <= p) || o.market != market {
+                return Err(());
+            }
+            prev = Some(o.id);
+            b.oins(o.id, o);
+        }
+        let mut a = 0u64;
+        let mut pp: Option<Price> = None;
+        for _ in 0..r.len()? {
+            let p = r.i64()?;
+            if pp.is_some_and(|x| p <= x) {
+                return Err(());
+            }
+            pp = Some(p);
+            let n = r.len()?;
+            if n == 0 {
+                return Err(());
+            }
+            let mut l = Level::new();
+            for _ in 0..n {
+                let id = OrderId(r.id()?);
+                if !b.orders.contains_key(&id) || b.arr.contains_key(&id) {
+                    return Err(());
+                }
+                Self::lvl_put(&mut l, &mut b.arr, a, id);
+                a += 1;
+            }
+            b.asks.insert(p, l);
+        }
+        let mut pp: Option<Price> = None;
+        for _ in 0..r.len()? {
+            let p = r.i64()?;
+            if pp.is_some_and(|x| p >= x) {
+                return Err(());
+            }
+            pp = Some(p);
+            let n = r.len()?;
+            if n == 0 {
+                return Err(());
+            }
+            let mut l = Level::new();
+            for _ in 0..n {
+                let id = OrderId(r.id()?);
+                if !b.orders.contains_key(&id) || b.arr.contains_key(&id) {
+                    return Err(());
+                }
+                Self::lvl_put(&mut l, &mut b.arr, a, id);
+                a += 1;
+            }
+            b.bids.insert(Reverse(p), l);
+        }
+        b.next_arr = a;
+        let mut pp: Option<Price> = None;
+        for _ in 0..r.len()? {
+            let p = r.i64()?;
+            if pp.is_some_and(|x| p <= x) {
+                return Err(());
+            }
+            pp = Some(p);
+            b.ask_qty.insert(p, r.u64()?);
+        }
+        let mut pp: Option<Price> = None;
+        for _ in 0..r.len()? {
+            let p = r.i64()?;
+            if pp.is_some_and(|x| p >= x) {
+                return Err(());
+            }
+            pp = Some(p);
+            b.bid_qty.insert(Reverse(p), r.u64()?);
+        }
+        Ok(b)
+    }
     /// PILOT (S1b): `arr` == exactly the level entries (host tests).
     pub fn level_ok(&self) -> bool {
         let n: usize = self.bids.values().map(|l| l.len()).sum::<usize>() + self.asks.values().map(|l| l.len()).sum::<usize>();

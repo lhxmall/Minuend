@@ -18,6 +18,12 @@
 //!   engine-diff robust <dir>   malformed / limit batches for js/robust.js (host vs guest)
 //!   engine-diff portout <batch.bin>   port result in the guest's shape (status, ev, roots)
 //!
+//!   engine-diff liqfuzz <n_seeds> <n_ops>   loop round 4: leverage / oracle / liquidation / ADL /
+//!       funding-rate / withdraw batches: real vs port (hash + events + per-unit MNWIT1 roots)
+//!   engine-diff liqgen <seed> <n_ops> <out.bin>   write one liqfuzz batch
+//!   engine-diff snaptest <n_seeds> <n_ops>   loop round 4 (R3-H2): export/import of the session
+//!       at random segment boundaries == the uninterrupted run (roots, events, hash, re-export)
+//!
 //! real/port print one JSON line: {"hash":..,"applied":..,"rejected":..,"fills":..,"ev":[..]}
 use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
 use minuend_exec::{Engine, ExecEvent, RejectReason};
@@ -33,6 +39,8 @@ mod adv;
 mod heapsim;
 mod l2;
 mod seg;
+mod liq;
+mod snap;
 #[global_allocator]
 static GA: heapsim::Sim = heapsim::Sim;
 
@@ -137,7 +145,117 @@ fn real_hash(s: &ChainState) -> [u8; 32] {
         h.update(a.0);
         h.update(c.to_le_bytes());
     }
+    // loop round 4: same bytes as mnpilot::state_hash's MNPILOT2 tail
+    h.update(b"MNPILOT2");
+    h.update(s.height.to_le_bytes());
+    h.update((s.withdrawals.len() as u32).to_le_bytes());
+    for ((a, n), w) in &s.withdrawals {
+        h.update(a.0);
+        h.update(n.to_le_bytes());
+        h.update(w.amount.to_le_bytes());
+        h.update([w.pending as u8]);
+        h.update(w.height.to_le_bytes());
+    }
+    h.update((s.oracle_reports.len() as u32).to_le_bytes());
+    for ((m, a), p) in &s.oracle_reports {
+        h.update(m.0.to_le_bytes());
+        h.update(a.0);
+        h.update(p.to_le_bytes());
+    }
+    for map in [&s.last_index, &s.funding_index_twap] {
+        h.update((map.len() as u32).to_le_bytes());
+        for (m, p) in map {
+            h.update(m.0.to_le_bytes());
+            h.update(p.to_le_bytes());
+        }
+    }
+    h.update((s.last_funding_height.len() as u32).to_le_bytes());
+    for (m, x) in &s.last_funding_height {
+        h.update(m.0.to_le_bytes());
+        h.update(x.to_le_bytes());
+    }
+    for map in [&s.oracle_twap, &s.funding_twap] {
+        h.update((map.len() as u32).to_le_bytes());
+        for (m, q) in map {
+            h.update(m.0.to_le_bytes());
+            h.update((q.len() as u32).to_le_bytes());
+            for t in q {
+                h.update(t.seq.to_le_bytes());
+                h.update(t.height.to_le_bytes());
+                h.update(t.median.to_le_bytes());
+            }
+        }
+    }
+    h.update((s.oracle_report_history.len() as u32).to_le_bytes());
+    for ((m, a), q) in &s.oracle_report_history {
+        h.update(m.0.to_le_bytes());
+        h.update(a.0);
+        h.update((q.len() as u32).to_le_bytes());
+        for t in q {
+            h.update(t.height.to_le_bytes());
+            h.update(t.price.to_le_bytes());
+            h.update(t.seq.to_le_bytes());
+        }
+    }
+    h.update((s.external_price_ring.len() as u32).to_le_bytes());
+    for (m, q) in &s.external_price_ring {
+        h.update(m.0.to_le_bytes());
+        h.update((q.len() as u32).to_le_bytes());
+        for t in q {
+            h.update(t.seq.to_le_bytes());
+            h.update(t.height.to_le_bytes());
+            h.update(t.price.to_le_bytes());
+            h.update([t.source_id]);
+        }
+    }
     h.finalize().into()
+}
+
+/// loop round 4 fixtures (header word 3 bits 25 / 26) applied to the REAL engine, as
+/// `mnpilot::state::ChainState::genesis_fixture` does to the port.
+fn real_fixtures(eng: &mut Engine, flags: u32, ids: &[AccountId]) {
+    if flags & mnpilot::FUNDING_MKT_FLAG != 0 {
+        let p = mnpilot::funding_fixture_params();
+        eng.state.markets.insert(
+            MarketId(mnpilot::FUNDING_MKT.0),
+            minuend_types::MarketParams {
+                symbol: p.symbol,
+                tick_size: p.tick_size,
+                im_bps: p.im_bps,
+                mm_bps: p.mm_bps,
+                taker_fee_bps: p.taker_fee_bps,
+                keeper_reward_bps: p.keeper_reward_bps,
+                delisted: p.delisted,
+                spot_only: p.spot_only,
+                funding_rate: p.funding_rate,
+                usd_per_unit: p.usd_per_unit,
+                funding_cap_bps: p.funding_cap_bps,
+                min_price: p.min_price,
+                max_price: p.max_price,
+            },
+        );
+        if let Some(a) = ids.first() {
+            eng.state.external_sources.insert(*a);
+        }
+    }
+    if flags & mnpilot::ORACLES_FLAG != 0 {
+        for a in ids.iter().skip(1).take(3) {
+            eng.state.oracle_bonds.insert(*a, minuend_types::ORACLE_BOND_PERP);
+        }
+    }
+}
+/// The port's genesis for batch `w` (fixtures name accounts of its table).
+pub fn port_genesis(w: &[u32]) -> mnpilot::state::ChainState {
+    let ids: Vec<mnpilot::types::AccountId> = (0..w[1] as usize)
+        .map(|a| {
+            let mut id = [0u8; 32];
+            for k in 0..8 {
+                id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + a * 8 + k].to_le_bytes());
+            }
+            mnpilot::types::AccountId(id)
+        })
+        .collect();
+    mnpilot::state::ChainState::genesis_fixture(w[3], &ids)
 }
 
 struct Out {
@@ -191,6 +309,7 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
         eng.state.markets.insert(MarketId(2), minuend_types::genesis_params());
         eng.state.marks.insert(MarketId(2), 100_000 * PRICE_SCALE as i64);
     }
+    real_fixtures(&mut eng, w[3], &ids);
     let mut parent = genesis_id();
     let mut out = Out { hash: [0; 32], applied: 0, rejected: 0, fills: 0, ev: Vec::new() };
     for i in 0..n_ops as usize {
@@ -227,6 +346,31 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
                 let a = ids[acct as usize];
                 (acct, Op::Cancel { account: a, order_id: order_id(a, MarketId(market), client_seq) })
             }
+            mnpilot::BatchOp::Withdraw { acct, amount, nonce } => {
+                (acct, Op::Withdraw { account: ids[acct as usize], amount: amount as i128, nonce })
+            }
+            mnpilot::BatchOp::Liquidate { acct, target, market } => {
+                let t = if target == mnpilot::LIQ_TARGET_INSURANCE { minuend_types::INSURANCE_ACCOUNT } else { ids[target as usize] };
+                (acct, Op::Liquidate { caller: ids[acct as usize], target: t, market: MarketId(market) })
+            }
+            mnpilot::BatchOp::Report { acct, price, market } => {
+                (acct, Op::ReportPrice { oracle: ids[acct as usize], market: MarketId(market), price })
+            }
+            mnpilot::BatchOp::ExtPrice { acct, price, source_id, market } => {
+                (acct, Op::UpdateExternalPrice { source: ids[acct as usize], market: MarketId(market), price, source_id })
+            }
+            mnpilot::BatchOp::SetHeight { height } => {
+                // test fixture: not a unit upstream -- the batch layer sets the height
+                if height >= eng.state.height {
+                    eng.state.height = height;
+                    out.ev.push(mnpilot::EV_HEIGHT);
+                } else {
+                    out.rejected += 1;
+                    out.ev.push(2);
+                }
+                per_unit(&eng);
+                continue;
+            }
             mnpilot::BatchOp::Bad => panic!("bad op {}", i),
         };
         let u = sign_unit(vec![parent], op, &secret(ai));
@@ -240,7 +384,8 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
                 out.ev.push(EV_APPLIED | fills.len() as u32);
                 for f in fills {
                     out.ev.push(u32::from_le_bytes(f.maker_id.0[..4].try_into().unwrap()));
-                    out.ev.push(u32::from_le_bytes(f.taker_id.0[..4].try_into().unwrap()));
+                    // loop round 4: liquidation fills carry liq_order_id(unit id); masked on both sides
+                    out.ev.push(if f.kind == 2 || f.kind == 3 { mnpilot::LIQ_TAKER_EV } else { u32::from_le_bytes(f.taker_id.0[..4].try_into().unwrap()) });
                     out.ev.push(f.price as u32);
                     out.ev.push((f.price >> 32) as u32);
                     out.ev.push(f.qty as u32);
@@ -332,12 +477,29 @@ impl Gen {
                 let a = self.ids[acct as usize];
                 self.eng.cancel(a, oid(a, M(market), client_seq))
             }
+            mnpilot::BatchOp::Withdraw { acct, amount, nonce } => self.eng.withdraw(self.ids[acct as usize], amount as i128, nonce),
+            mnpilot::BatchOp::Liquidate { acct, target, market } => {
+                let t = if target == mnpilot::LIQ_TARGET_INSURANCE { mnpilot::types::INSURANCE_ACCOUNT } else { self.ids[target as usize] };
+                self.eng.liquidate([0; 32], seq, self.ids[acct as usize], t, M(market))
+            }
+            mnpilot::BatchOp::Report { acct, price, market } => self.eng.report_price(self.ids[acct as usize], M(market), price),
+            mnpilot::BatchOp::ExtPrice { acct, price, source_id, market } => {
+                self.eng.update_external_price(self.ids[acct as usize], M(market), price, source_id, seq)
+            }
+            mnpilot::BatchOp::SetHeight { height } => {
+                self.ops.push(w);
+                if height >= self.eng.state.height {
+                    self.eng.state.height = height;
+                }
+                return true;
+            }
             mnpilot::BatchOp::Bad => unreachable!(),
         };
         self.ops.push(w);
         if r.is_ok() {
             self.eng.state.seq += 1;
         }
+        let _ = self.eng.state.take_dirty();
         r.is_ok()
     }
     fn next_cseq(&self, a: u32) -> u64 {
@@ -795,6 +957,14 @@ fn main() {
             let w = adv::crowd_cancel(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap());
             write_words(&a[5], &w);
             println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
+        }
+        Some("snaptest") => println!("{}", snap::snaptest(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])),
+        Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("liqgen") => {
+            let w = liq::liq_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"ops\":{}}}", w[2]);
         }
         Some("advfuzz") => println!("{}", adv::advfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("advgen") => {

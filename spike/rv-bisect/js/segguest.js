@@ -36,7 +36,9 @@ for (const [k, m] of man.entries()) {
     continue; }
   const r = runOne(path.join(DIR, m.file));
   const zero = '0'.repeat(64);
-  const same = r.halted && r.a0 !== 77 && r.status === m.status && r.hash === m.hash && r.segs === m.segs &&
+  // PROD=1 (loop round 4, item c): the prod image returns a zero state hash (no O(state) end-of-run work)
+  const hashOk = process.env.PROD ? r.hash === '0'.repeat(64) : r.hash === m.hash;
+  const same = r.halted && r.a0 !== 77 && r.status === m.status && hashOk && r.segs === m.segs &&
     r.start_root === (m.status === 0 ? m.start_root : zero) && r.end_root === (m.status === 0 ? m.end_root : zero) &&
     JSON.stringify(r.roots) === JSON.stringify(m.roots) && JSON.stringify(r.ev) === JSON.stringify(m.ev) && r.applied === m.applied;
   if (same) ok++; steps += r.steps;

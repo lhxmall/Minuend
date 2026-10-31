@@ -20,6 +20,22 @@
 //!     market 2 (genesis params, mark 100 000 USD; upstream test fixtures insert markets the same way)
 //!     Cancel:  w6 = client_seq of the account's own order to cancel; w7 = market id
 //!              (order id = order_id(account, market, client_seq), computed in the guest)
+//!   loop round 4 (upstream ops ported with their engine paths):
+//!     6 Withdraw:      w1,w2 = amount (i64); w6,w7 = nonce (u64 lo,hi)
+//!     7 Liquidate:     author = keeper (caller); w1 = target account index (LIQ_TARGET_INSURANCE =
+//!                      the insurance account); w7 = market. The liquidation order id
+//!                      `liq_order_id(unit id)` needs the unit's hash, which the pilot batch does not
+//!                      carry: the port uses unit id 0 and the event log writes LIQ_TAKER_EV for the
+//!                      taker id of kind-2/3 fills on both sides (production: the unit id is part of
+//!                      the unit input)
+//!     8 ReportPrice:   author = oracle; w2,w3 = price; w7 = market
+//!     9 ExternalPrice: author = source; w2,w3 = price; w6 = source_id (low byte); w7 = market
+//!    10 SetHeight:     TEST FIXTURE (refused as kind 0 in `prod`): w1,w2 = new batch height (must be >=
+//!                      the current one, else event 2); emits EV_HEIGHT, is neither applied nor rejected
+//!                      (no seq), but is a unit for the per-unit roots (unchanged root)
+//!   header [3] loop round 4 fixtures: bit 25 = list market 3 as a funding-rate market (the 100x
+//!     listing of upstream's funding tests; account 0 of the table is its external feed), bit 26 =
+//!     accounts 1..=3 of the table are bonded oracles (oracle_bonds = ORACLE_BOND_PERP)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
 //!
 //! Segments (loop round 3): an upstream batch (<= 200 000 units) is cut into guest runs of
@@ -49,6 +65,7 @@ pub mod account;
 pub mod book;
 pub mod book_types;
 pub mod engine;
+pub mod snapshot;
 pub mod state;
 pub mod types;
 pub mod wit;
@@ -97,6 +114,16 @@ pub fn book_code(e: &BookError) -> u32 {
 }
 pub const EV_APPLIED: u32 = 0x8000_0000;
 pub const MARKET2_FLAG: u32 = 1 << 24;
+/// loop round 4 fixtures (header word 3, non-prod): funding-rate market 3 / bonded oracles
+pub const FUNDING_MKT_FLAG: u32 = 1 << 25;
+pub const ORACLES_FLAG: u32 = 1 << 26;
+pub const FUNDING_MKT: MarketId = MarketId(3);
+/// Liquidate op: target index meaning the insurance account
+pub const LIQ_TARGET_INSURANCE: u32 = 0xFF_FFFF;
+/// event word standing in for the taker id of a liquidation fill (kind 2 / 3)
+pub const LIQ_TAKER_EV: u32 = 0x4C49_5121;
+/// event of a SetHeight fixture op
+pub const EV_HEIGHT: u32 = 0x4000_0000;
 
 /// Max units (ops) per guest batch: the per-unit root region OUT+0x20000.. (8 words per unit)
 /// ends exactly at the top of the 2^24-word RAM (0x0400_0000), and the event log
@@ -106,7 +133,7 @@ pub const MAX_UNITS: u32 = 16_384;
 pub const MAX_ACCOUNTS: u32 = 4_096;
 /// Event-log word capacity in the guest's OUT area (words 13 .. 0x1FFE0; 0x1FFE0.. holds the
 /// segment words and counters, loop round 3).
-pub const EV_CAP: u32 = 0x1FFE0 - 13;
+pub const EV_CAP: u32 = 0x1FFD6 - 13;
 /// Batch status (OUT[0x1FFF9] in the guest; `Stats::status` on the host).
 pub const ST_OK: u32 = 0;
 pub const ST_BAD_MAGIC: u32 = 1;
@@ -117,6 +144,17 @@ pub const ST_BAD_FLAGS: u32 = 4;
 /// a previous run of this session aborted (panic / out of memory): its state may be torn
 /// mid-unit, so every later run refuses to execute (guest only; main.rs)
 pub const ST_DEAD: u32 = 5;
+/// loop round 4 (snapshot.rs): EXPORT run without a session
+pub const ST_NO_SESSION: u32 = 6;
+/// IMPORT input malformed / non-canonical (no session is created; a dead image stays dead)
+pub const ST_BAD_SNAP: u32 = 7;
+/// IMPORT refused: the image already holds a live session (only a fresh or dead image imports)
+pub const ST_SESSION_LIVE: u32 = 8;
+/// EXPORT header words 1..3 must be 0
+pub const ST_BAD_EXPORT: u32 = 9;
+/// input words an import may read (the input tree's index range below the ecall trap range)
+pub const SNAP_LIMIT: u32 = (1 << 24) - 1;
+
 /// Event code of a unit rejected by the MNWIT1 depth rule (wit::MAX_WIT_DEPTH, loop round 2 W2);
 /// outside the engine's RejectReason codes (1..17, 0x100+).
 pub const WIT_DEPTH_CODE: u32 = 18;
@@ -133,6 +171,9 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
     let new_acct = !s.accounts.contains_key(&author);
     match *op {
         BatchOp::Deposit { .. } => !new_acct || ok(&wit::acct_key(&author)),
+        // loop round 4: a keeper reward credits the caller (`account_mut(caller)`): its acct: key
+        // can be created by the unit -> checked like a deposit's
+        BatchOp::Liquidate { .. } => !new_acct || ok(&wit::acct_key(&author)),
         BatchOp::Place { market, client_seq, .. } => {
             let m = MarketId(market);
             let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
@@ -143,7 +184,7 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
         _ => true,
     }
 }
-const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFE0);
+const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFD6);
 const _: () = assert!(0x03F0_0000 / 4 + 0x20000 + 8 * MAX_UNITS <= 1 << 24);
 const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + MAX_UNITS) < 1 << 24);
 
@@ -170,10 +211,26 @@ impl state::ChainState {
     /// test-fixture `allow_all` market seed (BTC_USD genesis params).
     /// genesis plus market 2 when `flags` bit 24 is set (batch header word 3)
     pub fn genesis_flags(flags: u32) -> Self {
+        Self::genesis_fixture(flags, &[])
+    }
+    /// loop round 4: + the funding-rate market / oracle fixtures (bits 25 / 26), which name
+    /// accounts of the batch's table
+    pub fn genesis_fixture(flags: u32, accts: &[AccountId]) -> Self {
         let mut s = Self::genesis();
         if flags & MARKET2_FLAG != 0 {
             s.markets.insert(MarketId(2), genesis_params());
             s.marks.insert(MarketId(2), 100_000 * PRICE_SCALE as i64);
+        }
+        if flags & FUNDING_MKT_FLAG != 0 {
+            s.markets.insert(FUNDING_MKT, funding_fixture_params());
+            if let Some(a) = accts.first() {
+                s.external_sources.insert(*a);
+            }
+        }
+        if flags & ORACLES_FLAG != 0 {
+            for a in accts.iter().skip(1).take(3) {
+                s.oracle_bonds.insert(*a, ORACLE_BOND_PERP);
+            }
         }
         s
     }
@@ -186,6 +243,28 @@ impl state::ChainState {
         s.put_account(INSURANCE_ACCOUNT, insurance);
         s.markets.insert(BTC_USD, genesis_params());
         s
+    }
+}
+
+/// Params of the funding-rate fixture market (upstream test `funding_rate_lists_at_100x`:
+/// tick 1, im 100, mm 50, fee 5, keeper 10, funding_rate, usd_per_unit 10 000, cap 10 bps).
+pub fn funding_fixture_params() -> MarketParams {
+    let mut symbol = [0u8; 16];
+    symbol[..6].copy_from_slice(b"HUNDRD");
+    MarketParams {
+        symbol,
+        tick_size: 1,
+        im_bps: 100,
+        mm_bps: 50,
+        taker_fee_bps: 5,
+        keeper_reward_bps: 10,
+        delisted: false,
+        spot_only: false,
+        funding_rate: true,
+        usd_per_unit: 10_000,
+        funding_cap_bps: 10,
+        min_price: 0,
+        max_price: 0,
     }
 }
 
@@ -222,7 +301,7 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
     h.update(s.seq.to_le_bytes());
     h.update((s.accounts.len() as u32).to_le_bytes());
     for a in s.accounts.values() {
-        h.update(account_leaf(a, 0, 0));
+        h.update(account_leaf(a, 0, s.withdrawn_total.get(&a.id).copied().unwrap_or(0)));
     }
     h.update((s.books.len() as u32).to_le_bytes());
     for (m, b) in &s.books {
@@ -238,6 +317,70 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
     for (a, c) in &s.seen_client_seq {
         h.update(a.0);
         h.update(c.to_le_bytes());
+    }
+    // loop round 4: oracle / funding / withdrawal state (the host computes the same bytes from
+    // the real ChainState, engine-diff `real_hash`)
+    h.update(b"MNPILOT2");
+    h.update(s.height.to_le_bytes());
+    h.update((s.withdrawals.len() as u32).to_le_bytes());
+    for ((a, n), w) in &s.withdrawals {
+        h.update(a.0);
+        h.update(n.to_le_bytes());
+        h.update(w.amount.to_le_bytes());
+        h.update([w.pending as u8]);
+        h.update(w.height.to_le_bytes());
+    }
+    h.update((s.oracle_reports.len() as u32).to_le_bytes());
+    for ((m, a), p) in &s.oracle_reports {
+        h.update(m.0.to_le_bytes());
+        h.update(a.0);
+        h.update(p.to_le_bytes());
+    }
+    for map in [&s.last_index, &s.funding_index_twap] {
+        h.update((map.len() as u32).to_le_bytes());
+        for (m, p) in map {
+            h.update(m.0.to_le_bytes());
+            h.update(p.to_le_bytes());
+        }
+    }
+    h.update((s.last_funding_height.len() as u32).to_le_bytes());
+    for (m, x) in &s.last_funding_height {
+        h.update(m.0.to_le_bytes());
+        h.update(x.to_le_bytes());
+    }
+    for map in [&s.oracle_twap, &s.funding_twap] {
+        h.update((map.len() as u32).to_le_bytes());
+        for (m, q) in map {
+            h.update(m.0.to_le_bytes());
+            h.update((q.len() as u32).to_le_bytes());
+            for t in q {
+                h.update(t.seq.to_le_bytes());
+                h.update(t.height.to_le_bytes());
+                h.update(t.median.to_le_bytes());
+            }
+        }
+    }
+    h.update((s.oracle_report_history.len() as u32).to_le_bytes());
+    for ((m, a), q) in &s.oracle_report_history {
+        h.update(m.0.to_le_bytes());
+        h.update(a.0);
+        h.update((q.len() as u32).to_le_bytes());
+        for t in q {
+            h.update(t.height.to_le_bytes());
+            h.update(t.price.to_le_bytes());
+            h.update(t.seq.to_le_bytes());
+        }
+    }
+    h.update((s.external_price_ring.len() as u32).to_le_bytes());
+    for (m, q) in &s.external_price_ring {
+        h.update(m.0.to_le_bytes());
+        h.update((q.len() as u32).to_le_bytes());
+        for t in q {
+            h.update(t.seq.to_le_bytes());
+            h.update(t.height.to_le_bytes());
+            h.update(t.price.to_le_bytes());
+            h.update([t.source_id]);
+        }
     }
     h.finalize().into()
 }
@@ -256,6 +399,11 @@ pub enum BatchOp {
     Deposit { acct: u32, amount: i64 },
     Place { acct: u32, side: Side, typ: OrderType, tif: TimeInForce, isolated: bool, price: i64, qty: u64, client_seq: u64, market: u32, margin: u64 },
     Cancel { acct: u32, client_seq: u64, market: u32 },
+    Withdraw { acct: u32, amount: i64, nonce: u64 },
+    Liquidate { acct: u32, target: u32, market: u32 },
+    Report { acct: u32, price: i64, market: u32 },
+    ExtPrice { acct: u32, price: i64, source_id: u8, market: u32 },
+    SetHeight { height: u64 },
     Bad,
 }
 pub fn decode_op(w: &[u32; 8]) -> BatchOp {
@@ -276,6 +424,11 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
             margin: match k { 4 => w[7] as u64 * USD_SCALE, 5 => w[7] as u64, _ => 0 },
         },
         3 => BatchOp::Cancel { acct, client_seq: w[6] as u64, market: w[7] },
+        6 => BatchOp::Withdraw { acct, amount: lo64(w[1], w[2]) as i64, nonce: lo64(w[6], w[7]) },
+        7 => BatchOp::Liquidate { acct, target: w[1], market: w[7] },
+        8 => BatchOp::Report { acct, price: lo64(w[2], w[3]) as i64, market: w[7] },
+        9 => BatchOp::ExtPrice { acct, price: lo64(w[2], w[3]) as i64, source_id: w[6] as u8, market: w[7] },
+        10 if !cfg!(feature = "prod") => BatchOp::SetHeight { height: lo64(w[1], w[2]) },
         _ => BatchOp::Bad,
     }
 }
@@ -313,9 +466,12 @@ pub struct Session {
 }
 impl Session {
     pub fn genesis(flags: u32, mode: WitMode) -> Self {
-        let mut eng = Engine { state: state::ChainState::genesis_flags(flags) };
+        Self::genesis_with(flags, mode, &[])
+    }
+    pub fn genesis_with(flags: u32, mode: WitMode, accts: &[AccountId]) -> Self {
+        let mut eng = Engine { state: state::ChainState::genesis_fixture(flags, accts) };
         let w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
-        eng.state.wit_dirty = Default::default();
+        let _ = eng.state.take_dirty();
         Session { eng, w, mode, segs: 0 }
     }
 }
@@ -372,7 +528,7 @@ pub fn run_segment(
     }
     let base = 4 + n_acc * 8;
     if sess.is_none() {
-        let mut s = Session::genesis(rd(3), mode);
+        let mut s = Session::genesis_with(rd(3), mode, &accts);
         s.segs = 1;
         *sess = Some(s);
     }
@@ -391,14 +547,21 @@ pub fn run_segment(
         let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
         let op = decode_op(&ow);
         let author = match op {
-            BatchOp::Deposit { acct, .. } | BatchOp::Place { acct, .. } | BatchOp::Cancel { acct, .. } => acct_of(acct),
-            BatchOp::Bad => None,
+            BatchOp::Deposit { acct, .. }
+            | BatchOp::Place { acct, .. }
+            | BatchOp::Cancel { acct, .. }
+            | BatchOp::Withdraw { acct, .. }
+            | BatchOp::Liquidate { acct, .. }
+            | BatchOp::Report { acct, .. }
+            | BatchOp::ExtPrice { acct, .. } => acct_of(acct),
+            BatchOp::SetHeight { .. } | BatchOp::Bad => None,
         };
         // W2 depth rule (only where the tree exists: Incremental mode; Off/Legacy are bench builds)
         let too_deep = match (w.as_ref(), author) {
             (Some(w), Some(a)) => !wit_depth_ok(w, &eng.state, &op, a),
             _ => false,
         };
+        let mut height_op = false;
         let res = if too_deep { Err(None) } else { match op {
             BatchOp::Deposit { acct, amount } => match acct_of(acct) {
                 Some(a) => eng.deposit(a, amount as Usd),
@@ -412,9 +575,38 @@ pub fn run_segment(
                 Some(a) => eng.cancel(a, order_id(a, MarketId(market), client_seq)),
                 None => Err(RejectReason::BadAccount),
             },
+            BatchOp::Withdraw { acct, amount, nonce } => match acct_of(acct) {
+                Some(a) => eng.withdraw(a, amount as Usd, nonce),
+                None => Err(RejectReason::BadAccount),
+            },
+            BatchOp::Liquidate { acct, target, market } => {
+                let t = if target == LIQ_TARGET_INSURANCE { Some(INSURANCE_ACCOUNT) } else { accts.get(target as usize).copied() };
+                match (acct_of(acct), t) {
+                    (Some(a), Some(t)) => eng.liquidate([0u8; 32], seq, a, t, MarketId(market)),
+                    _ => Err(RejectReason::BadAccount),
+                }
+            }
+            BatchOp::Report { acct, price, market } => match acct_of(acct) {
+                Some(a) => eng.report_price(a, MarketId(market), price),
+                None => Err(RejectReason::BadAccount),
+            },
+            BatchOp::ExtPrice { acct, price, source_id, market } => match acct_of(acct) {
+                Some(a) => eng.update_external_price(a, MarketId(market), price, source_id, seq),
+                None => Err(RejectReason::BadAccount),
+            },
+            BatchOp::SetHeight { height } => {
+                if height >= eng.state.height {
+                    eng.state.height = height;
+                    height_op = true;
+                    Ok(Vec::new())
+                } else {
+                    Err(RejectReason::BadAccount)
+                }
+            }
             BatchOp::Bad => Err(RejectReason::BadAccount),
         }.map_err(Some) };
         match res {
+            Ok(_) if height_op => ev(EV_HEIGHT),
             Ok(fills) => {
                 eng.state.seq += 1;
                 st.applied += 1;
@@ -422,7 +614,11 @@ pub fn run_segment(
                 ev(EV_APPLIED | fills.len() as u32);
                 for f in &fills {
                     ev(u32::from_le_bytes([f.maker_id.0[0], f.maker_id.0[1], f.maker_id.0[2], f.maker_id.0[3]]));
-                    ev(u32::from_le_bytes([f.taker_id.0[0], f.taker_id.0[1], f.taker_id.0[2], f.taker_id.0[3]]));
+                    ev(if f.kind == 2 || f.kind == 3 {
+                        LIQ_TAKER_EV
+                    } else {
+                        u32::from_le_bytes([f.taker_id.0[0], f.taker_id.0[1], f.taker_id.0[2], f.taker_id.0[3]])
+                    });
                     ev(f.price as u32);
                     ev((f.price >> 32) as u32);
                     ev(f.qty as u32);
@@ -436,12 +632,12 @@ pub fn run_segment(
         }
         let root = match mode {
             WitMode::Off => {
-                eng.state.wit_dirty = Default::default();
+                let _ = eng.state.take_dirty();
                 [0u8; 32]
             }
             WitMode::Incremental => w.as_mut().unwrap().commit(&mut eng.state),
             WitMode::Legacy { skip } => {
-                eng.state.wit_dirty = Default::default();
+                let _ = eng.state.take_dirty();
                 if i >= skip { wit::legacy_root(&eng.state) } else { [0u8; 32] }
             }
         };
@@ -452,12 +648,78 @@ pub fn run_segment(
     }
     if let Some(w) = w.as_mut() {
         // from-scratch rebuild; also a duplicate-kid check (W3): every leaf put from scratch must
-        // land on its own key (count == puts), else two live leaves share a kid
-        let mut sw = wit::Wit::from_state(&eng.state);
-        wo.scratch_ok = sw.smt.count as u64 == sw.leaf_updates && sw.root() == wo.root;
+        // land on its own key (count == puts), else two live leaves share a kid.
+        // Loop round 4 (item c): O(state) per segment -> test builds only. The `prod` image skips
+        // it (scratch_ok stays false = "not checked") and returns a zero state hash: neither is
+        // read by the rollup (rv_witbind binds the segment end root, the dispute game the
+        // machine roots), and both grow with the whole session state, not with the segment.
+        if !cfg!(feature = "prod") {
+            let mut sw = wit::Wit::from_state(&eng.state);
+            wo.scratch_ok = sw.smt.count as u64 == sw.leaf_updates && sw.root() == wo.root;
+        }
         wo.leaves = w.smt.count;
         wo.leaf_updates = w.leaf_updates;
         wo.node_hashes = w.smt.node_hashes;
     }
-    (state_hash(&eng.state), st, wo)
+    let h = if cfg!(feature = "prod") { [0u8; 32] } else { state_hash(&eng.state) };
+    (h, st, wo)
+}
+
+/// Result of an EXPORT / IMPORT run (loop round 4, snapshot.rs).
+pub struct SnapOut {
+    pub status: u32,
+    /// sha256 over the snapshot words (export: produced; import: consumed)
+    pub digest: [u8; 32],
+    pub words: u32,
+    /// MNWIT1 root of the session (export: current; import: rebuilt) -- both segment roots
+    pub root: [u8; 32],
+}
+
+/// EXPORT run: stream the live session's canonical snapshot through sha256. Counts as a segment
+/// (`segs` += 1 before encoding, so the snapshot carries it); changes nothing else.
+pub fn run_export(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>) -> SnapOut {
+    let mut o = SnapOut { status: ST_OK, digest: [0; 32], words: 0, root: [0; 32] };
+    if rd(0) != snapshot::EXPORT_MAGIC {
+        o.status = ST_BAD_MAGIC;
+        return o;
+    }
+    if rd(1) != 0 || rd(2) != 0 || rd(3) != 0 {
+        o.status = ST_BAD_EXPORT;
+        return o;
+    }
+    let Some(s) = sess.as_mut() else {
+        o.status = ST_NO_SESSION;
+        return o;
+    };
+    s.segs += 1;
+    let (d, n, _) = snapshot::export(s, false);
+    o.digest = d;
+    o.words = n;
+    if let Some(w) = s.w.as_mut() {
+        o.root = w.root();
+    }
+    o
+}
+
+/// IMPORT run: only without a live session. On success `sess` holds the decoded session (the
+/// import itself does not count as a segment: the imported session IS the exported one).
+pub fn run_import(rd: &mut dyn FnMut(u32) -> u32, sess: &mut Option<Session>) -> SnapOut {
+    let mut o = SnapOut { status: ST_OK, digest: [0; 32], words: 0, root: [0; 32] };
+    if sess.is_some() {
+        o.status = ST_SESSION_LIVE;
+        return o;
+    }
+    let mut r = snapshot::SnapR::new(rd, SNAP_LIMIT);
+    match snapshot::decode(&mut r) {
+        Ok(mut s) => {
+            o.words = r.i;
+            o.digest = r.digest();
+            if let Some(w) = s.w.as_mut() {
+                o.root = w.root();
+            }
+            *sess = Some(s);
+        }
+        Err(()) => o.status = ST_BAD_SNAP,
+    }
+    o
 }

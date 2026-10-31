@@ -62,7 +62,7 @@ pub fn check(w: &[u32], s: u32, bad_at: Option<usize>) -> (SegCheck, Vec<Vec<u32
         rroots.push(smt_ref::root(&real_pilot_leaves(e)));
         rhash.push(real_hash(&e.state));
     });
-    let genesis_root = mnpilot::wit::Wit::from_state(&mnpilot::state::ChainState::genesis_flags(w[3])).root();
+    let genesis_root = mnpilot::wit::Wit::from_state(&port_genesis(w)).root();
     let mut sess: Option<mnpilot::Session> = None;
     let mut done = 0usize; // units consumed
     let mut prev_end = genesis_root;

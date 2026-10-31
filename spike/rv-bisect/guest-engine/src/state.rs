@@ -4,11 +4,13 @@
 use crate::account::Account;
 use crate::book::{BookJournal, OrderBook};
 use crate::types::{
-    bps, notional_usd, funding_notional_usd, AccountId, Height, MarketId, MarketParams, Price, Seq,
-    INSURANCE_ACCOUNT, USD_SCALE,
+    bps, notional_usd, funding_notional_usd, funding_rate_bps, AccountId, ExternalSample,
+    FundingSourceKind, Height, MarketId, MarketParams, OracleConfig, Price, ReportSample, Seq,
+    TwapSample, Withdrawal, FUNDING_EXTERNAL_MAX_STALENESS, FUNDING_TWAP_MIN_SAMPLES,
+    FUNDING_TWAP_WINDOW, INSURANCE_ACCOUNT, USD_SCALE,
 };
 use crate::{Fill, SelfTrade};
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 type HashSet<K> = BTreeSet<K>;
 mod minuend_account { pub use crate::account::AccountError; }
@@ -26,66 +28,196 @@ pub struct StateJournal {
     book: Option<(MarketId, bool, BookJournal)>,
 }
 
+/// PILOT (loop round 4, R3-O1 fix): the account map behind a type that only hands out
+/// *guarded* mutable access. `Deref` gives every read-only `BTreeMap` method (`get`, `iter`,
+/// `contains_key`, `values`, `len`, ...), so upstream read code compiles unchanged; the
+/// inherent `get_mut` / `insert` / `remove` shadow the map's and keep three derived indexes
+/// current on every write: `oi_long` (running sum of positive position qty per market, the
+/// first term of `funding_open_interest`), `holders` (accounts with a position per market, in
+/// AccountId order = upstream's `accounts.iter().filter(has position)` order) and `dirty`
+/// (MNWIT1 keys touched since the last witness commit). `BTreeMap::get_mut`, `entry`,
+/// `iter_mut`, `values_mut` are unreachable (no `DerefMut`), so a future path that edits
+/// positions in place cannot desync them -- the compiler refuses it.
 #[derive(Clone, Debug, Default)]
-pub struct ChainState {
-    pub seq: Seq,
-    pub accounts: BTreeMap<AccountId, Account>,
-    pub markets: BTreeMap<MarketId, MarketParams>,
-    pub books: BTreeMap<MarketId, OrderBook>,
-    pub marks: BTreeMap<MarketId, Price>,
-    /// PILOT: always empty (no ReportPrice ops in the pilot); kept so the mark
-    /// guard in `apply_fill_pair` reads exactly as upstream.
-    pub oracle_reports: BTreeMap<(MarketId, AccountId), Price>,
-    pub oracle_bonds: BTreeMap<AccountId, u128>,
-    pub last_index: BTreeMap<MarketId, Price>,
-    pub last_funding_height: BTreeMap<MarketId, Height>,
-    /// upstream: HashMap<AccountId, u64>
-    pub seen_client_seq: BTreeMap<AccountId, u64>,
-    /// PILOT (MNWIT1 proposal): keys touched since the last witness commit.
-    pub wit_dirty: crate::wit::WitDirty,
-    /// PILOT (loop round 3, S1b): running per-market sum of positive position qty over all
-    /// accounts (the first term of `Engine::funding_open_interest`, which upstream recomputes by
-    /// iterating every account). Maintained by `put_account` / `del_account`, the only paths that
-    /// replace an account's positions; checked against the full sum by `oi_ok` (host tests).
+pub struct Accounts {
+    map: BTreeMap<AccountId, Account>,
     pub oi_long: BTreeMap<MarketId, u128>,
+    pub holders: BTreeMap<MarketId, BTreeSet<AccountId>>,
+    pub dirty: BTreeSet<AccountId>,
 }
-
-impl ChainState {
-    fn oi_adj(oi: &mut BTreeMap<MarketId, u128>, a: &Account, add: bool) {
-        for (m, p) in &a.positions {
-            if p.qty > 0 {
-                let e = oi.entry(*m).or_insert(0);
-                if add {
-                    *e += p.qty as u128;
-                } else {
-                    *e -= p.qty as u128;
-                }
-                if *e == 0 {
-                    oi.remove(m);
-                }
+impl core::ops::Deref for Accounts {
+    type Target = BTreeMap<AccountId, Account>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+impl<'a> IntoIterator for &'a Accounts {
+    type Item = (&'a AccountId, &'a Account);
+    type IntoIter = alloc::collections::btree_map::Iter<'a, AccountId, Account>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
+}
+fn idx_adj(
+    oi: &mut BTreeMap<MarketId, u128>,
+    holders: &mut BTreeMap<MarketId, BTreeSet<AccountId>>,
+    id: AccountId,
+    pos: &[(MarketId, i64)],
+    add: bool,
+) {
+    for (m, q) in pos {
+        if *q > 0 {
+            let e = oi.entry(*m).or_insert(0);
+            if add {
+                *e += *q as u128;
+            } else {
+                *e -= *q as u128;
+            }
+            if *e == 0 {
+                oi.remove(m);
+            }
+        }
+        if add {
+            holders.entry(*m).or_default().insert(id);
+        } else if let Some(h) = holders.get_mut(m) {
+            h.remove(&id);
+            if h.is_empty() {
+                holders.remove(m);
             }
         }
     }
-    /// PILOT (S1b): `accounts.insert` that keeps `oi_long` current.
+}
+fn pos_of(a: &Account) -> Vec<(MarketId, i64)> {
+    a.positions.iter().map(|(m, p)| (*m, p.qty)).collect()
+}
+impl Accounts {
+    pub fn insert(&mut self, id: AccountId, a: Account) -> Option<Account> {
+        self.dirty.insert(id);
+        let new = pos_of(&a);
+        let old = self.map.insert(id, a);
+        // remove the old entry's contribution BEFORE adding the new one (holders is a set)
+        if let Some(o) = &old {
+            idx_adj(&mut self.oi_long, &mut self.holders, id, &pos_of(o), false);
+        }
+        idx_adj(&mut self.oi_long, &mut self.holders, id, &new, true);
+        old
+    }
+    pub fn remove(&mut self, id: &AccountId) -> Option<Account> {
+        let old = self.map.remove(id);
+        if let Some(o) = &old {
+            self.dirty.insert(*id);
+            idx_adj(&mut self.oi_long, &mut self.holders, *id, &pos_of(o), false);
+        }
+        old
+    }
+    pub fn get_mut(&mut self, id: &AccountId) -> Option<AcctMut<'_>> {
+        let Accounts { map, oi_long, holders, dirty } = self;
+        let a = map.get_mut(id)?;
+        dirty.insert(*id);
+        let before = pos_of(a);
+        Some(AcctMut { a, oi: oi_long, holders, before })
+    }
+    /// upstream `accounts.entry(id).or_insert_with(|| Account::new(id))`, guarded
+    pub fn get_or_new(&mut self, id: AccountId) -> AcctMut<'_> {
+        if !self.map.contains_key(&id) {
+            self.map.insert(id, Account::new(id));
+        }
+        self.get_mut(&id).unwrap()
+    }
+    /// full recomputation of the derived indexes == the running ones (host tests)
+    pub fn idx_ok(&self) -> bool {
+        let mut oi = BTreeMap::new();
+        let mut h = BTreeMap::new();
+        for (id, a) in &self.map {
+            idx_adj(&mut oi, &mut h, *id, &pos_of(a), true);
+        }
+        oi == self.oi_long && h == self.holders
+    }
+    /// accounts holding a position in `m`, ascending AccountId (empty iterator if none)
+    pub fn holders_of(&self, m: MarketId) -> impl Iterator<Item = AccountId> + '_ {
+        self.holders.get(&m).into_iter().flat_map(|s| s.iter().copied())
+    }
+}
+/// Guarded `&mut Account`: on drop, re-indexes the account's positions (OI + holders).
+pub struct AcctMut<'a> {
+    a: &'a mut Account,
+    oi: &'a mut BTreeMap<MarketId, u128>,
+    holders: &'a mut BTreeMap<MarketId, BTreeSet<AccountId>>,
+    before: Vec<(MarketId, i64)>,
+}
+impl core::ops::Deref for AcctMut<'_> {
+    type Target = Account;
+    fn deref(&self) -> &Account {
+        self.a
+    }
+}
+impl core::ops::DerefMut for AcctMut<'_> {
+    fn deref_mut(&mut self) -> &mut Account {
+        self.a
+    }
+}
+impl Drop for AcctMut<'_> {
+    fn drop(&mut self) {
+        let after = pos_of(self.a);
+        if after != self.before {
+            let id = self.a.id;
+            idx_adj(self.oi, self.holders, id, &self.before, false);
+            idx_adj(self.oi, self.holders, id, &after, true);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ChainState {
+    /// PILOT: the batch height. Upstream sets it per batch; the pilot sets it only through the
+    /// test-fixture op `SetHeight` (kind 10, non-`prod` builds), the real-engine harness writes
+    /// `eng.state.height` at the same unit.
+    pub height: Height,
+    pub seq: Seq,
+    /// PILOT (loop round 4): guarded map, see [`Accounts`].
+    pub accounts: Accounts,
+    pub markets: BTreeMap<MarketId, MarketParams>,
+    pub books: BTreeMap<MarketId, OrderBook>,
+    pub marks: BTreeMap<MarketId, Price>,
+    pub oracle_reports: BTreeMap<(MarketId, AccountId), Price>,
+    pub oracle_bonds: BTreeMap<AccountId, u128>,
+    pub last_index: BTreeMap<MarketId, Price>,
+    pub withdrawals: BTreeMap<(AccountId, u64), Withdrawal>,
+    pub withdrawn_total: BTreeMap<AccountId, i128>,
+    pub oracle_configs: BTreeMap<MarketId, OracleConfig>,
+    pub oracle_report_history: BTreeMap<(MarketId, AccountId), VecDeque<ReportSample>>,
+    pub oracle_twap: BTreeMap<MarketId, VecDeque<TwapSample>>,
+    pub funding_twap: BTreeMap<MarketId, VecDeque<TwapSample>>,
+    pub funding_index_twap: BTreeMap<MarketId, Price>,
+    pub funding_source: FundingSourceKind,
+    pub external_price_ring: BTreeMap<MarketId, VecDeque<ExternalSample>>,
+    pub external_sources: BTreeSet<AccountId>,
+    pub last_funding_height: BTreeMap<MarketId, Height>,
+    /// upstream: HashMap<AccountId, u64>
+    pub seen_client_seq: BTreeMap<AccountId, u64>,
+    /// PILOT (MNWIT1 proposal): order / market keys touched since the last witness commit
+    /// (account keys: `accounts.dirty`).
+    pub wit_dirty: crate::wit::WitDirty,
+}
+
+impl ChainState {
+    /// PILOT: `accounts.insert` (kept for the S1b call sites).
     pub fn put_account(&mut self, id: AccountId, a: Account) {
-        Self::oi_adj(&mut self.oi_long, &a, true);
-        if let Some(old) = self.accounts.insert(id, a) {
-            Self::oi_adj(&mut self.oi_long, &old, false);
-        }
+        self.accounts.insert(id, a);
     }
-    /// PILOT (S1b): `accounts.remove` that keeps `oi_long` current.
+    /// PILOT: `accounts.remove`.
     pub fn del_account(&mut self, id: &AccountId) {
-        if let Some(old) = self.accounts.remove(id) {
-            Self::oi_adj(&mut self.oi_long, &old, false);
-        }
+        self.accounts.remove(id);
     }
-    /// PILOT (S1b): running total == full recomputation (host tests).
+    /// PILOT: running indexes == full recomputation (host tests).
     pub fn oi_ok(&self) -> bool {
-        let mut full: BTreeMap<MarketId, u128> = BTreeMap::new();
-        for a in self.accounts.values() {
-            Self::oi_adj(&mut full, a, true);
-        }
-        full == self.oi_long
+        self.accounts.idx_ok()
+    }
+    /// PILOT (MNWIT1): drain every dirty key (orders / markets + guarded account writes).
+    pub fn take_dirty(&mut self) -> crate::wit::WitDirty {
+        let mut d = core::mem::take(&mut self.wit_dirty);
+        d.accounts.append(&mut self.accounts.dirty);
+        d
     }
     pub fn journal_account(&self, j: &mut StateJournal, id: AccountId) {
         if j.seen_accounts.insert(id) {
@@ -147,12 +279,8 @@ impl ChainState {
             .get(&fill.market)
             .is_some_and(|p| p.funding_rate)
         {
-            let holders: Vec<AccountId> = self
-                .accounts
-                .iter()
-                .filter(|(_, a)| a.positions.contains_key(&fill.market))
-                .map(|(id, _)| *id)
-                .collect();
+            // PILOT (loop round 4): holders index (same set, same AccountId order).
+            let holders: Vec<AccountId> = self.accounts.holders_of(fill.market).collect();
             for id in holders {
                 self.journal_account(j, id);
             }
@@ -164,7 +292,7 @@ impl ChainState {
     /// what the unit changed; unchanged leaves rehash to the same value and cost no path).
     pub fn note_journal(&mut self, j: &StateJournal) {
         for (id, _) in &j.accounts {
-            self.wit_dirty.accounts.insert(*id);
+            self.accounts.dirty.insert(*id);
         }
         for (m, _, _) in &j.markets {
             self.wit_dirty.markets.insert(*m);
@@ -214,9 +342,9 @@ impl ChainState {
             .or_insert_with(|| OrderBook::new(market))
     }
 
-    pub fn account_mut(&mut self, id: AccountId) -> &mut Account {
-        self.wit_dirty.accounts.insert(id); // PILOT (MNWIT1)
-        self.accounts.entry(id).or_insert_with(|| Account::new(id))
+    /// PILOT (loop round 4): guarded (`AcctMut` keeps OI / holders / dirty current).
+    pub fn account_mut(&mut self, id: AccountId) -> crate::state::AcctMut<'_> {
+        self.accounts.get_or_new(id)
     }
 
     pub fn apply_fill_pair(&mut self, fill: &Fill) -> Result<(), minuend_account::AccountError> {
@@ -303,7 +431,7 @@ impl ChainState {
             };
             let fee = bps(notional, params.taker_fee_bps);
             if fee > 0 {
-                if let Some(a) = self.accounts.get_mut(&fill.taker) {
+                if let Some(mut a) = self.accounts.get_mut(&fill.taker) {
                     a.collateral -= fee;
                 }
                 self.account_mut(INSURANCE_ACCOUNT).collateral += fee;
@@ -337,10 +465,10 @@ impl ChainState {
                 _ => 0,
             };
             if pay > 0 {
-                if let Some(a) = self.accounts.get_mut(&party) {
+                if let Some(mut a) = self.accounts.get_mut(&party) {
                     a.collateral += pay;
                 }
-                if let Some(a) = self.accounts.get_mut(&counterparty) {
+                if let Some(mut a) = self.accounts.get_mut(&counterparty) {
                     a.collateral -= pay;
                 }
             }
@@ -349,9 +477,39 @@ impl ChainState {
         // notional must be >= 100 USD (dust cannot move the peg) and the
         // printed rate must step from the current anchor — bootstrapping
         // from the index, then ≤10% of the old rate (min 1 bps) per fill.
-        // PILOT: the funding-rate mark/peg block (fresh_external_index, settle_funding_peg)
-        // is not ported; the pilot never lists a funding-rate market (place rejects it first).
-        if funding_usd.is_some() {
+        if let Some(usd) = funding_usd {
+            let cap = self
+                .markets
+                .get(&fill.market)
+                .map(|p| p.funding_cap_bps)
+                .unwrap_or(0) as i64;
+            // The $100 gate prices the fill at the multiplier notional: the
+            // encoded rate price carries no dollar scale on this market.
+            let notional_ok = funding_notional_usd(fill.qty, usd).abs() >= 100 * USD_SCALE as i128;
+            if !notional_ok {
+                return Ok(());
+            }
+            let old = self.marks.get(&fill.market).copied().unwrap_or(0);
+            let step_ok = if old != 0 {
+                let step = (funding_rate_bps(old).unsigned_abs() / 10).max(1) as i64;
+                (funding_rate_bps(fill.price) - funding_rate_bps(old)).abs() <= step
+            } else {
+                // Bootstrap: anchor the first print to the fresh external
+                // index, gap capped at this market's peg cap.
+                match self.fresh_external_index(fill.market) {
+                    Some(index) => {
+                        (funding_rate_bps(fill.price) - funding_rate_bps(index)).abs() <= cap
+                    }
+                    _ => false,
+                }
+            };
+            // R9-H2: a print at / above MARK_CAP never becomes the mark.
+            if step_ok && fill.price.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+                self.marks.insert(fill.market, fill.price);
+                // The mark just moved: re-evaluate the peg so its interval
+                // clock arms as soon as index + mark + fresh reports exist.
+                self.settle_funding_peg(fill.market);
+            }
             return Ok(());
         }
         // Mark oracle guards: fills move the mark only for markets where NO
@@ -398,4 +556,467 @@ impl ChainState {
     pub fn market_params(&self, m: MarketId) -> MarketParams {
         self.markets[&m]
     }
+    // ---- PILOT (loop round 4): oracle / TWAP / funding, copied verbatim from
+    // minuend-state/src/lib.rs @ 20326c0 (oracle_config .. effective_funding_index,
+    // apply_report .. transfer_funding_rate); edits marked PILOT. ----
+    // -----------------------------------------------------------------------
+    // Oracle config / TWAP helpers
+    pub fn oracle_config(&self, market: MarketId) -> OracleConfig {
+        self.oracle_configs
+            .get(&market)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn record_twap_sample(&mut self, market: MarketId, median: Price, seq: Seq) {
+        let cfg = self.oracle_config(market);
+        let window_len = cfg.twap_window as usize;
+        // Cap window_len to max to avoid unbounded growth if governance mis-sets
+        let cap = window_len
+            .min(minuend_types::ORACLE_TWAP_MAX as usize)
+            .max(2);
+        let q = self.oracle_twap.entry(market).or_default();
+        if q.back().map(|s| s.height == self.height).unwrap_or(false) {
+            // Same height: overwrite median if different (multiple reporters same batch)
+            if q.back().unwrap().median != median {
+                let back = q.back_mut().unwrap();
+                back.median = median;
+                back.seq = seq;
+            } else {
+                return;
+            }
+        } else {
+            q.push_back(TwapSample {
+                seq,
+                height: self.height,
+                median,
+            });
+            while q.len() > cap {
+                q.pop_front();
+            }
+        }
+        // Mirror into funding_twap and cache funding_index_twap for effective_funding_index.
+        // Doc 06 §2.4: dedup same-height-same-median so multiple reporters in one batch
+        // don't double-count; a different median at the same height overwrites (last wins).
+        let fq = self.funding_twap.entry(market).or_default();
+        if fq.back().map(|s| s.height == self.height).unwrap_or(false) {
+            if fq.back().unwrap().median != median {
+                let back = fq.back_mut().unwrap();
+                back.median = median;
+                back.seq = seq;
+            }
+        } else {
+            fq.push_back(TwapSample {
+                seq,
+                height: self.height,
+                median,
+            });
+            while fq.len() > FUNDING_TWAP_WINDOW as usize {
+                fq.pop_front();
+            }
+        }
+        if let Some(twap) = self.compute_twap(market) {
+            self.funding_index_twap.insert(market, twap);
+        }
+        if let Some(ftwap) = self.compute_funding_twap(market) {
+            self.funding_index_twap.insert(market, ftwap);
+        }
+    }
+
+    /// Record an external keeper tick (doc 06 §2.6): allowlist + live-market +
+    /// positive-price gated by the caller; ring capped at the funding window.
+    pub fn apply_external_price(
+        &mut self,
+        _source: AccountId,
+        market: MarketId,
+        price: Price,
+        source_id: u8,
+        seq: Seq,
+    ) {
+        let q = self.external_price_ring.entry(market).or_default();
+        q.push_back(ExternalSample {
+            seq,
+            height: self.height,
+            price,
+            source_id,
+        });
+        while q.len() > FUNDING_TWAP_WINDOW as usize {
+            q.pop_front();
+        }
+    }
+
+    /// Latest external ring sample that is still fresh at the current
+    /// height and non-zero. Used as the peg payment index — a dead feed
+    /// means the window pays nothing, never a stale or zero index.
+    pub fn fresh_external_index(&self, market: MarketId) -> Option<Price> {
+        let q = self.external_price_ring.get(&market)?;
+        q.iter()
+            .rev()
+            .find(|s| s.height + FUNDING_EXTERNAL_MAX_STALENESS > self.height && s.price != 0)
+            .map(|s| s.price)
+    }
+
+    /// TWAP over the external keeper ring (doc 06 §2.6 rule 2): requires
+    /// MIN_SAMPLES and freshness within FUNDING_EXTERNAL_MAX_STALENESS so a
+    /// dead feed falls back instead of freezing funding.
+    pub fn external_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.external_price_ring.get(&market)?;
+        if q.len() < FUNDING_TWAP_MIN_SAMPLES {
+            return None;
+        }
+        let last = q.back()?;
+        if last.height + FUNDING_EXTERNAL_MAX_STALENESS <= self.height {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.price), q.len())
+    }
+
+
+    /// Signed mean over at most `FUNDING_TWAP_WINDOW` `i64` samples. The
+    /// `i128` sum cannot overflow (window cap 1800); `try_from` is only the
+    /// backstop. Returns `None` on `n == 0` or an impossible conversion —
+    /// never panics, never substitutes `0`.
+    fn mean_price(samples: impl Iterator<Item = i64>, n: usize) -> Option<Price> {
+        if n == 0 {
+            return None;
+        }
+        let sum: i128 = samples.map(i128::from).sum();
+        i64::try_from(sum / n as i128).ok()
+    }
+
+    /// Mark must stay within ±10% of the funding index (the external
+    /// anchor): anchor 0 means no index exists, so nothing to anchor to.
+    fn within_band(candidate: Price, anchor: Price) -> bool {
+        anchor == 0
+            || (i128::from(candidate) - i128::from(anchor)).abs() <= i128::from(anchor).abs() / 10
+    }
+
+    pub fn compute_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.oracle_twap.get(&market)?;
+        if q.len() < 2 {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.median), q.len())
+    }
+
+    pub fn compute_funding_twap(&self, market: MarketId) -> Option<Price> {
+        let q = self.funding_twap.get(&market)?;
+        if q.len() < 2 {
+            return None;
+        }
+        Self::mean_price(q.iter().map(|s| s.median), q.len())
+    }
+    pub fn effective_funding_index(&self, market: MarketId, median: Price) -> Price {
+        match self.funding_source {
+            FundingSourceKind::BondedMedianTwap => self
+                .funding_index_twap
+                .get(&market)
+                .copied()
+                .unwrap_or(median),
+            FundingSourceKind::AggregatedExternal => {
+                // Doc 06 §2.6 rule 1: external TWAP overrides when fresh and
+                // populated; else fall back to bonded-median TWAP, then the
+                // instant median — funding never freezes.
+                self.external_twap(market).unwrap_or_else(|| {
+                    self.funding_index_twap
+                        .get(&market)
+                        .copied()
+                        .unwrap_or(median)
+                })
+            }
+        }
+    }
+    pub fn prune_oracle_twap(&mut self, _min_height: Height) {
+        // TWAP is bounded by VecDeque length cap, not height expiry; no-op for v1
+    }
+
+    /// Apply a bonded oracle's report for `market` and recompute the effective
+    /// mark as the median of all current bonded reporters, subject to the
+    /// ±10% deviation cap vs the previous mark (the first report for a market
+    /// sets the mark unconditionally). Fills no longer move the mark for
+    /// markets where any bonded reporter has spoken. Zero prices and unbonded
+    /// reporters are ignored defensively — the exec layer pre-validates bonds.
+    pub fn apply_report(
+        &mut self,
+        oracle: AccountId,
+        market: MarketId,
+        price: Price,
+        caller_seq: Seq,
+    ) -> Result<(), ()> {
+        if price == 0 || !self.oracle_bonds.contains_key(&oracle) {
+            return Ok(());
+        }
+        self.oracle_reports.insert((market, oracle), price);
+        // Record per-reporter history for slash streak detection (depth 8)
+        {
+            let q = self
+                .oracle_report_history
+                .entry((market, oracle))
+                .or_default();
+            // Push new sample; dedup same height by overwriting last
+            if q.back().map(|s| s.height == self.height).unwrap_or(false) {
+                if let Some(back) = q.back_mut() {
+                    back.price = price;
+                    back.seq = self.seq;
+                }
+            } else {
+                q.push_back(ReportSample {
+                    height: self.height,
+                    price,
+                    seq: self.seq,
+                });
+                while q.len() > 8 {
+                    q.pop_front();
+                }
+            }
+        }
+        // Median over reporters that hold BOTH a bond and a current report
+        // for this market. sorted[(len-1)/2] is the exact middle when the
+        // count is odd and the smaller middle when even — deterministic in
+        // both cases, no rounding drift.
+        let mut prices: Vec<Price> = self
+            .oracle_reports
+            .iter()
+            .filter(|((m, o), _)| *m == market && self.oracle_bonds.contains_key(o))
+            .map(|(_, p)| *p)
+            .collect();
+        if prices.is_empty() {
+            return Ok(());
+        }
+        prices.sort();
+        let median = prices[(prices.len() - 1) / 2];
+        // Funding index: unclamped median, so the premium reflects true
+        // reporter consensus even while the spot mark lags behind the cap.
+        self.last_index.insert(market, median);
+        // Funding-rate markets: the oracle writes the index only. The mark
+        // comes from fills, so the ±10% band and the premium block are
+        // skipped; funding settles as the peg instead. The TWAP ring is
+        // still recorded so slash sees the reporter's sample.
+        if self
+            .markets
+            .get(&market)
+            .map(|p| p.funding_rate)
+            .unwrap_or(false)
+        {
+            self.record_twap_sample(market, median, caller_seq);
+            self.settle_funding_peg(market);
+            return Ok(());
+        }
+        // Signed marks: the ±10% band is measured on the old mark's
+        // magnitude, so a negative mark can still move by capped steps.
+        let mut capped = match self.marks.get(&market) {
+            Some(&old) if old != 0 => {
+                let dev = (median as i128 - old as i128).abs();
+                if dev <= (old as i128).abs() / 10 {
+                    median
+                } else {
+                    old
+                }
+            }
+            _ => median,
+        };
+        // Index band: a median outside ±10% of the funding index must not
+        // become the mark. Keep the previous mark if one exists (do not
+        // walk a legacy out-of-band mark toward the index); with no mark,
+        // bootstrap directly to the index rather than the out-of-band
+        // median.
+        let index = self.effective_funding_index(market, median);
+        if index != 0 && !Self::within_band(capped, index) {
+            capped = self
+                .marks
+                .get(&market)
+                .copied()
+                .filter(|p| *p != 0)
+                .unwrap_or(index);
+        }
+        // R9-H2: a mark at / above MARK_CAP is never written.
+        if capped.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+            self.marks.insert(market, capped);
+        }
+        // Record TWAP sample after median update
+        self.record_twap_sample(market, median, caller_seq);
+        // Funding: once at least two valid reports exist, every report tick
+        // settles peer-to-peer funding.
+        // premium_bps = (spot − funding_index)/funding_index, clamped to ±FUNDING_CAP_BPS.
+        // funding_index = twap when height >= activation else median.
+        // notional = signed_notional_usd(qty, funding_index)
+        if prices.len() >= 2 {
+            let funding_index = self.effective_funding_index(market, median);
+            let index = funding_index as i128;
+            let spot = capped as i128;
+            if index != 0 {
+                // Pay at most once per height: reporters report in batch at
+                // the same height, and a non-zero premium must not transfer
+                // again for every report tick at that height.
+                if self.last_funding_height.get(&market) != Some(&self.height) {
+                    let diff_bps = ((spot - index) * 10_000 / index).clamp(
+                        -(minuend_types::FUNDING_CAP_BPS as i128),
+                        minuend_types::FUNDING_CAP_BPS as i128,
+                    );
+                    if diff_bps != 0 {
+                        self.transfer_funding(market, funding_index, diff_bps);
+                    }
+                    // Record consideration even when diff_bps == 0: a later
+                    // report at this height must not pay either.
+                    self.last_funding_height.insert(market, self.height);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Two-phase peer-to-peer funding transfer: Phase 1 collects signed
+    /// payments in ascending AccountId order, Phase 2a debits payers clamped
+    /// at non-negative collateral into a budget, Phase 2b credits receivers
+    /// until the budget is spent. Conservation is exact; insurance
+    /// participates like any account.
+    fn transfer_funding(&mut self, market: MarketId, funding_index: Price, diff_bps: i128) {
+        // Phase 1: signed payments in ascending AccountId order.
+        // PILOT (loop round 4): holders index instead of every account (same ids, same order).
+        let payments: Vec<(AccountId, i128)> = self
+            .accounts
+            .holders_of(market)
+            .filter_map(|id| {
+                let a = &self.accounts[&id];
+                a.positions.get(&market).map(|pos| {
+                    let id = &id;
+                    (
+                        *id,
+                        minuend_types::signed_notional_usd(pos.qty, funding_index) * diff_bps
+                            / 10_000,
+                    )
+                })
+            })
+            .filter(|(_, p)| *p != 0)
+            .collect();
+        // Phase 2a: debit payers, clamped at non-negative collateral.
+        let mut budget: i128 = 0;
+        for (id, payment) in &payments {
+            if *payment <= 0 {
+                continue;
+            }
+            if let Some(mut a) = self.accounts.get_mut(id) {
+                let debit = (*payment).min(a.collateral.max(0));
+                a.collateral -= debit;
+                budget += debit;
+            }
+        }
+        // Phase 2b: credit receivers until the budget is spent.
+        for (id, payment) in &payments {
+            if budget == 0 {
+                break;
+            }
+            if *payment >= 0 {
+                continue;
+            }
+            let want = -*payment;
+            let credit = want.min(budget);
+            if let Some(mut a) = self.accounts.get_mut(id) {
+                a.collateral += credit;
+            }
+            budget -= credit;
+        }
+    }
+
+    /// Funding-rate peg settlement for a `funding_rate` market:
+    /// - needs a non-zero fill-written mark, else no-op (clock untouched);
+    /// - the first observation arms `last_funding_height` and pays nothing
+    ///   (no reporters and no external print required to arm);
+    /// - windows at least `FUNDING_PEG_INTERVAL_HEIGHTS` after the armed
+    ///   height always re-arm; payment happens only when a fresh external
+    ///   print exists — no fresh print means that window pays nothing;
+    /// - diff is `mark rate − index rate`, clamped to the market's
+    ///   `funding_cap_bps`, then paid rate-cash peer-to-peer.
+    pub fn settle_funding_peg(&mut self, market: MarketId) {
+        let mark = match self.marks.get(&market).copied() {
+            Some(m) if m != 0 => m,
+            _ => return,
+        };
+        let height = self.height;
+        match self.last_funding_height.get(&market).copied() {
+            // Not armed: arm the interval clock, pay nothing.
+            None => {
+                self.last_funding_height.insert(market, height);
+                return;
+            }
+            Some(last) if height < last + minuend_types::FUNDING_PEG_INTERVAL_HEIGHTS => {
+                return;
+            }
+            _ => {}
+        }
+        // Window elapsed: re-arm unconditionally, even with no fresh feed.
+        self.last_funding_height.insert(market, height);
+        let index = match self.fresh_external_index(market) {
+            Some(i) => i,
+            None => return,
+        };
+        let cap = self
+            .markets
+            .get(&market)
+            .map(|p| p.funding_cap_bps)
+            .unwrap_or(0) as i64;
+        if cap == 0 {
+            return;
+        }
+        let diff_bps = (funding_rate_bps(mark) - funding_rate_bps(index)).clamp(-cap, cap);
+        if diff_bps != 0 {
+            self.transfer_funding_rate(market, diff_bps);
+        }
+    }
+
+    /// Rate-cash sibling of `transfer_funding`: same two-phase debit/credit
+    /// conservation, but each payment is `funding_rate_cash(qty, diff_bps,
+    /// usd_per_unit)` of the market's listing-time multiplier.
+    fn transfer_funding_rate(&mut self, market: MarketId, diff_bps: i64) {
+        let usd = match self.markets.get(&market) {
+            Some(p) if p.funding_rate => p.usd_per_unit,
+            _ => return,
+        };
+        // Phase 1: signed payments in ascending AccountId order.
+        // PILOT (loop round 4): holders index instead of every account (same ids, same order).
+        let payments: Vec<(AccountId, i128)> = self
+            .accounts
+            .holders_of(market)
+            .filter_map(|id| {
+                let a = &self.accounts[&id];
+                a.positions.get(&market).map(|pos| {
+                    let id = &id;
+                    (
+                        *id,
+                        minuend_types::funding_rate_cash(pos.qty, diff_bps, usd),
+                    )
+                })
+            })
+            .filter(|(_, p)| *p != 0)
+            .collect();
+        // Phase 2a: debit payers, clamped at non-negative collateral.
+        let mut budget: i128 = 0;
+        for (id, payment) in &payments {
+            if *payment <= 0 {
+                continue;
+            }
+            if let Some(mut a) = self.accounts.get_mut(id) {
+                let debit = (*payment).min(a.collateral.max(0));
+                a.collateral -= debit;
+                budget += debit;
+            }
+        }
+        // Phase 2b: credit receivers until the budget is spent.
+        for (id, payment) in &payments {
+            if budget == 0 {
+                break;
+            }
+            if *payment >= 0 {
+                continue;
+            }
+            let want = -*payment;
+            let credit = want.min(budget);
+            if let Some(mut a) = self.accounts.get_mut(id) {
+                a.collateral += credit;
+            }
+            budget -= credit;
+        }
+    }
+
+    // -------------------------------------------------------------------
 }

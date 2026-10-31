@@ -20,10 +20,10 @@ pub fn batch_words(ids_real: &[AccountId], ops: &[[u32; 8]], flags: u32) -> Vec<
     }
     w
 }
-fn new_gen(n_acc: u32, flags: u32) -> (Vec<AccountId>, Gen) {
+pub(crate) fn new_gen(n_acc: u32, flags: u32) -> (Vec<AccountId>, Gen) {
     let ids_real: Vec<AccountId> = (0..n_acc).map(acct_id).collect();
     let ids: Vec<mnpilot::types::AccountId> = ids_real.iter().map(|a| mnpilot::types::AccountId(a.0)).collect();
-    let g = Gen { eng: mnpilot::engine::Engine { state: mnpilot::state::ChainState::genesis_flags(flags) }, ops: Vec::new(), live: Vec::new(), ids };
+    let g = Gen { eng: mnpilot::engine::Engine { state: mnpilot::state::ChainState::genesis_fixture(flags, &ids) }, ops: Vec::new(), live: Vec::new(), ids };
     (ids_real, g)
 }
 fn dep(a: u32, amt: i64) -> [u32; 8] {

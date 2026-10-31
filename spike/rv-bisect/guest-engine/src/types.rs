@@ -224,3 +224,77 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(data).into()
 }
+
+// ---- PILOT (loop round 4): oracle / funding / withdraw / liquidation types and constants,
+// copied from minuend-types/src/{lib,ids}.rs and minuend-state/src/lib.rs (`Withdrawal`) @ 20326c0
+pub const LIQ_MIN_BOOK_FILL_DIV: u64 = 10;
+pub const FUNDING_CAP_BPS: i64 = 50;
+pub const FUNDING_PEG_INTERVAL_HEIGHTS: Height = 14_400;
+pub const ORACLE_TWAP_WINDOW: Height = 256;
+pub const ORACLE_TWAP_MAX: Height = 1800;
+pub const SLASH_DEVIATION_BPS: u64 = 500;
+pub const SLASH_REWARD_BPS: u64 = 5000;
+pub const FUNDING_TWAP_WINDOW: Height = 256;
+pub const FUNDING_TWAP_MIN_SAMPLES: usize = 2;
+pub const FUNDING_EXTERNAL_MAX_STALENESS: Height = 32;
+pub const ORACLE_BOND_PERP: u128 = 50_000;
+/// minuend-exec: pending withdrawals per account / smallest partial withdrawal
+pub const MAX_PENDING_WITHDRAWALS_PER_ACCOUNT: usize = 64;
+pub const MIN_WITHDRAW_AMOUNT: Usd = USD_SCALE as Usd;
+pub fn encode_funding_price(rate_bps: i64) -> Price {
+    FUNDING_PRICE_OFFSET + rate_bps.saturating_mul(FUNDING_BPS_UNIT)
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum FundingSourceKind {
+    #[default]
+    BondedMedianTwap = 0,
+    AggregatedExternal = 1,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OracleConfig {
+    pub deviation_bps: u64,
+    pub twap_window: u64,
+    pub slash_reward_bps: u64,
+}
+impl Default for OracleConfig {
+    fn default() -> Self {
+        Self {
+            deviation_bps: SLASH_DEVIATION_BPS,
+            twap_window: ORACLE_TWAP_WINDOW,
+            slash_reward_bps: SLASH_REWARD_BPS,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TwapSample {
+    pub seq: Seq,
+    pub height: Height,
+    pub median: Price,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReportSample {
+    pub height: Height,
+    pub price: Price,
+    pub seq: Seq,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalSample {
+    pub seq: Seq,
+    pub height: Height,
+    pub price: Price,
+    pub source_id: u8,
+}
+#[derive(Clone, Debug)]
+pub struct Withdrawal {
+    pub amount: Usd,
+    pub pending: bool,
+    pub height: Height,
+}
+/// minuend-types ids.rs `liq_order_id` (the unit id is an input of the unit; see engine.rs)
+pub fn liq_order_id(unit: [u8; 32]) -> OrderId {
+    let mut buf = alloc::vec::Vec::with_capacity(3 + 32);
+    buf.extend_from_slice(b"liq");
+    buf.extend_from_slice(&unit);
+    OrderId(sha256(&buf))
+}

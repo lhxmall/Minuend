@@ -7,14 +7,15 @@ use crate::account::AccountError;
 use crate::book_types::{BookError, Fill, Order};
 use crate::state::ChainState;
 use crate::types::{
-    bps, funding_notional_usd, funding_rate_bps, notional_usd, order_id, AccountId, Bps, MarketId,
-    OrderId, OrderType, Qty, Seq, Side, TimeInForce, Usd, INSURANCE_ACCOUNT,
-    MAX_LIVE_ORDERS_PER_ACCOUNT, MIN_OPEN_EQUITY,
+    bps, funding_notional_usd, funding_rate_bps, funding_rate_cash, liq_order_id, notional_usd,
+    order_id, AccountId, Bps, MarketId, MarketParams, OrderId, OrderType, Price, Qty, Seq, Side,
+    TimeInForce, Usd, INSURANCE_ACCOUNT, MAX_LIVE_ORDERS_PER_ACCOUNT,
+    MAX_PENDING_WITHDRAWALS_PER_ACCOUNT, MIN_OPEN_EQUITY, MIN_WITHDRAW_AMOUNT,
 };
 use alloc::vec::Vec;
 mod minuend_account { pub use crate::account::*; }
 mod minuend_book { pub use crate::book_types::*; }
-mod minuend_state { pub use crate::state::*; }
+mod minuend_state { pub use crate::state::*; pub use crate::types::Withdrawal; }
 mod minuend_types { pub use crate::types::*; }
 /// PILOT: stands in for minuend_types::UnitId (only threaded through `place`, never read).
 pub type UnitId = [u8; 32];
@@ -627,7 +628,7 @@ impl Engine {
     fn funding_open_interest(&self, market: MarketId, account: AccountId, open_qty: i64) -> Qty {
         // PILOT (loop round 3, S1b): running total instead of iterating every account (same value:
         // ChainState::oi_long = sum of positive qty in `market` over all accounts, see oi_ok).
-        let mut oi: u128 = self.state.oi_long.get(&market).copied().unwrap_or(0);
+        let mut oi: u128 = self.state.accounts.oi_long.get(&market).copied().unwrap_or(0);
         oi += open_qty.unsigned_abs() as u128;
         if let Some(book) = self.state.books.get(&market) {
             let pos_qty = self
@@ -873,4 +874,875 @@ impl Engine {
         self.state.wit_dirty.accounts.insert(account); // PILOT (MNWIT1)
         Ok(Vec::new())
     }
+
+    // ---- PILOT (loop round 4): withdraw, liquidate (book path + ADL + funding-rate off-book
+    // close), update_external_price and the ReportPrice dispatch arm, copied verbatim from
+    // minuend-exec/src/lib.rs @ 20326c0 (lines 1534-2296, 2807-2862, 546-582). Edits marked
+    // PILOT: `mut` bindings for the guarded account handles, the holders index instead of
+    // full account scans, `note_journal` for the MNWIT1 dirty set, no re-entrancy flag. ----
+    /// upstream `dispatch` arm `Op::ReportPrice`
+    pub fn report_price(&mut self, oracle: AccountId, market: MarketId, price: Price) -> Result<Vec<Fill>, RejectReason> {
+        // Bond gate: only PERP-bonded accounts may report prices;
+        // unknown markets have no book to index either.
+        if !self.state.oracle_bonds.contains_key(&oracle) {
+            return Err(RejectReason::BadAccount);
+        }
+        if !self.state.markets.contains_key(&market) {
+            return Err(RejectReason::NotFound);
+        }
+        // Spot-only markets have no oracle feed: same signal as
+        // unknown markets so watchers need no new error path.
+        if self
+            .state
+            .markets
+            .get(&market)
+            .map(|p| p.spot_only)
+            .unwrap_or(false)
+        {
+            return Err(RejectReason::NotFound);
+        }
+        // R10-L1: a report at / above MARK_CAP is rejected (it can
+        // never become the mark; R9-H2) rather than recorded.
+        if price.unsigned_abs() >= minuend_types::MARK_CAP.unsigned_abs() {
+            return Err(RejectReason::Risk);
+        }
+        // Doc 06 §2.7: pass the pre-increment global seq so TWAP
+        // samples carry intra-height ordering without wall clocks.
+        let caller_seq = self.state.seq;
+        self.state
+            .apply_report(oracle, market, price, caller_seq)
+            .map_err(|_| RejectReason::NotFound)?;
+        self.state.wit_dirty.markets.insert(market); // PILOT (MNWIT1): the mark is in `meta:`
+        Ok(Vec::new())
+    }
+    pub fn withdraw(
+        &mut self,
+        account: AccountId,
+        amount: Usd,
+        nonce: u64,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        if self.state.withdrawals.contains_key(&(account, nonce)) {
+            return Err(RejectReason::DuplicateNonce);
+        }
+        let pending = self
+            .state
+            .withdrawals
+            .range((account, 0)..=(account, u64::MAX))
+            .count();
+        if pending >= MAX_PENDING_WITHDRAWALS_PER_ACCOUNT {
+            return Err(RejectReason::Risk);
+        }
+        // R2-E-3: cash reserved by this account's resting cross opening
+        // orders (spot band worst cases, perp IM) is not withdrawable —
+        // otherwise an order placed against collateral could be filled after
+        // that collateral already left, leaving an unbacked position.
+        let resting = self.resting_open_im(account);
+        // #47 (cross-PR): an unknown account has nothing to withdraw. The
+        // old `account_mut(..).debit(..)` created an empty account first and
+        // left it behind on the Insufficient reject.
+        let Some(mut acct) = self.state.accounts.get_mut(&account) else {
+            return Err(RejectReason::Insufficient);
+        };
+        if amount > 0 && amount < MIN_WITHDRAW_AMOUNT && amount != acct.collateral {
+            return Err(RejectReason::Risk);
+        }
+        acct.debit(amount, &self.state.marks, &self.state.markets)
+            .map_err(map_acct)?;
+        if resting > 0 && acct.snapshot(&self.state.marks, &self.state.markets).equity < resting {
+            acct.collateral += amount;
+            return Err(RejectReason::Insufficient);
+        }
+        // Cumulative signed-withdrawal ledger committed as `W` in the AA
+        // leaf: the vault AA enforces "this claim + prior claims <= W".
+        *self.state.withdrawn_total.entry(account).or_insert(0) += amount;
+        self.state.withdrawals.insert(
+            (account, nonce),
+            minuend_state::Withdrawal {
+                amount,
+                pending: true,
+                height: self.state.height,
+            },
+        );
+        Ok(Vec::new())
+    }
+
+    /// Guarded entry — dispatch and force-sell both land here. A nested
+    /// call (one made while another `liquidate` is mid-flight) returns no
+    /// fills before touching any state, so an outer call's book submit,
+    /// fills, and ADL never interleave with a second cascade. The flag is
+    /// cleared on every exit path, `Err` included.
+    pub fn liquidate(
+        &mut self,
+        unit: UnitId,
+        seq: Seq,
+        caller: AccountId,
+        target: AccountId,
+        market: minuend_types::MarketId,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        // PILOT: upstream's `liquidating` re-entrancy flag is dropped: nothing in the port
+        // (no force-sell) calls `liquidate` from inside another engine op.
+        self.liquidate_inner(unit, seq, caller, target, market)
+    }
+
+    fn liquidate_inner(
+        &mut self,
+        unit: UnitId,
+        seq: Seq,
+        caller: AccountId,
+        target: AccountId,
+        market: minuend_types::MarketId,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        // Self-liquidation is banned: a keeper must not trigger its own account.
+        if caller == target {
+            return Err(RejectReason::BadAccount);
+        }
+        if target == INSURANCE_ACCOUNT || caller == INSURANCE_ACCOUNT {
+            // Insurance fund never liquidates or is liquidated.
+            return Err(RejectReason::NotLiquidatable);
+        }
+        let pos = self
+            .state
+            .accounts
+            .get(&target)
+            .and_then(|a| a.positions.get(&market))
+            .cloned();
+        // Isolation fork: an isolated position is liquidatable on its own
+        // bucket risk (`isolated_risk`), a cross one on the pooled account
+        // snapshot as today.
+        let liquidatable = match &pos {
+            Some(p) if p.isolated => self
+                .state
+                .accounts
+                .get(&target)
+                .map(|a| {
+                    a.isolated_risk(market, &self.state.marks, &self.state.markets)
+                        .liquidatable
+                })
+                .unwrap_or(false),
+            _ => {
+                self.state
+                    .accounts
+                    .get(&target)
+                    .ok_or(RejectReason::NotFound)?
+                    .snapshot(&self.state.marks, &self.state.markets)
+                    .liquidatable
+            }
+        };
+        if !liquidatable {
+            return Err(RejectReason::NotLiquidatable);
+        }
+        let pos_qty = pos.as_ref().map(|p| p.qty).unwrap_or(0);
+        if pos_qty == 0 {
+            return Err(RejectReason::NotLiquidatable);
+        }
+        // Funding-rate markets close off-book at the external index: their
+        // book prices are rates, so an IOC there would trade against a rate
+        // ladder instead of unwinding dollars. No book submit, no mark write.
+        if self
+            .state
+            .markets
+            .get(&market)
+            .map(|p| p.funding_rate)
+            .unwrap_or(false)
+        {
+            // R2-E-11: the off-book close mutates the target, every ADL
+            // counterparty (holders of this market), and the keeper; any
+            // `?` mid-way used to leave half of it applied. Journal all of
+            // them and roll back on Err (all-or-nothing, B4).
+            let mut journal = minuend_state::StateJournal::default();
+            self.state.journal_account(&mut journal, target);
+            self.state.journal_account(&mut journal, caller);
+            // PILOT (loop round 4): holders index (same ids, same order)
+            let holders: Vec<AccountId> = self.state.accounts.holders_of(market).collect();
+            for h in holders {
+                self.state.journal_account(&mut journal, h);
+            }
+            let out = self.liquidate_funding_off_book(unit, seq, caller, target, market, pos_qty);
+            if out.is_err() {
+                self.state.rollback(journal);
+            } else {
+                self.state.note_journal(&journal); // PILOT (MNWIT1)
+            }
+            return out;
+        }
+        // #47 L1: a legacy spot listing (see `spot_market_tradeable`) can
+        // never fill — `apply_fill_pair` returns `Risk` for it. Refuse
+        // BEFORE the book is touched instead of matching makers first.
+        if !minuend_types::spot_market_tradeable(&self.state.market_params(market)) {
+            return Err(RejectReason::Risk);
+        }
+        // R2-E-4: a (tradeable) spot_only position is never liquidated —
+        // neither by a keeper `Liquidate` nor by force-sell. Its mark is
+        // frozen, so the ADL fallback would close honest opposite holders
+        // at a stale price; its band worst case is already reserved (cross)
+        // or escrowed (isolated), so there is nothing for a liquidation to
+        // protect. A distressed account is liquidated through its non-spot
+        // positions instead. Refused before any state is touched.
+        if self.state.market_params(market).spot_only {
+            return Err(RejectReason::NotLiquidatable);
+        }
+        // #47 L1/B4: everything below (book IOC, fills, refunds, ADL, keeper
+        // payout) is journaled and rolled back on any Err, so a failing
+        // liquidation leaves no half-applied book or account state.
+        let mut journal = minuend_state::StateJournal::default();
+        let out =
+            self.liquidate_book_path(&mut journal, unit, seq, caller, target, market, pos_qty);
+        // #47 (owner item "escrow refunds of fill-less forced liquidation"):
+        // a book-path liquidation that closed NOTHING is a no-op. Without
+        // this, its IOC could still cancel the target's own escrowed orders
+        // (CancelMaker) and refund their margin — a cash leg no fill string
+        // carries. In a force-sell after a single-fill Place that refund
+        // landed on a fill party's leaf, so the fill dispute AA's exact
+        // collateral identity judged the HONEST unit as fraud.
+        match &out {
+            Err(_) => self.state.rollback(journal),
+            Ok(fills) if fills.is_empty() => self.state.rollback(journal),
+            Ok(_) => self.state.note_journal(&journal), // PILOT (MNWIT1)
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn liquidate_book_path(
+        &mut self,
+        journal: &mut minuend_state::StateJournal,
+        unit: UnitId,
+        seq: Seq,
+        caller: AccountId,
+        target: AccountId,
+        market: minuend_types::MarketId,
+        pos_qty: i64,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        let target_isolated_pos = self
+            .state
+            .accounts
+            .get(&target)
+            .and_then(|a| a.positions.get(&market))
+            .map(|p| p.isolated)
+            .unwrap_or(false);
+        let side = if pos_qty > 0 { Side::Ask } else { Side::Bid };
+        let qty = pos_qty.unsigned_abs();
+        let oid = liq_order_id(unit);
+        let order = Order {
+            id: oid,
+            account: target,
+            market,
+            side,
+            typ: OrderType::Market,
+            tif: TimeInForce::Ioc,
+            price: 0,
+            qty,
+            remaining: qty,
+            seq,
+            isolated: false,
+            margin_left: 0,
+        };
+        // Round 7b (R7-H1): one fill per unit lets a dust order at the top
+        // of the book absorb each `Liquidate` (1 lot closed, no ADL because
+        // the book "filled"). When the first maker would close less than
+        // 1/LIQ_MIN_BOOK_FILL_DIV of the position, skip the book: the ADL
+        // path below runs in this same unit (a book of no crossing maker
+        // behaves exactly as before).
+        let dust = self
+            .state
+            .books
+            .get(&market)
+            .and_then(|b| b.first_maker_qty(side, target))
+            .is_some_and(|q| q.saturating_mul(minuend_types::LIQ_MIN_BOOK_FILL_DIV) < qty);
+        let result = if dust {
+            minuend_book::MatchResult {
+                fills: Vec::new(),
+                taker_remaining: qty,
+                taker_resting: false,
+                canceled_maker: Vec::new(),
+                taker_margin_left: 0,
+                refunds: Vec::new(),
+            }
+        } else {
+            self.state
+                .submit_journaled(journal, order, minuend_book::SelfTrade::CancelMaker)
+                .map_err(RejectReason::Book)?
+        };
+        // Default self-trade policy: cancel-maker-continue (the target's
+        // book must clear for the close to execute; kind 3's identity is
+        // unchanged by this PR).
+        let mut fills = result.fills;
+        // Liquidation book fills carry the keeper reward, distinct from a
+        // plain place (kind 0/1): the AA subtracts the reward on taker legs.
+        for f in &mut fills {
+            f.kind = 3;
+        }
+        for fill in &fills {
+            // An AccountError here (should one ever fire) no longer leaves
+            // partially-applied state: the caller rolls the journal back.
+            self.state
+                .apply_fill_pair_journaled(journal, fill)
+                .map_err(map_acct)?;
+        }
+        // Escrow returns (#10): STP refunds and the liquidation IOC's
+        // unfilled remainder are the target's own money — mirror place().
+        for (acct, amt) in &result.refunds {
+            if *amt > 0 {
+                self.state.journal_account(journal, *acct);
+                self.state.account_mut(*acct).collateral += i128::from(*amt);
+            }
+        }
+        if !result.taker_resting && result.taker_margin_left > 0 {
+            self.state.journal_account(journal, target);
+            self.state.account_mut(target).collateral += i128::from(result.taker_margin_left);
+        }
+        let still = if target_isolated_pos {
+            self.state
+                .accounts
+                .get(&target)
+                .map(|a| {
+                    a.isolated_risk(market, &self.state.marks, &self.state.markets)
+                        .liquidatable
+                })
+                .unwrap_or(false)
+        } else {
+            self.state
+                .accounts
+                .get(&target)
+                .map(|a| {
+                    a.snapshot(&self.state.marks, &self.state.markets)
+                        .liquidatable
+                })
+                .unwrap_or(false)
+        };
+        let remaining_pos = self
+            .state
+            .accounts
+            .get(&target)
+            .and_then(|a| a.positions.get(&market))
+            .map(|p| p.qty)
+            .unwrap_or(0);
+        let mut keeper_paid = Usd::from(0u64);
+        // Round 7 (one fill per unit): ADL only when the book IOC filled
+        // nothing; a remainder after a book fill waits for the next
+        // `Liquidate`.
+        if still && remaining_pos != 0 && fills.is_empty() {
+            // ADL remainder: the book did not finish the close, so the
+            // still-liquidatable remainder is walked onto opposite-sign
+            // positions at the current mark — insurance is never the
+            // buyer of last resort. Each take is a zero-sum kind-2 fill
+            // (the dispute AA always bounces kind 2; no haircut formula
+            // here). Candidates exhausted → the unsold qty stays:
+            // negative collateral remains, the target is not credited,
+            // nothing is printed.
+            let mark = *self.state.marks.get(&market).unwrap_or(&0);
+            // #47 L3: the ADL print is clamped into the market's listed
+            // band (each side only when set). The oracle mark itself is not
+            // bounded by the band, but no fill may print outside it.
+            let mark = clamp_to_band(mark, &self.state.market_params(market));
+            let close_side = if remaining_pos > 0 {
+                Side::Ask
+            } else {
+                Side::Bid
+            };
+            let remaining = remaining_pos.unsigned_abs();
+            // Opposite-sign holders only, excluding the target and
+            // insurance. Larger |qty| first, AccountId ascending on ties
+            // (explicit tie-break keeps the order deterministic).
+            // PILOT (loop round 4): holders index instead of every account (same filter result,
+            // same AccountId order before the sort).
+            let accts = &self.state.accounts;
+            let mut candidates: Vec<(AccountId, Qty)> = accts
+                .holders_of(market)
+                .map(|id| (id, &accts[&id]))
+                .filter(|(id, a)| {
+                    *id != target
+                        && *id != INSURANCE_ACCOUNT
+                        && a.positions
+                            .get(&market)
+                            .is_some_and(|p| p.qty.signum() == -remaining_pos.signum())
+                })
+                .map(|(id, a)| (id, a.positions[&market].qty.unsigned_abs()))
+                .collect();
+            candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let target_isolated = self
+                .state
+                .accounts
+                .get(&target)
+                .and_then(|a| a.positions.get(&market))
+                .map(|p| p.isolated)
+                .unwrap_or(false);
+            for (maker_acct, maker_qty) in candidates {
+                if remaining == 0 {
+                    break;
+                }
+                let take = remaining.min(maker_qty);
+                if take == 0 {
+                    continue;
+                }
+                let fill = Fill {
+                    taker_id: oid,
+                    maker_id: OrderId([0u8; 32]),
+                    taker: target,
+                    maker: maker_acct,
+                    market,
+                    price: mark,
+                    qty: take,
+                    seq,
+                    taker_side: close_side,
+                    taker_post: 0,
+                    maker_post: 0,
+                    taker_isolated: target_isolated,
+                    maker_isolated: false,
+                    kind: 2,
+                };
+                self.state
+                    .apply_fill_pair_journaled(journal, &fill)
+                    .map_err(map_acct)?;
+                fills.push(fill);
+                // Round 7: one ADL counterparty per unit.
+                break;
+            }
+        }
+        // Keeper reward: bps of filled notional, seized from the
+        // liquidatee's own collateral — insurance never funds the reward.
+        // A target with no positive collateral leaves the keeper with
+        // nothing.
+        for f in &fills {
+            let keeper_bps = self.state.market_params(market).keeper_reward_bps;
+            keeper_paid += bps(notional_usd(f.qty, f.price), keeper_bps);
+        }
+        if keeper_paid > 0 {
+            // Realized PnL settles into collateral, so the target's spendable
+            // balance is just its collateral.
+            let bal = self
+                .state
+                .accounts
+                .get(&target)
+                .map(|a| a.collateral)
+                .unwrap_or(0);
+            let pay = keeper_paid.min(bal.max(0));
+            if pay > 0 {
+                self.state.journal_account(journal, target);
+                self.state.journal_account(journal, caller);
+                if let Some(mut a) = self.state.accounts.get_mut(&target) {
+                    a.collateral -= pay;
+                }
+                self.state
+                    .account_mut(caller)
+                    .credit(pay)
+                    .map_err(map_acct)?;
+            }
+        }
+        Ok(fills)
+    }
+
+    /// Funding-rate liquidation, off-book: close the target at the external
+    /// index (mark as fallback), ADL the closed qty onto opposite-sign
+    /// positions, then positive-PnL counterparties take a pro-rata haircut
+    /// of any residual hole — zero-sum, insurance untouched. A hole they
+    /// cannot cover stays on the account: collateral is never printed.
+    /// Keeper reward is seized from the target afterwards, on the qty the
+    /// ADL actually closed (R2-A-11); when no opposite-sign holder exists
+    /// nothing closes and the liquidation is rejected (`NotLiquidatable`,
+    /// the caller rolls the journal back), so no reward is paid.
+    /// Returns synthetic fills for the event log (state is already applied).
+    fn liquidate_funding_off_book(
+        &mut self,
+        unit: UnitId,
+        seq: Seq,
+        caller: AccountId,
+        target: AccountId,
+        market: MarketId,
+        pos_qty: i64,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        let usd = self.state.market_params(market).usd_per_unit;
+        // Price: fresh external index; fall back to a non-zero mark when the
+        // feed is dead; both missing means there is nothing to close at.
+        let price = match self.state.fresh_external_index(market) {
+            Some(p) => p,
+            None => match self.state.marks.get(&market).copied() {
+                Some(m) if m != 0 => m,
+                _ => return Err(RejectReason::NotLiquidatable),
+            },
+        };
+        let abs_qty = pos_qty.unsigned_abs();
+        // Smallest close (1..=abs_qty) whose simulated fill leaves the
+        // target not liquidatable; none qualifies → full close.
+        let mut lo: u64 = 1;
+        let mut hi: u64 = abs_qty;
+        let mut dq: u64 = abs_qty;
+        let close_side = if pos_qty > 0 { Side::Ask } else { Side::Bid };
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let qualifies = self
+                .state
+                .accounts
+                .get(&target)
+                .cloned()
+                .map(|mut sim| {
+                    let target_isolated = self
+                        .state
+                        .accounts
+                        .get(&target)
+                        .and_then(|a| a.positions.get(&market))
+                        .map(|p| p.isolated)
+                        .unwrap_or(false);
+                    sim.apply_fill(
+                        close_side,
+                        true,
+                        price,
+                        mid,
+                        market,
+                        Some(usd),
+                        0,
+                        target_isolated,
+                    )
+                    .is_ok()
+                        && !if target_isolated {
+                            // Isolated: the simulated close must restore the
+                            // bucket's own health, not the cross snapshot's.
+                            sim.isolated_risk(market, &self.state.marks, &self.state.markets)
+                                .liquidatable
+                        } else {
+                            sim.snapshot(&self.state.marks, &self.state.markets)
+                                .liquidatable
+                        }
+                })
+                .unwrap_or(false);
+            if qualifies {
+                dq = mid;
+                if mid == 1 {
+                    break;
+                }
+                hi = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        // ADL candidates: opposite-sign positions, excluding the target and
+        // insurance. Deterministic order: close-price unrealized rate cash
+        // desc, then notional/equity desc, then AccountId asc.
+        let mut cps: Vec<(AccountId, i64, Usd)> = Vec::new();
+        // PILOT (loop round 4): holders index (same ids, same order)
+        for id in self.state.accounts.holders_of(market) {
+            let a = &self.state.accounts[&id];
+            let id = &id;
+            if *id == target || *id == INSURANCE_ACCOUNT {
+                continue;
+            }
+            if let Some(p) = a.positions.get(&market) {
+                if p.qty != 0 && p.qty.signum() == -pos_qty.signum() {
+                    let unrealized = funding_rate_cash(
+                        p.qty,
+                        funding_rate_bps(price) - funding_rate_bps(p.entry_price),
+                        usd,
+                    );
+                    cps.push((*id, p.qty, unrealized));
+                }
+            }
+        }
+        cps.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| {
+                    let ratio = |id: AccountId, q: Qty| {
+                        let e = self
+                            .state
+                            .accounts
+                            .get(&id)
+                            .map(|x| {
+                                // Isolated cp positions rank on their own
+                                // bucket equity; cross ones on the pooled
+                                // snapshot as today.
+                                let cp_isolated = x
+                                    .positions
+                                    .get(&market)
+                                    .map(|p| p.isolated)
+                                    .unwrap_or(false);
+                                if cp_isolated {
+                                    x.isolated_risk(market, &self.state.marks, &self.state.markets)
+                                        .equity
+                                } else {
+                                    x.snapshot(&self.state.marks, &self.state.markets).equity
+                                }
+                            })
+                            .unwrap_or(0)
+                            .max(1);
+                        funding_notional_usd(q, usd) / e
+                    };
+                    ratio(b.0, b.1.unsigned_abs()).cmp(&ratio(a.0, a.1.unsigned_abs()))
+                })
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let oid = liq_order_id(unit);
+        let mut fills: Vec<Fill> = Vec::new();
+        let mut remaining = dq;
+        // Positive collateral deltas recorded for this call: the only pools
+        // the residual haircut may ever touch.
+        let mut pos_deltas: Vec<(AccountId, Usd)> = Vec::new();
+        for (cp, cp_qty, _) in cps {
+            if remaining == 0 {
+                break;
+            }
+            let take = cp_qty.unsigned_abs().min(remaining);
+            if take == 0 {
+                continue;
+            }
+            // Opposite-sign holder closes its own way: a short buys back,
+            // a long sells — paired with the target's closing side.
+            let cp_side = if cp_qty > 0 { Side::Ask } else { Side::Bid };
+            let before = self
+                .state
+                .accounts
+                .get(&cp)
+                .map(|a| a.collateral)
+                .unwrap_or(0);
+            let cp_isolated = self
+                .state
+                .accounts
+                .get(&cp)
+                .and_then(|a| a.positions.get(&market))
+                .map(|p| p.isolated)
+                .unwrap_or(false);
+            let target_isolated = self
+                .state
+                .accounts
+                .get(&target)
+                .and_then(|a| a.positions.get(&market))
+                .map(|p| p.isolated)
+                .unwrap_or(false);
+            {
+                let mut a = self.state.account_mut(cp);
+                a.apply_fill(
+                    cp_side,
+                    true,
+                    price,
+                    take,
+                    market,
+                    Some(usd),
+                    0,
+                    cp_isolated,
+                )
+                .map_err(map_acct)?;
+            }
+            {
+                let mut a = self.state.account_mut(target);
+                a.apply_fill(
+                    close_side,
+                    false,
+                    price,
+                    take,
+                    market,
+                    Some(usd),
+                    0,
+                    target_isolated,
+                )
+                .map_err(map_acct)?;
+            }
+            let after = self
+                .state
+                .accounts
+                .get(&cp)
+                .map(|a| a.collateral)
+                .unwrap_or(0);
+            if after > before {
+                pos_deltas.push((cp, after - before));
+            }
+            // No taker fee inside this fill and no socialization: ADL is
+            // the transfer, not a trade.
+            fills.push(Fill {
+                taker_id: oid,
+                maker_id: OrderId([0u8; 32]),
+                taker: cp,
+                maker: target,
+                market,
+                price,
+                qty: take,
+                seq,
+                taker_side: cp_side,
+                taker_post: 0,
+                maker_post: 0,
+                taker_isolated: cp_isolated,
+                maker_isolated: target_isolated,
+                kind: 2,
+            });
+            remaining -= take;
+            // Round 7 (one fill per unit): one ADL counterparty per
+            // off-book liquidation; the rest waits for the next call.
+            break;
+        }
+        // R2-A-11 (round 2 of #47): only the qty the ADL loop actually
+        // closed counts. With no opposite-sign holders nothing closed: the
+        // old code still paid the keeper on the full `dq` (a cash transfer
+        // with no fill behind it, invisible to the fill dispute AA) and
+        // reported success. Now that is a rejected Liquidate: no state
+        // change (the caller rolls the journal back), no reward.
+        let closed = dq - remaining;
+        if closed == 0 {
+            return Err(RejectReason::NotLiquidatable);
+        }
+        let target_equity = |s: &ChainState| {
+            s.accounts
+                .get(&target)
+                .map(|a| {
+                    // Isolated: residual bucket + remaining uPnL after the
+                    // ADL fills; cross: pooled equity as today.
+                    let tgt_isolated = a
+                        .positions
+                        .get(&market)
+                        .map(|p| p.isolated)
+                        .unwrap_or(false);
+                    if tgt_isolated {
+                        a.isolated_risk(market, &s.marks, &s.markets).equity
+                    } else {
+                        a.snapshot(&s.marks, &s.markets).equity
+                    }
+                })
+                .unwrap_or(0)
+        };
+        // No insurance top-up: the fund never pays a loss. The residual
+        // hole below is haircut from positive-PnL ADL counterparties
+        // instead (zero-sum, insurance not debited); whatever they cannot
+        // cover stays on the account as negative equity.
+        let equity = target_equity(&self.state);
+        // Residual hole: haircut positive-PnL ADL counterparties pro-rata,
+        // last in ADL order takes the remainder. Each is debited at most
+        // the positive delta recorded for this call, and every debit lands
+        // on the target (collateral or isolated bucket) — money moves, it
+        // never vanishes (#9).
+        if equity < 0 {
+            let mut hole = -equity;
+            let total: Usd = pos_deltas.iter().map(|(_, d)| *d).sum();
+            if total > 0 {
+                let last = pos_deltas.last().map(|(id, _)| *id);
+                for (id, delta) in &pos_deltas {
+                    if hole <= 0 || total <= 0 {
+                        break;
+                    }
+                    let share = adl_haircut_share(hole, *delta, total, Some(*id) == last);
+                    if share <= 0 {
+                        continue;
+                    }
+                    if let Some(mut a) = self.state.accounts.get_mut(id) {
+                        a.collateral -= share;
+                    }
+                    // Credit the target through the isolated-vs-cross
+                    // branch (bucket while the position still exists,
+                    // collateral once it is gone).
+                    let tgt_still_isolated = self
+                        .state
+                        .accounts
+                        .get(&target)
+                        .map(|a| {
+                            a.positions
+                                .get(&market)
+                                .map(|p| p.isolated)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if tgt_still_isolated {
+                        if let Some(mut a) = self.state.accounts.get_mut(&target) {
+                            *a.isolated_margin.entry(market).or_insert(0) += share;
+                        }
+                    } else if let Some(mut a) = self.state.accounts.get_mut(&target) {
+                        a.collateral += share;
+                    }
+                    hole -= share;
+                }
+            }
+        }
+        // Keeper reward: bps of the multiplier notional of the qty actually
+        // closed (R2-A-11: `closed`, not the planned `dq`), seized from the
+        // target's positive collateral after the steps above. No book fill,
+        // so no reward from a book price.
+        let reward = bps(
+            funding_notional_usd(closed, usd),
+            self.state.market_params(market).keeper_reward_bps,
+        );
+        if reward > 0 {
+            let bal = self
+                .state
+                .accounts
+                .get(&target)
+                .map(|a| a.collateral.max(0))
+                .unwrap_or(0);
+            let pay = reward.min(bal);
+            if pay > 0 {
+                if let Some(mut a) = self.state.accounts.get_mut(&target) {
+                    a.collateral -= pay;
+                }
+                self.state
+                    .account_mut(caller)
+                    .credit(pay)
+                    .map_err(map_acct)?;
+            }
+        }
+        Ok(fills)
+    }
+
+    pub fn update_external_price(
+        &mut self,
+        source: AccountId,
+        market: MarketId,
+        price: Price,
+        source_id: u8,
+        caller_seq: Seq,
+    ) -> Result<Vec<Fill>, RejectReason> {
+        let funding_rate = self
+            .state
+            .markets
+            .get(&market)
+            .map(|p| p.funding_rate)
+            .unwrap_or(false);
+        // Funding-rate markets trade the external rate itself: their feed
+        // must work regardless of the global source selection (the peg pays
+        // only from a fresh external print). Regular markets keep the
+        // AggregatedExternal gate.
+        if !funding_rate
+            && self.state.funding_source != minuend_types::FundingSourceKind::AggregatedExternal
+        {
+            return Err(RejectReason::NotFound);
+        }
+        if !self.state.external_sources.contains(&source) {
+            return Err(RejectReason::BadAccount);
+        }
+        if !self.state.markets.contains_key(&market) || price == 0 {
+            return Err(RejectReason::NotFound);
+        }
+        // The ring carries an encoded rate on funding-rate markets; a print
+        // beyond ±100% is a broken feed, not a market. Regular markets carry
+        // dollar prices in the same ring — their scale is untouched here.
+        if funding_rate && minuend_types::funding_rate_bps(price).abs() > 10_000 {
+            return Err(RejectReason::NotFound);
+        }
+        if self
+            .state
+            .markets
+            .get(&market)
+            .map(|p| p.spot_only)
+            .unwrap_or(false)
+        {
+            return Err(RejectReason::NotFound);
+        }
+        self.state
+            .apply_external_price(source, market, price, source_id, caller_seq);
+        // A fresh print may unblock this window's peg payment (or arm it).
+        if funding_rate {
+            self.state.settle_funding_peg(market);
+        }
+        Ok(Vec::new())
+    }
+}
+
+/// #47 L3: clamp an off-book print into the market's listed band. `0` on
+/// either side means unbounded (see `create_market`).
+fn clamp_to_band(price: minuend_types::Price, p: &MarketParams) -> minuend_types::Price {
+    let mut px = price;
+    if p.min_price != 0 && px < p.min_price {
+        px = p.min_price;
+    }
+    if p.max_price != 0 && px > p.max_price {
+        px = p.max_price;
+    }
+    px
+}
+
+fn adl_haircut_share(hole: i128, delta: i128, total: i128, is_last: bool) -> i128 {
+    let raw = if is_last { hole } else { hole * delta / total };
+    raw.min(delta)
 }

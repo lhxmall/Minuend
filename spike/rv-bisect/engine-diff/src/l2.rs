@@ -211,7 +211,7 @@ fn port_units(w: &[u32]) -> (Vec<Vec<u32>>, [u8; 32], Vec<Vec<String>>) {
     let evs: RefCell<Vec<u32>> = RefCell::new(Vec::new());
     let mut per: Vec<Vec<u32>> = Vec::new();
     let mut pre: Vec<Vec<String>> = Vec::new();
-    let mut last = mnpilot::wit::all_leaves(&mnpilot::state::ChainState::genesis_flags(w[3]));
+    let mut last = mnpilot::wit::all_leaves(&port_genesis(w));
     let mut cut = 0usize;
     let (h, _, _) = mnpilot::run_batch_wit(
         &mut |i| w.get(i as usize).copied().unwrap_or(0),

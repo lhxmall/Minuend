@@ -16,6 +16,12 @@
 //! (round 2 A4); every value that must survive a run lives in `.data`. A run that aborts (panic /
 //! OOM, status 0xFFFF0077) or traps (status stays 0xFFFF0001 = running, segment roots stay 0) marks the session
 //! dead: later runs execute nothing (status ST_DEAD = 5). Loop round 3 review R3-G1/G2.
+//! Loop round 4 (R3-H2, snapshot.rs): input word 0 = EXPORT_MAGIC -> export run (needs a live session:
+//! digest of the canonical snapshot at OUT[0x1FFD8..8], its length in words at [0x1FFD7], kind 1 at
+//! [0x1FFD6], session root as both segment roots); word 0 = SNAP_MAGIC -> import run (only without a live
+//! session: a fresh image, or a DEAD one, whose allocator is then reset and torn session abandoned;
+//! digest of the words consumed, kind 2, rebuilt root as both segment roots; ST_BAD_SNAP on bad input).
+//! [0x1FFD6..0x1FFE0] are zero in every other run. Event log cap lowered to 0x1FFD6 (EV_CAP).
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
 #[cfg(not(target_os = "none"))]
@@ -148,6 +154,9 @@ mod rt {
     const SEG_START: usize = 0x1FFF0;
     const SEG_END: usize = 0x1FFE8;
     const SEG_N: usize = 0x1FFE7;
+    const SNAP_KIND: usize = 0x1FFD6;
+    const SNAP_N: usize = 0x1FFD7;
+    const SNAP_DIGEST: usize = 0x1FFD8;
     fn put_root(at: usize, r: &[u8; 32]) {
         for k in 0..8 {
             unsafe { OUT.add(at + k).write_volatile(u32::from_le_bytes([r[4 * k], r[4 * k + 1], r[4 * k + 2], r[4 * k + 3]])) };
@@ -167,16 +176,61 @@ mod rt {
             OUT.add(ROOTS - 7).write_volatile(ST_RUNNING);
             put_root(SEG_START, &[0; 32]);
             put_root(SEG_END, &[0; 32]);
+            put_root(SNAP_DIGEST, &[0; 32]);
+            OUT.add(SNAP_N).write_volatile(0);
+            OUT.add(SNAP_KIND).write_volatile(0);
+            let import = read_word(0) == mnpilot::snapshot::SNAP_MAGIC;
             if DEAD != 0 || IN_RUN != 0 {
-                DEAD = 1;
-                OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
-                return 0;
+                if !import {
+                    DEAD = 1;
+                    OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
+                    return 0;
+                }
+                // loop round 4 (R3-H2) revive: abandon the torn session and its heap -- the allocator
+                // starts over from _heap_start (nothing of this run is allocated yet)
+                FREE = [0; NCLASS];
+                HEAP = 0;
+                HEAP0 = 0;
+                LIVE = 0;
+                PEAK = 0;
+                SESS = 0;
+                DEAD = 0;
             }
             IN_RUN = 1;
         }
         let mut sess: Option<mnpilot::Session> = unsafe {
             if SESS == 0 { None } else { Some(*alloc::boxed::Box::from_raw(SESS as *mut mnpilot::Session)) }
         };
+        let w0 = read_word(0);
+        if w0 == mnpilot::snapshot::EXPORT_MAGIC || w0 == mnpilot::snapshot::SNAP_MAGIC {
+            let so = if w0 == mnpilot::snapshot::EXPORT_MAGIC {
+                mnpilot::run_export(&mut |i| read_word(i), &mut sess)
+            } else {
+                mnpilot::run_import(&mut |i| read_word(i), &mut sess)
+            };
+            unsafe {
+                let segs = sess.as_ref().map(|s| s.segs).unwrap_or(0);
+                if let Some(s) = sess {
+                    SESS = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(s)) as usize;
+                }
+                OUT.add(SEG_N).write_volatile(segs);
+                if so.status == mnpilot::ST_OK {
+                    put_root(SEG_START, &so.root);
+                    put_root(SEG_END, &so.root);
+                    put_root(SNAP_DIGEST, &so.digest);
+                    OUT.add(SNAP_N).write_volatile(so.words);
+                    OUT.add(SNAP_KIND).write_volatile(if w0 == mnpilot::snapshot::EXPORT_MAGIC { 1 } else { 2 });
+                }
+                for k in 0..13 {
+                    OUT.add(k).write_volatile(0);
+                }
+                OUT.add(12).write_volatile((HEAP - HEAP0) as u32);
+                OUT.add(ROOTS - 6).write_volatile(PEAK as u32);
+                OUT.add(ROOTS - 7).write_volatile(so.status);
+                IN_RUN = 0; // clean exit
+            }
+            return so.status;
+        }
         #[cfg(feature = "nowit")]
         let mode = mnpilot::WitMode::Off;
         #[cfg(all(feature = "legacywit", not(feature = "nowit")))]
