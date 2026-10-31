@@ -803,7 +803,7 @@ fn main() {
                 st.status, w[2], st.applied, wo.leaves, top, peak, heapsim::sum_class_peaks(), bump, 0x0300_0000u32 - 0x0002_0000);
         }
         Some("frag") => {
-            let w = l2::frag();
+            let w = l2::frag(a.get(3).map(|x| x.parse().unwrap()).unwrap_or(62), a.get(4).map(|x| x.parse().unwrap()).unwrap_or(mnpilot::MAX_UNITS));
             write_words(&a[2], &w);
             println!("{{\"ops\":{}}}", w[2]);
         }

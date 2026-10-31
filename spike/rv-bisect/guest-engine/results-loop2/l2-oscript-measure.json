@@ -1,0 +1,86 @@
+[
+ {
+  "D_bits": 16,
+  "binary": {
+   "complexity": 20,
+   "ops": 481
+  },
+  "quad": {
+   "levels": 8,
+   "complexity": 11,
+   "ops": 393
+  }
+ },
+ {
+  "D_bits": 24,
+  "binary": {
+   "complexity": 28,
+   "ops": 629
+  },
+  "quad": {
+   "levels": 12,
+   "complexity": 15,
+   "ops": 533
+  }
+ },
+ {
+  "D_bits": 32,
+  "binary": {
+   "complexity": 36,
+   "ops": 777
+  },
+  "quad": {
+   "levels": 16,
+   "complexity": 19,
+   "ops": 673
+  }
+ },
+ {
+  "D_bits": 48,
+  "binary": {
+   "complexity": 52,
+   "ops": 1073
+  },
+  "quad": {
+   "levels": 24,
+   "complexity": 27,
+   "ops": 953
+  }
+ },
+ {
+  "D_bits": 64,
+  "binary": {
+   "complexity": 68,
+   "ops": 1369
+  },
+  "quad": {
+   "levels": 32,
+   "complexity": 35,
+   "ops": 1233
+  }
+ },
+ {
+  "D_bits": 80,
+  "binary": {
+   "complexity": 84,
+   "ops": 1665
+  },
+  "quad": {
+   "levels": 40,
+   "complexity": 43,
+   "ops": 1513
+  }
+ },
+ {
+  "D_bits": 96,
+  "binary": {
+   "complexity": 100,
+   "ops": 1961
+  },
+  "quad": {
+   "levels": 48,
+   "complexity": 51,
+   "ops": 1793
+  }
+ }
+]

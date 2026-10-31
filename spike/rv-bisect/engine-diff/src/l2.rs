@@ -1,5 +1,5 @@
 //! Loop round 2 tools (findings/rv-loop-2.md).
-//!   frag <out.bin>                 allocator fragmentation stress: phases whose live sets sit in
+//!   frag <out.bin> [per max_units]               allocator fragmentation stress: phases whose live sets sit in
 //!                                  different size classes (crowded level / many levels / fills)
 //!   grind <seed> <log2_accounts> <target|any> <out.bin>
 //!                                  grind an attacker ACCOUNT (key pair; client_seq is forced to
@@ -35,9 +35,8 @@ fn new_gen(n_acc: u32) -> (Vec<AccountId>, Gen) {
 /// Fragmentation stress (A3): 64 accounts; phase A crowds one bid level (64 x 62 orders), phase B
 /// cancels them all, phase C rests 64 x 62 orders on distinct price levels, phase D cancels them,
 /// phase E crosses: every account trades (positions -> pos: leaves, account maps grow).
-pub fn frag() -> Vec<u32> {
+pub fn frag(per: u64, max_units: u32) -> Vec<u32> {
     let n = 64u32;
-    let per = 62u64;
     let (ids_real, mut g) = new_gen(n);
     let q = QTY_SCALE / 10_000;
     for a in 0..n {
@@ -70,10 +69,10 @@ pub fn frag() -> Vec<u32> {
     }
     // E: asks from even accounts, crossing bids from odd accounts (one fill each)
     let mut cs = 2 * per;
-    while (g.ops.len() as u32) + 2 <= mnpilot::MAX_UNITS {
+    while (g.ops.len() as u32) + 2 <= max_units {
         cs += 1;
         for a in (0..n).step_by(2) {
-            if (g.ops.len() as u32) + 2 > mnpilot::MAX_UNITS {
+            if (g.ops.len() as u32) + 2 > max_units {
                 break;
             }
             g.apply(place_w(a, false, MID + 10 * DOLLAR, q, cs, 1));

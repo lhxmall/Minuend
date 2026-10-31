@@ -260,7 +260,7 @@ Full findings with PoCs: project file `findings/rv-loop-1.md` (C 1 · H 2 · M 5
   allocator that never freed; the book's undo journal clones a whole price level per touch, so ~1 700 orders at one
   price exhausted the 48 MiB heap — guest abort on batches the real engine accepts).
 
-**Measured bounds** (`engine-diff heapsim`, host 64-bit sizes = upper bound for rv32): size-class high-water 19.0 MB
+**Measured bounds** (`engine-diff heapsim`, host 64-bit sizes; round 2 (A2): NOT a strict upper bound for rv32 — the guest's own OUT[12] / OUT[0x1FFFA] are authoritative): size-class high-water 19.0 MB
 for 16 384 bids at one price (old bump: 4.21 GB), 3.8 MB for the 4 096-account × 16 384-unit limit batch. Steps:
 L ≤ MAX_UNITS live orders, so a unit costs ≤ ≈ 43k + 170·16 384 + 0.45 M ≈ 3.3 M steps and a full segment
 ≈ 5.4·10^10 < 2^40 (R ≤ 10).
@@ -268,3 +268,31 @@ L ≤ MAX_UNITS live orders, so a unit costs ≤ ≈ 43k + 170·16 384 + 0.45 M 
 **New tools:** `engine-diff crowd | advfuzz | advgen | robust | selftest | proofs | heapsim | portout`,
 `smt_ref::{prove, verify_member, verify_absent}` (the §7.3.3 AA rule set), `js/robust.js`, `scripts/loop1-suite.sh`,
 `scripts/loop1-mut.sh`. Results: `work/rv-rollup-notes.md` → "loop round 1".
+
+## 8. Attack → fix, loop round 2 (2026-10-31)
+
+Full findings: `findings/rv-loop-2.md` (C 0 · H 0 · M 5 · L 7, plus 4 checked-no-defect items; no real-engine ↔ port
+divergence).
+
+**MNWIT1 depth rule (consensus, W2).** Before a unit runs, each key it could create for its own author (`acct:` of a
+new account, the order's `ord:`, the author's `pos:` in the order's market when it has no position there) must land at
+proof depth ≤ `wit::MAX_WIT_DEPTH` = 64, else the unit is rejected with event code 18 (`mnpilot::WIT_DEPTH_CODE`).
+Pre-check over the current tree (`Smt::insert_depth`), no rollback, Incremental mode only (bench builds `nowit` /
+`legacywit` do not enforce it). Feature `depth8` (guest and `engine-diff`) sets the bound to 8 for grind-able tests.
+The AA verifier (`../js/smtverify.js`) is then a fixed 64-level unroll: complexity 68 / 100, ops 1 369 / 2 000 under
+ocore 0.4.8's static limits (4-ary variant, not implemented: 35 / 1 233). Kid parsing in Oscript must not use
+`split()` (numeric coercion breaks `acct:000…0`, the insurance account).
+
+**Port changes (semantics-preserving, S1/W4).** `OrderBook::by_acct` (account → order ids; `oins` / `orem` are the
+only membership changes; `live_orders_of(account)` visits exactly the filtered orders in the same order) replaces the
+five full-book scans in `Engine::place`; the book journal records front pops / back pushes per level and undoes them in
+reverse instead of cloning the level deque. `book.rs` / `engine.rs` are therefore no longer verbatim copies of
+20326c0 in those places (marked `PILOT (S1)` / `PILOT (W4)`); equivalence is checked by fuzz / advfuzz / witfuzz /
+scen and an `index_ok()` assertion after every unit of every host run.
+
+**Allocator.** `align > 64` refused on every path (A1). Carved bytes = Σ per-class peak live bytes + pads
+(`heapsim` prints `sum_class_peaks`); worst measured 20.2 MB (crowdmax) of 50.2 MB. `_start` does not zero `.bss`:
+the initial memory image must (A4).
+
+**New tools:** `engine-diff frag | grind | depth8 | proofdump | depthsel`, `js/smtverify.js` (measure | run | synth),
+`scripts/loop2-suite.sh`, `scripts/loop2-mut.sh`. Results: `results-loop2/`, `work/rv-rollup-notes.md` → "Loop round 2".
