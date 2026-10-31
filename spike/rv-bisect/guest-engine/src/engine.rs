@@ -625,14 +625,9 @@ impl Engine {
     /// (bids above the short they reduce, asks above the long they reduce).
     /// Over-counting resting qty is intentional — the cap is a worst case.
     fn funding_open_interest(&self, market: MarketId, account: AccountId, open_qty: i64) -> Qty {
-        let mut oi: u128 = 0;
-        for a in self.state.accounts.values() {
-            if let Some(pos) = a.positions.get(&market) {
-                if pos.qty > 0 {
-                    oi += pos.qty as u128;
-                }
-            }
-        }
+        // PILOT (loop round 3, S1b): running total instead of iterating every account (same value:
+        // ChainState::oi_long = sum of positive qty in `market` over all accounts, see oi_ok).
+        let mut oi: u128 = self.state.oi_long.get(&market).copied().unwrap_or(0);
         oi += open_qty.unsigned_abs() as u128;
         if let Some(book) = self.state.books.get(&market) {
             let pos_qty = self
@@ -874,7 +869,7 @@ impl Engine {
             .cloned()
             .unwrap_or_else(|| minuend_account::Account::new(account));
         acct.credit(amount).map_err(map_acct)?;
-        self.state.accounts.insert(account, acct);
+        self.state.put_account(account, acct); // PILOT (S1b)
         self.state.wit_dirty.accounts.insert(account); // PILOT (MNWIT1)
         Ok(Vec::new())
     }

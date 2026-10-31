@@ -160,7 +160,7 @@ impl state::ChainState {
         s.marks.insert(BTC_USD, 100_000 * PRICE_SCALE as i64);
         let mut insurance = account::Account::new(INSURANCE_ACCOUNT);
         insurance.collateral = 10_000 * USD_SCALE as Usd; // INSURANCE_SEED
-        s.accounts.insert(INSURANCE_ACCOUNT, insurance);
+        s.put_account(INSURANCE_ACCOUNT, insurance);
         s.markets.insert(BTC_USD, genesis_params());
         s
     }

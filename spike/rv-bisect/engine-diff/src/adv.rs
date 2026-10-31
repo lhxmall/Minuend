@@ -49,6 +49,34 @@ pub fn crowd(n_acc: u32, per: u32) -> Vec<u32> {
     batch_words(&ids_real, &g.ops, 0)
 }
 
+/// Loop round 3 (S1b): `crowd` with the last `tail` units spent on cancels of orders in the
+/// MIDDLE of the one crowded level (alternating middle / just-after-middle accounts, client_seq
+/// in the middle of each account's run). Upstream `OrderBook::cancel` scans the level
+/// (`position` + `VecDeque::remove`), so each such cancel is O(level); the port's arrival map
+/// makes it O(log level). Measures the worst cancel unit at the MAX_UNITS cap.
+pub fn crowd_cancel(n_acc: u32, per: u32, tail: u32) -> Vec<u32> {
+    let (ids_real, mut g) = new_gen(n_acc, 0);
+    for a in 0..n_acc {
+        g.apply(dep(a, 1_000 * USD_SCALE as i64));
+    }
+    'outer: for _ in 0..per {
+        for a in 0..n_acc {
+            if g.ops.len() as u32 >= mnpilot::MAX_UNITS - tail {
+                break 'outer;
+            }
+            g.place(a, true, false, false, MID - 1_000 * DOLLAR, QTY_SCALE / 10_000);
+        }
+    }
+    let placed = g.ops.len() as u32 - n_acc;
+    let rounds = placed / n_acc; // every account has >= rounds orders
+    for k in 0..tail {
+        let a = n_acc / 2 + (k % 2);
+        let cs = (rounds / 2 + k / 2 + 1) as u64;
+        g.apply([3 | (a << 8), 0, 0, 0, 0, 0, cs as u32, 1]);
+    }
+    batch_words(&ids_real, &g.ops, 0)
+}
+
 /// One edge-heavy random batch.
 pub fn adv_batch(seed: u64, n_ops: u32) -> Vec<u32> {
     let mut rng = Rng(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);

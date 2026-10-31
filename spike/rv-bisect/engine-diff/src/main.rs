@@ -285,7 +285,7 @@ fn run_port(w: &[u32]) -> Out {
     let (hash, st, _) = mnpilot::run_batch_wit(
         &mut |i| w.get(i as usize).copied().unwrap_or(0),
         &mut |x| ev.push(x),
-        &mut |i, s, _| assert!(s.books.values().all(|b| b.index_ok()), "order index broken at unit {}", i),
+        &mut |i, s, _| assert!(s.books.values().all(|b| b.index_ok() && b.level_ok()) && s.oi_ok(), "order index broken at unit {}", i),
         mnpilot::WitMode::Off,
     );
     Out { hash, applied: st.applied, rejected: st.rejected, fills: st.fills, ev }
@@ -504,7 +504,7 @@ fn port_roots(w: &[u32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, mnpilot::WitOut) {
         &mut |i| w.get(i as usize).copied().unwrap_or(0),
         &mut |_| {},
         &mut |i, st, r| {
-            assert!(st.books.values().all(|b| b.index_ok()), "order index broken at unit {}", i);
+            assert!(st.books.values().all(|b| b.index_ok() && b.level_ok()) && st.oi_ok(), "order index broken at unit {}", i);
             inc.push(*r);
             scratch.push(smt_ref::root(&mnpilot::wit::all_leaves(st)));
         },
@@ -780,6 +780,11 @@ fn main() {
         Some("crowd") => {
             let w = adv::crowd(a[2].parse().unwrap(), a[3].parse().unwrap());
             write_words(&a[4], &w);
+            println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
+        }
+        Some("crowdc") => {
+            let w = adv::crowd_cancel(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap());
+            write_words(&a[5], &w);
             println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
         }
         Some("advfuzz") => println!("{}", adv::advfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),

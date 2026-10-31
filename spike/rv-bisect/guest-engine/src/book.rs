@@ -1,7 +1,7 @@
 use crate::{BookError, Fill, MatchResult, Order, SelfTrade};
 use crate::types::{AccountId, MarketId, OrderId, OrderType, Price, Qty, Side, TimeInForce, Usd};
 use core::cmp::Reverse;
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 // PILOT: HashMap/HashSet -> BTreeMap/BTreeSet (no_std). Only lookups + order-independent folds iterate `orders`.
 type HashMap<K, V> = BTreeMap<K, V>;
@@ -22,11 +22,24 @@ fn pro_rata_post(margin_left: u64, fill_qty: u64, remaining_before: u64) -> u64 
     }
 }
 
+/// PILOT (loop round 3, S1b): a price level is an arrival-ordered map (arrival number -> id)
+/// instead of upstream's `VecDeque<OrderId>`. Iteration order = arrival order = the deque's
+/// FIFO order, so matching, the commitment bytes and every result are unchanged; `cancel`
+/// becomes O(log n) (id -> arrival lookup in `OrderBook::arr`, then a map remove) instead of
+/// a linear `position` scan + `VecDeque::remove` (O(orders at that price)).
+pub type Level = BTreeMap<u64, OrderId>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderBook {
     market: MarketId,
-    bids: BTreeMap<Reverse<Price>, VecDeque<OrderId>>,
-    asks: BTreeMap<Price, VecDeque<OrderId>>,
+    bids: BTreeMap<Reverse<Price>, Level>,
+    asks: BTreeMap<Price, Level>,
+    /// PILOT (S1b): arrival number of every id present in a level (one entry per level entry;
+    /// ids are unique, see `submit_inner`'s DuplicateOrder check and `level_ok`).
+    arr: BTreeMap<OrderId, u64>,
+    /// PILOT (S1b): next arrival number (monotone; restored on rollback). Not committed: only
+    /// the relative order of arrivals matters, and that is the FIFO order upstream keeps.
+    next_arr: u64,
     orders: HashMap<OrderId, Order>,
     /// Incrementally-maintained visible qty per price level (bids).
     bid_qty: BTreeMap<Reverse<Price>, Qty>,
@@ -54,8 +67,8 @@ struct LevelUndo {
     price: Price,
     /// the level (deque) existed before the first touch
     existed: bool,
-    /// ids popped from the front, in pop order
-    popped: Vec<OrderId>,
+    /// (arrival, id) popped from the front, in pop order
+    popped: Vec<(u64, OrderId)>,
     /// ids pushed to the back
     pushed: u32,
     /// visible qty pre-image
@@ -68,6 +81,8 @@ pub struct BookJournal {
     seen_orders: HashSet<OrderId>,
     levels: Vec<LevelUndo>,
     seen_levels: BTreeMap<(bool, Price), usize>,
+    /// PILOT (S1b): `next_arr` before the submit
+    next_arr0: Option<u64>,
 }
 
 impl BookJournal {
@@ -87,7 +102,39 @@ impl OrderBook {
             bid_qty: BTreeMap::new(),
             ask_qty: BTreeMap::new(),
             by_acct: BTreeMap::new(),
+            arr: BTreeMap::new(),
+            next_arr: 0,
         }
+    }
+
+    // PILOT (S1b): level primitives. Every level mutation goes through these three, so the
+    // `arr` index stays in lockstep with the level entries.
+    fn lvl_mut(&mut self, side: Side, price: Price) -> Option<&mut Level> {
+        match side {
+            Side::Bid => self.bids.get_mut(&Reverse(price)),
+            Side::Ask => self.asks.get_mut(&price),
+        }
+    }
+    /// pop the level's first (oldest) entry
+    fn lvl_pop_front(&mut self, side: Side, price: Price) -> Option<(u64, OrderId)> {
+        let (a, id) = self.lvl_mut(side, price)?.pop_first()?;
+        if self.arr.get(&id) == Some(&a) {
+            self.arr.remove(&id);
+        }
+        Some((a, id))
+    }
+    /// re-insert an entry with its original arrival number (rollback of a pop)
+    fn lvl_put(lvl: &mut Level, arr: &mut BTreeMap<OrderId, u64>, a: u64, id: OrderId) {
+        lvl.insert(a, id);
+        arr.insert(id, a);
+    }
+    /// PILOT (S1b): `arr` == exactly the level entries (host tests).
+    pub fn level_ok(&self) -> bool {
+        let n: usize = self.bids.values().map(|l| l.len()).sum::<usize>() + self.asks.values().map(|l| l.len()).sum::<usize>();
+        n == self.arr.len()
+            && self.bids.values().chain(self.asks.values()).all(|l| {
+                !l.is_empty() && l.iter().all(|(a, id)| self.arr.get(id) == Some(a) && *a < self.next_arr)
+            })
     }
 
     // PILOT (S1): the only two ways `orders` changes membership.
@@ -154,12 +201,12 @@ impl OrderBook {
         fn encode_level(
             b: &mut Vec<u8>,
             price: Price,
-            q: &VecDeque<OrderId>,
+            q: &Level,
             orders: &HashMap<OrderId, Order>,
         ) {
             let mut body = Vec::new();
             let mut live = 0u32;
-            for id in q {
+            for id in q.values() {
                 if let Some(o) = orders.get(id) {
                     live += 1;
                     body.extend_from_slice(&o.id.0);
@@ -211,8 +258,8 @@ impl OrderBook {
     /// cancel-maker self-trade policy) the taker account's own orders.
     /// Read-only mirror of the head walk in `submit_inner`.
     pub fn first_maker_qty(&self, taker_side: Side, taker: AccountId) -> Option<Qty> {
-        let first = |ids: &VecDeque<OrderId>| {
-            ids.iter().find_map(|id| {
+        let first = |ids: &Level| {
+            ids.values().find_map(|id| {
                 self.orders
                     .get(id)
                     .filter(|o| o.remaining > 0 && o.account != taker)
@@ -267,7 +314,7 @@ impl OrderBook {
         order: Order,
         self_trade: SelfTrade,
     ) -> Result<MatchResult, BookError> {
-        let mut j = BookJournal::default();
+        let mut j = BookJournal { next_arr0: Some(self.next_arr), ..Default::default() };
         match self.submit_inner(order, self_trade, false, &mut j) {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -295,7 +342,7 @@ impl OrderBook {
         order: Order,
         self_trade: SelfTrade,
     ) -> Result<(MatchResult, BookJournal), BookError> {
-        let mut j = BookJournal::default();
+        let mut j = BookJournal { next_arr0: Some(self.next_arr), ..Default::default() };
         match self.submit_inner(order, self_trade, true, &mut j) {
             Ok(r) => Ok((r, j)),
             Err(e) => {
@@ -308,6 +355,9 @@ impl OrderBook {
     /// Undo everything recorded in `j` (restores each first-touch
     /// pre-image; entries that did not exist before are removed).
     pub fn rollback(&mut self, j: BookJournal) {
+        if let Some(n) = j.next_arr0 {
+            self.next_arr = n;
+        }
         for (id, pre) in j.orders {
             match pre {
                 Some(o) => {
@@ -323,10 +373,23 @@ impl OrderBook {
             let cur = if is_bid { self.bids.remove(&Reverse(price)) } else { self.asks.remove(&price) };
             let mut dq = cur.unwrap_or_default();
             for _ in 0..pushed {
-                dq.pop_back();
+                // pushes got the largest arrival numbers: undo = drop the last entries
+                if let Some((a, id)) = dq.pop_last() {
+                    if self.arr.get(&id) == Some(&a) {
+                        self.arr.remove(&id);
+                    }
+                }
             }
-            for id in popped.into_iter().rev() {
-                dq.push_front(id);
+            for (a, id) in popped.into_iter().rev() {
+                Self::lvl_put(&mut dq, &mut self.arr, a, id);
+            }
+            if !existed {
+                // a level created by this submit is dropped whole: its entries leave `arr` too
+                for (a, id) in dq.iter() {
+                    if self.arr.get(id) == Some(a) {
+                        self.arr.remove(id);
+                    }
+                }
             }
             if existed {
                 if is_bid {
@@ -562,21 +625,30 @@ impl OrderBook {
         let side = order.side;
         let mut order = self.orem(&id).ok_or(BookError::NotFound)?;
 
-        let removed = {
-            let dq = match side {
-                Side::Bid => self.bids.get_mut(&Reverse(price)),
-                Side::Ask => self.asks.get_mut(&price),
-            };
-            match dq {
-                Some(dq) => match dq.iter().position(|x| x == &id) {
-                    Some(pos) => {
-                        dq.remove(pos);
+        // PILOT (S1b): O(log n) -- id -> arrival, then remove that entry from the order's level
+        // (upstream: `dq.iter().position(id)` + `VecDeque::remove`, O(orders at that price)).
+        // Same outcome: the id's (unique) entry leaves its level, `removed` as before.
+        let removed = match self.arr.get(&id).copied() {
+            Some(a) => {
+                let hit = match side {
+                    Side::Bid => self.bids.get_mut(&Reverse(price)),
+                    Side::Ask => self.asks.get_mut(&price),
+                }
+                .map(|l| {
+                    if l.get(&a) == Some(&id) {
+                        l.remove(&a);
                         true
+                    } else {
+                        false
                     }
-                    None => false,
-                },
-                None => false,
+                })
+                .unwrap_or(false);
+                if hit {
+                    self.arr.remove(&id);
+                }
+                hit
             }
+            None => false,
         };
         // Visible qty is defined by order existence, not queue position: the
         // cache decrements for EVERY cancel, and the id is removed from its
@@ -590,20 +662,14 @@ impl OrderBook {
     }
 
     fn enqueue(&mut self, order: Order) {
-        match order.side {
-            Side::Bid => {
-                self.bids
-                    .entry(Reverse(order.price))
-                    .or_default()
-                    .push_back(order.id);
-            }
-            Side::Ask => {
-                self.asks
-                    .entry(order.price)
-                    .or_default()
-                    .push_back(order.id);
-            }
-        }
+        // PILOT (S1b): push_back = insert under the next arrival number
+        let a = self.next_arr;
+        self.next_arr += 1;
+        let lvl = match order.side {
+            Side::Bid => self.bids.entry(Reverse(order.price)).or_default(),
+            Side::Ask => self.asks.entry(order.price).or_default(),
+        };
+        Self::lvl_put(lvl, &mut self.arr, a, order.id);
         self.oins(order.id, order);
     }
 
@@ -612,13 +678,13 @@ impl OrderBook {
     fn next_ask_head(&mut self, j: &mut BookJournal) -> Option<(OrderId, Price)> {
         loop {
             let price = *self.asks.keys().next()?;
-            while let Some(id) = self.asks.get(&price).and_then(|dq| dq.front().copied()) {
+            while let Some(id) = self.asks.get(&price).and_then(|dq| dq.values().next().copied()) {
                 match self.orders.get(&id) {
                     Some(o) if o.remaining > 0 => return Some((id, price)),
                     _ => {
                         self.save_level(j, Side::Ask, price);
                         self.save_order(j, id);
-                        let x = self.asks.get_mut(&price).and_then(|dq| dq.pop_front());
+                        let x = self.lvl_pop_front(Side::Ask, price);
                         if let Some(x) = x {
                             self.jlevel(j, Side::Ask, price).popped.push(x);
                         }
@@ -627,7 +693,7 @@ impl OrderBook {
                 }
             }
             self.save_level(j, Side::Ask, price);
-            self.asks.remove(&price);
+            self.asks.remove(&price); // empty here (the loop above drained it)
         }
     }
 
@@ -637,14 +703,14 @@ impl OrderBook {
             while let Some(id) = self
                 .bids
                 .get(&Reverse(price))
-                .and_then(|dq| dq.front().copied())
+                .and_then(|dq| dq.values().next().copied())
             {
                 match self.orders.get(&id) {
                     Some(o) if o.remaining > 0 => return Some((id, price)),
                     _ => {
                         self.save_level(j, Side::Bid, price);
                         self.save_order(j, id);
-                        let x = self.bids.get_mut(&Reverse(price)).and_then(|dq| dq.pop_front());
+                        let x = self.lvl_pop_front(Side::Bid, price);
                         if let Some(x) = x {
                             self.jlevel(j, Side::Bid, price).popped.push(x);
                         }
@@ -662,7 +728,7 @@ impl OrderBook {
             Side::Ask => {
                 if let Some((&price, _)) = self.asks.iter().next() {
                     self.save_level(j, Side::Ask, price);
-                    let x = self.asks.get_mut(&price).and_then(|dq| dq.pop_front());
+                    let x = self.lvl_pop_front(Side::Ask, price);
                     if let Some(x) = x {
                         self.jlevel(j, Side::Ask, price).popped.push(x);
                     }
@@ -672,7 +738,7 @@ impl OrderBook {
             Side::Bid => {
                 if let Some((&Reverse(price), _)) = self.bids.iter().next() {
                     self.save_level(j, Side::Bid, price);
-                    let x = self.bids.get_mut(&Reverse(price)).and_then(|dq| dq.pop_front());
+                    let x = self.lvl_pop_front(Side::Bid, price);
                     if let Some(x) = x {
                         self.jlevel(j, Side::Bid, price).popped.push(x);
                     }

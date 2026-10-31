@@ -43,9 +43,50 @@ pub struct ChainState {
     pub seen_client_seq: BTreeMap<AccountId, u64>,
     /// PILOT (MNWIT1 proposal): keys touched since the last witness commit.
     pub wit_dirty: crate::wit::WitDirty,
+    /// PILOT (loop round 3, S1b): running per-market sum of positive position qty over all
+    /// accounts (the first term of `Engine::funding_open_interest`, which upstream recomputes by
+    /// iterating every account). Maintained by `put_account` / `del_account`, the only paths that
+    /// replace an account's positions; checked against the full sum by `oi_ok` (host tests).
+    pub oi_long: BTreeMap<MarketId, u128>,
 }
 
 impl ChainState {
+    fn oi_adj(oi: &mut BTreeMap<MarketId, u128>, a: &Account, add: bool) {
+        for (m, p) in &a.positions {
+            if p.qty > 0 {
+                let e = oi.entry(*m).or_insert(0);
+                if add {
+                    *e += p.qty as u128;
+                } else {
+                    *e -= p.qty as u128;
+                }
+                if *e == 0 {
+                    oi.remove(m);
+                }
+            }
+        }
+    }
+    /// PILOT (S1b): `accounts.insert` that keeps `oi_long` current.
+    pub fn put_account(&mut self, id: AccountId, a: Account) {
+        Self::oi_adj(&mut self.oi_long, &a, true);
+        if let Some(old) = self.accounts.insert(id, a) {
+            Self::oi_adj(&mut self.oi_long, &old, false);
+        }
+    }
+    /// PILOT (S1b): `accounts.remove` that keeps `oi_long` current.
+    pub fn del_account(&mut self, id: &AccountId) {
+        if let Some(old) = self.accounts.remove(id) {
+            Self::oi_adj(&mut self.oi_long, &old, false);
+        }
+    }
+    /// PILOT (S1b): running total == full recomputation (host tests).
+    pub fn oi_ok(&self) -> bool {
+        let mut full: BTreeMap<MarketId, u128> = BTreeMap::new();
+        for a in self.accounts.values() {
+            Self::oi_adj(&mut full, a, true);
+        }
+        full == self.oi_long
+    }
     pub fn journal_account(&self, j: &mut StateJournal, id: AccountId) {
         if j.seen_accounts.insert(id) {
             j.accounts.push((id, self.accounts.get(&id).cloned()));
@@ -148,10 +189,10 @@ impl ChainState {
         for (id, pre) in j.accounts {
             match pre {
                 Some(a) => {
-                    self.accounts.insert(id, a);
+                    self.put_account(id, a); // PILOT (S1b)
                 }
                 None => {
-                    self.accounts.remove(&id);
+                    self.del_account(&id); // PILOT (S1b)
                 }
             }
         }
@@ -224,7 +265,7 @@ impl ChainState {
                 fill.maker_post,
                 fill.maker_isolated,
             )?;
-            self.accounts.insert(fill.taker, taker);
+            self.put_account(fill.taker, taker); // PILOT (S1b)
         } else {
             let mut maker = self
                 .accounts
@@ -241,8 +282,8 @@ impl ChainState {
                 fill.maker_post,
                 fill.maker_isolated,
             )?;
-            self.accounts.insert(fill.taker, taker);
-            self.accounts.insert(fill.maker, maker);
+            self.put_account(fill.taker, taker); // PILOT (S1b)
+            self.put_account(fill.maker, maker);
         }
         // Taker fee: bps of notional debited from the taker's collateral and
         // credited to the insurance fund — the fund's income leg, offsetting
