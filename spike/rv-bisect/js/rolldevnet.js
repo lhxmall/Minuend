@@ -13,11 +13,12 @@ const { Network } = Testkit({ TESTDATA_DIR: process.env.TESTDATA || path.join(__
 process.env.RV_MINGAP = process.env.RV_MINGAP || '1'; // loop round 7 (R6-M2): the devnet runs on its real clock
 const ref = require('./ref.js'); const T = require('./rolltrace.js'); const M = require('./mkrollup.js'); // (re)generates rv_game_ref.aa / rv_seg_ref.aa / rv_rollup.aa
 const WP = require('./mkwitproof.js'); const K = require('./witkit.js'); // loop round 3: rv_witbind.aa / rv_witproof.aa
-const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, RK = 10000;
+const OBOND = 200000, VCAP = 6, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, RK = 10000;
 // max_aa_responses per trigger = number of AAs that respond in its chain (one lower bounces 'max_aa_responses N exceeded'):
 // rollup submit / finalize / reclaim, referee mids / pick / direct open, rv_step: 1 (refunds and payouts go to plain
 // addresses); rollup open: 2 (rollup -> referee); referee resolve: 2 (referee -> rollup callback); fwd test AA: 2 (fwd -> rollup)
 const NOMAXR = !!process.env.NOMAXR; const ONLY9 = !!process.env.ONLY9; const ONLY10 = !!process.env.ONLY10; // loop round 11: ONLY10=1 runs only section 10
+const ONLY11 = !!process.env.ONLY11; // loop round 13: ONLY11=1 runs only section 11 (R12-M1 VCAP + end-to-end fraudulent height flow)
 const cmdOf = data => ['submit', 'open', 'finalize', 'reclaim', 'mids', 'pick', 'resolve'].find(k => data && data[k] !== undefined) || (data && data.to ? 'fwd' : 'step');
 const MAXR = { submit: 1, finalize: 1, reclaim: 1, mids: 1, pick: 1, step: 1, open: 2, resolve: 2, fwd: 2 };
 const results = []; const rec = (name, expected, actual, extra) => { const pass = JSON.stringify(expected) === JSON.stringify(actual); results.push({ name, expected, actual, pass, ...(extra || {}) }); console.log(pass ? 'PASS' : 'FAIL', '|', name, '| expected', JSON.stringify(expected), '| actual', JSON.stringify(actual), extra ? JSON.stringify(extra) : ''); };
@@ -85,7 +86,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
       else if (turn === 'c') { const m = String((await vars(GAME))['m_' + gid]).split(','); const at = i => i == 0 ? g[5] : i == cnt + 1 ? g[6] : m[i - 1];
         let j = 0; while (j < cnt && at(j + 1) === chv[pt(j + 1)]) j++; const r = await trig(chw, GAME, { pick: gid, j }, 10000, 'pick'); if (r.err) return 'pick ' + r.err; }
       else { if (honest.roots[lo] === g[5] && !(await vars(STEP))['s_' + g[5]]) { const s = await trig(w, STEP, honest.wits[lo], 10000, 'step'); if (s.err) return 'step ' + s.err; }
-        const r = await trig(w, GAME, { resolve: gid }, 10000, 'resolve'); if (r.err) return 'resolve ' + r.err; play.last = await secondary(r.response, ROLL); }
+        const r = await trig(w, GAME, { resolve: gid }, 10000, 'resolve'); if (r.err) return 'resolve ' + r.err; play.last = await secondary(r.response, ROLLA); }
     }
     return 'unfinished';
   }
@@ -94,8 +95,39 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   // In sections 3-8 every new fraud comes >= one WIN after the previous void, so V has decayed to 0 and max(v_h, V) = v_h.
   const Vat = async aa => { const v = await vars(aa || ROLL); const now = Math.floor((await w.getTime()).time / 1000);
     return Math.max(0, +(v.V || 0) - Math.floor((now - +(v.Vt || 0)) / 86400)); };
-  const bondAt = async (h, aa) => OBOND * 2 ** Math.min(Math.max(+((await vars(aa || ROLL))['v' + h] || 0), await Vat(aa)), 10);
-  if (!ONLY9 && !ONLY10) { // loop round 10: ONLY9=1 runs only section 9 (R9-T1)
+  // loop round 13 (R12-M1): the global term is capped separately at VCAP = 6: max(v_h, min(V, 6))
+  const bondAt = async (h, aa) => OBOND * 2 ** Math.min(Math.max(+((await vars(aa || ROLL))['v' + h] || 0), Math.min(await Vat(aa), VCAP)), 10);
+  // ===== 8 (helper, hoisted in loop round 13 so section 11 can use it): layer-1 game (rv_seg_ref) player; the rollup
+  //   callback is read from ROLLA (the rollup instance the section runs on)
+  // max_aa_responses: uopen 2 (rollup -> seg); seg mids / pick 1, pick that hands off 2 (seg -> game); layer-2 resolve
+  // 3 (game -> seg -> rollup); seg resolve on a timeout 2 (seg -> rollup); bind / prove 1
+  const H64 = x => require('crypto').createHash('sha256').update(x).digest('base64');
+  async function playSeg(sgid, defT, chT, honest, opw, chw) {
+    chT = T.at(chT, defT.ts); honest = honest === defT ? defT : honest === chT ? chT : T.at(honest, defT.ts); // loop round 7
+    const bnd = k => Math.floor(k * defT.steps / defT.units);
+    for (let it = 0; it < 20; it++) {
+      const g = String((await vars(SEG))['g_' + sgid] || '').split(':'); if (g[0] === 'done') return { w: g[1] };
+      const lo = +g[3], hi = +g[4], slo = +g[5], shi = +g[6], turn = g[9]; const { cnt, pt } = pts(lo, hi);
+      if (turn === 'd') { const st = Array.from({ length: cnt }, (_, i) => bnd(pt(i + 1))); const r = await trig(opw, SEG, { mids: sgid, steps: st, roots: st.map(x => defT.roots[x]) }, 10000, 'smids', 1); if (r.err) return { w: 'smids ' + r.err }; }
+      else if (turn === 'c') { const v = await vars(SEG); const m = String(v['m_' + sgid]).split(','), n = String(v['n_' + sgid]).split(',').map(Number);
+        const rootAt = i => i == 0 ? g[7] : i == cnt + 1 ? g[8] : m[i - 1], stepAt = i => i == 0 ? slo : i == cnt + 1 ? shi : n[i - 1];
+        let j = 0; while (j < cnt && rootAt(j + 1) === chT.roots[stepAt(j + 1)]) j++;
+        const one = pt(j + 1) - pt(j) === 1; const r = await trig(chw, SEG, { pick: sgid, j }, 10000, one ? 'spick-handoff' : 'spick', one ? 2 : 1); if (r.err) return { w: 'spick ' + r.err }; }
+      else { // layer 2 on [slo, shi]
+        const gid2 = SEG + H64(sgid); const sl = a => a.slice(slo, shi + 1);
+        for (let k = 0; k < 40; k++) { const q = String((await vars(GAME))['g_' + gid2] || '').split(':'); if (q[0] === 'done') break;
+          const lo2 = +q[3], hi2 = +q[4], t2 = q[7]; const p2 = pts(lo2, hi2);
+          if (t2 === 'd') { const r = await trig(opw, GAME, { mids: gid2, roots: Array.from({ length: p2.cnt }, (_, i) => sl(defT.roots)[p2.pt(i + 1)]) }, 10000, 'mids'); if (r.err) return { w: 'l2 mids ' + r.err }; }
+          else if (t2 === 'c') { const m = String((await vars(GAME))['m_' + gid2]).split(','); const at = i => i == 0 ? q[5] : i == p2.cnt + 1 ? q[6] : m[i - 1];
+            let j = 0; while (j < p2.cnt && at(j + 1) === sl(chT.roots)[p2.pt(j + 1)]) j++; const r = await trig(chw, GAME, { pick: gid2, j }, 10000, 'pick'); if (r.err) return { w: 'l2 pick ' + r.err }; }
+          else { const a = slo + lo2; if (honest.roots[a] === q[5] && !(await vars(STEP))['s_' + q[5]]) { const s = await trig(w, STEP, honest.wits[a], 10000, 'step'); if (s.err) return { w: 'step ' + s.err }; }
+            const r = await trig(w, GAME, { resolve: gid2 }, 10000, 'resolve3', 3); if (r.err) return { w: 'l2 resolve ' + r.err };
+            const segResp = await secondary(r.response, SEG); const rollResp = await secondary(segResp, ROLLA); return { w: (String((await vars(SEG))['g_' + sgid]).split(':')[1]), roll: rollResp, unit: [lo, hi, slo, shi] }; } }
+        return { w: 'l2 unfinished' }; }
+    }
+    return { w: 'unfinished' };
+  }
+  if (!ONLY9 && !ONLY10 && !ONLY11) { // loop round 10: ONLY9=1 runs only section 9 (R9-T1)
   const G0 = T.genesis(); const b1 = T.batch(G0, 1), x1 = T.batch(G0, 7);
   // 1. race tie: two operators submit h1 before the witness stabilizes either unit
   { const ra = await send(op1, ROLL, sub(b1, 1, 'genesis'), OBOND); const rb = await send(op2, ROLL, sub(x1, 1, 'genesis'), OBOND);
@@ -246,35 +278,6 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(op2, ROLL, sub(H8, 8, H7.final), OBOND + FEE, 'submit'); rec('7 submit h8 with OBOND + FEE (kept, no refund unit)', ['ok', 0], [r.err || 'ok', await paidTo(r.response, A.op2)]);
     r = await trig(ch2, GAME, { open: ref.H('direct' + Date.now()), s0: H8.s0, sN: H8.final, n: 1, d: A.op2, c: A.ch2 }, GF + 5000); rec('7 direct referee open with GF + 5000 refunds 5000', ['ok', 5000], [r.err || 'ok', await paidTo(r.response, A.ch2)]); }
 
-  // ===== 8. loop round 3: layer-1 game (rv_seg_ref) and witness proofs (rv_witbind / rv_witproof) on the real chain
-  // max_aa_responses: uopen 2 (rollup -> seg); seg mids / pick 1, pick that hands off 2 (seg -> game); layer-2 resolve
-  // 3 (game -> seg -> rollup); seg resolve on a timeout 2 (seg -> rollup); bind / prove 1
-  const H64 = x => require('crypto').createHash('sha256').update(x).digest('base64');
-  async function playSeg(sgid, defT, chT, honest, opw, chw) {
-    chT = T.at(chT, defT.ts); honest = honest === defT ? defT : honest === chT ? chT : T.at(honest, defT.ts); // loop round 7
-    const bnd = k => Math.floor(k * defT.steps / defT.units);
-    for (let it = 0; it < 20; it++) {
-      const g = String((await vars(SEG))['g_' + sgid] || '').split(':'); if (g[0] === 'done') return { w: g[1] };
-      const lo = +g[3], hi = +g[4], slo = +g[5], shi = +g[6], turn = g[9]; const { cnt, pt } = pts(lo, hi);
-      if (turn === 'd') { const st = Array.from({ length: cnt }, (_, i) => bnd(pt(i + 1))); const r = await trig(opw, SEG, { mids: sgid, steps: st, roots: st.map(x => defT.roots[x]) }, 10000, 'smids', 1); if (r.err) return { w: 'smids ' + r.err }; }
-      else if (turn === 'c') { const v = await vars(SEG); const m = String(v['m_' + sgid]).split(','), n = String(v['n_' + sgid]).split(',').map(Number);
-        const rootAt = i => i == 0 ? g[7] : i == cnt + 1 ? g[8] : m[i - 1], stepAt = i => i == 0 ? slo : i == cnt + 1 ? shi : n[i - 1];
-        let j = 0; while (j < cnt && rootAt(j + 1) === chT.roots[stepAt(j + 1)]) j++;
-        const one = pt(j + 1) - pt(j) === 1; const r = await trig(chw, SEG, { pick: sgid, j }, 10000, one ? 'spick-handoff' : 'spick', one ? 2 : 1); if (r.err) return { w: 'spick ' + r.err }; }
-      else { // layer 2 on [slo, shi]
-        const gid2 = SEG + H64(sgid); const sl = a => a.slice(slo, shi + 1);
-        for (let k = 0; k < 40; k++) { const q = String((await vars(GAME))['g_' + gid2] || '').split(':'); if (q[0] === 'done') break;
-          const lo2 = +q[3], hi2 = +q[4], t2 = q[7]; const p2 = pts(lo2, hi2);
-          if (t2 === 'd') { const r = await trig(opw, GAME, { mids: gid2, roots: Array.from({ length: p2.cnt }, (_, i) => sl(defT.roots)[p2.pt(i + 1)]) }, 10000, 'mids'); if (r.err) return { w: 'l2 mids ' + r.err }; }
-          else if (t2 === 'c') { const m = String((await vars(GAME))['m_' + gid2]).split(','); const at = i => i == 0 ? q[5] : i == p2.cnt + 1 ? q[6] : m[i - 1];
-            let j = 0; while (j < p2.cnt && at(j + 1) === sl(chT.roots)[p2.pt(j + 1)]) j++; const r = await trig(chw, GAME, { pick: gid2, j }, 10000, 'pick'); if (r.err) return { w: 'l2 pick ' + r.err }; }
-          else { const a = slo + lo2; if (honest.roots[a] === q[5] && !(await vars(STEP))['s_' + q[5]]) { const s = await trig(w, STEP, honest.wits[a], 10000, 'step'); if (s.err) return { w: 'step ' + s.err }; }
-            const r = await trig(w, GAME, { resolve: gid2 }, 10000, 'resolve3', 3); if (r.err) return { w: 'l2 resolve ' + r.err };
-            const segResp = await secondary(r.response, SEG); const rollResp = await secondary(segResp, ROLL); return { w: (String((await vars(SEG))['g_' + sgid]).split(':')[1]), roll: rollResp, unit: [lo, hi, slo, shi] }; } }
-        return { w: 'l2 unfinished' }; }
-    }
-    return { w: 'unfinished' };
-  }
   { const v0 = await vars(ROLL); rec('8 state before: lf = 7, top = 8', [7, 8], [v0.lf, v0.top]);
     const H8 = globalThis.__H8;
     const H9 = Object.assign(T.batch(H8.mem, 9, { extra: 300 }), { units: 24 });
@@ -322,7 +325,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   //          wallet (the main one bakes the fixed test address GOVXXX..., which no wallet controls): upgrade -> import ->
   //          xbind (both digests, ~9 KB proof triggers) -> finalize, then the R9-H1 brick path and governance cancel.
   //          Memories are synthetic (rolltest `upgrade`): OUT[0x1FFD6] = kind, OUT[0x1FFD8..8] = digest D.
-  if (!ONLY10) { const XK = 0x03F00000 / 4 + 0x1FFD6, Z32 = Array(32).fill(0).join(',');
+  if (!ONLY10 && !ONLY11) { const XK = 0x03F00000 / 4 + 0x1FFD6, Z32 = Array(32).fill(0).join(',');
     const aa1 = fs.readFileSync(path.join(__dirname, '../aa/rv_rollup.aa'), 'utf8'); const body2 = aa1.split(M.govAddr).join(A.gov);
     rec('9 rollup-2 definition = rv_rollup.aa with $GOV = the gov wallet', [1, 0], [body2.split(A.gov).length - 1, body2.split(M.govAddr).length - 1]);
     const dep = await gov.deployAgent(body2); rec('9 rollup-2 deployed by the gov wallet', 'ok', dep.error ? String(dep.error).slice(0, 120) : 'ok');
@@ -385,7 +388,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   // 5. accounting: the rollup holds exactly burned + kept FEEs + GB refunds + bounce fees, no bond is outstanding
   // ===== 10. loop round 11 (R10-M1): escalating bond + winner priority on a real devnet. A third rv_rollup instance
   //           (rv_rollup.aa with $GOV = the ch3 wallet, so a fresh address; same referees, genesis = the test program).
-  { const aa1 = fs.readFileSync(path.join(__dirname, '../aa/rv_rollup.aa'), 'utf8'); const body3 = aa1.split(M.govAddr).join(A.ch3);
+  if (!ONLY11) { const aa1 = fs.readFileSync(path.join(__dirname, '../aa/rv_rollup.aa'), 'utf8'); const body3 = aa1.split(M.govAddr).join(A.ch3);
     const dep = await ch3.deployAgent(body3); rec('10 rollup-3 deployed', 'ok', dep.error ? String(dep.error).slice(0, 120) : 'ok');
     await net.witnessUntilStable(dep.unit); const R3 = dep.address; const keepRoll = ROLLA; ROLLA = R3; // prepSub reads ts(h-1) from ROLLA
     const G0 = T.genesis(); const L1 = T.batch(G0, 1, { k: 30, mut: T.MUT.mem }), H1 = T.batch(G0, 1);
@@ -408,6 +411,71 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     T.retime(H2, L2.ts); rec('10 fraud at h2 proven by ch2', 'c', await play(R3 + o2.unit, L2.roots, H2.roots, ch2, H2, op2));
     await net.timetravel({ shift: '1801s' }); const Hm = T.batch(Hn.mem, 2);
     r = await trig(op1, R3, sub(Hm, 2, Hn.final), await bondAt(2, R3)); rec('10 op1 after the window with 2 x OBOND', ['ok', 2 * OBOND], [r.err || 'ok', await bondAt(2, R3)]);
+    ROLLA = keepRoll; }
+  // ===== 11. loop round 13: R12-M1 (global term capped at VCAP = 6) and an end-to-end fraudulent height flow on a real
+  //           devnet. A fourth rv_rollup instance (rv_rollup.aa with $GOV = the w wallet, so a fresh address; same referees).
+  //   (a) a moving-height fraudster (op2) over 7 cycles: fraud at h -> ch1 instruction game -> rv_step -> void -> ch1
+  //       re-submits h inside its priority window; V caps at 6, fraud and honest bonds cap at 64 x OBOND; real payouts.
+  //   (b) h8: fraud with units 5 -> ch2 layer-1 game (uopen) -> layer-2 instruction game -> rv_step -> void -> ch2
+  //       re-submits; (c) h9: fraud, the defender goes silent in the layer-1 game -> resolve after T -> void;
+  //   (d) a griefer (ch3) uopens the honest h9 and goes silent -> the operator wins on the timeout;
+  //   (e) finalize 1..9 after WIN: every real payout = the stored bond - FEE; burned = sum of fraud bonds / 2; decay.
+  if (!ONLY9 && !ONLY10) { const aa1 = fs.readFileSync(path.join(__dirname, '../aa/rv_rollup.aa'), 'utf8'); const body4 = aa1.split(M.govAddr).join(A.w);
+    const dep = await w.deployAgent(body4); rec('11 rollup-4 deployed', 'ok', dep.error ? String(dep.error).slice(0, 120) : 'ok');
+    await net.witnessUntilStable(dep.unit); const R4 = dep.address; const keepRoll = ROLLA; ROLLA = R4;
+    const G0 = T.genesis(); let prev = { mem: G0, final: 'genesis' }; const hon = {}, own = {}; let fraudBonds = 0, r, v;
+    for (let c = 0; c < 7; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { k: 60 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h);
+      const b = await bondAt(h, R4); rec('11a cycle ' + c + ': bond for the fraud at h' + h + ' = OBOND x 2^' + Math.min(c, VCAP), OBOND * 2 ** Math.min(c, VCAP), b);
+      if (c === 6) { r = await trig(op2, R4, sub(T.batch(prev.mem, h, { k: 90, mut: T.MUT.mem }), h, prev.final), b - 1); rec('11a cycle 6: 64 x OBOND - 1 bounces', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err }); }
+      r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11a cycle ' + c + ': fraudulent h' + h + ' accepted', 'ok', r.err || 'ok'); const sf = r.unit; fraudBonds += b;
+      const o = await trig(ch1, R4, { open: sf }, CBOND, 'open'); T.retime(H, L.ts);
+      const win = await play(R4 + o.unit, L.roots, H.roots, ch1, H, op2); const paid = await paidTo(play.last, A.ch1); v = await vars(R4);
+      rec('11a cycle ' + c + ': fraud proven; V = ' + Math.min(c + 1, VCAP) + ', v' + h + ' = 1, top = ' + (h - 1) + '; ch1 paid CBOND - GF - FEE + bond/2 (real output)',
+        ['c', Math.min(c + 1, VCAP), 1, h - 1, CBOND - GF - FEE + b / 2], [win, +v.V, +v['v' + h], +(v.top || 0), paid]);
+      const hb = await bondAt(h, R4); r = await trig(ch1, R4, sub(H, h, prev.final), hb, 'submit'); v = await vars(R4);
+      rec('11a cycle ' + c + ': ch1 re-submits the honest h' + h + ' at max(v_h, min(V, 6)) = OBOND x 2^' + Math.min(c + 1, VCAP) + ' (b<sid> stored)', ['ok', OBOND * 2 ** Math.min(c + 1, VCAP)], [r.err || 'ok', +v['b' + r.unit]]);
+      hon[h] = r.unit; own[h] = A.ch1; prev = H; }
+    // (b) layer-1 end-to-end at h8
+    { const h = 8, L = Object.assign(T.batch(prev.mem, h, { k: 70, mut: T.MUT.mem }), { units: 5 }), X = T.batch(prev.mem, h); const b = await bondAt(h, R4);
+      rec('11b bond at h8 (V = 6, v8 = 0) = 64 x OBOND', OBOND * 64, b);
+      r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11b fraudulent h8 (units 5)', 'ok', r.err || 'ok'); const sf = r.unit; fraudBonds += b; const bu0 = +((await vars(R4)).burned || 0);
+      const o = await trig(ch2, R4, { uopen: sf }, CBOND + GF, 'uopen', 2); rec('11b ch2 uopen h8 (CBOND + GF; 2 GF to the seg referee)', ['ok', 2 * GF], [o.err || 'ok', await paidTo(o.response, SEG)]);
+      const g = await playSeg(R4 + o.unit, L, X, X, op2, ch2); v = await vars(R4);
+      rec('11b fraud proven through layer 1 -> layer 2 -> rv_step; void: top 7, f, V = 6, v8 = 1, burned += bond/2', ['c', 7, 1, 6, 1, b / 2], [g.w, +v.top, +v['f' + sf], +v.V, +v.v8, +v.burned - bu0], { unit: g.unit });
+      rec('11b ch2 paid CBOND - GF - FEE + bond/2 (real output, rollup response to the seg callback)', CBOND - GF - FEE + b / 2, await paidTo(g.roll, A.ch2));
+      r = await trig(op1, R4, sub(X, h, prev.final), OBOND * 64); rec('11b op1 inside ch2 priority window', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+      r = await trig(ch2, R4, sub(X, h, prev.final), await bondAt(h, R4), 'submit'); v = await vars(R4); rec('11b ch2 re-submits the honest h8 at 64 x OBOND', ['ok', OBOND * 64], [r.err || 'ok', +v['b' + r.unit]]);
+      hon[h] = r.unit; own[h] = A.ch2; prev = X; }
+    // (c) defender silent in the layer-1 game at h9
+    { const h = 9, L = Object.assign(T.batch(prev.mem, h, { k: 71, mut: T.MUT.mem }), { units: 5 }), X = Object.assign(T.batch(prev.mem, h), { units: 5 }); const b = await bondAt(h, R4);
+      r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11c fraudulent h9 at 64 x OBOND', ['ok', OBOND * 64], [r.err || 'ok', b]); const sf = r.unit; fraudBonds += b;
+      const o = await trig(ch1, R4, { uopen: sf }, CBOND + GF, 'uopen', 2); const sg = R4 + o.unit;
+      r = await trig(w, SEG, { resolve: sg }, 10000); rec('11c seg resolve before the defender deadline', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+      r = await trig(ch1, R4, { finalize: 1 }); rec('11c finalize h1 before WIN', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+      await net.timetravel({ shift: '3601s' });
+      r = await trig(w, SEG, { resolve: sg }, 10000, 'sresolve', 2); const rr = await secondary(r.response, R4); v = await vars(R4);
+      rec('11c defender silent: resolve after T -> c; void top 8, V stays 6 (cap), v9 = 1; ch1 paid CBOND - GF - FEE + bond/2', ['ok', 'c', 8, 6, 1, CBOND - GF - FEE + b / 2],
+        [r.err || 'ok', String((await vars(SEG))['g_' + sg]).split(':')[1], +v.top, +v.V, +v.v9, await paidTo(rr, A.ch1)]);
+      r = await trig(ch1, R4, sub(X, h, prev.final), await bondAt(h, R4), 'submit'); v = await vars(R4); rec('11c ch1 re-submits the honest h9 (units 5) at 64 x OBOND', ['ok', OBOND * 64], [r.err || 'ok', +v['b' + r.unit]]);
+      hon[h] = r.unit; own[h] = A.ch1; prev = X;
+      // (d) griefer ch3 uopens the honest h9 and never picks: the operator (ch1) wins on the timeout
+      const og = await trig(ch3, R4, { uopen: hon[h] }, CBOND + GF, 'uopen', 2); const gg = R4 + og.unit;
+      const g = await (async () => { const q = String((await vars(SEG))['g_' + gg]).split(':'); const { cnt, pt } = pts(+q[3], +q[4]); const bnd = k => Math.floor(k * X.steps / X.units);
+        const st = Array.from({ length: cnt }, (_, i) => bnd(pt(i + 1))); return trig(ch1, SEG, { mids: gg, steps: st, roots: st.map(x => X.roots[x]) }, 10000, 'smids', 1); })();
+      rec('11d honest operator posts its layer-1 points', 'ok', g.err || 'ok');
+      r = await trig(ch3, R4, { reclaim: hon[h] }); rec('11d reclaim of a live submission refused', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+      await net.timetravel({ shift: '3601s' });
+      r = await trig(w, SEG, { resolve: gg }, 10000, 'sresolve', 2); const rr2 = await secondary(r.response, R4); v = await vars(R4);
+      rec('11d griefer silent: resolve -> d; operator ch1 paid CBOND - GF - FEE; no open game; h9 live', ['ok', 'd', CBOND - GF - FEE, 0, 9], [r.err || 'ok', String((await vars(SEG))['g_' + gg]).split(':')[1], await paidTo(rr2, A.ch1), +(v['n' + hon[h]] || 0), +v.top]); }
+    // (e) finalize 1..9: real payouts = stored bond - FEE; accounting; decay from the cap
+    await net.timetravel({ shift: WIN + 's' }); let pays = [], want = [];
+    for (let h = 1; h <= 9; h++) { const b = +((await vars(R4))['b' + hon[h]] || OBOND); r = await trig(w, R4, { finalize: h }); pays.push(r.err ? 'bounce: ' + r.err : await paidTo(r.response, own[h])); want.push(b - FEE); }
+    rec('11e finalize 1..9: each real payout = its stored escalated bond - FEE', want, pays);
+    v = await vars(R4); rec('11e burned = sum of the 9 fraud bonds / 2; lf 9', [fraudBonds / 2, 9], [+v.burned, +v.lf], { fraudBonds });
+    { const b = await bal(R4); rec('11e rollup-4 holds burned + kept FEEs only (balance >= burned, no bond outstanding)', true, b >= +v.burned && b - +v.burned < 200000, { balance: b, burned: +v.burned }); }
+    rec('11e decay: ~1 day after the last void V = 5 -> next height posts 32 x OBOND', [5, 32 * OBOND], [await Vat(R4), await bondAt(10, R4)]);
+    await net.timetravel({ shift: (5 * 86400) + 's' }); rec('11e decay: 6 days after the last void V = 0 -> OBOND', [0, OBOND], [await Vat(R4), await bondAt(10, R4)]);
+    r = await trig(op1, R4, sub(T.batch(prev.mem, 10), 10, prev.final), OBOND, 'submit'); rec('11e h10 at OBOND accepted (no b<sid>)', ['ok', false], [r.err || 'ok', !!(await vars(R4))['b' + r.unit]]);
     ROLLA = keepRoll; }
   { const v = await vars(ROLL); const b = await bal(ROLL); rec('rollup balance >= burned (all bonds settled)', true, b >= (v.burned || 0), { balance: b, burned: v.burned, lf: v.lf, top: v.top }); }
   const avg = a => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
