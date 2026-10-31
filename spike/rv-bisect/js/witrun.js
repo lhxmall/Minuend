@@ -20,7 +20,8 @@ function run(elf, batchPath, maxSteps = 2e10) {
   for (let u = 0; u < units; u++) roots.push(hexw(Array.from({ length: 8 }, (_, k) => mem.get(ROOTS + 8 * u + k) >>> 0)));
   return { hash, applied: g(9), rejected: g(10), fills: g(11), ev, steps: st.step, halted: st.pc === ref.HALT, a0: st.regs[10] >>> 0,
     heap: g(12), units, unitEnd, roots, scratch_ok: mem.get(CNT - 1) >>> 0, leaves: mem.get(CNT - 2) >>> 0,
-    leaf_updates: mem.get(CNT - 3) >>> 0, node_hashes: mem.get(CNT - 4) >>> 0, ms: Date.now() - t0 };
+    leaf_updates: mem.get(CNT - 3) >>> 0, node_hashes: mem.get(CNT - 4) >>> 0,
+    heap_peak_live: mem.get(CNT - 5) >>> 0, status: mem.get(CNT - 6) >>> 0, ev_overflow: mem.get(CNT - 7) >>> 0, trapped: st.pc === ref.TRAP, ms: Date.now() - t0 };
 }
 module.exports = { run };
 if (require.main === module) {

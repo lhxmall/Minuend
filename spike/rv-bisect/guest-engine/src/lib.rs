@@ -6,12 +6,13 @@
 //! (`Engine::place`, `cancel` verbatim; `deposit` simplified). See ../README.md.
 //!
 //! Batch format (u32 words, read through `rd(i)`, i.e. ecall a7=63 in the guest):
-//!   [0] MAGIC  [1] n_accounts  [2] n_ops  [3] 0
+//!   [0] MAGIC  [1] n_accounts  [2] n_ops  [3] flags
 //!   n_accounts x 8 words: 32-byte AccountId (little-endian words)
 //!   n_ops x 8 words:
-//!     w0 = kind | acct_idx << 8          kind 1 Deposit, 2 Place, 3 Cancel, 4 isolated Place
+//!     w0 = kind | acct_idx << 8          kind 1 Deposit, 2 Place, 3 Cancel, 4/5 isolated Place
 //!     Deposit: w1,w2 = amount (i64 lo,hi, USD_SCALE units)
-//!     Place:   w1 = side | typ<<1 | tif<<2 | isolated<<3; w2,w3 = price i64; w4,w5 = qty u64;
+//!     Place:   w1 = side | typ<<1 | tif<<2 (other bits ignored; isolated = kind 4/5);
+//!              w2,w3 = price i64; w4,w5 = qty u64;
 //!              w6 = client_seq; w7 = market id
 //!     Place4:  as Place but isolated, market = BTC_USD (1), w7 = margin in whole USD
 //!     Place5:  as Place4 but w7 = margin in USD_SCALE units (<= 4294.967295 USD)
@@ -20,6 +21,15 @@
 //!     Cancel:  w6 = client_seq of the account's own order to cancel; w7 = market id
 //!              (order id = order_id(account, market, client_seq), computed in the guest)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
+//!
+//! Input validation (loop round 1, findings/rv-loop-1.md G1/G2): the header is checked BEFORE any
+//! op runs; a batch with a bad magic, `n_accounts > MAX_ACCOUNTS` or `n_ops > MAX_UNITS` runs no op
+//! and returns status != 0 with a zero state hash (host and guest share this code, so both agree).
+//! Within the limits every input index is < 4 + 8*(MAX_ACCOUNTS + MAX_UNITS) < 2^24, so no read can
+//! wrap or reach the input ecall's trap range; words past the end of a truncated batch read as 0
+//! (input-tree semantics), which decodes as kind 0 = BadAccount. An op whose account index is out of
+//! range, or whose account id is the INSURANCE_ACCOUNT (all-zero id; no ed25519 key hashes to it,
+//! so the real engine can never see such an author), is rejected BadAccount.
 #![no_std]
 extern crate alloc;
 
@@ -75,6 +85,36 @@ pub fn book_code(e: &BookError) -> u32 {
 }
 pub const EV_APPLIED: u32 = 0x8000_0000;
 pub const MARKET2_FLAG: u32 = 1 << 24;
+
+/// Max units (ops) per guest batch: the per-unit root region OUT+0x20000.. (8 words per unit)
+/// ends exactly at the top of the 2^24-word RAM (0x0400_0000), and the event log
+/// (<= 7 words per unit: a unit carries at most one fill) fits below the counters at OUT+0x1FFF0.
+pub const MAX_UNITS: u32 = 16_384;
+/// Max entries of the batch's account table.
+pub const MAX_ACCOUNTS: u32 = 4_096;
+/// Event-log word capacity in the guest's OUT area (words 13 .. 0x1FFF0).
+pub const EV_CAP: u32 = 0x1FFF0 - 13;
+/// Batch status (OUT[0x1FFF9] in the guest; `Stats::status` on the host).
+pub const ST_OK: u32 = 0;
+pub const ST_BAD_MAGIC: u32 = 1;
+pub const ST_TOO_MANY_ACCOUNTS: u32 = 2;
+pub const ST_TOO_MANY_UNITS: u32 = 3;
+const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFF0);
+const _: () = assert!(0x03F0_0000 / 4 + 0x20000 + 8 * MAX_UNITS <= 1 << 24);
+const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + MAX_UNITS) < 1 << 24);
+
+/// Header check shared by host and guest.
+pub fn check_header(rd: &mut dyn FnMut(u32) -> u32) -> u32 {
+    if rd(0) != MAGIC {
+        ST_BAD_MAGIC
+    } else if rd(1) > MAX_ACCOUNTS {
+        ST_TOO_MANY_ACCOUNTS
+    } else if rd(2) > MAX_UNITS {
+        ST_TOO_MANY_UNITS
+    } else {
+        ST_OK
+    }
+}
 
 impl state::ChainState {
     /// Mirrors the parts of upstream `ChainState::new()` the pilot keeps, plus the
@@ -154,6 +194,8 @@ pub fn state_hash(s: &state::ChainState) -> [u8; 32] {
 }
 
 pub struct Stats {
+    /// ST_* (0 = header accepted and every op ran)
+    pub status: u32,
     pub applied: u32,
     pub rejected: u32,
     pub fills: u32,
@@ -227,9 +269,10 @@ pub fn run_batch_wit(
     unit: &mut dyn FnMut(u32, &state::ChainState, &[u8; 32]),
     mode: WitMode,
 ) -> ([u8; 32], Stats, WitOut) {
-    let mut st = Stats { applied: 0, rejected: 0, fills: 0 };
+    let mut st = Stats { status: ST_OK, applied: 0, rejected: 0, fills: 0 };
     let mut wo = WitOut { root: [0; 32], scratch_ok: false, leaves: 0, leaf_updates: 0, node_hashes: 0 };
-    if rd(0) != MAGIC {
+    st.status = check_header(rd);
+    if st.status != ST_OK {
         return ([0u8; 32], st, wo);
     }
     let n_acc = rd(1);
@@ -255,7 +298,8 @@ pub fn run_batch_wit(
             *x = rd(base + i * 8 + k as u32);
         }
         let seq = eng.state.seq;
-        let acct_of = |a: u32| accts.get(a as usize).copied();
+        // INSURANCE_ACCOUNT can never author a signed unit upstream (ids are pubkey hashes).
+        let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
         let res = match decode_op(&ow) {
             BatchOp::Deposit { acct, amount } => match acct_of(acct) {
                 Some(a) => eng.deposit(a, amount as Usd),
@@ -308,8 +352,10 @@ pub fn run_batch_wit(
         unit(i, &eng.state, &root);
     }
     if let Some(w) = w.as_mut() {
-        let scratch = wit::Wit::from_state(&eng.state).root();
-        wo.scratch_ok = scratch == wo.root;
+        // from-scratch rebuild; also a duplicate-kid check (W3): every leaf put from scratch must
+        // land on its own key (count == puts), else two live leaves share a kid
+        let mut sw = wit::Wit::from_state(&eng.state);
+        wo.scratch_ok = sw.smt.count as u64 == sw.leaf_updates && sw.root() == wo.root;
         wo.leaves = w.smt.count;
         wo.leaf_updates = w.leaf_updates;
         wo.node_hashes = w.smt.node_hashes;

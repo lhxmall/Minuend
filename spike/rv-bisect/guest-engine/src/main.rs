@@ -3,7 +3,10 @@
 //! [10] rejected, [11] fills, [12] heap bytes used, [13..] event log.
 //! Witness (MNWIT1, default build): per-unit roots at OUT+0x20000 words (8 words each, unit order),
 //! OUT[0x1FFFF] = units done (written after each unit, every mode), [0x1FFFE] = final root == from-scratch rebuild (1/0), [0x1FFFD] = leaves,
-//! [0x1FFFC] = leaf updates, [0x1FFFB] = node hashes. Features: `nowit` = no commitment (2d01fe8
+//! [0x1FFFC] = leaf updates, [0x1FFFB] = node hashes, [0x1FFFA] = peak live heap bytes,
+//! [0x1FFF9] = status (mnpilot::ST_*: 0 ok, 1 bad magic, 2 n_accounts > MAX_ACCOUNTS, 3 n_ops >
+//! MAX_UNITS; 0xFFFF0077 = abort: panic or out of memory, exit code a0 = 77), [0x1FFF8] = event
+//! log overflow (never 1 within MAX_UNITS). [12] = heap high-water (bytes carved). Features: `nowit` = no commitment (2d01fe8
 //! pilot), `legacywit` = legacy full rebuild per unit for units >= input word 3.
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
@@ -27,28 +30,86 @@ mod rt {
     fn read_word(i: u32) -> u32 {
         unsafe { ((0x0300_0000 + 4 * i) as *const u32).read_volatile() }
     }
-    // Deterministic bump allocator (never frees), as in ../guest.
-    struct Bump;
-    static mut HEAP: usize = 0;
-    static mut HEAP0: usize = 0;
+    // Deterministic size-class free-list allocator (loop round 1, finding G3). The 2d01fe8 bump
+    // allocator never freed, so heap use grew with the TOTAL bytes ever allocated: e.g. the book's
+    // undo journal clones a whole price level on every touch, so k orders resting at one price
+    // cost O(k^2) bytes and ~1 700 orders at one level exhausted the 48 MiB heap (guest abort on a
+    // batch the real engine accepts). Now: every request is rounded up to a power-of-two class
+    // (16 B .. 32 MiB), freed blocks go to that class's LIFO free list and are reused first, new
+    // blocks are carved from the top. Heap use is bounded by the live bytes per class (<= 2x
+    // internal rounding) -- a pure function of the allocation sequence, hence of the input.
+    // Out of memory (top would pass 0x0300_0000): alloc returns null -> alloc error -> panic ->
+    // exit a0 = 77 with OUT[0x1FFF9] = ST_ABORT (deterministic on every RISC-V implementation).
+    struct Heap;
+    const NCLASS: usize = 22;
+    static mut FREE: [usize; NCLASS] = [0; NCLASS];
+    pub static mut HEAP: usize = 0; // top of carved region
+    pub static mut HEAP0: usize = 0;
+    pub static mut LIVE: usize = 0; // bytes in live blocks (class sizes)
+    pub static mut PEAK: usize = 0;
     extern "C" { static _heap_start: u8; }
-    unsafe impl GlobalAlloc for Bump {
+    const HEAP_END: usize = 0x0300_0000; // below the embed input region; stack has 15 MiB above
+    #[inline]
+    fn class(l: &Layout) -> Option<usize> {
+        let sz = l.size().max(l.align()).max(16).checked_next_power_of_two()?;
+        let c = sz.trailing_zeros() as usize - 4;
+        if c < NCLASS { Some(c) } else { None }
+    }
+    unsafe impl GlobalAlloc for Heap {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             if HEAP == 0 { HEAP = &_heap_start as *const u8 as usize; HEAP0 = HEAP; }
-            let p = (HEAP + l.align() - 1) & !(l.align() - 1);
-            HEAP = p + l.size();
-            if HEAP >= 0x3000000 { panic!() } // below the embed input region; stack has 15 MiB
+            let Some(c) = class(&l) else { return core::ptr::null_mut() };
+            let sz = 16usize << c;
+            let p = if FREE[c] != 0 {
+                let p = FREE[c];
+                FREE[c] = *(p as *const usize);
+                p
+            } else {
+                // blocks are aligned to min(size, 64): every class's blocks satisfy any align <= 64
+                let a = sz.min(64);
+                if l.align() > a { return core::ptr::null_mut(); }
+                let p = (HEAP + a - 1) & !(a - 1);
+                if p + sz > HEAP_END { return core::ptr::null_mut(); }
+                HEAP = p + sz;
+                p
+            };
+            LIVE += sz;
+            if LIVE > PEAK { PEAK = LIVE; }
             p as *mut u8
         }
-        unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            if let Some(c) = class(&l) {
+                *(p as *mut usize) = FREE[c];
+                FREE[c] = p as usize;
+                LIVE -= 16usize << c;
+            }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+            let nl = Layout::from_size_align_unchecked(new_size, l.align());
+            if class(&l).is_some() && class(&l) == class(&nl) {
+                return p; // same class: the block already has room
+            }
+            let q = self.alloc(nl);
+            if !q.is_null() {
+                core::ptr::copy_nonoverlapping(p, q, l.size().min(new_size));
+                self.dealloc(p, l);
+            }
+            q
+        }
     }
     #[global_allocator]
-    static A: Bump = Bump;
+    static A: Heap = Heap;
+    const OUT: *mut u32 = 0x03F0_0000 as *mut u32;
+    const ROOTS: usize = 0x20000;
+    /// OUT[0x1FFF9]: batch status (mnpilot::ST_*), ST_ABORT on panic / out of memory.
+    const ST_ABORT: u32 = 0xFFFF_0077;
     #[panic_handler]
     fn panic(_: &core::panic::PanicInfo) -> ! {
-        unsafe { core::arch::asm!("li a0, 77", "li a7, 93", "ecall", options(noreturn)); }
+        unsafe {
+            OUT.add(ROOTS - 7).write_volatile(ST_ABORT);
+            core::arch::asm!("li a0, 77", "li a7, 93", "ecall", options(noreturn));
+        }
     }
-    const OUT: *mut u32 = 0x03F0_0000 as *mut u32;
     #[no_mangle]
     extern "C" fn rmain() -> u32 {
         let mut n_ev: u32 = 0;
@@ -58,11 +119,14 @@ mod rt {
         let mode = mnpilot::WitMode::Legacy { skip: read_word(3) & 0xFF_FFFF };
         #[cfg(not(any(feature = "nowit", feature = "legacywit")))]
         let mode = mnpilot::WitMode::Incremental;
-        const ROOTS: usize = 0x20000;
         let (h, st, wo) = mnpilot::run_batch_wit(
             &mut |i| read_word(i),
             &mut |w| unsafe {
-                OUT.add(13 + n_ev as usize).write_volatile(w);
+                // bounded: never reaches the counters at 0x1FFF0.. (cannot trigger within
+                // MAX_UNITS since a unit emits <= 7 words; n_ev keeps counting, overflow flagged)
+                if n_ev < mnpilot::EV_CAP {
+                    OUT.add(13 + n_ev as usize).write_volatile(w);
+                }
                 n_ev += 1;
             },
             &mut |i, _, r| unsafe {
@@ -89,7 +153,10 @@ mod rt {
             OUT.add(9).write_volatile(st.applied);
             OUT.add(10).write_volatile(st.rejected);
             OUT.add(11).write_volatile(st.fills);
-            OUT.add(12).write_volatile((HEAP - HEAP0) as u32);
+            OUT.add(12).write_volatile((HEAP - HEAP0) as u32); // heap high-water (carved bytes)
+            OUT.add(ROOTS - 6).write_volatile(PEAK as u32); // peak live bytes (class sizes)
+            OUT.add(ROOTS - 7).write_volatile(st.status);
+            OUT.add(ROOTS - 8).write_volatile((n_ev > mnpilot::EV_CAP) as u32);
         }
         u32::from_le_bytes([h[0], h[1], h[2], h[3]])
     }

@@ -227,4 +227,16 @@ keys parsed from the leaf TEXT the way an AA would) and fed with the REAL engine
 one run when the guest bumps the unit counter, so setup and final hash cancel out). `inc` = with MNWIT1,
 `nowit` = matching only, `wit` = inc − nowit, `legacy` = current per-unit full rebuild (measured for N=10).
 R = ceil(log16 steps); operator cost = R × 3372 + 11 467 vs payout 108 000.
-STEPS_PLACEHOLDER
+| book | N | leaves / avg depth / max depth | inc avg / median / max | nowit | **wit** | legacy wit | unit R (cost) | flow steps → R (cost) |
+|---|---|---|---|---|---|---|---|---|
+| depth200 | 10 | 231 / 9.06 / 14 | 250,424 / 189,354 / 652,484 | 72,006 | **178,418** | 6,042,590 | 5 (28,327) | 2,504,238 → 6 (31,699) |
+| depth200 | 100 | 251 / 9.29 / 14 | 379,373 / 260,575 / 789,910 | 84,442 | **294,931** | — | 5 (28,327) | 37,937,253 → 7 (35,071) |
+| depth200 | 1000 | 447 / 10.04 / 17 | 389,173 / 256,720 / 869,907 | 93,460 | **295,713** | — | 5 (28,327) | 389,173,266 → 8 (38,443) |
+| depth800 | 10 | 843 / 11.02 / 18 | 542,721 / 745,842 / 909,385 | 184,140 | **358,581** | 22,304,829 | 5 (28,327) | 5,427,206 → 6 (31,699) |
+| depth800 | 100 | 883 / 11.05 / 17 | 503,768 / 434,700 / 1,123,895 | 202,046 | **301,722** | — | 6 (31,699) | 50,376,827 → 7 (35,071) |
+| depth800 | 1000 | 1069 / 11.26 / 17 | 535,650 / 461,846 / 1,176,458 | 195,633 | **340,017** | — | 6 (31,699) | 535,649,546 → 8 (38,443) |
+| depth2000 | 10 | 2066 / 12.32 / 21 | 788,587 / 1,008,489 / 1,109,753 | 352,845 | **435,742** | 54,981,624 | 6 (31,699) | 7,885,869 → 6 (31,699) |
+| depth2000 | 100 | 2121 / 12.34 / 21 | 701,285 / 593,600 / 1,232,993 | 354,200 | **347,085** | — | 6 (31,699) | 70,128,480 → 7 (35,071) |
+| depth2000 | 1000 | 2311 / 12.47 / 21 | 697,316 / 622,891 / 1,401,744 | 334,655 | **362,661** | — | 6 (31,699) | 697,316,275 → 8 (38,443) |
+
+(Source: VM logs `/data/hark/logs/rv/wit-bench-depth{200,800,2000,2000-n1000}.jsonl`, run 2026-10-31 at commit df02e33; the table was left as a placeholder when the previous run was cut off and was filled in loop round 1 from those logs. Every row: `match_real_guest`, `roots_equal`, `scratch_ok` = true.)

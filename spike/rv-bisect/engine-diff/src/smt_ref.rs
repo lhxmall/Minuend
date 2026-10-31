@@ -116,3 +116,75 @@ pub fn depths(leaves: &[String]) -> Vec<usize> {
     go(&v, 0, &mut out);
     out
 }
+
+// ---------------------------------------------------------------- proofs (loop round 1, W1)
+// Reference prover + the verifier rules of docs/rv-dispute-design.md §7.3.3 (as an AA would run
+// them), used by `engine-diff proofs` to check soundness/completeness and forgery resistance.
+
+/// Proof terminal: the subtree found at depth `siblings.len()` on the key's path.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Term {
+    Empty,
+    /// a leaf string (its key and leaf hash are recomputed by the verifier)
+    Leaf(String),
+}
+/// Max proof depth a verifier accepts (keys are 256 bits).
+pub const MAX_DEPTH: usize = 256;
+
+/// Path of `k` in the canonical tree over `leaves`: siblings from the ROOT down
+/// (s_0 = sibling at depth 0) and the terminal.
+pub fn prove(leaves: &[String], k: &H) -> (Vec<H>, Term) {
+    let mut v: Vec<(H, H, String)> = leaves.iter().map(|l| (key(l), leaf_hash(l), l.clone())).collect();
+    v.sort();
+    let mut lo = 0;
+    let mut hi = v.len();
+    let mut sib = Vec::new();
+    let mut d = 0;
+    loop {
+        match hi - lo {
+            0 => return (sib, Term::Empty),
+            1 => return (sib, Term::Leaf(v[lo].2.clone())),
+            _ => {
+                let s = lo + v[lo..hi].partition_point(|(kk, _, _)| !bit(kk, d));
+                let kv: Vec<(H, H)> = v.iter().map(|x| (x.0, x.1)).collect();
+                if bit(k, d) {
+                    sib.push(sub(&kv[lo..s], d + 1));
+                    lo = s;
+                } else {
+                    sib.push(sub(&kv[s..hi], d + 1));
+                    hi = s;
+                }
+                d += 1;
+            }
+        }
+    }
+}
+/// Fold a terminal hash up the path of `k` (siblings root-first).
+fn fold(k: &H, mut h: H, sib: &[H]) -> H {
+    for (d, s) in sib.iter().enumerate().rev() {
+        h = if bit(k, d) { node(s, &h) } else { node(&h, s) };
+    }
+    h
+}
+/// Membership: the key is DERIVED from the leaf text (never taken from the prover).
+pub fn verify_member(root: &H, leaf: &str, sib: &[H]) -> bool {
+    sib.len() <= MAX_DEPTH && fold(&key(leaf), leaf_hash(leaf), sib) == *root
+}
+/// Non-membership of key `k`: the terminal is EMPTY, or a leaf whose (derived) key differs from
+/// `k` but shares its first `sib.len()` bits.
+pub fn verify_absent(root: &H, k: &H, term: &Term, sib: &[H]) -> bool {
+    if sib.len() > MAX_DEPTH {
+        return false;
+    }
+    let h = match term {
+        Term::Empty => [0u8; 32],
+        Term::Leaf(l) => {
+            let k2 = key(l);
+            if k2 == *k || (0..sib.len()).any(|d| bit(&k2, d) != bit(k, d)) {
+                return false;
+            }
+            leaf_hash(l)
+        }
+    };
+    fold(k, h, sib) == *root
+}

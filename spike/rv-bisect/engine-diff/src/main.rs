@@ -12,6 +12,12 @@
 //!   engine-diff portroots <batch.bin>   per-unit MNWIT1 roots of the port (incremental, native)
 //!   engine-diff witfuzz <n_seeds> <n_orders> [smt_rounds]   property + diff test of MNWIT1
 //!
+//!   engine-diff crowd <n_acc> <per_acct> <out.bin>   one-price-level crowd batch (loop round 1, G3)
+//!   engine-diff advfuzz <n_seeds> <n_ops>   edge-heavy random ops: real vs port + per-unit roots
+//!   engine-diff advgen <seed> <n_ops> <out.bin>   write one advfuzz batch
+//!   engine-diff robust <dir>   malformed / limit batches for js/robust.js (host vs guest)
+//!   engine-diff portout <batch.bin>   port result in the guest's shape (status, ev, roots)
+//!
 //! real/port print one JSON line: {"hash":..,"applied":..,"rejected":..,"fills":..,"ev":[..]}
 use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
 use minuend_exec::{Engine, ExecEvent, RejectReason};
@@ -23,6 +29,10 @@ use minuend_types::{
 use sha2::{Digest, Sha256};
 use std::fs;
 mod smt_ref;
+mod adv;
+mod heapsim;
+#[global_allocator]
+static GA: heapsim::Sim = heapsim::Sim;
 
 const EV_APPLIED: u32 = mnpilot::EV_APPLIED;
 
@@ -759,6 +769,32 @@ fn main() {
             println!("{{\"leaves\":{:?},\"root_hex\":\"{}\",\"root_b64\":\"{}\",\"pilot_root_hex\":\"{}\",\"legacy_wit_root\":\"{}\"}}",
                 all, smt_ref::hex(&r), smt_ref::b64(&r), smt_ref::hex(&smt_ref::root(&real_pilot_leaves(&eng))), minuend_state::wit_root(&eng.state));
         }
+        Some("crowd") => {
+            let w = adv::crowd(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
+        }
+        Some("advfuzz") => println!("{}", adv::advfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("advgen") => {
+            let w = adv::adv_batch(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"ops\":{}}}", w[2]);
+        }
+        Some("robust") => println!("{}", adv::robust(&a[2])),
+        Some("proofs") => println!("{}", adv::proofs(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("selftest") => println!("{}", adv::selftest(&a[2])),
+        Some("heapsim") => {
+            // guest allocator simulation over one port run (incremental witness), 64-bit sizes
+            let w = read_words(&a[2]);
+            heapsim::reset();
+            heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
+            let (_, st, wo) = mnpilot::run_batch_wit(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |_| {}, &mut |_, _, _| {}, mnpilot::WitMode::Incremental);
+            heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
+            let (top, peak, bump) = heapsim::read();
+            println!("{{\"status\":{},\"units\":{},\"applied\":{},\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"bump_total\":{},\"guest_heap_limit\":{}}}",
+                st.status, w[2], st.applied, wo.leaves, top, peak, bump, 0x0300_0000u32 - 0x0002_0000);
+        }
+        Some("portout") => println!("{}", adv::portout(&read_words(&a[2]))),
         Some("scen") => println!("{}", scen(&a[2], a.get(3).map(|x| x.as_str()))),
         Some("witfuzz") => {
             let p = |i: usize, d: u64| a.get(i).map(|x| x.parse().unwrap()).unwrap_or(d);
