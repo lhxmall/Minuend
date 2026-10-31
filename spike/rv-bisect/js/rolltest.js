@@ -255,6 +255,24 @@ groups.delay = async () => { const K = +(process.env.PUPPETS || 40); const X = +
   rec('delay', 'rollup surplus = FEE per payout + GB per result (no drain, nothing stuck)', (K + 1) * FEE + K * GB + 10000 /* bounce fee of the late open */, C.b(ROLL) - liabilities(C), { burned: C.r('burned') || 0 }); };
 
 // honest operator vs griefers: bond accounting, no drain, referee balance
+// ---------- loop round 10 (R10-M1): stall economics. A fraudster re-submits a fraudulent h after every void (it can
+//            race the honest re-submission) and defends each challenger game as slowly as the deadlines allow. Measures
+//            the finalization stall per cycle and the fraudster's cost per cycle (OBOND / 2 burned + OBOND / 2 to the
+//            first winning challenger). Nothing here is wrong in the AA: it quantifies a documented gap (design §8.3).
+groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.env.EXTRA || 4000); const CYC = +(process.env.CYCLES || 3);
+  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'); const t0 = C.ts; const x0 = C.b(OPX); let hours = [];
+  for (let c = 0; c < CYC; c++) { const L = T.batch(G0, 1, { extra: X, k: 1 + c, mut: T.MUT.mem }), H = T.batch(G0, 1, { extra: X });
+    const ts0 = C.ts; let r = await submit(C, OPX, 1, L, 'genesis'); rec(g, 'cycle ' + c + ': fraudulent h1 submitted first', 'accepted', bnc(r));
+    const o = await open(C, CH1, L.sid); rec(g, 'cycle ' + c + ': honest challenger opens at once', 'ok', ok(o));
+    const gm = game(o, L, H, H, { defDelay: 'slow', chDelay: 60 }); await playAll(C, [gm]);
+    rec(g, 'cycle ' + c + ': challenger wins (fraud), h1 voided', ['c', 0], [gm.winner, +(C.r('top') || 0)]);
+    hours.push(+((gm.resolvedAt - ts0) / 3600).toFixed(2)); }
+  const rounds = Math.ceil(Math.log(T.batch(G0, 1, { extra: X }).steps) / Math.log(16));
+  rec(g, 'stall per cycle ~ one slow game (<= rounds + 1 hours)', true, hours.every(x => x <= rounds + 1.5), { hoursPerCycle: hours, rounds, steps: T.batch(G0, 1, { extra: X }).steps });
+  const cost = x0 - C.b(OPX); rec(g, 'fraudster cost per cycle = OBOND (half burned, half to the challenger) + unit fees', CYC * OBOND, cost, { burned: C.r('burned'), perCycleBytes: cost / CYC,
+    stallHoursPerCycle: hours[0], bytesPerStallDay: Math.round(cost / CYC * 24 / hours[0]) });
+  rec(g, 'no height ever finalized during the attack', 0, +(C.r('lf') || 0)); };
+
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const b2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, b2, b1.final);
   const games = []; for (let i = 0; i < 12; i++) { const P = A('GRIEF' + i); const sid = i % 2 ? b2.sid : b1.sid; const tr = i % 2 ? b2 : b1;

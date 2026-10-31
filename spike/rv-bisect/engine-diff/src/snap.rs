@@ -418,3 +418,89 @@ pub fn snapcap() -> String {
     let over = mk(mnpilot::MAX_STATE_ACCOUNTS + 1);
     format!("{{\"ok\":{},\"at_cap_status\":{},\"over_cap_status\":{}}}", at == 0 && over == mnpilot::ST_BAD_SNAP, at, over)
 }
+
+/// Loop round 10 (R10-H1): the heap bound of R4-H1 / R6-M1 measured accounts with positions in TWO markets and
+/// markets without positions. `mktcap n m r`: genesis (market 2 fixture) + `m - 2` markets listed by CreateMarket (a
+/// PERP-funded creator), `n` accounts that each hold a position in EVERY market (crossing the previous account's
+/// resting ask, as statecap), and `r` of them bonded oracles that report in every market (oracle_reports +
+/// oracle_report_history ring of depth 8 per (market, oracle)). MNWIT1 tree committed after every account.
+/// Real engine entry points only (gov_deposit / create_market / stake_oracle / report_price / place), so every
+/// state reached here is reachable by units. Prints the host heap simulation (64-bit sizes).
+pub fn mktcap(n: u32, m: u32, r: u32) -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M, OrderType, Side as S, TimeInForce as T};
+    heapsim::reset();
+    heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut sess = mnpilot::Session::genesis(0, mnpilot::WitMode::Incremental);
+    let id = |i: u32| A(Sha256::digest(format!("mktcap-{}", i).as_bytes()).into());
+    let mut fails = 0u32;
+    let mut why: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut ok = |r: Result<Vec<mnpilot::Fill>, mnpilot::engine::RejectReason>, e: &mut mnpilot::engine::Engine| {
+        match r { Ok(_) => e.state.seq += 1, Err(x) => { fails += 1; *why.entry(format!("{:?}", x)).or_insert(0) += 1; } }
+    };
+    {
+        let e = &mut sess.eng;
+        let c = id(1_000_000);
+        let need = (m as u128) * minuend_types::CREATE_MARKET_FEE_PERP + minuend_types::ORACLE_BOND_PERP;
+        let r0 = e.gov_deposit(c, need);
+        ok(r0, e);
+        // the creator is a bonded oracle: every new market gets a mark from its report (fills need a mark)
+        let r0 = e.stake_oracle(c);
+        ok(r0, e);
+        let mut l = e.state.markets.get(&M(1)).cloned().unwrap();
+        for k in 2..=m {
+            l.symbol[0] = (k & 0xff) as u8;
+            l.symbol[1] = (k >> 8) as u8;
+            let r1 = e.create_market(c, &l);
+            ok(r1, e);
+            let id = M(e.state.next_market_id - 1);
+            let r1 = e.report_price(c, id, MID);
+            ok(r1, e);
+        }
+    }
+    let markets: Vec<u32> = sess.eng.state.markets.keys().map(|x| x.0).collect();
+    for i in 0..n {
+        let a = id(i);
+        let e = &mut sess.eng;
+        let r1 = e.deposit(a, 10_000_000 * USD_SCALE as i128);
+        ok(r1, e);
+        if i > 0 {
+            for &mk in &markets {
+                let b = id(i - 1);
+                let seq = e.state.seq;
+                let cs = e.state.seen_client_seq.get(&b).copied().unwrap_or(0) + 1;
+                let r2 = e.place(b, M(mk), S::Ask, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, QTY_SCALE / 100, cs, [0; 32], seq, false, 0);
+                ok(r2, e);
+                let seq = e.state.seq;
+                let cs = e.state.seen_client_seq.get(&a).copied().unwrap_or(0) + 1;
+                let r3 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, QTY_SCALE / 100, cs, [0; 32], seq, false, 0);
+                ok(r3, e);
+            }
+        }
+        if i < r {
+            let r4 = e.gov_deposit(a, minuend_types::ORACLE_BOND_PERP);
+            ok(r4, e);
+            let r5 = e.stake_oracle(a);
+            ok(r5, e);
+            for &mk in &markets {
+                for k in 0..8i64 {
+                    let r6 = e.report_price(a, M(mk), MID + k * DOLLAR);
+                    ok(r6, e);
+                }
+            }
+        }
+        if let Some(w) = sess.w.as_mut() {
+            w.commit(&mut sess.eng.state);
+        }
+    }
+    heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (top, peak, _) = heapsim::read();
+    let (_, words, _) = mnpilot::snapshot::export(&sess, false);
+    let st = &sess.eng.state;
+    let pos: usize = st.accounts.values().map(|a| a.positions.len()).sum();
+    let hist: usize = st.oracle_report_history.values().map(|q| q.len()).sum();
+    format!(
+        "{{\"accounts\":{},\"markets\":{},\"marks\":{},\"positions\":{},\"oracles\":{},\"oracle_reports\":{},\"history_samples\":{},\"rejected_ops\":{},\"why\":\"{}\",\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{},\"guest_heap_limit\":{}}}",
+        st.accounts.len(), st.markets.len(), st.marks.len(), pos, st.oracle_bonds.len(), st.oracle_reports.len(), hist, fails, format!("{:?}", why).replace('"', "'"),
+        sess.w.as_ref().map(|w| w.smt.count).unwrap_or(0), top, peak, heapsim::sum_class_peaks(), words, 0x0300_0000u32 - 0x0002_0000
+    )
+}
