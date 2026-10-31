@@ -28,6 +28,18 @@ MUTS = [
                         return Err(Need::Level(mm, sd, p));
                     }''', '')], None),
   ('C1-unverified-absent', 'else if v { Look::Absent } else { Look::Unknown }', 'else { Look::Absent }'),
+  # layer-1 + layer-2 combinations (round 14: single-layer mutants of C1 / the lvl digest are caught by the second layer --
+  # an update / insert / delete through an UNVERIFIED leaf is refused, and a leaf becomes verified only by its check)
+  ('C1-both-layers', [('else if v { Look::Absent } else { Look::Unknown }', 'else { Look::Absent }'),
+      ('P::L(_, _, false) => Err(()),\n            P::L(k2, lh2, true) => {', 'P::L(k2, lh2, _) => {'),
+      ('P::L(_, _, false) => Err(()),\n            P::L(k, _, true) =>', 'P::L(k, _, _) =>')], None),
+  ('lvl-digest+update-unverified', [('''        lvl_leaf(&mut b, m, sd, price, &ids);
+        sl.leaf_hashes += k as u64 / 2; // ids digest (64 B per 2 ids ~ one compression each)
+        sl.check(&b, true)?;''', '''        lvl_leaf(&mut b, m, sd, price, &ids);
+        sl.leaf_hashes += k as u64 / 2; // ids digest (64 B per 2 ids ~ one compression each)
+        let _ = sl.check(&b, true);'''),
+      ('P::L(_, _, false) => Err(()),\n            P::L(k2, lh2, true) => {', 'P::L(k2, lh2, _) => {'),
+      ('P::L(_, _, false) => Err(()),\n            P::L(k, _, true) =>', 'P::L(k, _, _) =>')], None),
   ('lvl-digest-skipped', '''        lvl_leaf(&mut b, m, sd, price, &ids);
         sl.leaf_hashes += k as u64 / 2; // ids digest (64 B per 2 ids ~ one compression each)
         sl.check(&b, true)?;''', '''        lvl_leaf(&mut b, m, sd, price, &ids);
