@@ -297,6 +297,7 @@ groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.e
   rec(g, 'cost grows geometrically (ratio -> 2)', true, costs.slice(1).every((x, k) => x / costs[k] > 1.8), { ratios: costs.slice(1).map((x, k) => +(x / costs[k]).toFixed(3)) });
   rec(g, 'cumulative cost after n cycles ~ OBOND x 2^(n-1) (n = ' + CYC + ')', true, costs.reduce((a, b) => a + b, 0) >= OBOND * 2 ** (CYC - 1) - OBOND / 2);
   rec(g, 'no height finalized during the attack', 0, +(C.r('lf') || 0));
+  rec(g, 'burned = sum of bond_c / 2 (the escalated half, not OBOND / 2)', bonds.reduce((a, b) => a + b / 2, 0), +C.r('burned'));
   // after the window anyone may submit h1 (at the escalated bond); the honest h1 then finalizes and gets it back
   C.ts += PRIO; const Hn = T.batch(G0, 1, { extra: X }); const b0 = C.b(OP1); const bn = bondFor(C, 1);
   rec(g, 'after the window the honest operator submits h1 at bond OBOND x 2^' + CYC, ['accepted', OBOND * 2 ** CYC], [bnc(await submit(C, OP1, 1, Hn, 'genesis')), bn]);
@@ -306,7 +307,20 @@ groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.e
     const o = await open(C2, CH1, L.sid); await playAll(C2, [game(o, L, H, H)]);
     rec(g, '(b) honest winner: fraudster re-submit inside the window', 'bounce', bnc(await submit(C2, OPX, 1, T.batch(G0, 1, { k: 4, mut: T.MUT.mem }), 'genesis'), /priority/));
     rec(g, '(b) the winning challenger submits the honest h1 (2 x OBOND)', ['accepted', 2 * OBOND], [bnc(await submit(C2, CH1, 1, T.batch(G0, 1), 'genesis')), +C2.r('b' + C2.r('h1'))]);
-    C2.ts += WIN; rec(g, '(b) honest h1 finalizes', 'accepted', bnc(await S(C2, W, ROLL, 0, { finalize: 1 }))); }
+    C2.ts += WIN; rec(g, '(b) honest h1 finalizes', 'accepted', bnc(await S(C2, W, ROLL, 0, { finalize: 1 })));
+    // a voided (not fraudulent) escalated submission is reclaimed at its own bond: fraud at h2, the winner re-submits h2
+    // at 2 x OBOND, a governance upgrade at 2 voids it (not fraud), reclaim pays 2 x OBOND - FEE
+    const h1 = T.batch(G0, 1); const L2 = T.batch(h1.mem, 2, { k: 25, mut: T.MUT.mem }), h2 = T.batch(h1.mem, 2); await submit(C2, OPX, 2, L2, h1.final);
+    const o2 = await open(C2, CH2, L2.sid); await playAll(C2, [game(o2, L2, h2, h2)]);
+    rec(g, '(b) fraud at h2; the winner re-submits h2 at 2 x OBOND', 'accepted', bnc(await submit(C2, CH2, 2, h2, h1.final)));
+    rec(g, '(b) a winner-only window starts exactly at the void: at now = until anyone may submit', true, C2.ts + PRIO === +String(C2.r('p2')).split(':')[1]);
+    await S(C2, M.govAddr, ROLL, 0, { upgrade: 2, mem: ref.H('l11-image') }); const c0 = C2.b(CH2);
+    rec(g, '(b) upgrade voids it; reclaim pays the escalated bond back (2 x OBOND - FEE)', ['accepted', 2 * OBOND - FEE], [bnc(await S(C2, CH2, ROLL, 0, { reclaim: h2.sid })), C2.b(CH2) - c0]); }
+  // (d) the priority window boundary: at now = until - 1 only the winner, at now = until anyone
+  { const C4 = new Chain(); const L = T.batch(G0, 1, { k: 3, mut: T.MUT.mem }), H = T.batch(G0, 1); await submit(C4, OPX, 1, L, 'genesis');
+    const o = await open(C4, CH1, L.sid); await playAll(C4, [game(o, L, H, H)]); const until = +String(C4.r('p1')).split(':')[1];
+    C4.ts = until - 1; rec(g, '(d) non-winner at until - 1', 'bounce', bnc(await submit(C4, OP1, 1, T.batch(G0, 1), 'genesis'), /priority/));
+    C4.ts = until; rec(g, '(d) non-winner at until', 'accepted', bnc(await submit(C4, OP1, 1, T.batch(G0, 1), 'genesis'))); }
   // (c) exponent cap: with v1 forced to 15 the bond is OBOND x 2^10
   { const C3 = new Chain(); C3.sv[ROLL] = { v1: { value: new (require(OCP + '/../decimal.js'))(15) } };
     rec(g, '(c) cap: bond at v = 15 is OBOND x 2^MAXESC', ['bounce', 'accepted'], [bnc(await S(C3, OP1, ROLL, OBOND * 1024 - 1, subData(T.batch(G0, 1), 1, 'genesis')), /bond 204800000/),

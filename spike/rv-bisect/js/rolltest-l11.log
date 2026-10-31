@@ -127,7 +127,7 @@ require not met: height taken
 { bounce_message: 'height taken' }
 PASS race | h3 two operators same ts: first wins | expected "ok" | actual "ok" 
 PASS race | h3 second bounces | expected "bounce" | actual "bounce" 
-PASS race | h3 winner recorded | expected "xzS5YYVT4VAGxpo/wBDqD9tfgYQ7cn1ilp0GHjiYdJY=" | actual "xzS5YYVT4VAGxpo/wBDqD9tfgYQ7cn1ilp0GHjiYdJY=" 
+PASS race | h3 winner recorded | expected "iBws1Jvqmxh0iaMtAw1vzCPp9sZVWgurUPh+Cai9W+4=" | actual "iBws1Jvqmxh0iaMtAw1vzCPp9sZVWgurUPh+Cai9W+4=" 
 PASS race | record of h3 lists OP1 as operator | expected "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" | actual "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" 
 PASS window | open at 24h - 1 s | expected "ok" | actual "ok" 
 require not met: window closed
@@ -306,6 +306,7 @@ PASS stall (R10-M1) | fraudster net cost per cycle = bond_c / 2 + GF + FEE, bond
 PASS stall (R10-M1) | cost grows geometrically (ratio -> 2) | expected true | actual true {"ratios":[1.982,1.901,1.948]}
 PASS stall (R10-M1) | cumulative cost after n cycles ~ OBOND x 2^(n-1) (n = 4) | expected true | actual true 
 PASS stall (R10-M1) | no height finalized during the attack | expected 0 | actual 0 
+PASS stall (R10-M1) | burned = sum of bond_c / 2 (the escalated half, not OBOND / 2) | expected 1500000 | actual 1500000 
 PASS stall (R10-M1) | after the window the honest operator submits h1 at bond OBOND x 2^4 | expected ["accepted",3200000] | actual ["accepted",3200000] 
 PASS stall (R10-M1) | honest h1 finalizes; escalated bond back (bond - FEE) | expected ["accepted",-2000] | actual ["accepted",-2000] 
 require not met: priority: HITCB7V2ERDPVFQFGW5IKDEDAFD6M5QF
@@ -313,6 +314,13 @@ require not met: priority: HITCB7V2ERDPVFQFGW5IKDEDAFD6M5QF
 PASS stall (R10-M1) | (b) honest winner: fraudster re-submit inside the window | expected "bounce" | actual "bounce" 
 PASS stall (R10-M1) | (b) the winning challenger submits the honest h1 (2 x OBOND) | expected ["accepted",400000] | actual ["accepted",400000] 
 PASS stall (R10-M1) | (b) honest h1 finalizes | expected "accepted" | actual "accepted" 
+PASS stall (R10-M1) | (b) fraud at h2; the winner re-submits h2 at 2 x OBOND | expected "accepted" | actual "accepted" 
+PASS stall (R10-M1) | (b) a winner-only window starts exactly at the void: at now = until anyone may submit | expected true | actual true 
+PASS stall (R10-M1) | (b) upgrade voids it; reclaim pays the escalated bond back (2 x OBOND - FEE) | expected ["accepted",398000] | actual ["accepted",398000] 
+require not met: priority: HITCB7V2ERDPVFQFGW5IKDEDAFD6M5QF
+{ bounce_message: 'priority: HITCB7V2ERDPVFQFGW5IKDEDAFD6M5QF' }
+PASS stall (R10-M1) | (d) non-winner at until - 1 | expected "bounce" | actual "bounce" 
+PASS stall (R10-M1) | (d) non-winner at until | expected "accepted" | actual "accepted" 
 require not met: bond 204800000
 { bounce_message: 'bond 204800000' }
 PASS stall (R10-M1) | (c) cap: bond at v = 15 is OBOND x 2^MAXESC | expected ["bounce","accepted"] | actual ["bounce","accepted"] 
@@ -433,7 +441,7 @@ bounce called:  unknown command
 PASS overpay | nobody can take the burned half: {"burn":1} | expected "bounce" | actual "bounce" 
 require not met: cannot reclaim
 { bounce_message: 'cannot reclaim' }
-PASS overpay | nobody can take the burned half: {"reclaim":"sO8i41syhBoFqrHb81 | expected "bounce" | actual "bounce" 
+PASS overpay | nobody can take the burned half: {"reclaim":"qcVPQcUhILpbV4ghTU | expected "bounce" | actual "bounce" 
 require not met: voided
 { bounce_message: 'voided' }
 PASS overpay | nobody can take the burned half: {"finalize":1} | expected "bounce" | actual "bounce" 
@@ -2722,4 +2730,4 @@ PASS ts (R6-M2) | its ts may be below the voided h2 ts | expected true | actual 
 PASS ts (R6-M2) | the zero-register trace differs from the submitted one only in the ts-carrying roots | expected [true,true,true] | actual [true,true,true] 
 PASS ts (R6-M2) | roots after x10 is overwritten agree | expected true | actual true 
 PASS invariant | rollup balance >= outstanding bonds + burned after every tx | expected 0 | actual 0 
-SUMMARY {"total":394,"pass":394,"fail":0}
+SUMMARY {"total":400,"pass":400,"fail":0}

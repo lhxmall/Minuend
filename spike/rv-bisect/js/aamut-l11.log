@@ -1,0 +1,23 @@
+aamut 1 [$bond = $OBOND * 2^min(var['v' || $h] OTHERWISE 0, $MAXESC); -> $bond = $OBOND;] {"total": 400, "pass": 371, "fail": 29} -> KILLED ['R10-M1: bond 2 x OBOND - 1 after the window', 'race restarts at h2: first resubmission wins', 'R10-M1: escalated bond back at finalize (2 x OBOND - FEE)']
+aamut 2 [$bond = $OBOND * 2^min(var['v' || $h] OTHERWISE 0, $MAXESC); -> $bond = $OBOND * 2^(var['v' || $h] OTHERWISE 0);] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['(c) cap: bond at v = 15 is OBOND x 2^MAXESC']
+aamut 3 [$MAXESC = 10; -> $MAXESC = 11;] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['(c) cap: bond at v = 15 is OBOND x 2^MAXESC']
+aamut 4 [require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]); -> require(true, 'priority: ' || $pw[0]);] {"total": 400, "pass": 365, "fail": 35} -> KILLED ['R10-M1: another address inside the priority window', 'R10-M1: bond 2 x OBOND - 1', 'R10-M1: bond 2 x OBOND - 1 after the window']
+aamut 5 [require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]); -> require(length($pw) != 2 OR $now > +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]);] {"total": 400, "pass": 388, "fail": 12} -> KILLED ['race restarts at h2: first resubmission wins', 'second resubmission at h2', 'new h3 still referencing the voided h2 root']
+aamut 6 [require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]); -> require(length($pw) != 2 OR $now >= +$pw[1], 'priority: ' || $pw[0]);] {"total": 400, "pass": 376, "fail": 24} -> KILLED ['cycle 1: fraudulent h1 submitted first with bond 400000', 'cycle 1: honest + puppet challengers open', 'cycle 1: both win; the puppet first (holds priority); h1 voided']
+aamut 7 [$PRIO = 1800; -> $PRIO = 1799;] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['(b) a winner-only window starts exactly at the void: at now = until an']
+aamut 8 [rf: max($paid - $bond - $FEE, 0) -> rf: max($paid - $OBOND - $FEE, 0)] {"total": 400, "pass": 384, "fail": 16} -> KILLED ['new h3 finalizes', 'cycle 2: both win; the puppet first (holds priority); h1 voided', 'cycle 3: both win; the puppet first (holds priority); h1 voided']
+aamut 9 [amt: $CBOND - $GF - $FEE + ($first ? $bd / 2 : 0)}; -> amt: $CBOND - $GF - $FEE + ($first ? $OBOND / 2 : 0)};] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['fraudster net cost per cycle = bond_c / 2 + GF + FEE, bond_c = OBOND x']
+aamut 10 [	$st = {sid: $sid, pay: $r[1], amt: $bondOf($sid) - $FEE};
+}
+// ---- reclaim -> 	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+}
+// ---- reclaim] {"total": 400, "pass": 398, "fail": 2} -> KILLED ['R10-M1: escalated bond back at finalize (2 x OBOND - FEE)', 'honest h1 finalizes; escalated bond back (bond - FEE)']
+aamut 11 [require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');
+	$st = {sid: $sid, pay: $r[1], amt: $bondOf($sid) - $FEE}; -> require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');
+	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['(b) upgrade voids it; reclaim pays the escalated bond back (2 x OBOND ']
+aamut 12 [		if ($st.bd > $OBOND) var['b' || $st.sid] = $st.bd;   // loop round 11 (R10-M1): escalated bond
+ -> ] {"total": 400, "pass": 394, "fail": 6} -> KILLED ['R10-M1: escalated bond back at finalize (2 x OBOND - FEE)', 'fraudster net cost per cycle = bond_c / 2 + GF + FEE, bond_c = OBOND x', 'burned = sum of bond_c / 2 (the escalated half, not OBOND / 2)']
+aamut 13 [if ($st.first) var['burned'] += $st.bd - $st.bd / 2; -> if ($st.first) var['burned'] += $OBOND - $OBOND / 2;] {"total": 400, "pass": 399, "fail": 1} -> KILLED ['burned = sum of bond_c / 2 (the escalated half, not OBOND / 2)']
+aamut 14 [			var['v' || $st.h] += 1; -> ] {"total": 400, "pass": 388, "fail": 12} -> KILLED ['R10-M1: v2 = 1, priority p2 = CH1 until now + PRIO', 'R10-M1: bond 2 x OBOND - 1 after the window', 'race restarts at h2: first resubmission wins']
+aamut 15 [			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO); -> ] {"total": 400, "pass": 362, "fail": 38} -> KILLED ['R10-M1: v2 = 1, priority p2 = CH1 until now + PRIO', 'R10-M1: another address inside the priority window', 'R10-M1: bond 2 x OBOND - 1']
+aamut 16 [			var['v' || $st.h] += 1; -> 			var['v' || $st.h] += 2;] {"total": 400, "pass": 390, "fail": 10} -> KILLED ['R10-M1: v2 = 1, priority p2 = CH1 until now + PRIO', 'R10-M1: bond 2 x OBOND - 1', 'R10-M1: bond 2 x OBOND - 1 after the window']
