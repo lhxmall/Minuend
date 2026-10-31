@@ -24,8 +24,11 @@ depth8 = []
 # loop round 3 (H1): the rollup's committed image -- header flags (word 3) must be 0 (status 4)
 prod = []
 # loop round 9 (R7-L3): governance state (proposals, commits, gov nonces) as MNWIT1 leaves prop: / cmt: / gnon:
-# (pilot-only kinds; upstream wit_leaves has none). Off by default: every MNWIT1 root of a governance batch changes.
+# (pilot-only kinds; upstream wit_leaves has none). DEFAULT since loop round 15 (consensus change: every MNWIT1 root of
+# a batch with governance state changes; roots of batches without governance state are identical, l10-fx.log).
+# --no-default-features = the round-8 commitment format.
 govwit = []
+default = ["govwit"]
 # loop round 14 (R4-H1 production direction): stateless (witness-fed) segment runner prototype, src/stateless.rs
 # (MNWIT-S leaf set, pruned-SMT multiproof loader, completeness guards, end-root recompute). Host-tested.
 stateless = []

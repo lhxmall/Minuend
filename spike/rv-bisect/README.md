@@ -28,6 +28,12 @@ Memory = 2^D 32-bit words, Obyte merkle (`leaf = H(String(word))`, `node = H(lef
 precomputed. Input (batch data) = separate read-only word tree `inp_root`, read with `ecall a7=63 (a0 = word index)`.
 `ecall a7=93` → HALT (pc=2). Illegal / misaligned / out-of-range → TRAP (pc=1). pc ≡ 1,2 (mod 4) are absorbing no-op steps.
 
+**MNWIT1 governance leaves (govwit) — default since loop round 15, a consensus change.** `prop:` / `cmt:` / `gnon:`
+leaves are part of MNWIT1 by default (`--no-default-features` = the round-8 format). Every MNWIT1 root of a batch with
+governance state changes; batches without governance state keep identical roots (`guest-engine/results-loop10/l10-fx.log`).
+Upstream `wit_leaves`, the witness-reading AAs / scripts and `ASSERTION_VERSION` must change together (design §7.3.4;
+evidence `findings/rv-loop-10.md` "govwit default", `guest-engine/results-loop14/l14-gw.log`).
+
 ## Results (2026-10-30)
 - difftest: 26 000+ random instructions, 0 mismatches; 3 injected bugs all detected.
 - real compiled trace (sha256 guest, 16 186 steps): 2 313 sampled steps checked by the Oscript AA, 0 mismatches;

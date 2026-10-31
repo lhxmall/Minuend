@@ -1,0 +1,2 @@
+{"batch":"limit_max_accounts_units.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":3105385767,"units":16384,"applied":715,"rejected":15660,"steps":373558502,"heap":652992,"heap_peak_live":587680,"ms":4662813}
+{"batches":1,"match":1}

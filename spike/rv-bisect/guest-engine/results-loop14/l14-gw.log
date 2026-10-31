@@ -1,0 +1,27 @@
+/data/hark/spike-rv/loop14/guest-engine/Cargo.toml:31:default = ["govwit"]
+/data/hark/spike-rv/loop14/engine-diff/Cargo.toml:25:default = ["govwit"]
+    Finished `release` profile [optimized] target(s) in 57.25s
+    Finished `release` profile [optimized] target(s) in 1m 03s
+    Finished `release` profile [optimized] target(s) in 11.22s
+== govedge
+{"cases":9,"ok":9,"fail":[]}
+== govwit
+{"govwit":1,"ok":1,"fail":[]}
+== govcap
+{"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":1377,"sizeclass_highwater":4026176,"peak_live":3829760,"sum_class_peaks":4026128,"snapshot_words":391905}
+== govfuzz 40 300
+{"seeds":40,"match":40,"units":13409,"why":"","coverage":{"commit:0x11":223,"commit:0x13":502,"commit:ok":941,"delisted":26,"final:0x7":287,"final:0xc":188,"final:ok":119,"gdep:0x7":211,"gdep:ok":766,"gwd:0x6":254,"gwd:0x9":195,"gwd:ok":297,"market:0x13":159,"market:0x7":131,"market:0x9":64,"market:ok":552,"markets_created":568,"param_changed":17,"place:0x7":652,"place:ok":833,"prop:0x7":573,"prop:0x9":33,"prop:0xa":97,"prop:ok":237,"reveal:0x11":1130,"reveal:0x13":27,"reveal:0x2":311,"reveal:0x3":8,"reveal:0x7":52,"reveal:0x9":21,"reveal:0xa":2,"reveal:0xc":11,"reveal:0xd":18,"reveal:0xe":11,
+== xfuzz 40 300
+{"seeds":40,"match":40,"units":13415,"why":"","coverage":{"commit:0x11":216,"commit:0x13":516,"commit:ok":934,"delisted":20,"final:0x7":276,"final:0xc":217,"final:ok":104,"gdep:0x7":209,"gdep:ok":749,"gwd:0x6":243,"gwd:0x9":192,"gwd:ok":311,"liq:0x2":15,"liq:0xb":172,"market:0x13":195,"market:0x7":129,"market:0x9":58,"market:ok":550,"markets_created":567,"param_changed":20,"place:0x7":785,"place:ok":1094,"prop:0x7":603,"prop:0x9":28,"prop:0xa":95,"prop:ok":235,"reveal:0x11":1129,"reveal:0x13":31,"reveal:0x2":302,"reveal:0x3":9,"reveal:0x7":70,"reveal:0x9":14,"reveal:0xa":1,"reveal:0xc":12,"rev
+== fuzz 40 300
+{"seeds":40,"match":40,"ev_words":39884,"fills":4186,"rejected":2173,"codes":{"0x7":1386,"0xa":322,"0x107":465,"0x80000000":8409,"0x80000001":4186}}
+== witfuzz 40 300 2
+{"seeds":40,"match":40,"units_compared":14768,"history_independent":40,"max_leaves":253,"smt_rounds_ok":2,"smt_rounds_bad":0,"smt_ops":236}
+== liqfuzz 40 300
+{"seeds":40,"match":40,"units":43002,"liq_fills_unmasked_v2":42,"funding_clock_armed_batches":40,"coverage":{"deposit:ok0":1534,"extprice:0x2":86,"extprice:0xa":153,"extprice:ok0":505,"height:0x2":7,"height:set":474,"liquidate1:0x2":143,"liquidate1:0xb":1211,"liquidate1:ok1":37,"liquidate2:0x2":12,"liquidate2:0xb":104,"liquidate2:ok1":2,"liquidate3:0x2":83,"liquidate3:0xb":665,"liquidate3:ok1":3,"liquidate:adl":6,"liquidate:book":36,"place1:0x107":5506,"place1:0x7":7594,"place1:ok0":10253,"place1:ok1":3661,"place2:0x107":175,"place2:0x7":390,"place2:ok0":483,"place2:ok1":349,"place3:0x107":102
+== stateless (govwit default) slfuzz 40 300 / sladv 4 120
+{"mode":"gen","batches":40,"ok":40,"bad_segments":0,"unsupported_segments":0,"segments":330,"units":14768,"witness_bytes":9625413,"max_witness":73154,"leaves_verified":72596,"tree_nodes":107631,"sl_hashes":361672,"session_hashes":218580,"operator_iterations":13724,"first_bad":""}
+{"segments":19,"cases":2273,"sound":2273,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[14,14,0],"book:hide-level-in-trie":[14,14,0],"book:omit-best-level":[25,25
+952e4c88cfbc8cf7cfed93ebe4a73574b3207b11  /data/hark/target-l14-gw/release/engine-diff
+43f65cb4cff03b5eba0142bb9b1bac10f57c2050  /data/hark/target-l14-gw-g/riscv32im-unknown-none-elf/release/rvengine
+GWDONE

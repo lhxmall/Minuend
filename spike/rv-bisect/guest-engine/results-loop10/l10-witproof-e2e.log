@@ -1,0 +1,34 @@
+===== testnet = false
+===== devnet
+not using app root conf: Error: Cannot find module '/data/hark/spike-rv/roll9/js/conf.js'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll9/js/oc.js
+- /data/hark/spike-rv/roll9/js/chain.js
+- /data/hark/spike-rv/roll9/js/witproofe2e.js
+app dir /data/hark/spike-rv/roll9/js
+not using user conf: Error: Cannot find module '/data/home/.config/spikerv/conf.json'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll9/js/oc.js
+- /data/hark/spike-rv/roll9/js/chain.js
+- /data/hark/spike-rv/roll9/js/witproofe2e.js
+app dir /data/hark/spike-rv/roll9/js
+PASS guest halted, status 0 [true,0] {"steps":156243892}
+PASS guest OUT[0x1FFE8..8] = proofdump root (host real-engine state) "QSCGAPevYQUC3HAEbo+HVeZQtRmqtKAtSSu1Q2jhEMM=" 
+PASS loop 7: guest published ts at OUT[0x1FFE5] 999999970 
+PASS memory image words / Merkle root built true {"words":240237,"ms":738}
+(node:836535) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:836535) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:836535) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+PASS height 1 with the guest memory as fmem "ok" 
+PASS finalized "ok" 
+PASS bind from the real guest memory ["ok","QSCGAPevYQUC3HAEbo+HVeZQtRmqtKAtSSu1Q2jhEMM="] 
+PASS every proofdump membership verifies 3 
+PASS absence verifies "ok" 
+E2E {"pass":9,"total":9}

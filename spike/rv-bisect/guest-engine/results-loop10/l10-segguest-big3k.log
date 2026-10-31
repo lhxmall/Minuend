@@ -1,0 +1,6 @@
+{"seg":"seg000.bin","match":true,"status":0,"segs":1,"units":700,"steps":238926029,"heap":449376,"heap_peak_live":399680,"ms":500453}
+{"seg":"seg001.bin","match":true,"status":0,"segs":2,"units":700,"steps":305214242,"heap":634720,"heap_peak_live":536384,"ms":362262}
+{"seg":"seg002.bin","match":true,"status":0,"segs":3,"units":700,"steps":329140064,"heap":836192,"heap_peak_live":672640,"ms":287281}
+{"seg":"seg003.bin","match":true,"status":0,"segs":4,"units":700,"steps":355392768,"heap":916832,"heap_peak_live":753024,"ms":1086614}
+{"seg":"seg004.bin","match":true,"status":0,"segs":5,"units":428,"steps":230464387,"heap":1246176,"heap_peak_live":983936,"ms":1003698}
+{"dir":"/data/hark/spike-rv/loop10/seg-big3k","segments":5,"match":5,"steps":1459137490}

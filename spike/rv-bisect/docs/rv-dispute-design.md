@@ -460,6 +460,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 | `wit_leaf_trace`（每个 unit 存整份叶子列表，O(状态) 内存） | 换成每个 unit 的「改动叶子 + 证明」，争议只需要这些 |
 | 10 个读 witness 的 AA（`minuend_dispute*.aa`、`minuend_rollup.aa`、`minuend_vault.aa`）、`post_batch.js`、`script_helpers.js`、`minuend-settle` 的提现证明 | 存在 / 不存在证明换成 7.3.3 的格式 |
 | `ASSERTION_VERSION` | +1，所有 AA 重新部署 |
+| **治理状态（第 15 轮起默认，R7-L3 `govwit`）** | 提案 / commit / 治理 nonce 也是 MNWIT1 叶子：`prop:<id>:<creator>:<market>:<key>:<value>:<created_seq>:<deadline_seq>:<supply>:<yes>:<no>:<投票人数>:<快照大小>`、`cmt:<hash>:<account>:<commit unit>:<commit_height>:<ttl_height>:<revealed>`、`gnon:<account>:<nonce>`（kid = 第二个 `:` 之前；上游 `wit_leaves` 没有这三种，要一起加）。**这是共识变更**：有治理状态的批次的每个 MNWIT1 根都变了；没有治理状态的批次根完全不变（所有已提交的证明夹具 adv5–7、g1000、liq1/2 一字不差，`results-loop10/l10-fx.log`）；`js/testdata/proofs/gov21.json`（govwit 根）rolltest witproof 19/19。`--no-default-features` = 第 8 轮的旧格式。证据：round-10 govwit 全套（`results-loop10/l10-*`，SUITEDONE，全部通过；segbig big20k 被 OOM 杀 = 已知 R3-T1 主机测试限制）、round-12 默认构建（`results-loop12/l11gw*.log`）、round-14 仓库默认构建复测（`results-loop14/l14-gw.log`） |
 
 #### 7.3.5 代码和测试（`guest-engine/src/wit.rs`、`engine-diff/src/smt_ref.rs`）
 

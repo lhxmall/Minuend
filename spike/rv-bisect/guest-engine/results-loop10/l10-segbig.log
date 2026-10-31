@@ -1,0 +1,3 @@
+{"ops":20228,"words":162052}
+./loop10-suite.sh: line 42: 830906 Killed                  $B segrun $W/poc/big20k.bin 16384
+./loop10-suite.sh: line 42: 831255 Killed                  $B segrun $W/poc/big20k.bin 5000 $W/seg-big20k 2

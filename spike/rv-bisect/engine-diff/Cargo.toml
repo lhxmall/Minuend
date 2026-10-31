@@ -14,13 +14,15 @@ minuend-book = { path = "../engine-src/crates/minuend-book" }
 minuend-account = { path = "../engine-src/crates/minuend-account" }
 ed25519-dalek = "3"
 sha2 = "0.10"
-mnpilot = { path = "../guest-engine" }
+mnpilot = { path = "../guest-engine", default-features = false }
 
 [features]
 # loop round 2 (W2) test build: MNWIT1 MAX_WIT_DEPTH = 8 in the port and the reference verifier
 depth8 = ["mnpilot/depth8"]
 # loop round 9 (R7-L3): governance leaves prop: / cmt: / gnon: in the port and in the real-engine mirror
 govwit = ["mnpilot/govwit"]
+# loop round 15: govwit is the default (see guest-engine/Cargo.toml)
+default = ["govwit"]
 # loop round 14: stateless guest prototype differential (slfuzz / sladv)
 stateless = ["mnpilot/stateless"]
 

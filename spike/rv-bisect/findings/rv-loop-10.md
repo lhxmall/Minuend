@@ -1,7 +1,7 @@
 # rv loop round 10 — round-7/8 collection, govwit full suite, R9-T1 devnet, review of heap / snapshot / MNP2 / images / economics (2026-11-01)
 
-Branch `spike/rv-bisect`, parent a562c12. Status: **DRAFT** (box jobs still running at the time of writing; rows marked
-_running_ are filled by the next collection, see work/rv-rollup-notes.md "Loop round 10").
+Branch `spike/rv-bisect`, parent a562c12. Status: **FINAL** (round-15 collection: the govwit full suite reached SUITEDONE, every `l10-*` log green; govwit is the
+default feature since round 15 — a consensus change, see "govwit default" below and design §7.3.4).
 
 ## Summary
 
@@ -31,10 +31,10 @@ _running_ are filled by the next collection, see work/rv-rollup-notes.md "Loop r
    then the R9-H1 brick path (upgrade above a non-export height) and its governance `cancel` recovery, reclaim of the
    voided bond, re-scheduled upgrade finalizing. **43 / 43** (`results-loop10/l10-rolldevnet9.log`). Full rolldevnet
    with section 9: **186 / 186** (collected round 12).
-4. **R7-L3 / govwit** — full suite on the govwit build: _running_ (`l10-*`). Fixture check: the MNWIT1 roots of every
+4. **R7-L3 / govwit** — full suite on the govwit build: **all green** (SUITEDONE; `results-loop10/l10-*`, table below). Fixture check: the MNWIT1 roots of every
    committed proof fixture (adv5–7, g1000) and of liquidation batches are **identical** under govwit; governance batches
    (govgen 21–23) change, as designed. New fixture `js/testdata/proofs/gov21.json` (a real `prop:` membership from the
-   govwit host): rolltest witproof 19 / 19, 44 memberships (was 41). Default switch: pending the suite (see notes).
+   govwit host): rolltest witproof 19 / 19, 44 memberships (was 41). Default switch: **done** in round 15 (see "govwit default").
 5. Review areas with no new defect (I): snapshot v3 import/export, MNP2 extension area, guest images vs rv_step (static
    opcode scan), allocator behaviour across heights apart from R10-H1.
 
@@ -122,5 +122,15 @@ cycle). Options, each a rule change for the owner:
 | govcap at the new caps (256 PERP ids, 16 markets, 64 proposals / 19 999 voters, 1 024 commits) | 3.55 MB size-class high-water |
 | govfuzz 100 / xfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) · 100 / 100 (33 406 units) |
 | l10h rest: govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | **all green** (HDONE; collected round 12): govwit host govedge 9/9, govfuzz 100/100, xfuzz 100/100, govcap 4.03 MB; leaf-flip ok; capcheck 20/20 (cap fired in 20); snaptest 60/60 ok (480 flips: 316 decode to a new digest, the rest are refused); liqedge ok; govgen 31–33 through the JS guest 3/3 (1 005 units, engine + roots match); prodheight 16/16; mktcap at the caps 27.23 MB (`results-loop10/l10h*.log`) |
-| govwit full suite (`loop10-suite.sh g`, l10-*) | partial (round-12 collection): fuzz 300/300, advfuzz 300/300, witfuzz 300/300, segfuzz 300/300, proofs 300 (0 forged), scen 47/47, selftest ok, heapsim ok; robust-limit / guest-poc / liq-snap-cap still running (SUITEDONE pending) |
+| govwit full suite (`loop10-suite.sh g`, l10-*) | **all green, SUITEDONE** (round-15 collection): fuzz 300/300, advfuzz 300/300, witfuzz 300/300, segfuzz 300/300 (12 621 segments), proofs 300 (177 087 memberships / 61 540 absences ok, 0 / 829 291 forged), scen 47/47 + scen-guest all engine / roots match, selftest ok, heapsim ok, liq-snap-cap 300/300 + snaptest 300/300 + capcheck 50/50 + 20/20, robust-limit 1/1, robust ok, guest-poc 3/3 (crowd1800 / frag16 / grind1any), ora + hbind 300/300 (9 109 segments), gov 300/300 ×2, statecap, extra-guest / liq-guest engine + roots match, depth8 host + guest match, segrun / segbig-adv ok, segguest small / small-prod / big3k match, witproof e2e 9/9, sail spot-checks 6/6 `out_match`, prodflags / prodheight ok, roll9 rolltest 357/357. segbig big20k killed by the OOM killer = the known R3-T1 host-test limit (not a guest result) |
 | full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | **186 / 186** (RDDONE exit 0; `results-loop10/l10-rolldevnet.log`) |
+
+## govwit default (round 15) — consensus change
+
+`default = ["govwit"]` in `guest-engine/Cargo.toml` and `engine-diff/Cargo.toml` (round-15 commit; `--no-default-features`
+= the round-8 commitment format). **This is a consensus change**: every MNWIT1 root of a batch that has governance state
+(`prop:` / `cmt:` / `gnon:` leaves) changes; roots of batches without governance state are identical (`l10-fx.log`: adv5–7,
+g1000, liq1/2 SAME). Upstream `wit_leaves` and every AA / script that verifies MNWIT1 proofs must adopt the three leaf kinds
+together with `ASSERTION_VERSION` + 1 (design §7.3.4 table). Evidence: this round's suite, round-12 default build
+(`results-loop12/l11gw*.log`), round-14 repo-default rebuild (`results-loop14/l14-gw.log`: govedge 9/9, govwit 1/1,
+govfuzz / xfuzz / fuzz / witfuzz / liqfuzz 40/40, stateless slfuzz 40/40 + sladv 2 273 / 2 273 sound).

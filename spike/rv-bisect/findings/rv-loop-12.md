@@ -1,7 +1,6 @@
 # rv loop round 12 — R11-M1 fix (global decaying fraud-void counter), review of rounds 11/12 (2026-11-01)
 
-Branch `spike/rv-bisect`, parent b74ed8f. Status: see the table "Box runs" at the end (rows marked _pending_ are filled
-by the next collection; work/rv-rollup-notes.md "Loop round 12").
+Branch `spike/rv-bisect`, parent b74ed8f. Status: **FINAL** (all box rows collected; the govwit default switch landed in round 15 after SUITEDONE, see below).
 
 ## Summary
 
@@ -97,4 +96,4 @@ Not changed this round (no C/H; this is the trade-off R11-M1 already named, now 
 | full rolldevnet on the round-12 AAs, first run (`l11-rolldevnet-v1.log`) | 76 PASS / 38 FAIL, exit 1: section 6c submitted h5 at OBOND 1801 + 3601 s after the 6a fraud void — the global V = 1 still applied (`bond 400000`), and every later step cascaded. A test-timeline error (the round-11 script assumed per-height bonds), i.e. the devnet confirms the new rule: 6c now asserts 2 × OBOND for h5 (never voided), the OBOND bounce, and the 2 × OBOND − FEE refund at finalize |
 | full rolldevnet, rerun with 6c adapted (`l12rd.sh` → `l12-rolldevnet.log`) | **204 / 204** (RDDONE exit 0; all sections 1–10 incl. section 9 governance and the 4 new R11-M1 devnet checks) — `guest-engine/results-loop12/l12-rolldevnet.log` |
 | govwit as the DEFAULT feature (`l11gw.sh` on loop11gw = head + work/govwit-default.patch; no `--features`) | **all green** (GWDONE): default host / guest / prod built with `default = ["govwit"]`; govedge 9/9, govwit leaf-flip 1/1, govfuzz 100/100, xfuzz 100/100, witfuzz 100/100 (37 581 units), segfuzz 100/100, proofs 30 (0 / 78 546 forged), govgen 41–43 through the JS guest 3/3 (1 000 units, engine + roots match), prodheight 16/16, snapguest default 9/9 + prod 9/9 (`results-loop12/l11gw*.log`) |
-| govwit default applied in the repo | **not yet**: gated on SUITEDONE of the round-10 govwit full suite (`loop10-suite.sh g`; at 19:5x UTC its parts so far are green — fuzz / advfuzz / witfuzz / segfuzz / proofs / scen / selftest / heapsim / liq-snap-cap / robust-limit / guest-poc crowd1800 — and its sequential tail ora / gov / statecap / JS-guest / segments / depth8 / robust is still running) |
+| govwit default applied in the repo | **done in round 15** (consensus change: MNWIT1 roots of batches with governance state change, others identical; design §7.3.4, `results-loop14/l14-gw.log` green, l10 suite SUITEDONE all green). Was gated on SUITEDONE of the round-10 govwit full suite (`loop10-suite.sh g`; at 19:5x UTC its parts so far are green — fuzz / advfuzz / witfuzz / segfuzz / proofs / scen / selftest / heapsim / liq-snap-cap / robust-limit / guest-poc crowd1800 — and its sequential tail ora / gov / statecap / JS-guest / segments / depth8 / robust is still running) |
