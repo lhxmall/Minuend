@@ -6,6 +6,12 @@
 //!   engine-diff port <batch.bin>   run through the mnpilot port natively
 //!   engine-diff fuzz <n_seeds> <n_orders>   gen + real + port for many seeds, compare
 //!
+//!   engine-diff wroots <batch.bin> [legacy <skip>]   per-unit witness roots of the REAL engine's
+//!       state: MNWIT1 rebuilt from scratch by smt_ref (default) or the legacy Obyte-merkle root
+//!       (upstream obyte_merkle::root over the pilot's leaf tags + `~:end`) for units >= skip
+//!   engine-diff portroots <batch.bin>   per-unit MNWIT1 roots of the port (incremental, native)
+//!   engine-diff witfuzz <n_seeds> <n_orders> [smt_rounds]   property + diff test of MNWIT1
+//!
 //! real/port print one JSON line: {"hash":..,"applied":..,"rejected":..,"fills":..,"ev":[..]}
 use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
 use minuend_exec::{Engine, ExecEvent, RejectReason};
@@ -16,6 +22,7 @@ use minuend_types::{
 };
 use sha2::{Digest, Sha256};
 use std::fs;
+mod smt_ref;
 
 const EV_APPLIED: u32 = mnpilot::EV_APPLIED;
 
@@ -144,6 +151,11 @@ fn run_real(w: &[u32]) -> Out {
 }
 
 fn run_real_eng(w: &[u32]) -> (Out, Engine) {
+    run_real_eng_cb(w, &mut |_| {})
+}
+
+/// `per_unit(&engine)` runs after every ingested unit (one apply_one each in a linear chain).
+fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine) {
     assert_eq!(w[0], mnpilot::MAGIC);
     let n_acc = w[1];
     let n_ops = w[2];
@@ -225,6 +237,7 @@ fn run_real_eng(w: &[u32]) -> (Out, Engine) {
             }
         }
         parent = id;
+        per_unit(&eng);
     }
     out.hash = real_hash(&eng.state);
     (out, eng)
@@ -435,6 +448,136 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32, stres
     (mk(&g.ops), mk(&setup_ops), n_setup)
 }
 
+/// Pilot-modelled leaves of the REAL engine state (upstream wit_leaves, filtered by tag).
+fn real_pilot_leaves(e: &Engine) -> Vec<String> {
+    minuend_state::wit_leaves(&e.state).into_iter().filter(|l| smt_ref::pilot_leaf(l)).collect()
+}
+fn legacy_real_root(e: &Engine) -> [u8; 32] {
+    let mut l = real_pilot_leaves(e);
+    l.push(minuend_state::WIT_MAX_SENTINEL.to_string());
+    l.sort();
+    smt_ref::unb64(&minuend_state::obyte_merkle::root(&l)).try_into().unwrap()
+}
+fn wroots(w: &[u32], legacy: Option<u32>) -> String {
+    let mut roots: Vec<String> = Vec::new();
+    let mut i = 0u32;
+    let (_, eng) = run_real_eng_cb(w, &mut |e| {
+        let r = match legacy {
+            None => smt_ref::root(&real_pilot_leaves(e)),
+            Some(skip) => if i >= skip { legacy_real_root(e) } else { [0u8; 32] },
+        };
+        roots.push(format!("\"{}\"", smt_ref::hex(&r)));
+        i += 1;
+    });
+    let leaves = real_pilot_leaves(&eng);
+    let d = smt_ref::depths(&leaves);
+    let live: usize = eng.state.books.values().map(|b| b.live_orders().count()).sum();
+    format!(
+        "{{\"leaves\":{},\"live_orders\":{},\"depth_max\":{},\"depth_avg\":{:.2},\"roots\":[{}]}}",
+        leaves.len(), live, d.iter().max().unwrap_or(&0), d.iter().sum::<usize>() as f64 / d.len().max(1) as f64, roots.join(",")
+    )
+}
+fn port_roots(w: &[u32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, mnpilot::WitOut) {
+    let (mut inc, mut scratch) = (Vec::new(), Vec::new());
+    let (_, _, wo) = mnpilot::run_batch_wit(
+        &mut |i| w.get(i as usize).copied().unwrap_or(0),
+        &mut |_| {},
+        &mut |_, st, r| {
+            inc.push(*r);
+            scratch.push(smt_ref::root(&mnpilot::wit::all_leaves(st)));
+        },
+        mnpilot::WitMode::Incremental,
+    );
+    (inc, scratch, wo)
+}
+/// Pure tree property test: random set/remove sequences on the incremental Smt vs a
+/// from-scratch root over a model map, after EVERY op; keys drawn from clustered prefixes so
+/// splits/collapses happen deep in the tree (up to depth ~250).
+fn smt_fuzz(rounds: u64) -> (u64, u64, u64) {
+    use std::collections::BTreeMap;
+    let (mut ok, mut ops, mut bad) = (0u64, 0u64, 0u64);
+    for r in 1..=rounds {
+        let mut rng = Rng(r.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        let mut t = mnpilot::wit::Smt::new();
+        let mut m: BTreeMap<[u8; 32], [u8; 32]> = BTreeMap::new();
+        let mut good = true;
+        let n = 20 + rng.below(200);
+        for _ in 0..n {
+            let mut k = [0u8; 32];
+            match rng.below(3) {
+                0 => k.iter_mut().for_each(|b| *b = rng.next() as u8),                // random
+                1 => { k = [0x5a; 32]; k[31] = rng.below(8) as u8; }                    // share 253 bits
+                _ => { k[0] = rng.below(4) as u8; k[1] = rng.below(4) as u8; k[2] = rng.next() as u8; } // clustered
+            }
+            if rng.below(3) == 0 && !m.is_empty() {
+                let pick = *m.keys().nth(rng.below(m.len() as u64) as usize).unwrap();
+                let k2 = if rng.below(4) == 0 { k } else { pick };
+                t.remove(&k2);
+                m.remove(&k2);
+            } else {
+                let mut v = [0u8; 32];
+                v.iter_mut().for_each(|b| *b = rng.next() as u8);
+                t.set(k, v);
+                m.insert(k, v);
+            }
+            ops += 1;
+            let kv: Vec<_> = m.iter().map(|(a, b)| (*a, *b)).collect();
+            if t.root() != smt_ref::root_kv(&kv) || t.count as usize != m.len() {
+                good = false;
+            }
+        }
+        if good { ok += 1 } else { bad += 1 }
+    }
+    (ok, bad, ops)
+}
+fn witfuzz(n: u64, ord: u32, smt_rounds: u64) -> String {
+    let (mut ok, mut units, mut max_leaves, mut hist_ok) = (0u64, 0u64, 0u32, 0u64);
+    for s in 1..=n {
+        let makers = 4 + (s % 9) as u32;
+        let levels = 1 + (s % 25) as u32;
+        let per = 1 + (s % 3) as u32;
+        let stress = s % 2 == 0;
+        let (w, _, _) = gen(s, makers, levels, per, ord, stress);
+        let mut a = Vec::new();
+        run_real_eng_cb(&w, &mut |e| a.push(smt_ref::root(&real_pilot_leaves(e))));
+        let (b, c, wo) = port_roots(&w);
+        // history independence: same final leaf set, shuffled, with churn of extra keys
+        let mut leaves: Vec<String> = Vec::new();
+        let last = w[2].saturating_sub(1);
+        let _ = mnpilot::run_batch_wit(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |_| {}, &mut |i, st, _| {
+            if i == last { leaves = mnpilot::wit::all_leaves(st); }
+        }, mnpilot::WitMode::Off);
+        let mut rng = Rng(s | 1);
+        let mut order: Vec<usize> = (0..leaves.len()).collect();
+        for i in (1..order.len()).rev() { order.swap(i, rng.below(i as u64 + 1) as usize); }
+        let mut t = mnpilot::wit::Smt::new();
+        for (j, &i) in order.iter().enumerate() {
+            let l = &leaves[i];
+            t.set(smt_ref::key(l), smt_ref::leaf_hash(l));
+            if j % 3 == 0 {
+                let junk = smt_ref::key(&format!("ord:junk{}", j));
+                t.set(junk, [1u8; 32]);
+                if rng.below(2) == 0 { t.root(); }
+                t.remove(&junk);
+            }
+        }
+        if Some(&t.root()) == b.last() { hist_ok += 1; }
+        units += a.len() as u64;
+        max_leaves = max_leaves.max(wo.leaves);
+        if a == b && b == c && wo.scratch_ok && a.len() == w[2] as usize {
+            ok += 1;
+        } else {
+            let first = a.iter().zip(&b).zip(&c).position(|((x, y), z)| x != y || y != z);
+            println!("WITMISMATCH seed {} first unit {:?} scratch_ok {} lens {} {} {}", s, first, wo.scratch_ok, a.len(), b.len(), c.len());
+        }
+    }
+    let (sok, sbad, sops) = smt_fuzz(smt_rounds);
+    format!(
+        "{{\"seeds\":{},\"match\":{},\"units_compared\":{},\"history_independent\":{},\"max_leaves\":{},\"smt_rounds_ok\":{},\"smt_rounds_bad\":{},\"smt_ops\":{}}}",
+        n, ok, units, hist_ok, max_leaves, sok, sbad, sops
+    )
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -450,6 +593,20 @@ fn main() {
         Some("real") => println!("{}", run_real(&read_words(&a[2])).json()),
         Some("witstat") => println!("{}", witstat(&read_words(&a[2]))),
         Some("port") => println!("{}", run_port(&read_words(&a[2])).json()),
+        Some("wroots") => {
+            let legacy = if a.get(3).map(|x| x == "legacy").unwrap_or(false) { Some(a[4].parse().unwrap()) } else { None };
+            println!("{}", wroots(&read_words(&a[2]), legacy))
+        }
+        Some("portroots") => {
+            let (inc, scr, wo) = port_roots(&read_words(&a[2]));
+            let r: Vec<String> = inc.iter().map(|x| format!("\"{}\"", smt_ref::hex(x))).collect();
+            println!("{{\"scratch_equal\":{},\"scratch_ok\":{},\"leaves\":{},\"leaf_updates\":{},\"node_hashes\":{},\"roots\":[{}]}}",
+                inc == scr, wo.scratch_ok, wo.leaves, wo.leaf_updates, wo.node_hashes, r.join(","));
+        }
+        Some("witfuzz") => {
+            let p = |i: usize, d: u64| a.get(i).map(|x| x.parse().unwrap()).unwrap_or(d);
+            println!("{}", witfuzz(p(2, 300), p(3, 300) as u32, p(4, 300)));
+        }
         Some("fuzz") => {
             let n: u64 = a[2].parse().unwrap();
             let ord: u32 = a[3].parse().unwrap();

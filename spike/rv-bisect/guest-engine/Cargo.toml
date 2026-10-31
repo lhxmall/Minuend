@@ -15,6 +15,10 @@ path = "src/main.rs"
 # sail spot-check build: read the batch from memory at 0x0300_0000 (loaded as a data ELF)
 # instead of the ecall a7=63 input tree, which sail does not model.
 embed = []
+# no per-unit witness commitment (the 2d01fe8 pilot numbers)
+nowit = []
+# legacy full witness rebuild (sort + Obyte merkle) after every unit >= input word 3 (cost comparison)
+legacywit = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }

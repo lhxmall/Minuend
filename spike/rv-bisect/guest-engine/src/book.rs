@@ -49,6 +49,13 @@ pub struct BookJournal {
     seen_levels: HashSet<(bool, Price)>,
 }
 
+impl BookJournal {
+    /// PILOT (MNWIT1): ids of every order this journal touched (inserted, filled, removed).
+    pub fn touched_orders(&self) -> impl Iterator<Item = OrderId> + '_ {
+        self.orders.iter().map(|(id, _)| *id)
+    }
+}
+
 impl OrderBook {
     pub fn new(market: MarketId) -> Self {
         Self {

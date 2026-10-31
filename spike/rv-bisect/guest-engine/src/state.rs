@@ -41,6 +41,8 @@ pub struct ChainState {
     pub last_funding_height: BTreeMap<MarketId, Height>,
     /// upstream: HashMap<AccountId, u64>
     pub seen_client_seq: BTreeMap<AccountId, u64>,
+    /// PILOT (MNWIT1 proposal): keys touched since the last witness commit.
+    pub wit_dirty: crate::wit::WitDirty,
 }
 
 impl ChainState {
@@ -117,8 +119,25 @@ impl ChainState {
         self.apply_fill_pair(fill)
     }
 
+    /// PILOT (MNWIT1): every key a journal recorded is a dirty witness key (superset of
+    /// what the unit changed; unchanged leaves rehash to the same value and cost no path).
+    pub fn note_journal(&mut self, j: &StateJournal) {
+        for (id, _) in &j.accounts {
+            self.wit_dirty.accounts.insert(*id);
+        }
+        for (m, _, _) in &j.markets {
+            self.wit_dirty.markets.insert(*m);
+        }
+        if let Some((m, _, bj)) = &j.book {
+            for id in bj.touched_orders() {
+                self.wit_dirty.orders.insert((*m, id));
+            }
+        }
+    }
+
     /// Restore every pre-image recorded in `j`.
     pub fn rollback(&mut self, j: StateJournal) {
+        self.note_journal(&j); // PILOT (MNWIT1)
         if let Some((market, existed, bj)) = j.book {
             if existed {
                 self.book_mut(market).rollback(bj);
@@ -155,6 +174,7 @@ impl ChainState {
     }
 
     pub fn account_mut(&mut self, id: AccountId) -> &mut Account {
+        self.wit_dirty.accounts.insert(id); // PILOT (MNWIT1)
         self.accounts.entry(id).or_insert_with(|| Account::new(id))
     }
 

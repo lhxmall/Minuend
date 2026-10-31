@@ -550,6 +550,7 @@ impl Engine {
         // `Liquidate` in a later unit (with the keeper reward as incentive).
         let _ = (unit, seq);
         self.state.seen_client_seq.insert(account, client_seq);
+        self.state.note_journal(&journal); // PILOT (MNWIT1)
         Ok(result.fills)
     }
 
@@ -846,6 +847,7 @@ impl Engine {
             .book_mut(market)
             .cancel(order_id)
             .map_err(RejectReason::Book)?;
+        self.state.wit_dirty.orders.insert((market, order_id)); // PILOT (MNWIT1)
         // Isolated escrow rides on the order: cancel returns its remainder.
         if canceled.margin_left > 0 {
             self.state.account_mut(account).collateral += i128::from(canceled.margin_left);
@@ -874,6 +876,7 @@ impl Engine {
             .unwrap_or_else(|| minuend_account::Account::new(account));
         acct.credit(amount).map_err(map_acct)?;
         self.state.accounts.insert(account, acct);
+        self.state.wit_dirty.accounts.insert(account); // PILOT (MNWIT1)
         Ok(Vec::new())
     }
 }

@@ -26,6 +26,7 @@ pub mod book_types;
 pub mod engine;
 pub mod state;
 pub mod types;
+pub mod wit;
 
 pub use book_types::*;
 
@@ -175,13 +176,48 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
     }
 }
 
+/// Per-unit witness mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitMode {
+    /// no per-unit commitment (the 2d01fe8 pilot)
+    Off,
+    /// MNWIT1 incremental sparse Merkle root after every unit (proposal)
+    Incremental,
+    /// legacy fix/47-all style full rebuild (sort + Obyte merkle) after every unit with index >= skip
+    Legacy { skip: u32 },
+}
+
+pub struct WitOut {
+    /// final incremental root (Incremental) or last legacy root
+    pub root: [u8; 32],
+    /// Incremental: final root == root of a tree rebuilt from scratch over the final state
+    pub scratch_ok: bool,
+    pub leaves: u32,
+    pub leaf_updates: u64,
+    pub node_hashes: u64,
+}
+
+/// Run one batch (no witness), as in 2d01fe8.
+pub fn run_batch(rd: &mut dyn FnMut(u32) -> u32, ev: &mut dyn FnMut(u32)) -> ([u8; 32], Stats) {
+    let (h, st, _) = run_batch_wit(rd, ev, &mut |_, _, _| {}, WitMode::Off);
+    (h, st)
+}
+
 /// Run one batch. `rd(i)` returns input word i; `ev(word)` receives the event log
 /// (per op: EV_APPLIED|n_fills followed by 6 words per fill [maker_id w0, taker_id w0,
-/// price lo, price hi, qty lo, qty hi], or a reject code).
-pub fn run_batch(rd: &mut dyn FnMut(u32) -> u32, ev: &mut dyn FnMut(u32)) -> ([u8; 32], Stats) {
+/// price lo, price hi, qty lo, qty hi], or a reject code); `unit(i, state, root)` is called
+/// after every unit (applied or rejected, as upstream `apply_one` pushes one wit root per unit)
+/// with the unit's witness root (zero when mode = Off, or Legacy before `skip`).
+pub fn run_batch_wit(
+    rd: &mut dyn FnMut(u32) -> u32,
+    ev: &mut dyn FnMut(u32),
+    unit: &mut dyn FnMut(u32, &state::ChainState, &[u8; 32]),
+    mode: WitMode,
+) -> ([u8; 32], Stats, WitOut) {
     let mut st = Stats { applied: 0, rejected: 0, fills: 0 };
+    let mut wo = WitOut { root: [0; 32], scratch_ok: false, leaves: 0, leaf_updates: 0, node_hashes: 0 };
     if rd(0) != MAGIC {
-        return ([0u8; 32], st);
+        return ([0u8; 32], st, wo);
     }
     let n_acc = rd(1);
     let n_ops = rd(2);
@@ -195,14 +231,19 @@ pub fn run_batch(rd: &mut dyn FnMut(u32) -> u32, ev: &mut dyn FnMut(u32)) -> ([u
     }
     let base = 4 + n_acc * 8;
     let mut eng = Engine { state: state::ChainState::genesis() };
+    let mut w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
+    eng.state.wit_dirty = Default::default();
+    if let Some(w) = w.as_mut() {
+        wo.root = w.root();
+    }
     for i in 0..n_ops {
-        let mut w = [0u32; 8];
-        for (k, x) in w.iter_mut().enumerate() {
+        let mut ow = [0u32; 8];
+        for (k, x) in ow.iter_mut().enumerate() {
             *x = rd(base + i * 8 + k as u32);
         }
         let seq = eng.state.seq;
         let acct_of = |a: u32| accts.get(a as usize).copied();
-        let res = match decode_op(&w) {
+        let res = match decode_op(&ow) {
             BatchOp::Deposit { acct, amount } => match acct_of(acct) {
                 Some(a) => eng.deposit(a, amount as Usd),
                 None => Err(RejectReason::BadAccount),
@@ -237,6 +278,28 @@ pub fn run_batch(rd: &mut dyn FnMut(u32) -> u32, ev: &mut dyn FnMut(u32)) -> ([u
                 ev(reason_code(&r));
             }
         }
+        let root = match mode {
+            WitMode::Off => {
+                eng.state.wit_dirty = Default::default();
+                [0u8; 32]
+            }
+            WitMode::Incremental => w.as_mut().unwrap().commit(&mut eng.state),
+            WitMode::Legacy { skip } => {
+                eng.state.wit_dirty = Default::default();
+                if i >= skip { wit::legacy_root(&eng.state) } else { [0u8; 32] }
+            }
+        };
+        if mode != WitMode::Off {
+            wo.root = root;
+        }
+        unit(i, &eng.state, &root);
     }
-    (state_hash(&eng.state), st)
+    if let Some(w) = w.as_mut() {
+        let scratch = wit::Wit::from_state(&eng.state).root();
+        wo.scratch_ok = scratch == wo.root;
+        wo.leaves = w.smt.count;
+        wo.leaf_updates = w.leaf_updates;
+        wo.node_hashes = w.smt.node_hashes;
+    }
+    (state_hash(&eng.state), st, wo)
 }
