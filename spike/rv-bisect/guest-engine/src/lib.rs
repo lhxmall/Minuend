@@ -222,7 +222,13 @@ pub const MAX_STATE_ACCOUNTS: usize = 256;
 /// weight snapshot (R6-H2), listed markets (R6-M1). The PERP ledger shares the account cap (R6-H3).
 pub const MAX_STATE_COMMITS: usize = 1024;
 pub const MAX_ZERO_VOTERS: usize = 64;
-pub const MAX_STATE_MARKETS: usize = 256;
+/// Loop round 10 (R10-H1): 256 -> 32. Every account may hold a position (+ isolated-margin entry) in every listed
+/// market and every bonded oracle a report + an 8-deep ring per market, so the per-(account, market) state scales
+/// with accounts x markets: at 256 x 256 positions alone measured 46.1 MB and oracle reports 25.6 MB (engine-diff
+/// `mktcap`, 64-bit host sizes) against the 50.2 MB heap. With 32 the whole state at every cap at once (256 accounts
+/// x 32 markets positions, 256 oracles x 32 markets, 64 orders + 64 withdrawals per account) is measured by
+/// `mktcap 256 32 256 64 64` (findings/rv-loop-10.md). Counts delisted markets too (R7-L4).
+pub const MAX_STATE_MARKETS: usize = 32;
 /// Units that can create an account for their author (deposit; liquidate: the keeper reward
 /// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
 /// already holds `cap` accounts (the insurance account included).
@@ -258,7 +264,7 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
         },
         // R6-M1: listings are bounded only by the burned fee upstream. Loop round 8 (R7-L4, accepted pilot limit): the cap
         // counts delisted markets too -- upstream never removes a market (its params, marks and book indexes stay), so
-        // the heap they hold is real; filling the cap burns 255 x CREATE_MARKET_FEE_PERP and the recovery is an upgrade
+        // the heap they hold is real; filling the cap burns (MAX_STATE_MARKETS - 1) x CREATE_MARKET_FEE_PERP and the recovery is an upgrade
         // image with a larger cap (rv_rollup `upgrade`), not a state rule
         BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
         _ => true,

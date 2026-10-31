@@ -1253,7 +1253,7 @@ fn main() {
         }
         Some("snaptest") => println!("{}", snap::snaptest(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("capcheck") => println!("{}", snap::capcheck(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
-        Some("mktcap") => println!("{}", snap::mktcap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())), // loop round 10 (R10-H1)
+        Some("mktcap") => println!("{}", snap::mktcap_full(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), a.get(5).map(|x| x.parse().unwrap()).unwrap_or(0), a.get(6).map(|x| x.parse().unwrap()).unwrap_or(0))), // loop round 10 (R10-H1)
         Some("statecap") => println!("{}", snap::statecap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap())),
         Some("snapdir") => println!("{}", snap::snapdir(&read_words(&a[2]), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5], a.get(6).map(|x| x == "bind").unwrap_or(false))),
         Some("snapcap") => println!("{}", snap::snapcap()),

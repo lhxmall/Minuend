@@ -1058,7 +1058,7 @@ pub fn govedge() -> String {
         let base = 4 + 8 * w[1] as usize;
         let kind = |i: usize| w[base + 8 * i] & 0xff;
         let _ = kind;
-        let n_mk = mnpilot::MAX_STATE_MARKETS; // BTC + 255 ok, the 256th listing refused
+        let n_mk = mnpilot::MAX_STATE_MARKETS; // BTC + (cap - 1) ok, the next listing refused (round 10: cap 32)
         let mk_ok = pe[1..n_mk].iter().all(|e| *e == OK) && pe[n_mk] == mnpilot::STATE_CAP_CODE;
         expect("cap:markets", mk_ok, &mut fails);
         let p0 = 1 + n_mk;

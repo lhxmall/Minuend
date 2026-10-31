@@ -427,6 +427,12 @@ pub fn snapcap() -> String {
 /// Real engine entry points only (gov_deposit / create_market / stake_oracle / report_price / place), so every
 /// state reached here is reachable by units. Prints the host heap simulation (64-bit sizes).
 pub fn mktcap(n: u32, m: u32, r: u32) -> String {
+    mktcap_full(n, m, r, 0, 0)
+}
+/// `mktcap n m r orders wd`: + per account `orders` resting bids (<= MAX_LIVE_ORDERS_PER_ACCOUNT, spread over the
+/// markets, every third isolated) and `wd` pending withdrawals, positions in even markets isolated (isolated_margin
+/// entries): every per-account state kind at once = the whole-state heap bound at the caps.
+pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
     use mnpilot::types::{AccountId as A, MarketId as M, OrderType, Side as S, TimeInForce as T};
     heapsim::reset();
     heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -471,13 +477,28 @@ pub fn mktcap(n: u32, m: u32, r: u32) -> String {
                 let b = id(i - 1);
                 let seq = e.state.seq;
                 let cs = e.state.seen_client_seq.get(&b).copied().unwrap_or(0) + 1;
-                let r2 = e.place(b, M(mk), S::Ask, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, false, 0);
+                let iso = mk % 2 == 0;
+                let mg = if iso { 1_000 * USD_SCALE } else { 0 };
+                let r2 = e.place(b, M(mk), S::Ask, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, iso, mg);
                 ok(r2, e);
                 let seq = e.state.seq;
                 let cs = e.state.seen_client_seq.get(&a).copied().unwrap_or(0) + 1;
-                let r3 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, false, 0);
+                let r3 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, iso, mg);
                 ok(r3, e);
             }
+        }
+        for j in 0..orders {
+            let seq = e.state.seq;
+            let cs = e.state.seen_client_seq.get(&a).copied().unwrap_or(0) + 1;
+            let mk = markets[j as usize % markets.len()];
+            let iso = mk % 2 == 0;
+            let px = MID - (1000 + (i as i64 * 64 + j as i64) % 5000) * DOLLAR;
+            let r7 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, px, QTY_SCALE / 1000, cs, [0; 32], seq, iso, if iso { 50 * USD_SCALE } else { 0 });
+            ok(r7, e);
+        }
+        for k in 0..wd {
+            let r8 = e.withdraw(a, USD_SCALE as i128, k as u64 + 1);
+            ok(r8, e);
         }
         if i < r {
             let r4 = e.gov_deposit(a, minuend_types::ORACLE_BOND_PERP);
@@ -502,8 +523,8 @@ pub fn mktcap(n: u32, m: u32, r: u32) -> String {
     let pos: usize = st.accounts.values().map(|a| a.positions.len()).sum();
     let hist: usize = st.oracle_report_history.values().map(|q| q.len()).sum();
     format!(
-        "{{\"accounts\":{},\"markets\":{},\"marks\":{},\"positions\":{},\"oracles\":{},\"oracle_reports\":{},\"history_samples\":{},\"rejected_ops\":{},\"why\":\"{}\",\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{},\"guest_heap_limit\":{}}}",
-        st.accounts.len(), st.markets.len(), st.marks.len(), pos, st.oracle_bonds.len(), st.oracle_reports.len(), hist, fails, format!("{:?}", why).replace('"', "'"),
+        "{{\"accounts\":{},\"markets\":{},\"orders_per_account\":{},\"withdrawals_per_account\":{},\"live_orders\":{},\"isolated_entries\":{},\"marks\":{},\"positions\":{},\"oracles\":{},\"oracle_reports\":{},\"history_samples\":{},\"rejected_ops\":{},\"why\":\"{}\",\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{},\"guest_heap_limit\":{}}}",
+        st.accounts.len(), st.markets.len(), orders, wd, st.books.values().map(|b| b.live_orders().count()).sum::<usize>(), st.accounts.values().map(|a| a.isolated_margin.len()).sum::<usize>(), st.marks.len(), pos, st.oracle_bonds.len(), st.oracle_reports.len(), hist, fails, format!("{:?}", why).replace('"', "'"),
         sess.w.as_ref().map(|w| w.smt.count).unwrap_or(0), top, peak, heapsim::sum_class_peaks(), words, 0x0300_0000u32 - 0x0002_0000
     )
 }
