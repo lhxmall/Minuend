@@ -2,7 +2,7 @@
 
 > 状态：**spike 原型**，没有审计，没有接进正式的 Minuend rollup。
 > 分支：`spike/rv-bisect`。相关文件都在 `spike/rv-bisect/` 下面。
-> 写于 2026-10-31；同日更新：CBOND = 120 000、多付退款、烧毁部分永久锁定、客户端 `max_aa_responses`（第 4、5b、6.5、8 节）。
+> 写于 2026-10-31；同日更新：CBOND = 120 000、多付退款、烧毁部分永久锁定、客户端 `max_aa_responses`（第 4、5b、6.5、8 节）；真实引擎移植试点（7.2）；增量 witness 承诺 MNWIT1 提案（7.3，共识变更，只在 spike 分支）。
 
 ---
 
@@ -402,7 +402,95 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 - **对拍**：`engine-diff` 直接链接真实引擎，用签名 unit 喂给 `Engine::ingest`，和移植版比较状态哈希 + 每个 unit 的事件（成交明细或拒绝原因）。随机 300 个种子 × 300 单：**300/300 完全一致**。真实引擎 ↔ 移植版 ↔ riscv32im guest（JS 模型）三方对拍 9 个批次（挂单深度 200/800，普通 + 压力场景，最多 1 832 个 unit）：**9/9 一致**。sail-riscv 抽查：**16 196 951 条指令，和 JS 模型完全相同**，结果内存和哈希一致。对移植版埋 13 个 bug，抓到 7 个（2 个在试点范围内等价，4 个是随机批次很少碰到的边界）。
 - **每单步数**（一单 = 一个 unit）：挂单 200–400 张时 7.3–9.4 万步，800–1 000 张时 18.9–20.4 万步，约等于 **4.3 万 + 170 × 挂单数**（`place` 每次把所有挂单扫 5 遍）。
 - **轮数和成本**（R = ceil(log16 步数)，operator 成本 = R × 3372 + 11 467）：10 单 R=5–6，100 单 R=6–7，1000 单 R=7，成本 2.83–3.51 万 bytes，赔付 108 000 至少还剩 6.95 万。单个 unit 的第 2 层博弈 R=5。
-- **没算进去、但完整移植后会占大头的部分**：每个 unit 重算 witness 根，约每张挂单 5.7 个 sha256 块 ≈ 2 万步（挂单 200 张约 500 万步，1000 张约 2000 万步），是撮合本身的 100 倍。建议在继续移植前把 witness 承诺改成增量式（只更新被改动的叶子）。
+- **没算进去、但完整移植后会占大头的部分**：每个 unit 重算 witness 根，约每张挂单 5.7 个 sha256 块 ≈ 2 万步（挂单 200 张约 500 万步，1000 张约 2000 万步），是撮合本身的 100 倍。建议在继续移植前把 witness 承诺改成增量式（只更新被改动的叶子）——提案和实测见 7.3。
+
+### 7.3 增量 witness 承诺 MNWIT1（提案，2026-10-31）
+
+> **这是给真实引擎的共识变更提案**（改 `wit_root` 的定义，要升 `ASSERTION_VERSION`、重新部署所有读 witness 的 AA）。
+> 这个 spike 只在 `spike/rv-bisect` 里实现和测量；**fix/47-all、main、PR #51 一行都没改**。
+
+**问题。** 真实引擎的 `apply_one` 每个 unit 之后都调用 `wit_root(&state)`：把整个状态格式化成字符串叶子（`acct:` / `pos:` / `ord:` / `adr:` / `adrx:` / `dep:` / `obond:` / `band:` / `meta:` + 哨兵 `~:end`），**排序**，再整棵 Obyte merkle 重算；同时还把整份叶子列表存进 `wit_leaf_trace`。这是 O(状态) 的：试点测得每张挂单约 5.7 个 sha256 块，guest 里实测（下表 legacy 列）挂单 200 张时每个 unit **6.0M 步**，是撮合本身（7.2 万步）的 80 倍以上，并且随订单簿线性变大。
+
+**思路。** 叶子字符串**一个字都不改**（AA 照样能解析），只换掉「把叶子组织成树」的方式：用**按 key 定位的紧凑稀疏 Merkle 树**（compact sparse Merkle tree）。每个叶子有一个由它的「身份」算出的固定 key，它在树里的位置只由 key 决定，跟别的叶子什么时候插入无关。一个 unit 只改了几个叶子，就只重算这几条路径。
+
+#### 7.3.1 规格
+
+| 项 | 定义 |
+|---|---|
+| 叶子字符串 | 与 `minuend_state::wit_leaves` 完全相同（`acct:{hex}:{collateral}:{perp}:{w}`、`pos:{hex}:{market}:{qty}:{entry}:{iso}:{bucket}`、`ord:{hex id}:{market}:{side}:{price}:{seq}:{remaining}:{hex acct}:{iso}:{margin_left}`、`adr:` `adrx:` `dep:` `obond:` `band:` `meta:` 同理）。**不再有** `~:end` 哨兵 |
+| 身份前缀 kid | 叶子字符串的前 2 个字段（`tag:id`）；`pos:` 取前 3 个（`pos:{hex}:{market}`）。即 `acct:{hex}`、`pos:{hex}:{m}`、`ord:{hex 订单 id}`、`adr:{地址}`、`adrx:{hex}`、`dep:{base64 unit}`、`obond:{hex}`、`band:{m}`、`meta:{m}`。一个 kid 在任何时刻最多对应一个叶子（这些本来就是现有排序树里做「相邻叶子不存在证明」用的 key） |
+| key | `key = sha256("~K1:" ‖ kid)`，32 字节；树里的路径 = key 的比特，**高位在前**（第 0 层看第 0 字节最高位） |
+| 叶子哈希 | `L = sha256("~L1:" ‖ hex(key) ‖ ":" ‖ 叶子字符串)`（hex 小写 64 字符） |
+| 内部节点 | `N = sha256("~N1:" ‖ b64(left) ‖ b64(right))`（b64 = 标准 base64，44 字符，和现有 Obyte merkle 一样是「字符串拼接再 sha256」，AA 里直接能算） |
+| 空子树 | `EMPTY` = 32 个 0 字节（b64 `AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`），它不是任何 sha256 的输出 |
+| 形状（规范形） | 空子树 = `EMPTY`；**只含 1 个叶子的子树 = 这个叶子的 L**（叶子停在能把它和别人分开的最浅位置）；含 ≥2 个叶子的子树 = `N(左, 右)`（某一边可以是 `EMPTY`）。空树的根 = `EMPTY` |
+| 域分离 | 前缀 `~K1:` / `~L1:` / `~N1:` 互不相同；旧树的叶子都以小写 tag 开头（哨兵是 `~:end`，第二个字符不同），旧树的节点输入以 base64 字符开头，所以新旧两种树的任何哈希输入都不会撞；`1` 是版本号 |
+| 根 | `wit_root = b64(根)`，仍是 44 字符 base64，**字段类型不变** |
+
+**确定性。** 规范形是「叶子集合」的纯函数：同一组 (key, 叶子) 不管按什么顺序插入、中间插过又删掉什么，根都一样。实现上删除叶子后要「塌缩」：一个内部节点如果只剩一个叶子孩子（另一边空），就用这个叶子替换掉自己，并一路向上检查。
+
+**创世根。** `ChainState::new()`（保险账户 + BTC_USD 的 `band:` / `meta:`）的 MNWIT1 根是 `8q+ZwYDtXcypxizCpTw0YfUr/6XPNkvLSZYJVHlwirk=`（3 个叶子；对照：现行 `GENESIS_WIT_ROOT` = `eAvY8Srl…` 用同一工具复算一致）。
+
+#### 7.3.2 增量更新（dirty-leaf tracking）
+
+- 状态里多一个 `wit_dirty`：本 unit 碰过的账户 id、`(市场, 订单 id)`、市场 id。
+- 来源（试点里的钩子，真实引擎照搬）：`StateJournal`（下单路径本来就为回滚记录了所有碰过的账户、市场标量和订单簿里碰过的订单——成功提交和回滚时都把它记进 dirty）、`account_mut`、撤单、入金。真实引擎还要加：清算/ADL、提现、PERP 余额、地址绑定（`adr:`/`adrx:`）、已用入金锚点（`dep:`）、预言机保证金（`obond:`）、参数变更/上架（`band:`/`meta:`）、资金费率结算（所有持仓人）。
+- 每个 unit 结束时（不管 Applied 还是 Rejected，和现在每个 unit 一个 wit 根一样）：对每个 dirty key 从状态重新生成叶子 → 算 L → 如果和树里的一样就跳过，不一样就更新，叶子消失就删除（账户还要删掉已平仓的 `pos:`）→ 只沿着被标脏的路径重算节点。dirty 是「超集」也没关系（被回滚的改动重新生成出来和原来一样，不产生任何路径重算）。
+- **安全网**：漏标一个 dirty key 会让增量根和真正的根不一致。所以测试/验证节点里要有「每个 unit 增量根 == 从头重建的根」的断言（本 spike 的 witfuzz 就是这个检查，下面的变异测试证明它能抓住漏标）。
+
+#### 7.3.3 证明（给 AA 用）
+
+- **存在证明**：给出叶子字符串 `l` 和兄弟列表 `s_{d-1} … s_0`（从叶子往上）。AA：`kid` = 取 `l` 的前 2/3 个字段 → `k = sha256("~K1:"+kid, 'hex')` → `h = sha256("~L1:"+k+":"+l)` → 对 `i = d-1 … 0`：key 的第 i 位（hex 第 `i/4` 个字符查表得 0–15，再取对应比特）为 0 时 `h = sha256("~N1:"+h+s_i)`，为 1 时 `h = sha256("~N1:"+s_i+h)` → 等于 `wit_root`。证明长度 d ≈ log2(叶子数) + 1～2（实测 2 000 张挂单时平均 ≈ 12，最大 ≈ 20）。
+- **不存在证明**（替代现在的「排序相邻叶子夹住」+ `wit_count` / `counts_root` / 哨兵）：给出 key `k` 路径上的终点：要么是 `EMPTY`，要么是**另一个**叶子 `(k', l')`，且 `k'` 的前 d 位和 `k` 相同、`k' ≠ k`；再加兄弟列表折叠到根。规范形保证这个位置上的子树里只有这一个叶子（或没有），所以 `k` 不在树里。
+- AA 侧需要确认 `sha256(x, 'hex')` 在 ocore 里可用（不可用的话 key 改成 base64，按 6 比特一个字符取位，规格其余不变）。
+
+#### 7.3.4 映射到现有字段 / 共识变更清单
+
+| 现有 | MNWIT1 下 |
+|---|---|
+| `wit_root`（checkpoint，44 字符 base64） | 同类型，值变成 MNWIT1 根 |
+| `wit_trace` / `trace_root`（每个 unit 一个根，再 merkle） | 结构不变，元素换成每个 unit 的 MNWIT1 根 |
+| `wit_count`、`counts_root`、`GENESIS_WIT_COUNT`、`WIT_MAX_SENTINEL` | 不存在证明不再需要它们：可以删掉，或 `wit_count` 留作信息字段（叶子数增量维护很便宜） |
+| `GENESIS_WIT_ROOT` | 换成 `8q+ZwYDtXcypxizCpTw0YfUr/6XPNkvLSZYJVHlwirk=` |
+| `wit_leaf_trace`（每个 unit 存整份叶子列表，O(状态) 内存） | 换成每个 unit 的「改动叶子 + 证明」，争议只需要这些 |
+| 10 个读 witness 的 AA（`minuend_dispute*.aa`、`minuend_rollup.aa`、`minuend_vault.aa`）、`post_batch.js`、`script_helpers.js`、`minuend-settle` 的提现证明 | 存在 / 不存在证明换成 7.3.3 的格式 |
+| `ASSERTION_VERSION` | +1，所有 AA 重新部署 |
+
+#### 7.3.5 代码和测试（`guest-engine/src/wit.rs`、`engine-diff/src/smt_ref.rs`）
+
+- guest（no_std + alloc）：`Wit` / `Smt`（数组 arena 上的二叉树，空闲表复用节点；叶子字符串写在栈上的固定缓冲里，不占堆）。`run_batch_wit` 每个 unit 后 `commit`，guest 把每个 unit 的根写到 `OUT+0x20000` 字（8 字一个），并在结尾用同一组叶子从头重建一遍做自检（`scratch_ok`）。编译开关：默认 = 增量；`nowit` = 不算 witness（7.2 的数字）；`legacywit` = 每个 unit 按现行规则（排序 + Obyte merkle + 哨兵）整棵重算，用来测对照成本。
+- host 参考实现 `smt_ref`：**独立写的**、从头递归构造（对排好序的 key 二分），key 直接从叶子字符串里解析（就像 AA 那样），不共享 guest 的任何代码。叶子来自**真实引擎**的 `minuend_state::wit_leaves`（按试点建模的 tag 过滤：acct/pos/ord/band/meta）。
+- 结果见下面「测试结果」和「步数」两张表。
+
+**测试结果（2026-10-31，机器日志 `/data/hark/logs/rv/wit-*`，副本在 `guest-engine/results-2026-10-31/`）**
+
+| 测试 | 结果 |
+|---|---|
+| 回归：真实引擎 vs 移植版 `fuzz 300 300`（加了 dirty 钩子之后） | **300/300** 一致（和 7.2 完全相同的事件统计） |
+| 性质测试 `witfuzz 300 300 300`：300 个随机批次（一半压力场景），**每个 unit** 比较 ①真实引擎状态从头重建的根（smt_ref）②移植版增量根 ③移植版状态从头重建的根 | **300/300**，共 **112 794 个 unit** 三方全等；guest 末尾自检 `scratch_ok` 全 1 |
+| 与插入历史无关：每个批次的最终叶子集合打乱顺序插入、中间插入又删除垃圾 key | **300/300** 根相同 |
+| 纯树随机测试：300 轮随机 set/remove（含共享 253 位前缀的 key，测深层分裂/塌缩），每一步比增量根和从头重建 | **300/300**，34 894 步 |
+| host 参考 vs guest（JS 模型）逐 unit 比根：7 个基准批次（深度 200/800/2000 × 10/100/1000 单） | 见下面步数表，**全部 roots_equal** |
+| 上游 `#[test]` 场景回放（`engine-diff/scenarios/upstream.scn`，47 个批次，355 个 unit）：真实引擎 vs 移植版（哈希 + 事件 + 每个 unit 的根） | **47/47** |
+| 同上 47 个批次过 riscv32im guest（JS 模型，`js/witscen.js`） | **47/47**（7 336 万步） |
+| sail-riscv 抽查（`xval/witsail.js`，embed 构建，比较指令数 + 事件 + 全部 unit 根） | 场景 `bnd_fee_guard_equity_clause`（两个市场，9 个 unit）：**2 005 758 = 2 005 758** 条指令，111 个结果字全等；基准 `depth200 N=10`（236 个 unit）：**52 812 940 = 52 812 940**，2 154 个结果字（含 236 个根）全等，最终根 = host 参考 `cca129b2…978c`，状态哈希 = 真实引擎 |
+| 变异测试（`guest-engine/scripts/wit-mut.sh`；每个变异体跑 `fuzz 100 300` + 场景回放 + `witfuzz 30 300`，任何一项不一致算抓到） | 移植版 13 个变异 **抓到 10 个**（7.2 时是 7 个）；witness 专用 6 个变异 **6/6** |
+
+- 7.2 里剩下的 4 个「边界」变异：**3 个被场景回放抓到**——孤立仓位开仓 `equity − margin < im + resting` 改成 `<=`（场景：margin 恰好等于权益）；孤立仓位按比例释放保证金的取整（场景：100 USD 桶分 0.003 BTC 三次平）；taker 手续费保护的权益条件（需要**第二个市场**：孤立仓位爆仓平仓后现金 10 020 USD 但交叉权益只剩 20 USD，手续费 40 USD → 原代码拒绝；两边各放一个刚好 0 和刚好 = 手续费的对照场景）。第 4 个「从负余额对手方 claw」**是等价变异**：对手方余额为负时变异体算出负的 `pay`，被后面的 `if pay > 0` 挡掉，和原代码的 0 完全同效，任何输入都区分不出来。
+- 另外 2 个仍存活的和 7.2 一样是试点范围内等价：mark ±10% 带（没有预言机指数时 mark 冻结，永远走不到）、`liquidatable`（下单路径不读）。
+- witness 变异（去掉下单成功时的 journal 记脏、去掉 `account_mut` 钩子、去掉撤单钩子、`ord:` 叶子字段改错、删除时只在一侧塌缩、平仓后不删 `pos:` 叶子）：纯引擎对拍 `fuzz` 一个都抓不到（引擎状态没变），逐 unit 比根的检查全部抓到——这正是 7.3.2 说的「安全网」要做的事。
+
+**每个 unit 的步数（JS 模型，只算下单流里的 unit；在同一次运行里读 unit 计数器被写的那一步，所以建簿和最后的哈希不计入）**
+
+`inc` = 带 MNWIT1；`nowit` = 只撮合（7.2 的口径）；`wit` = inc − nowit；`legacy` = 现行规则（排序 + Obyte merkle）每个 unit 整棵重算的 witness 部分（只测了 N=10）。R = ceil(log16 步数)；operator 成本 = R × 3372 + 11 467，赔付 108 000。「单 unit R」= 第 2 层（只争一个 unit）用这批里最贵的那个 unit 算；「整批 R」= 整个下单流单层博弈。
+
+| 订单簿 | N | 叶子 / 平均深度 / 最大深度 | inc 平均 / 中位 / 最大 | nowit | **wit** | legacy wit | 单 unit R（成本） | 整批步数 → R（成本） |
+|---|---|---|---|---|---|---|---|---|
+STEPS_ROWS_ZH
+
+- witness 部分每个 unit **18–44 万步**，随订单簿只按 log 增长（深度 9→12）；现行整棵重算是 **600 万 / 2 230 万 / 5 500 万步**（挂单 200 / 800 / 2 000），**省 34× / 62× / 126×**，而且 legacy 还随挂单数线性涨。
+- 成本：第 2 层单个 unit 的博弈 R = 5–6（2.83 万–3.17 万 bytes），现行规则下是 6–7；整批 1 000 单单层博弈 R = 8（3.84 万）。离 108 000 都还很远。R 是对数，所以链上成本只差一两轮；真正省的是**链下**：每个参与者算执行轨迹和每一步的内存 Merkle 根的工作量和步数成正比，少 1–2 个数量级。
+- sha256 是大头（剖析：74% 的步数在 `compress256`，每块约 4.1k 步）。每改一个叶子 ≈ 1（key）+ 3～5（叶子）+ 2 × 深度 个块。还能再省的地方（没做）：没变的 `band:`/`meta:`（每次成交都被 journal 标脏）先比字段再决定要不要重算、缓存 key、4 叉节点（4 个 base64 孩子 = 180 字节正好 3 块，每两层省 1 块，约 −25%）。
 
 ## 8. 已知的缺口（诚实列出）
 
@@ -414,7 +502,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 6. **operator 和挑战者都不能是 AA**（`is_aa` 禁止）。用多签 AA 当 operator 的方案目前不行。
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
 8. ~~没和 sail-riscv 对拍~~ 已做（7.1）：sail-riscv 0.16，0 处真不一致。剩下：对拍只覆盖单步语义；trap 的具体种类（mcause 等）rv_step 不建模，只比「都 trap 了」。
-9. **引擎只移植了一部分**（7.2）：下单/撤单/撮合/记账/保证金已经在 guest 里跑通并和真实引擎对拍一致；强平/ADL、提现、预言机/资金费率、治理、commit-reveal、每个 unit 的 witness 根还没移植。
+9. **引擎只移植了一部分**（7.2）：下单/撤单/撮合/记账/保证金已经在 guest 里跑通并和真实引擎对拍一致；每个 unit 的 witness 根已按增量提案 MNWIT1 在 guest 里实现并逐 unit 对拍（7.3，**真实引擎还没改，是共识变更**）；强平/ADL、提现、预言机/资金费率、治理、commit-reveal 还没移植。
 10. tps fee：测试客户端已设 `max_aa_responses`（6.5），只降预付、不降最终费用，并且预付少了交易可能暂时不被选作父单元；主网 tps 参数没核对。
 
 ---
@@ -430,6 +518,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 - `js/tpsdiag.js` —— tps fee 诊断
 - `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
 - `guest-engine/` —— 真实引擎移植试点（no_std guest，`rvengine`）；`engine-diff/` —— 真实引擎 vs 移植版对拍、批次生成、`witstat`；`js/pilotrun.js`、`pilotbench.js`、`pilotprof.js`、`xval/pilotsail.js`
+- `guest-engine/src/wit.rs` —— 增量 witness 承诺 MNWIT1（7.3）；`engine-diff/src/smt_ref.rs` —— 独立的从头重建参考实现；`engine-diff` 子命令 `wroots` / `portroots` / `witfuzz` / `scen` / `genesis`；`engine-diff/scenarios/upstream.scn` —— 上游 `#[test]` 场景回放；`js/witrun.js`、`witbench.js`、`witscen.js`；`xval/witsail.js`；`guest-engine/scripts/wit-mut.sh`
 - `xval/` —— 和 sail-riscv 对拍：`mkconfig.py`（生成 sail 配置）、`rv32im-strict.json` / `rv32im-relaxed.json`、`lib.js`（跑 sail、解析轨迹、写 ELF、逐步比较）、`xtests.js`（riscv-tests）、`xfuzz.js`（随机单步）、`mutants.sh`（埋 bug 自测）、`summarize.js`、`run-xval.sh`（全套）
 
 怎么跑（在机器上）：

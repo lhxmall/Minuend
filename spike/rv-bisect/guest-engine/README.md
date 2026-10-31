@@ -80,6 +80,7 @@ Results (2026-10-31, VM, logs `/data/hark/logs/rv/pilot2-*`):
   boundary cases random batches rarely hit (isolated equity `<` vs `<=`, claw from a negative counterparty, isolated
   bucket release rounding, taker-fee guard's equity clause; release rounding was caught 1/100 with an earlier generator).
   Next: replay the upstream `#[test]` scenarios as batches to pin these boundaries. Results: `results-2026-10-31/`.
+  **Update (§6):** with the upstream-scenario replay 10 of 13 are killed; the 3 survivors are equivalent.
 
 ## 4. Step counts (JS model; sail spot-check)
 
@@ -109,7 +110,7 @@ Fees: operator pays R × 3372 (one move) + 11 467 (resolve); payout CBOND − GF
 (`js/pilotprof.js`, small batch): `resting_open_im` 18 %, sha256 16.8 % (order ids + final hash), inlined scans in
 `run_batch`/`place` 12.8 %, `memcmp` 11.3 % (30k calls), `position_risk` 10 % (i128 division, ~12.5k steps/call).
 
-**What the pilot does NOT include — the per-unit witness root.** Upstream `apply_one` recomputes
+**What the pilot does NOT include — the per-unit witness root** (now prototyped incrementally, §6). Upstream `apply_one` recomputes
 `wit_root(state)` after every unit. `engine-diff witstat` sizes that tree on the real engine's final state:
 
 | batch | live orders | leaves | bytes | sha256 blocks | ≈ steps @ 3.5k/block (sha only) |
@@ -152,3 +153,78 @@ engine-diff gen 7 10 50 2 1000 b.bin [stress]; engine-diff real b.bin; engine-di
 node js/pilotrun.js rvengine b.bin; node js/pilotbench.js <engine-diff> <rvengine> <outdir> [cfg]; node js/pilotprof.js rvengine b.bin
 node xval/pilotsail.js <rvengine-embed> b.bin <workdir> <expected hash>
 ```
+
+## 6. Incremental witness commitment — MNWIT1 (proposal, 2026-10-31)
+
+**Consensus change for the real engine** (redefines `wit_root`; needs an `ASSERTION_VERSION` bump and a
+redeploy of every AA that reads witness proofs). Implemented and measured here only — `fix/47-all`,
+`main` and PR #51 are untouched. Full spec (Chinese): `docs/rv-dispute-design.md` §7.3.
+
+**Spec.** Same leaf strings as `minuend_state::wit_leaves` (no `~:end` sentinel); a compact sparse
+Merkle tree keyed by each leaf's identity prefix:
+- `kid` = first 2 fields of the leaf (`acct:<hex>`, `ord:<hex id>`, `adr:<addr>`, `adrx:<hex>`, `dep:<b64>`,
+  `obond:<hex>`, `band:<m>`, `meta:<m>`), first 3 for `pos:<hex>:<m>`;
+- `key = sha256("~K1:" || kid)` (path = key bits, MSB first);
+- `leaf = sha256("~L1:" || hex(key) || ":" || leaf_string)`; `node = sha256("~N1:" || b64(l) || b64(r))`;
+- `EMPTY` = 32 zero bytes; a subtree with one leaf IS that leaf's hash (collapsed at the shallowest
+  depth that separates it); root of the empty tree = `EMPTY`. `wit_root = b64(root)` (44 chars, same field type).
+- Domain separation: `~K1:`/`~L1:`/`~N1:` prefixes vs legacy leaves (lowercase tags, `~:end`) and legacy
+  nodes (base64 text). The shape is a pure function of the leaf set → root independent of insertion history.
+- Genesis (`ChainState::new()`): `8q+ZwYDtXcypxizCpTw0YfUr/6XPNkvLSZYJVHlwirk=` (3 leaves).
+- Proofs: membership = leaf string + siblings (fold with key bits); non-membership = siblings to a
+  terminal that is `EMPTY` or a different leaf whose key shares the path prefix — replaces sorted-neighbour
+  straddles, `wit_count`, `counts_root` and the sentinel.
+
+**Dirty tracking.** `ChainState::wit_dirty` (accounts, (market, order id), markets) is filled by the
+`StateJournal` (every account / market scalar / book order the place path records for rollback — noted on
+success and on rollback), `account_mut`, cancel and deposit. After each unit (applied or rejected, as
+upstream pushes one root per unit) `Wit::commit` regenerates the leaves of the dirty keys, skips unchanged
+leaf hashes, deletes vanished leaves (closed `pos:`, filled/cancelled `ord:`) and rehashes only dirty paths.
+
+**Code.** `src/wit.rs` (no_std: arena tree with free lists, leaf strings formatted into a stack buffer —
+no heap per leaf; `legacy_root` = the current fix/47-all construction for comparison);
+`run_batch_wit(rd, ev, unit_cb, WitMode)` in `src/lib.rs`; guest writes every unit's root at
+`OUT+0x20000` words (8 per unit), unit counter at `OUT+0x1FFFF`, `scratch_ok` (final incremental root ==
+root rebuilt from scratch in the guest) at `0x1FFFE`. Features: default = incremental, `nowit` = none
+(the 2d01fe8 numbers), `legacywit` = legacy full rebuild for units ≥ header word 3. Host reference:
+`../engine-diff/src/smt_ref.rs`, written independently (recursive from-scratch build over sorted keys,
+keys parsed from the leaf TEXT the way an AA would) and fed with the REAL engine's `wit_leaves`
+(filtered to the modelled tags acct/pos/ord/band/meta).
+
+**Tests** (VM logs `/data/hark/logs/rv/wit-*`, copies in `results-2026-10-31/`):
+- Regression `engine-diff fuzz 300 300` (real vs port after adding the dirty hooks): **300/300**, same event
+  statistics as §3.
+- **Property + diff test** `engine-diff witfuzz 300 300 300`: 300 random batches (half `stress`); for EVERY unit
+  (1) real-engine state → `smt_ref` from scratch, (2) port incremental root, (3) port state → `smt_ref` from
+  scratch: **300/300 batches, 112 794 units, all three equal**; guest-side `scratch_ok` = 1 everywhere.
+  History independence (final leaf set inserted shuffled, with junk keys inserted/removed in between):
+  **300/300**. Pure tree test (random set/remove incl. keys sharing 253-bit prefixes, root vs from-scratch
+  after every op): **300/300 rounds, 34 894 ops**.
+- **Host reference vs guest (JS model), per unit**: all 7 bench batches below `roots_equal` (2 066 units at depth
+  2000), `scratch_ok` = 1, and the guest's event log + state hash = real engine (`match_real_guest`).
+  `legacywit` guest roots = upstream `obyte_merkle::root` over the real leaves (`legacy_roots_equal`) — so the
+  legacy cost column measures the real construction.
+- **Upstream `#[test]` scenarios replayed as batches** (`engine-diff scen scenarios/upstream.scn`: 47 batches /
+  355 units from minuend-book, -account, -state and -exec tests driven through deposit/place/cancel, plus 6
+  boundary scenarios; header bit 24 lists a second market as the test fixtures do): real vs port (hash + events +
+  per-unit roots) **47/47**; the same 47 through the riscv32im guest in the JS model (`js/witscen.js`) **47/47**.
+- **sail-riscv 0.16** (`xval/witsail.js`, embed build; compares instruction count, events and every unit root):
+  scenario `bnd_fee_guard_equity_clause` (2 markets, 9 units) **2 005 758 = 2 005 758** insns, 111 words equal;
+  `depth200 N=10` (236 units) **52 812 940 = 52 812 940**, 2 154 words equal, final root = host reference
+  `cca129b2…978c`, hash = real engine.
+- **Mutation test** (`scripts/wit-mut.sh`: each mutant runs `fuzz 100 300` + `scen` + `witfuzz 30 300`):
+  port mutants **10/13 killed** (was 7/13). The 4 former boundary survivors: isolated equity `<`→`<=` killed
+  (scenario: margin == equity), bucket-release rounding killed (100 USD bucket closed in thirds), taker-fee
+  guard equity clause killed (needs a 2nd market: isolated blow-through close leaves cross cash 10 020 USD but
+  cross equity 20 USD vs a 40 USD fee; bracket scenarios at equity 0 and = fee), claw from a negative
+  counterparty is **equivalent** (the mutant's negative `pay` is skipped by `if pay > 0` exactly like the
+  original's 0). Other survivors as before: mark ±10 % band (mark frozen without an oracle index) and
+  `liquidatable` (not read on the place path). Witness mutants **6/6 killed** (drop journal note on place
+  success, drop `account_mut` hook, drop cancel hook, wrong `ord:` field, one-sided collapse, keep closed `pos:`
+  leaves) — engine-only `fuzz` catches none of them; the per-unit root checks catch all.
+
+**Steps per unit** (JS model; one unit = one op; flow units only — boundary step counts are read inside
+one run when the guest bumps the unit counter, so setup and final hash cancel out). `inc` = with MNWIT1,
+`nowit` = matching only, `wit` = inc − nowit, `legacy` = current per-unit full rebuild (measured for N=10).
+R = ceil(log16 steps); operator cost = R × 3372 + 11 467 vs payout 108 000.
+STEPS_PLACEHOLDER
