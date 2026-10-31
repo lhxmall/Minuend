@@ -40,6 +40,7 @@ ${esc(body)}
  messages: [
   {if: \`{$st.call}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{$GAME}\`, amount: \`{$GF}\`}]}},
   {if: \`{$st.call}\`, app: 'data', payload: \`{$st.call}\`},
+  {if: \`{$st.rf}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{trigger.address}\`, amount: \`{$st.rf}\`}]}},
   {if: \`{$st.pay}\`, app: 'payment', payload: {asset: 'base', outputs: [{address: \`{$st.pay}\`, amount: \`{$st.amt}\`}]}},
   {app: 'state', state: \`{${esc(state)}}\`}
  ]

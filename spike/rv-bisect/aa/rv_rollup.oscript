@@ -5,11 +5,19 @@
 $GAME = 'RV_GAME_AA_ADDRESS';   // rv_game referee (mkrollup.js bakes chash160(rv_game_ref.aa))
 $GENMEM = 'GENESIS_MEM_ROOT';   // memory root of the program image before height 1 (mkrollup.js)
 $OBOND = 200000;    // operator bond per submitted height
-$CBOND = 100000;    // challenger bond per game (> operator's cost to answer one game, 13-23 txs)
+$CBOND = 120000;    // challenger bond per game (owner 2026-10-31): payout CBOND-GF-FEE = 108000 >= 2.2x the honest
+                    // operator's worst cost to answer one game at MAXSTEPS (10 rounds, ~49300 bytes incl. tps fee)
 $GF = 10000;        // forwarded to the referee per game (pays its result unit)
 $FEE = 2000;        // kept back from every payout for this AA's response-unit fees
 $WIN = 86400;       // challenge window, seconds
-$MAXSTEPS = 1099511627776;   // 2^40: a challenger must be able to recompute any root of the batch (pass 1, bug R2)
+$MAXSTEPS = 1099511627776;   // 2^40 (kept, owner 2026-10-31): a challenger must be able to recompute any root (pass 1, bug R2)
+// Overpayment refunds (2026-10-31): bytes sent above the bond go back to the sender.
+//  - submit: trigger - OBOND - FEE (the refund needs a response unit of its own; FEE pays it, as for every payout);
+//    an overpayment of at most FEE is kept.
+//  - open: trigger - CBOND in full (the refund is one more output of the response unit that pays GF to the referee).
+// The burned half of a fraudulent operator's bond (var['burned']) stays locked in this AA forever: no command pays it
+// out. Any exit (a treasury key, or a reward pool for challengers) brings back a trusted key, or lets a fraudster's own
+// puppet challenger recoup it (owner decision 2026-10-31).
 $Z32 = '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';
 $d = trigger.data;
 $now = timestamp;
@@ -38,7 +46,8 @@ else if ($d.submit) {
 	require(is_integer($h) AND $h >= 1, 'bad height');
 	require($h > $top, 'height taken');
 	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
-	require(trigger.output[[asset=base]] >= $OBOND, 'bond');
+	$paid = trigger.output[[asset=base]];
+	require($paid >= $OBOND, 'bond');
 	// pass 1, bug R1: an AA operator could bounce its payouts and freeze resolve / finalize forever
 	require(!is_aa(trigger.address), 'an AA cannot be an operator');
 	require($isR($d.s0) AND $isR($d.final) AND $isR($d.inp) AND $isR($d.fmem), 'bad root');
@@ -53,7 +62,7 @@ else if ($d.submit) {
 	require($d.s0 == sha256('0:' || $Z32 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
 	// the final root must be the hash of a halted (pc 2) or trapped (pc 1) state; its memory root seeds h+1
 	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
-	$st = {sid: trigger.unit, h: $h, rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
+	$st = {sid: trigger.unit, h: $h, rf: max($paid - $OBOND - $FEE, 0), rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
 }
 // ---- open a game against submission sid (one per challenger, in parallel)
 else if ($d.open) {
@@ -61,10 +70,11 @@ else if ($d.open) {
 	$r = split(var['s' || $sid] OTHERWISE '', ':');
 	require(length($r) == 8 AND $live($sid, $r), 'not live');
 	require($r[0] > $lf AND $now < $r[3] + $WIN, 'window closed');
-	require(trigger.output[[asset=base]] >= $CBOND, 'bond');
+	$paid = trigger.output[[asset=base]];
+	require($paid >= $CBOND, 'bond');
 	require(trigger.address != $r[1], 'self');
 	require(!is_aa(trigger.address), 'an AA cannot be a challenger');   // pass 1, bug R1
-	$st = {sid: $sid, g: $sid || ':' || trigger.address || ':open',
+	$st = {sid: $sid, rf: $paid - $CBOND, g: $sid || ':' || trigger.address || ':open',
 		call: {open: trigger.unit, s0: $r[5], sN: $r[2], n: $r[4], d: $r[1], c: trigger.address}};
 }
 // ---- finalize height h: next in order, live, window over, no open games, no fraud, chained on finalized h-1

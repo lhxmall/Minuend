@@ -16,10 +16,11 @@ const cloneSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (cons
 const rnd = () => crypto.randomBytes(32).toString('base64');
 const errMsg = e => e && String((e.formattedError || e).message || e.bounce_message || JSON.stringify(e)).slice(0, 140);
 const AAS = {
-  [ROLL]: { f: M.body + '\n' + M.state, out: (st, L) => { const o = [];
+  [ROLL]: { f: M.body + '\n' + M.state, out: (st, L, from) => { const o = [];
       if (st.call) o.push({ to: GAME, amt: +L('GF'), data: st.call });
+      if (+st.rf > 0) o.push({ to: from, amt: +st.rf }); // overpayment refund (submit: - OBOND - FEE, open: - CBOND)
       if (st.pay && +st.amt > 0) o.push({ to: st.pay, amt: +st.amt }); return o; } },
-  [GAME]: { f: M.ref.body + '\n' + M.ref.state, out: (st, L, from) => [...(st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : []), ...(+st.rf > 0 ? [{ to: from, amt: +st.rf }] : [])] }, // rf: move refund (trigger - MK)
+  [GAME]: { f: M.ref.body + '\n' + M.ref.state, out: (st, L, from) => [...(st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : []), ...(+st.rf > 0 ? [{ to: from, amt: +st.rf }] : [])] }, // rf: move refund (trigger - MK), open refund (trigger - GF), resolve refund (trigger - RK)
   [STEP]: { f: STEPF, out: () => [] },
 };
 // an AA that bounces every trigger (used as a hostile operator / challenger that refuses payouts)

@@ -14,6 +14,9 @@ $GB = 1000;         // bytes sent back with the result (a trigger needs a paymen
 // referee kept all of it, so every move cost the mover 10000 + unit fee (attack pass 2: deep games cost the honest
 // operator more than CBOND pays). Keep MK for the refund unit's fee, send the rest back on mids / pick.
 $MK = 2000;
+// overpayment refunds (2026-10-31): open refunds trigger - GF (the rollup always sends exactly GF, so it never gets a
+// refund, which would be a data-less secondary trigger to it); resolve keeps RK (one tx per game) and refunds the rest.
+$RK = 10000;
 $d = trigger.data;
 $now = timestamp;
 // a root (and a ref) is 44 base64 chars ending in '=' and has no record separator ':' / ','
@@ -26,7 +29,7 @@ if ($d.open) {
 	$gid = trigger.address || $d.open;
 	require(!var['g_' || $gid], 'game exists');
 	// game: ref:defender:challenger:lo:hi:rlo:rhi:turn:deadline
-	$st = {k: 'g_' || $gid, v: $d.open || ':' || $d.d || ':' || $d.c || ':0:' || $d.n || ':' || $d.s0 || ':' || $d.sN || ':' || ($d.n == 1 ? 's' : 'd') || ':' || ($now + $T)};
+	$st = {k: 'g_' || $gid, rf: trigger.output[[asset=base]] - $GF, v: $d.open || ':' || $d.d || ':' || $d.c || ':0:' || $d.n || ':' || $d.s0 || ':' || $d.sN || ':' || ($d.n == 1 ? 's' : 'd') || ':' || ($now + $T)};
 }
 else {
 	$gid = $d.mids OTHERWISE $d.pick OTHERWISE $d.resolve;
@@ -61,7 +64,7 @@ else {
 			: $now >= $dl ? ($turn == 'd' ? 'c' : 'd')
 			: '';
 		require($w, 'undecided');
-		$st = {k: 'g_' || $gid, v: 'done:' || $w, to: substring($gid, 0, 32), cb: {res: $g[0], w: $w}};
+		$st = {k: 'g_' || $gid, v: 'done:' || $w, to: substring($gid, 0, 32), cb: {res: $g[0], w: $w}, rf: max(trigger.output[[asset=base]] - $RK, 0)};
 	}
 }
 

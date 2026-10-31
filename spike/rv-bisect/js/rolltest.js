@@ -2,7 +2,7 @@
 // usage: node rolltest.js [filter]     -> prints PASS/FAIL lines and SUMMARY {...}; writes rolltest-results.json
 'use strict';
 const { Chain, ROLL, GAME, STEP, M, rnd, BOUNCER } = require('./chain.js'); const T = require('./rolltrace.js'); const ref = require('./ref.js'); const fs = require('fs');
-const OBOND = 200000, CBOND = 100000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
+const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const A = s => require(OCP + '/object_hash.js').getChash160(['sig', { pubkey: require('crypto').createHash('sha256').update(s).digest('base64').slice(0, 44) }]); // valid Obyte address per name
 const OP1 = A('OPONE'), OP2 = A('OPTWO'), OP3 = A('OPTHREE'), CH1 = A('CHONE'), CH2 = A('CHTWO'), CH3 = A('CHTHREE'), W = A('WATCHER');
@@ -324,6 +324,46 @@ groups.refund = async () => { const C = new Chain(); const G0 = T.genesis(); con
   const op1 = C.b(OP1); r = await S(C, OP1, GAME, MK - 1, { mids: o.gid, roots: [] }); rec('refund', 'a move below MK gets no refund (and a bad move still bounces)', 'bounce', bnc(r, /need|not your move/));
   const g = game(o, b1, lie, b1); await playAll(C, [g]); rec('refund', 'game still plays out: honest operator wins', 'd', g.winner);
   r = await S(C, W, GAME, 10000, { resolve: o.gid }); rec('refund', 'resolve of a finished game bounces', 'bounce', bnc(r, /no game/)); };
+
+// overpayment refunds (2026-10-31): submit returns trigger - OBOND - FEE, open returns trigger - CBOND, the referee's
+// direct open returns trigger - GF and resolve returns trigger - RK; payouts and the bond invariant are unchanged
+groups.overpay = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1); const RK = 10000;
+  const num = k => { const m = M.body.match(new RegExp('\\$' + k + ' = (\\d+);')); return m ? +m[1] : null; };
+  rec('overpay', 'rv_rollup constants: CBOND 120000, OBOND 200000, MAXSTEPS 2^40', [120000, 200000, 2 ** 40], [num('CBOND'), num('OBOND'), num('MAXSTEPS')]);
+  rec('overpay', 'test constants match the AA', [CBOND, OBOND, GF, FEE], [num('CBOND'), num('OBOND'), num('GF'), num('FEE')]);
+  { const C = new Chain(); const o0 = C.b(OP1), r0 = C.b(ROLL);
+    let r = await S(C, OP1, ROLL, OBOND + 50000, subData(b1, 1, 'genesis')); b1.sid = r.unit; b1.op = OP1; rec('overpay', 'submit with OBOND + 50000', 'ok', ok(r));
+    rec('overpay', 'operator net cost OBOND + FEE (refund 50000 - FEE)', OBOND + FEE, o0 - C.b(OP1)); rec('overpay', 'rollup keeps OBOND + FEE', OBOND + FEE, C.b(ROLL) - r0);
+    const b2 = T.batch(b1.mem, 2), b3 = T.batch(b2.mem, 3), b4 = T.batch(b3.mem, 4);
+    const o2 = C.b(OP2); r = await S(C, OP2, ROLL, OBOND + FEE, subData(b2, 2, b1.final)); b2.sid = r.unit; rec('overpay', 'submit with OBOND + FEE: accepted, no refund (<= FEE kept)', ['ok', OBOND + FEE], [ok(r), o2 - C.b(OP2)]);
+    const o3 = C.b(OP2); r = await S(C, OP2, ROLL, OBOND + FEE + 1, subData(b3, 3, b2.final)); b3.sid = r.unit; rec('overpay', 'submit with OBOND + FEE + 1: refund 1', ['ok', OBOND + FEE], [ok(r), o3 - C.b(OP2)]);
+    const o4 = C.b(OP3); r = await S(C, OP3, ROLL, OBOND, subData(b4, 4, b3.final)); b4.sid = r.unit; rec('overpay', 'submit with exactly OBOND: no refund', ['ok', OBOND], [ok(r), o4 - C.b(OP3)]);
+    const ob = C.b(OP1); r = await S(C, OP1, ROLL, OBOND + 70000, subData(T.batch(b4.mem, 6), 6, b4.final)); rec('overpay', 'overpaid submit that bounces (gap) costs only the bounce fee', ['bounce', 10000], [bnc(r, /gap/), ob - C.b(OP1)]);
+    const c0 = C.b(CH1), g0 = C.b(GAME); const o = await open(C, CH1, b1.sid); rec('overpay', 'open with exactly CBOND', 'ok', ok(o)); rec('overpay', 'challenger pays CBOND', CBOND, c0 - C.b(CH1));
+    const c1 = C.b(CH2), rl = C.b(ROLL); r = await S(C, CH2, ROLL, CBOND + 30000, { open: b1.sid }); const o2g = { gid: ROLL + r.unit, ref: r.unit, ch: CH2 };
+    rec('overpay', 'open with CBOND + 30000', 'ok', ok(r)); rec('overpay', 'challenger net cost CBOND (refund 30000 in full)', CBOND, c1 - C.b(CH2));
+    rec('overpay', 'referee got exactly GF per open (no refund to the rollup)', 2 * GF, C.b(GAME) - g0); rec('overpay', 'rollup keeps CBOND - GF from the overpaid open', CBOND - GF, C.b(ROLL) - rl);
+    r = await S(C, CH3, ROLL, CBOND - 1, { open: b1.sid }); rec('overpay', 'open with CBOND - 1 still bounces', 'bounce', bnc(r, /bond/));
+    const lie = T.batch(G0, 1, { k: 11, mut: T.MUT.reg }); const ga = game(o, b1, lie, b1), gb = game(o2g, b1, T.batch(G0, 1, { k: 40, mut: T.MUT.pc }), b1);
+    const op0 = C.b(OP1); await playAll(C, [ga, gb]); rec('overpay', 'both griefer games (one overpaid) -> d', ['d', 'd'], [ga.winner, gb.winner]);
+    rec('overpay', 'operator gets 2 x (CBOND - GF - FEE) = 2 x 108000', 2 * (CBOND - GF - FEE), C.b(OP1) - op0);
+    C.ts += WIN; for (const h of [1, 2, 3, 4]) await S(C, W, ROLL, 0, { finalize: h }); rec('overpay', 'h1..h4 finalize after the games', 4, C.r('lf'));
+    rec('overpay', 'rollup ends with 3 kept submit FEEs + 6 payout FEEs + 2 GB + 2 bounce fees (no bond left, nothing over-refunded)', 3 * FEE + 6 * FEE + 2 * GB + 2 * 10000, C.b(ROLL) - r0); }
+  // fraud payout with an overpaid open: CBOND - GF - FEE + OBOND/2 = 208000
+  { const C = new Chain(); const L = T.batch(G0, 1, { k: 20, mut: T.MUT.reg }); await submit(C, OP1, 1, L, 'genesis');
+    const c0 = C.b(CH1); const r = await S(C, CH1, ROLL, CBOND + 12345, { open: L.sid }); const g = game({ gid: ROLL + r.unit, ref: r.unit, ch: CH1 }, L, b1, b1); await playAll(C, [g]);
+    rec('overpay', 'overpaid open on a fraud: challenger wins', 'c', g.winner); rec('overpay', 'challenger net gain OBOND/2 - GF - FEE (= 88000; payout 208000)', OBOND / 2 - GF - FEE, C.b(CH1) - c0);
+    rec('overpay', 'burned = OBOND/2 (stays locked: no command pays it out)', OBOND / 2, C.r('burned'));
+    for (const cmd of [{ withdraw: 1 }, { burn: 1 }, { reclaim: L.sid }, { finalize: 1 }]) rec('overpay', 'nobody can take the burned half: ' + JSON.stringify(cmd).slice(0, 30), 'bounce', bnc(await S(C, OP1, ROLL, 10000, cmd), /./)); }
+  // referee direct open / resolve refunds
+  { const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const ref0 = rnd();
+    const c0 = C.b(CH1), g0 = C.b(GAME); let r = await S(C, CH1, GAME, GF + 5000, { open: ref0, s0: b1.s0, sN: ref.H('lie'), n: 1, d: OP1, c: CH1 });
+    rec('overpay', 'direct referee open with GF + 5000: refund 5000', ['ok', GF, GF], [ok(r), c0 - C.b(CH1), C.b(GAME) - g0]);
+    const o = await open(C, CH2, b1.sid); C.ts += TM + 1; // operator never moves: challenger wins by timeout
+    const w0 = C.b(W), g1 = C.b(GAME), c2 = C.b(CH2); r = await S(C, W, GAME, RK + 25000, { resolve: o.gid });
+    rec('overpay', 'resolve with RK + 25000', 'ok', ok(r)); rec('overpay', 'resolver pays only RK (refund 25000)', RK, w0 - C.b(W));
+    rec('overpay', 'referee nets RK - GB from that resolve', RK - GB, C.b(GAME) - g1); rec('overpay', 'callback still pays the winner CBOND - GF - FEE + OBOND/2', CBOND - GF - FEE + OBOND / 2, C.b(CH2) - c2);
+    const w1 = C.b(W); r = await S(C, W, GAME, RK, { resolve: CH1 + ref0 }); rec('overpay', 'resolve with exactly RK: no refund', ['ok', RK], [ok(r), w1 - C.b(W)]); } };
 
 groups.fuzz = async () => { const RUNS = +(process.env.FUZZ || 6), STEPS = +(process.env.FUZZSTEPS || 60); let seed = +(process.env.FUZZSEED || 11);
   const rnd01 = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }; const pick = a => a[Math.floor(rnd01() * a.length)];

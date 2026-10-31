@@ -1,6 +1,8 @@
 // Real devnet run (aa-testkit: genesis + witness + hub, real units, real bounces, real secondary triggers, real payments)
 // of the rollup prototype: rv_step + rv_game (referee, rv_game_ref.aa) + rv_rollup.
 // usage (on the box): AATK=/data/hark/wt-all/vendor/aa-testkit OCORE=$AATK/node_modules/ocore node rolldevnet.js
+// Every trigger sets max_aa_responses to the real length of its response chain (MAXR below); NOMAXR=1 sends the
+// triggers without it (ocore then prepays tps fee for 1 + 10 units per trigger) to measure the difference.
 'use strict';
 const path = require('path'); const fs = require('fs');
 const AATK = process.env.AATK || '/data/hark/wt-all/vendor/aa-testkit';
@@ -9,13 +11,28 @@ process.env.OCORE = process.env.OCORE || path.join(AATK, 'node_modules', 'ocore'
 const { Testkit } = require(path.join(AATK, 'main.js'));
 const { Network } = Testkit({ TESTDATA_DIR: process.env.TESTDATA || path.join(__dirname, '..', 'devnet-testdata-roll'), NETWORK_PORT: +(process.env.PORT || 16641) });
 const ref = require('./ref.js'); const T = require('./rolltrace.js'); const M = require('./mkrollup.js'); // (re)generates rv_game_ref.aa / rv_rollup.aa
-const OBOND = 200000, CBOND = 100000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400;
+const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, RK = 10000;
+// max_aa_responses per trigger = number of AAs that respond in its chain (one lower bounces 'max_aa_responses N exceeded'):
+// rollup submit / finalize / reclaim, referee mids / pick / direct open, rv_step: 1 (refunds and payouts go to plain
+// addresses); rollup open: 2 (rollup -> referee); referee resolve: 2 (referee -> rollup callback); fwd test AA: 2 (fwd -> rollup)
+const NOMAXR = !!process.env.NOMAXR;
+const cmdOf = data => ['submit', 'open', 'finalize', 'reclaim', 'mids', 'pick', 'resolve'].find(k => data && data[k] !== undefined) || (data && data.to ? 'fwd' : 'step');
+const MAXR = { submit: 1, finalize: 1, reclaim: 1, mids: 1, pick: 1, step: 1, open: 2, resolve: 2, fwd: 2 };
 const results = []; const rec = (name, expected, actual, extra) => { const pass = JSON.stringify(expected) === JSON.stringify(actual); results.push({ name, expected, actual, pass, ...(extra || {}) }); console.log(pass ? 'PASS' : 'FAIL', '|', name, '| expected', JSON.stringify(expected), '| actual', JSON.stringify(actual), extra ? JSON.stringify(extra) : ''); };
-let net; const fees = {};
+let net; const fees = {}; const units = {}; let ROLLA, GAMEA;
 const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r({ timeout: true }), ms))]);
 async function unitFee(u) { const info = await net.wallet.op1.getUnitInfo({ unit: u }); const o = info.unitObj || {}; unitFee.extra = (o.tps_fee || 0) + (o.oversize_fee || 0); return (o.headers_commission || 0) + (o.payload_commission || 0); }
+// one AA trigger (payment + data), with max_aa_responses unless NOMAXR
+let objectHash;
+async function send(wallet, to, data, amount) {
+  objectHash = objectHash || require(path.join(process.env.OCORE, 'object_hash.js'));
+  let cmd = cmdOf(data); if (cmd === 'open' && to === GAMEA) cmd = 'ropen';
+  const opts = { to_address: to, amount, messages: [{ app: 'data', payload_location: 'inline', payload_hash: objectHash.getBase64Hash(data), payload: data }] };
+  if (!NOMAXR) opts.max_aa_responses = cmd === 'ropen' ? 1 : MAXR[cmd];
+  const r = await wallet.sendMulti(opts); if (r.unit) (units[cmd] = units[cmd] || []).push(r.unit); return r;
+}
 async function trig(wallet, to, data, amount = 10000, tag) {
-  const r = await wallet.triggerAaWithData({ toAddress: to, amount, data });
+  const r = await send(wallet, to, data, amount);
   if (r.error) return { err: 'compose: ' + String(r.error).slice(0, 120) };
   await net.witnessUntilStable(r.unit);
   if (tag) { (fees[tag] = fees[tag] || []).push(await unitFee(r.unit)); (fees[tag + '+tps'] = fees[tag + '+tps'] || []).push(unitFee.extra); }
@@ -37,8 +54,9 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   net = await Network.create().with.agent({ step: path.join(__dirname, '../aa/rv_step.aa') }).with.agent({ game: path.join(__dirname, '../aa/rv_game_ref.aa') })
     .with.agent({ roll: path.join(__dirname, '../aa/rv_rollup.aa') }).with.agent({ fwd: path.join(__dirname, '../aa/fwd_test.aa') })
     .with.wallet({ op1: 1e12 }).with.wallet({ op2: 1e10 }).with.wallet({ ch1: 1e10 }).with.wallet({ ch2: 1e10 }).with.wallet({ ch3: 1e10 }).with.wallet({ w: 1e10 }).run();
-  const { op1, op2, ch1, ch2, ch3, w } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd;
-  const A = { op1: await op1.getAddress(), op2: await op2.getAddress(), ch1: await ch1.getAddress(), ch2: await ch2.getAddress(), ch3: await ch3.getAddress() };
+  const { op1, op2, ch1, ch2, ch3, w } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd; ROLLA = ROLL; GAMEA = GAME;
+  const A = { op1: await op1.getAddress(), op2: await op2.getAddress(), ch1: await ch1.getAddress(), ch2: await ch2.getAddress(), ch3: await ch3.getAddress(), w: await w.getAddress() };
+  console.log('MODE', NOMAXR ? 'no max_aa_responses' : 'max_aa_responses set', JSON.stringify({ STEP, GAME, ROLL }));
   rec('deployed rv_step == address baked into the referee', STEP, M.stepAddr); rec('deployed referee == address baked into rv_rollup', GAME, M.gameAddr); rec('deployed rollup == computed address', ROLL, M.addr);
   const vars = async aa => { const v = await op1.readAAStateVars(aa); return v.vars || v; };
   const pts = (lo, hi) => { const cnt = Math.min(16, hi - lo) - 1; return { cnt, pt: j => j == 0 ? lo : j == cnt + 1 ? hi : lo + Math.floor(j * (hi - lo) / (cnt + 1)) }; };
@@ -58,7 +76,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
   }
   const G0 = T.genesis(); const b1 = T.batch(G0, 1), x1 = T.batch(G0, 7);
   // 1. race tie: two operators submit h1 before the witness stabilizes either unit
-  { const ra = await op1.triggerAaWithData({ toAddress: ROLL, amount: OBOND, data: sub(b1, 1, 'genesis') }); const rb = await op2.triggerAaWithData({ toAddress: ROLL, amount: OBOND, data: sub(x1, 1, 'genesis') });
+  { const ra = await send(op1, ROLL, sub(b1, 1, 'genesis'), OBOND); const rb = await send(op2, ROLL, sub(x1, 1, 'genesis'), OBOND);
     await net.witnessUntilStable(ra.unit); await net.witnessUntilStable(rb.unit);
     const A1 = (await net.getAaResponseToUnit(ra.unit)).response, B1 = (await net.getAaResponseToUnit(rb.unit)).response;
     const outcome = [A1.bounced ? 'bounce' : 'ok', B1.bounced ? 'bounce' : 'ok'].sort().join('+');
@@ -179,12 +197,33 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(op1, ROLL, { reclaim: s7 }); rec('6d reclaim voided h7 after its game', 'ok', r.err || 'ok'); rec('6d h7 bond back OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
     r = await trig(op2, ROLL, { reclaim: s6 }); rec('6d fraudster reclaims old h6', 'bounce', r.err ? 'bounce' : 'ok');
     await net.timetravel({ shift: WIN + 's' }); r = await trig(w, ROLL, { finalize: 6 }); rec('6d new h6 finalizes', 'ok', r.err || 'ok'); rec('6d lf = 6', 6, (await vars(ROLL)).lf); }
+  // ===== 7. overpayment refunds (2026-10-31) on the real chain
+  { const H6 = T.batch(H5.mem, 6), H7 = T.batch(H6.mem, 7), H8 = T.batch(H7.mem, 8); // new h6 (finalized in 6d) == honest batch 6
+    let r = await trig(op1, ROLL, sub(H7, 7, H6.final), OBOND + 50000, 'submit'); rec('7 submit h7 with OBOND + 50000', 'ok', r.err || 'ok'); const s7 = r.unit;
+    rec('7 submit refund = 50000 - FEE (real output)', 50000 - FEE, await paidTo(r.response, A.op1));
+    await net.timetravel({ shift: (WIN - 1800) + 's' });
+    const o = await trig(ch1, ROLL, { open: s7 }, CBOND + 30000, 'open'); rec('7 open h7 with CBOND + 30000', 'ok', o.err || 'ok');
+    rec('7 open refund = 30000 in full (real output)', 30000, await paidTo(o.response, A.ch1)); rec('7 the same response unit pays GF to the referee', GF, await paidTo(o.response, GAME));
+    rec('7 referee received the open (no refund back to the rollup)', true, !!(await vars(GAME))['g_' + ROLL + o.unit]);
+    await net.timetravel({ shift: '1900s' }); const gid = ROLL + o.unit;
+    const s = await play(gid, H7.roots, T.batch(H6.mem, 7, { k: 11, mut: T.MUT.reg }).roots, ch1, H7, op1, 'c'); rec('7 operator answered the overpaid game, challenger to move', 'stopped', s);
+    await net.timetravel({ shift: '3601s' });
+    r = await trig(w, GAME, { resolve: gid }, RK + 25000, 'resolve'); rec('7 resolve with RK + 25000', 'ok', r.err || 'ok');
+    rec('7 resolve refund = 25000 (real output, same unit as the callback)', 25000, await paidTo(r.response, A.w)); rec('7 callback payment GB to the rollup', GB, await paidTo(r.response, ROLL));
+    const cb = await rollRes(r); rec('7 operator paid CBOND - GF - FEE = 108000', CBOND - GF - FEE, await paidTo(cb, A.op1));
+    r = await trig(w, ROLL, { finalize: 7 }); rec('7 finalize h7', 'ok', r.err || 'ok'); rec('7 finalize pays OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
+    r = await trig(op2, ROLL, sub(H8, 8, H7.final), OBOND + FEE, 'submit'); rec('7 submit h8 with OBOND + FEE (kept, no refund unit)', ['ok', 0], [r.err || 'ok', await paidTo(r.response, A.op2)]);
+    r = await trig(ch2, GAME, { open: ref.H('direct' + Date.now()), s0: H8.s0, sN: H8.final, n: 1, d: A.op2, c: A.ch2 }, GF + 5000); rec('7 direct referee open with GF + 5000 refunds 5000', ['ok', 5000], [r.err || 'ok', await paidTo(r.response, A.ch2)]); }
   // 5. accounting: the rollup holds exactly burned + kept FEEs + GB refunds + bounce fees, no bond is outstanding
   { const v = await vars(ROLL); const b = await bal(ROLL); rec('rollup balance >= burned (all bonds settled)', true, b >= (v.burned || 0), { balance: b, burned: v.burned, lf: v.lf, top: v.top }); }
   const avg = a => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
   const feeRep = Object.fromEntries(Object.entries(fees).map(([k, a]) => [k, { n: a.length, avg: avg(a), max: Math.max(...a) }]));
   console.log('FEES ' + JSON.stringify(feeRep));
+  // tps fee per trigger type, read back from the unit (paid at composition); actual settled values: tpscmp.js on the sqlite
+  const tps = {}; for (const [k, us] of Object.entries(units)) { const a = []; for (const u of us) { const i = await op1.getUnitInfo({ unit: u }); const o = i.unitObj || {}; a.push({ u, tps: o.tps_fee || 0, mar: o.max_aa_responses }); } tps[k] = a; }
+  const tpsRep = Object.fromEntries(Object.entries(tps).map(([k, a]) => { const v = a.map(x => x.tps).sort((x, y) => x - y); return [k, { n: v.length, avg: avg(v), median: v[v.length >> 1], max: v[v.length - 1], max_aa_responses: [...new Set(a.map(x => x.mar))] }]; }));
+  console.log('TPS ' + JSON.stringify(tpsRep));
   const s = { total: results.length, pass: results.filter(r => r.pass).length, fail: results.filter(r => !r.pass).length };
-  console.log('SUMMARY ' + JSON.stringify(s)); fs.writeFileSync(process.env.OUT || 'rolldevnet-results.json', JSON.stringify({ results, fees: feeRep }, null, 1));
+  console.log('SUMMARY ' + JSON.stringify(s)); fs.writeFileSync(process.env.OUT || 'rolldevnet-results.json', JSON.stringify({ mode: NOMAXR ? 'nomaxr' : 'maxr', results, fees: feeRep, tps: tpsRep, units }, null, 1));
   await net.stop(); process.exit(0);
 })().catch(async e => { console.log('ERR', e.stack || e); try { await net.stop(); } catch (x) {} process.exit(1); });

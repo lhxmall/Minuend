@@ -2,7 +2,7 @@
 
 > 状态：**spike 原型**，没有审计，没有接进正式的 Minuend rollup。
 > 分支：`spike/rv-bisect`。相关文件都在 `spike/rv-bisect/` 下面。
-> 写于 2026-10-31。
+> 写于 2026-10-31；同日更新：CBOND = 120 000、多付退款、烧毁部分永久锁定、客户端 `max_aa_responses`（第 4、5b、6.5、8 节）。
 
 ---
 
@@ -22,15 +22,15 @@ AA（Autonomous Agent）是 Obyte 上的智能合约。这个原型用了三个�
 | AA | 文件 | 作用 | 复杂度 / ops（真实 ocore 校验） |
 |---|---|---|---|
 | `rv_step` | `aa/rv_step.oscript` → `aa/rv_step.aa` | 执行**一条** rv32im 指令，把结果记成 `s_<前状态根> = 后状态根`。谁都能调，结果是确定的，相当于一个「纯函数缓存」 | 10 / **1850**（上限 100 / 2000） |
-| referee（裁判） | `aa/rv_game_ref.oscript` → `js/mkref.js` 生成 `aa/rv_game_ref.aa` | 跑二分博弈本身：mids / pick / resolve，管超时。**不管钱**（只收手续费），结果回调给开局的 AA | 10 / **840** |
-| `rv_rollup` | `aa/rv_rollup.oscript` → `js/mkrollup.js` 生成 `aa/rv_rollup.aa` | 管高度、保证金、开局、判欺诈、作废、最终确认、取回保证金。**所有钱都在这里** | 42 / **729** |
+| referee（裁判） | `aa/rv_game_ref.oscript` → `js/mkref.js` 生成 `aa/rv_game_ref.aa` | 跑二分博弈本身：mids / pick / resolve，管超时。**不管钱**（只收手续费），结果回调给开局的 AA | 10 / **848** |
+| `rv_rollup` | `aa/rv_rollup.oscript` → `js/mkrollup.js` 生成 `aa/rv_rollup.aa` | 管高度、保证金、开局、判欺诈、作废、最终确认、取回保证金。**所有钱都在这里** | 42 / **750** |
 
 为什么把钱和博弈分开？因为 referee 只认「开局的那个 AA」的回调。别人自己去 referee 开的局，结果碰不到 rollup 的钱。
 
 地址（devnet 部署出来的，都是由代码内容算出的 chash160）：
 - rv_step：`7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA`
-- referee：`Z5GRE6KBBDMGYFSVHLSV5RBQVUOGI4CM`
-- rollup：`LPXCU745RPWYWG6F3XFGVKE6Z6PG7FQ5`
+- referee：`W7OQFFFU6446637YBHIA7B74L6X4ZO5B`（加了 open / resolve 多付退款后的新地址；旧的是 `Z5GRE6KB…`）
+- rollup：`W4BAKM5O2QOOBYTUY3FPKAICE5SY35BP`（CBOND 120 000 + 多付退款 + 新 referee 地址；旧的是 `LPXCU745…`）
 
 ---
 
@@ -63,7 +63,7 @@ operator 提交高度 h：
 
 规则（都在 `rv_rollup.oscript` 的 submit 分支里）：
 - **只能提交下一个高度**：`h == top + 1`（`top` 是当前最高的有效高度）。所以每个高度同一时间只有一个有效提交——谁先提交谁占位，这就是「赛跑」（race）。
-- 押 **OBOND = 200 000 bytes**。
+- 押 **OBOND = 200 000 bytes**。多付的部分退回：退 `付款 − OBOND − FEE`（退款要单独发一笔响应交易，FEE 付这笔交易费；多付不超过 FEE = 2000 时不退）。
 - operator 不能是 AA（防止它故意让给自己的付款 bounce，把系统卡死）。
 - `steps` 在 1 到 **2^40** 之间（`MAXSTEPS`）。
 - `prev` 必须等于上一高度提交的 `final` 根（h=1 时是 `'genesis'`）。高度一个接一个地链起来。
@@ -84,7 +84,7 @@ s0 = sha256( "0" ":" 32个0 ":" 上一高度的 fmem（h=1 用 GENMEM） ":" 本
 
 ### 3.3 开局（open）：每个挑战者一局，可以同时开很多局
 
-挑战者发：`{ "open": <submit 的 unit id> }`，押 **CBOND = 100 000 bytes**。
+挑战者发：`{ "open": <submit 的 unit id> }`，押 **CBOND = 120 000 bytes**。多付的部分**全额**退回（`付款 − CBOND`），因为这笔退款只是给 referee 转 GF 的那笔响应交易里多一个输出，不另花交易费。
 
 条件：这个提交仍然有效（是这个高度当前的赢家，且没被作废）、高度还没最终确认、还在 24 小时窗口内、挑战者不是 operator 本人、也不是 AA。
 
@@ -132,10 +132,11 @@ referee 里每局记录：`ref:防守方:挑战方:lo:hi:rlo:rhi:轮到谁:截�
 - 都不是：bounce `'undecided'`。
 
 referee 把结果和 **GB = 1000 bytes** 一起回调给 rollup：`{ res: 局 ref, w: 'd' 或 'c' }`。
+resolve 交易本身 referee 留 **RK = 10 000**，多付的部分在同一笔响应交易里退给发 resolve 的人。
 
 rollup 收到回调后：
-- **operator 赢**：operator 得到 `CBOND − GF − FEE = 88 000`。
-- **挑战者赢**：说明这个提交是欺诈，记 `f<sid> = 1`。挑战者拿回 `88 000`；如果他是**第一个**证明欺诈的，再加 `OBOND / 2 = 100 000`，一共 **188 000**。OBOND 的另一半（100 000）记到 `burned`，留在 AA 里。
+- **operator 赢**：operator 得到 `CBOND − GF − FEE = 108 000`。
+- **挑战者赢**：说明这个提交是欺诈，记 `f<sid> = 1`。挑战者拿回 `108 000`；如果他是**第一个**证明欺诈的，再加 `OBOND / 2 = 100 000`，一共 **208 000**。OBOND 的另一半（100 000）记到 `burned`，**永久锁在 AA 里，没有任何命令能取出**（真正的烧毁，见 5c）。
 - 不管谁赢，`n<sid>` 减 1。
 
 ### 3.7 欺诈：作废 h..最新，重新赛跑
@@ -145,7 +146,7 @@ rollup 收到回调后：
 赛跑从 h 重新开始：任何人（包括诚实的 operator）可以重新提交高度 h。
 
 注意：
-- 同一个欺诈提交上可能有好几局。只有第一个赢的挑战者拿 OBOND/2；后面赢的只拿回自己的 88 000，`burned` 不再增加，`top` 也不会再变（devnet 6d 测过）。
+- 同一个欺诈提交上可能有好几局。只有第一个赢的挑战者拿 OBOND/2；后面赢的只拿回自己的 108 000，`burned` 不再增加，`top` 也不会再变（devnet 6d 测过）。
 - 被作废的高度上可能还有没打完的局，它们照常打完、照常付钱，但不会再影响 `top`。
 
 ### 3.8 finalize：24 小时后且没有进行中的局
@@ -168,15 +169,16 @@ rollup 收到回调后：
 | 名字 | 值 | 在哪 | 意思 |
 |---|---|---|---|
 | OBOND | 200 000 | rollup | operator 每个高度的保证金 |
-| CBOND | 100 000 | rollup | 挑战者每局的保证金。**建议改成 120 000，或者保持 100 000 但把 MAXSTEPS 降到 2^32**（见第 6 节） |
+| CBOND | **120 000** | rollup | 挑战者每局的保证金（2026-10-31 定）。operator 赢一局拿 108 000，在 MAXSTEPS 时也有约 2.2 倍余量（见 6.2） |
 | GF | 10 000 | rollup / referee | 每局转给 referee，付它的回调交易 |
 | FEE | 2 000 | rollup | 每次付款扣下，付 rollup 自己的响应交易费 |
 | GB | 1 000 | referee | referee 回调时附带的 bytes（触发一个 AA 必须带付款），留在 rollup |
 | MK | 2 000 | referee | 每次 mids / pick，referee 只留 2000，其余退回给走棋的人（见第 5 节） |
+| RK | 10 000 | referee | resolve 时 referee 留下的部分，多付的退回（见 5b） |
 | T | 3 600 秒 | referee | 每一步的超时 |
 | WIN | 86 400 秒 | rollup | 挑战窗口（24 小时） |
 | K | 16 | referee | 二分的叉数 |
-| MAXSTEPS | 2^40 | rollup | 一个高度最多多少步 |
+| MAXSTEPS | 2^40 | rollup | 一个高度最多多少步（2026-10-31 定：保持 2^40，不降到 2^32） |
 
 ---
 
@@ -188,6 +190,31 @@ ocore 要求每个直接触发 AA 的交易至少带 `bounce_fees`（最少 10 0
 
 修法：referee 只留 MK = 2000，`rf = 触发金额 − 2000` 退回给走棋的人。resolve 仍然留 10 000（每局只有一次）。
 devnet 修完后：operator 每次 mids 净花 −3372（原来 −11 372），referee 每步净赚约 +1398。
+
+## 5b. 多付退款（2026-10-31）
+
+以前 submit 付超过 OBOND、open 付超过 CBOND，多出来的就留在 AA 里了。现在都退回给发送者：
+
+| 交易 | 留下 | 退回 | 为什么这样分 |
+|---|---|---|---|
+| rollup submit | OBOND（+ 最多 FEE） | `付款 − OBOND − FEE`（> 0 时） | submit 本来没有响应交易，退款要单独一笔，FEE 付它的交易费（和 rollup 所有付款都扣 FEE 同一个规则）；多付 ≤ 2000 不值得退 |
+| rollup open | CBOND | `付款 − CBOND` 全额 | 退款只是「给 referee 转 GF」那笔响应交易里多一个输出 |
+| referee open（别人直接开局） | GF | `付款 − GF` 全额 | rollup 总是正好付 GF，所以 rollup 永远收不到退款（给 rollup 一笔不带 data 的付款会触发它、bounce 掉整条链） |
+| referee mids / pick | MK = 2000 | `付款 − MK` | 第 5 节 |
+| referee resolve | RK = 10 000 | `付款 − RK` | 和回调同一笔响应交易 |
+
+被 bounce 的交易（比如付了 OBOND + 70 000 但高度不对）照 ocore 规则退回，只扣 bounce fee 10 000。
+finalize / reclaim 的触发交易（至少 10 000，ocore 的 bounce_fees 下限）仍然全部留在 rollup，没做退款（见第 8 节）。
+
+## 5c. 烧掉的那一半永久锁定（2026-10-31 决定）
+
+欺诈时 operator 保证金的一半（OBOND/2 = 100 000）记进 `burned`，**永远留在 rollup AA 里，没有任何命令能把它取出来**——没有 treasury，也没有奖励池。
+这就是真正的「烧毁」：钱还在 AA 地址上，但没有任何一条代码路径能花它。（sim 里测了 `withdraw` / `burn` / 对欺诈 sid 的 `reclaim` / `finalize` 都 bounce。）
+
+为什么不给它一个出口：
+- **交给 treasury**：就要有一个能提钱的 key，等于重新引入一个受信任的人（这个 key 被盗或作恶，整个设计的「无需信任」就没了）。
+- **放进奖励池分给挑战者**：骗子可以用自己的马甲当挑战者，把这一半也赢回来。现在骗子最多只能用马甲拿回另一半（第一个赢家的 OBOND/2），被烧的这一半他永远拿不回来，所以每次欺诈至少亏 100 000。
+任何出口都会二选一地带回「受信任的 key」或「骗子马甲回本的路」，所以不留出口。
 
 ---
 
@@ -210,22 +237,22 @@ devnet 修完后：operator 每次 mids 净花 −3372（原来 −11 372），r
 
 operator 要走 R 次 mids（每次：留给 referee 的 2000 + 交易费 1556 + tps 224），
 如果挑战者在某一步不动了，operator 再发一次 resolve（10 000 + 894 + 573）领钱。
-能拿到：`CBOND − GF − FEE = 88 000`。
+能拿到：`CBOND − GF − FEE`，CBOND = 100 000 时 88 000，**现在 CBOND = 120 000，是 108 000**。
 
-| 步数 | 轮数 R | 修复前成本 | 修复前余量 | 修复后成本 | 修复后余量 |
-|---|---|---|---|---|---|
-| 62 | 2 | 35 027 | +52 973 | 19 027 | +68 973 |
-| 1e6 | 5 | 70 367 | +17 633 | 30 367 | +57 633 |
-| 2^32 | 8 | 105 707 | **−17 707** | 41 707 | +46 293 |
-| 2^40 | 10 | 129 267 | **−41 267** | 49 267 | +38 733 |
+| 步数 | 轮数 R | 修复前成本 | 修复前余量（CBOND 100k） | 修复后成本 | 余量（CBOND 100k） | 余量（**CBOND 120k**） |
+|---|---|---|---|---|---|---|
+| 62 | 2 | 35 027 | +52 973 | 19 027 | +68 973 | **+88 973**（5.7 倍） |
+| 1e6 | 5 | 70 367 | +17 633 | 30 367 | +57 633 | **+77 633**（3.6 倍） |
+| 2^32 | 8 | 105 707 | **−17 707** | 41 707 | +46 293 | **+66 293**（2.6 倍） |
+| 2^40 | 10 | 129 267 | **−41 267** | 49 267 | +38 733 | **+58 733**（2.2 倍） |
 
-修复后，100 000 的 CBOND 在 2^40 时也有 1.79 倍余量。
-**建议**：CBOND 改成 120 000（赢了拿 108 000，2^40 时 ≥ 2.2 倍），给 tps fee 涨价留余地；或者 CBOND 不变、MAXSTEPS 降到 2^32（2.1 倍）。
+**决定（2026-10-31）**：CBOND = 120 000，MAXSTEPS 保持 2^40。给 tps fee 涨价留余地。
+（设了 `max_aa_responses` 之后每笔触发交易多 24 bytes 的头部，10 轮多约 240，不影响结论。）
 
 ### 6.3 诚实挑战者的成本
 
 2^40 步时大约：10 × (pick 900 + tps 224 + 2000) + 单步（10 000 + 3326 + 573）+ resolve 11 467 ≈ **56 600**。
-赢了第一个能拿 188 000（其中 100 000 来自 operator 的保证金）。
+赢了第一个能拿 208 000（其中 100 000 来自 operator 的保证金），净赚 OBOND/2 − GF − FEE = 88 000 减去上面的成本。
 
 ### 6.4 那个 1 205 193 bytes 的 tps fee 是怎么回事
 
@@ -251,16 +278,47 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 **对主网的含义（要记住的真东西）：**
 1. 主网上交易的 last ball 一般比自己早得多，elapsed 不会是 0，所以不会出现这种 120 万的预付。
 2. 但 tps fee 是**指数**增长的，而且一笔 AA 触发默认按 11 个单位收。主网初始参数是 tps_interval = 1（比 devnet 的 2 更陡；参数可以被投票改，当前值没核对）。
-   举例（只是按公式算的示意值）：网络 tps = 1 时每笔触发约 1 900，tps = 3 时约 21 000。一局 10 轮如果碰上 tps = 3，operator 的成本会超过 88 000。
-3. 所以：**客户端（operator / 挑战者的程序）应该给每笔触发设 `max_aa_responses` = 实际的响应链长度**。这样 count_units 从 11 降到 2～3，tps fee 降 4～5 倍。
-   设小了会直接 bounce（ocore `aa_composer.js`：`max_aa_responses exceeded`），所以要按实际链长设：
-   - mids / pick / submit / finalize / reclaim：1（只有一个 AA 响应；退款、付款都是给普通地址）
-   - open：2（rollup → referee）
-   - resolve：2（referee → rollup 回调）
-   这是客户端设置，不用改 AA。原型里还没实现，也没在 devnet 上测。
-4. 这也是建议 CBOND 留到 120 000 的理由之一。
+   举例（只是按公式算的示意值）：网络 tps = 1 时每笔触发约 1 900，tps = 3 时约 21 000。一局 10 轮如果碰上 tps = 3，operator 的预付会超过 108 000（这是不设 max_aa_responses、按 11 个单位预付算的；最终结算按真实响应数 1 + 1 = 2 个单位，约低 5 倍，见 6.5）。
+3. 客户端（operator / 挑战者的程序）给每笔触发设 `max_aa_responses` = 实际的响应链长度，**预付**的 count_units 从 11 降到 2～3。
+   **但实测（6.5）最终结算的 tps fee 不变**：ocore 结算时按 `1 + count_aa_responses`（真实响应数）算，跟 max_aa_responses 无关
+   （`storage.updateTpsFees`）。所以它省的是预付款（多付的变成只能抵以后 tps fee 的余额），不是最终费用。之前写的「tps fee 降 4～5 倍」不对，已改正。
+4. CBOND 120 000 的余量仍然是为 tps fee 涨价留的。
 
 诊断脚本：`js/tpsdiag.js`（读一个 devnet 节点的 sqlite 副本，列出大额 tps fee、elapsed 分布和每个地址的余额）。
+
+### 6.5 `max_aa_responses`：已在测试客户端实现，devnet 实测（2026-10-31）
+
+`js/rolldevnet.js` 现在每笔触发都设 `max_aa_responses`（用 headless wallet 的 `sendMulti`，`NOMAXR=1` 关掉做对照）：
+
+| 触发 | max_aa_responses | 实际响应数（hub sqlite 的 `count_aa_responses`） |
+|---|---|---|
+| rollup submit / finalize / reclaim | 1 | 1（19 / 12 / 7 笔全部） |
+| referee mids / pick | 1 | 1（17 / 15） |
+| rv_step（单步 memo） | 1 | 1（6） |
+| referee 直接 open | 1 | 1 |
+| rollup open | 2 | 2（rollup → referee）；2 笔故意 bounce 的是 1 |
+| referee resolve | 2 | 2（referee → rollup 回调）；1 笔故意 bounce 的是 1 |
+
+没有一笔超过上限，没有因为 `max_aa_responses exceeded` bounce；119 项检查全过。
+
+同一套测试跑两次（run 6 设了，run 8 不设），101 笔触发交易：
+
+| | 设 max_aa_responses（run 6） | 不设（run 8） |
+|---|---|---|
+| 预付 tps fee 合计 | **48 545** | **7 255 120** |
+| 单笔预付最大 | 5 730 | 1 205 193（每个钱包的第一笔，见 6.4） |
+| 单笔预付中位数 | 224 | 224 |
+| **最终结算 tps fee 合计** | **25 328** | **25 306** |
+| 结算：1 个响应的触发 / 2 个响应的触发 | 224 / 573 | 224 / 573 |
+| 每笔交易大小 | +24 bytes（头部多一个字段） | — |
+
+结论：
+- **最终 tps 费用一样**（差 22 bytes 是时间抖动）。设 max_aa_responses 只是把预付从「按 11 个单位」降到「按 2～3 个单位」，devnet 上把预付合计降了约 150 倍（主要是首笔 120 万的预付没了）。
+  多预付的钱不会丢，但只能抵这个地址以后的 tps fee，不能取出——对只发几笔就不用的挑战者地址，这部分基本等于白花。所以仍然建议设。
+- **代价**：预付少了，安全余量也少了。见证人选父单元时会跳过「每单位预付 < 3 × 当前网络 tps fee」的单元（`parent_composer.filterParentsByTpsFeeAndReplace`，`min_parentable_tps_fee_multiplier` 默认 3）。
+  run 6 的竞赛测试里两笔同时发的 submit 每单位只预付 1120，见证人那边当前费已经涨到 4422 / 7311 的门槛，这两笔**被跳过了 253 秒**才被收进来（之后没有别的交易被跳过）。不设 max_aa_responses 时自己算进去的 11 个单位把本地 tps 撑高，预付高出很多，不会碰到这个问题。
+  主网上 tps 低、变化慢，一般不会这样；但 operator / 挑战者程序要做好「交易一时不稳定」的处理，挑战窗口和每步 1 小时的截止时间要留出余量，不能卡着最后几分钟发。
+- 对照数据：`js/tpscmp.js`（读节点 sqlite 副本 + rolldevnet 的结果 json，按触发类型列预付 / 结算 / 响应数）。
 
 ---
 
@@ -268,19 +326,19 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 
 | 测试 | 结果 | 说明 |
 |---|---|---|
-| `js/rolltest.js`（真实 ocore 求值器模拟） | **176 / 176** | 含 'refund' 组 7 个 |
-| `js/rolldevnet.js`（aa-testkit devnet，真实交易、bounce、付款） | **104 / 104** | 第 6 节新增：operator 超时、挑战者超时、同一高度两局、欺诈作废 + 迟到回调 + reclaim |
+| `js/rolltest.js`（真实 ocore 求值器模拟） | **209 / 209** | 含 'refund' 组 7 个、新的 'overpay' 组 33 个（多付退款、常量、烧毁部分取不出） |
+| `js/rolldevnet.js`（aa-testkit devnet，真实交易、bounce、付款） | **119 / 119**（设 max_aa_responses 和不设各跑一次都全过） | 第 6 节：operator 超时、挑战者超时、同一高度两局、欺诈作废 + 迟到回调 + reclaim；第 7 节（新）：submit / open / resolve / referee 直接 open 多付退款的真实输出 |
 | 官方 riscv-tests（rv32ui 42 + rv32um 8，每一步都用链上 rv_step 复核） | **48 / 50** | 没过的 `ma_data`（非对齐访存）、`fence_i` 是故意不支持，会 TRAP |
 | 更早的 rv_game 对抗测试 | 300 / 300 + 300 局随机对手 + devnet 27/27 | 见 `README.md` |
 
-日志在机器 `/data/hark/logs/rv/`：`rolltest-r3.log`、`rolldevnet5.log`（+ `.json`）。
+日志在机器 `/data/hark/logs/rv/`：`rolltest-r4.log`、`rolldevnet6.log`（设 max_aa_responses）、`rolldevnet8.log`（不设）（+ `.json`）、`tpscmp6.txt` / `tpscmp8.txt`。
 
 ---
 
 ## 8. 已知的缺口（诚实列出）
 
-1. **多付的钱不退**：submit 付超过 OBOND、open 付超过 CBOND，多出来的留在 AA 里。
-2. **烧掉的钱取不出来**：`burned`（每次欺诈 OBOND/2）留在 AA 里，没有 treasury，也没真正销毁。
+1. ~~多付的钱不退~~ 已修（5b）。剩下：finalize / reclaim 触发交易里的 10 000（bounce_fees 下限）仍全部留在 rollup；submit 多付 ≤ FEE 不退。
+2. **烧掉的钱取不出来**：这是**有意的**（5c）：`burned` 永久锁定，不设 treasury 或奖励池。
 3. **反复作废的代价只有 OBOND/2**：骗子可以用自己的马甲当「第一个挑战者」拿回一半保证金。所以每作废一次整条链（h..最新），骗子只亏 100 000 + 手续费。被连带作废的诚实 operator 要 reclaim 再重新提交，浪费时间。
 4. **数据可用性（DA）没解决**：AA 读不到批次数据本身。挑战者拿不到输入数据就没法算根。「按块揭示」的 DA 挑战还没写。
 5. **单批上限 2^40 步**（MAXSTEPS）。
@@ -288,7 +346,7 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
 8. **没和 sail-riscv（或其他独立实现）对拍**。参照只有自己的 JS 参考实现 + 官方 riscv-tests + 真实编译出的程序。
 9. **引擎还没移植到 no_std**：真正的 Minuend 执行引擎还不能编译成 riscv32im guest，所以现在测的是测试程序，不是真实撮合。
-10. tps fee：客户端还没设 `max_aa_responses`（见 6.4）；主网参数没核对。
+10. tps fee：测试客户端已设 `max_aa_responses`（6.5），只降预付、不降最终费用，并且预付少了交易可能暂时不被选作父单元；主网 tps 参数没核对。
 
 ---
 
@@ -301,12 +359,14 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 - `js/rolltrace.js` —— 测试程序和它的诚实执行轨迹
 - `js/rolltest.js` —— 求值器测试；`js/rolldevnet.js` —— devnet 测试
 - `js/tpsdiag.js` —— tps fee 诊断
+- `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
 
 怎么跑（在机器上）：
 
 ```sh
 cd /data/hark/spike-rv/roll/js
 OCORE=/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore node rolltest.js
-AATK=/data/hark/wt-all/vendor/aa-testkit OCORE=$AATK/node_modules/ocore TESTDATA=<新目录> PORT=<空闲端口> OUT=<结果.json> node rolldevnet.js
+AATK=/data/hark/wt-all/vendor/aa-testkit OCORE=$AATK/node_modules/ocore TESTDATA=<新目录> PORT=<空闲端口> OUT=<结果.json> node rolldevnet.js   # 加 NOMAXR=1 不设 max_aa_responses
+NODE_PATH=$AATK/node_modules node tpscmp.js <节点 byteball.sqlite> <结果.json>
 node tpsdiag.js <devnet 节点 byteball.sqlite 的副本>
 ```
