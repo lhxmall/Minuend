@@ -80,3 +80,54 @@ mut 23 [src/engine.rs: !(pre >= 0 && post < 0)] fuzz 100/100 scen 45/47 witfuzz 
 mut 24 [src/engine.rs: ] fuzz 100/100 scen 2/47 witfuzz 0/30 advfuzz 0/30 selftest {"selftest_fail":[]} proofs ok depth8 0/5 segfuzz 0/30 -> KILLED
 mut 25 [src/state.rs: ] fuzz 100/100 scen 46/47 witfuzz 26/30 advfuzz 16/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 26/30 -> KILLED
 mut 26 [src/engine.rs: ] fuzz 100/100 scen 43/47 witfuzz 0/30 advfuzz 1/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 0/30 -> KILLED
+mut 27 [src/wit.rs: if o.isolated { 1 } else { 0 }, o.margin_left / 2);] fuzz 100/100 scen 39/47 witfuzz 25/30 advfuzz 12/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 25/30 -> KILLED
+mut 28 [src/wit.rs:                     [R::L(x), R::E] => {] fuzz 100/100 scen 33/47 witfuzz 0/30 advfuzz 0/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 0/30 -> KILLED
+mut 29 [src/wit.rs:                     }\n                    if !cur.is_empty() {] fuzz 100/100 scen 33/47 witfuzz 29/30 advfuzz 17/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 29/30 -> KILLED
+mut 30 [src/lib.rs:     } else if rd(2) > MAX_UNITS + 1 {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":["ops_over_limit"]} proofs ok depth8 5/5 segfuzz 30/30 -> KILLED
+mut 31 [src/lib.rs:     } else if rd(1) > MAX_ACCOUNTS + 1 {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":["acc_over_limit"]} proofs ok depth8 5/5 segfuzz 30/30 -> KILLED
+mut 32 [src/lib.rs: accts.get(a as usize).copied();] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":["insurance_author"]} proofs ok depth8 5/5 segfuzz 30/30 -> KILLED
+mut 33 [ed:src/smt_ref.rs:             if (0..sib.len())] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs BAD depth8 5/5 segfuzz 30/30 -> KILLED
+mut 34 [ed:src/smt_ref.rs:         Term::Empty => return true,] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs BAD depth8 5/5 segfuzz 30/30 -> KILLED
+mut 35 [ed:src/smt_ref.rs:             if k2 == *k {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 -> no
+mut 36 [src/book.rs:         Some(o)] fuzz /100 scen /47 witfuzz /30 advfuzz /30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz /30 -> KILLED
+mut 37 [src/book.rs: ] fuzz /100 scen /47 witfuzz /30 advfuzz /30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz /30 -> KILLED
+mut 38 [src/book.rs:             for (a, id) in popped.into_iter() {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 -> no
+warning: unused variable: `pushed`
+   --> /data/hark/spike-rv/loop3/mut/guest-engine/src/book.rs:372:61
+    |
+372 |             let LevelUndo { is_bid, price, existed, popped, pushed, qty } = u;
+    |                                                             ^^^^^^ help: try ignoring the field: `pushed: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `pushed`
+   --> /data/hark/spike-rv/loop3/mut/guest-engine/src/book.rs:372:61
+    |
+372 |             let LevelUndo { is_bid, price, existed, popped, pushed, qty } = u;
+    |                                                             ^^^^^^ help: try ignoring the field: `pushed: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+mut 39 [src/book.rs:             for _ in 0..0 {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 -> no
+mut 40 [src/book.rs:                     let x = self.lvl_pop_front(Side::Ask, price);\n   ] fuzz /100 scen exec_two_crossing_orders_fill units 4 applied 4 rejected 0 [ok0 ok0 ok0 ok1] fills 1 engine_match true roots_match true/47 witfuzz /30 advfuzz ADVMISMATCH seed 1 engine false roots false first_ev Some(333) first_root Some(272)/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz /30 -> KILLED
+mut 41 [src/lib.rs: .map(|d| d < wit::MAX_WIT_DEPTH)] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 0/5 segfuzz 30/30 -> KILLED
+warning: unused variable: `has_pos`
+   --> /data/hark/spike-rv/loop3/mut/guest-engine/src/lib.rs:138:17
+    |
+138 |             let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_pos`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `has_pos`
+   --> /data/hark/spike-rv/loop3/mut/guest-engine/src/lib.rs:138:17
+    |
+138 |             let has_pos = s.accounts.get(&author).map(|a| a.positions.contains_key(&m)).unwrap_or(false);
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_pos`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+mut 42 [src/lib.rs: ] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 0/5 segfuzz 30/30 -> KILLED
+mut 43 [src/lib.rs:         BatchOp::Deposit { .. } => true,] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 0/5 segfuzz 30/30 -> KILLED
+mut 44 [src/wit.rs:                     return Some(c);] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":["{"max_wit_depth":64,"depthsel_fail":["depth_at_limit", "depth_over_limit", "depth_bit0", "deep_split"]}"]} proofs ok depth8 0/5 segfuzz 30/30 -> KILLED
+DONE

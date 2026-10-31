@@ -580,17 +580,38 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 
 **静态成本**（ocore 0.4.8，上限 100 / 2 000）：rv_step 10 / 1 850，rv_game_ref 10 / 848，rv_seg_ref 18 / 1 443，rv_rollup 44 / 829，rv_witbind 15 / 1 406，rv_witproof 69 / 1 604。
 
+### 7.7 攻击→修复 第 4 轮（loop round 4，2026-10-31）：强平/预言机移植、状态导出导入、升级路径
+
+详细报告：`findings/rv-loop-4.md`（C 1 · H 3 · M 6 · L 3 · I 5）。
+
+**① 移植。** 提现、强平（订单簿 IOC + ADL + 资金费率市场的簿外平仓 + 剩余亏空按比例摊给盈利对手 + keeper 奖励）、报价（中位数、±10 %、指数带、TWAP、资金转移）、外部价格、资金锚定、`apply_fill_pair` 里资金费率市场的标记价逻辑都搬进了 guest。批次新增 6–10 号操作（10 = `SetHeight`，见 ④），头部夹具位 25（资金费率市场 3）/ 26（账户 1..3 是有保证金的预言机）。`engine-diff liqfuzz` 和真实引擎逐 unit 对拍（含强平、ADL、簿外 ADL、提现成功/拒绝、报价、外部价格、换高度）。没移植：预言机质押/解押/罚没、治理（上新市场、改参数）、commit-reveal（R4-M3）。
+
+**② 账户表加类型护栏（R3-O1 根治）。** `ChainState.accounts` 换成 `Accounts`：只能读（没有 DerefMut），要改只能拿 `AcctMut` 护栏，护栏析构时自动更新持仓总量、每个市场的持仓人索引和 MNWIT1 脏集合。持仓人索引顺便把资金转移、ADL 选对手、资金日志里「扫一遍所有账户」换成了只看这个市场的持仓人。宿主测试每个 unit 后全量重算比一次（第一次跑就抓到一个 insert 先加后删的顺序 bug）。上一轮存活的变异体「OI = 0」这轮被 liqfuzz 杀掉。
+
+**③ 会话导出 / 导入 + 升级路径（R3-H2 的答案）。**
+- 导出运行（输入第 0 个字 = EXPORT_MAGIC）：把整个会话按规范格式流式哈希，摘要写在 OUT[0x1FFD8..8]，字数在 [0x1FFD7]，种类 1 在 [0x1FFD6]；导入运行（SNAP_MAGIC）：校验、解码、重建树和索引，种类 2。
+- **R4-S1（C）**：第一版允许「没有会话的镜像」导入任意合法快照——高度 1 的创世镜像、或者 trap 后的死镜像都算。指令博弈只证明 guest 执行正确，而 guest 的程序确实是「导入这个快照」，所以 operator 可以凭空造一个全是自己余额的状态，没人能赢。修法：只有**升级镜像**能导入，它在编译时带上要导入的那次导出的摘要和字数（`MNPILOT_IMPORT_DIGEST`，进了镜像就进了内存根，也就是治理选的 GENMEM）；先哈希、对上了才解码；普通镜像一律 ST_IMPORT_LOCKED；死镜像不能原地复活。
+- **R4-S2（H）**：升级镜像如果第一次运行的是普通批次，会从创世开始一个新会话 = 所有余额清零。修法：升级镜像导入之前不执行任何 unit（ST_NEED_IMPORT）。
+- **rv_rollup（R4-M1）**：治理地址 `$GOV` 可以在 lf < h ≤ top + 1 安排升级 `U<h>` = 新镜像的内存根（≥ h 的未终结高度作废，保证金可取回）；高度 h 的 s0 从 U<h> 开始。任何人可以用 `xbind` 拿 9 条内存证明把某次提交的 OUT 种类字和摘要字绑定到链上；升级高度只有在「h−1 是导出、h 是导入、摘要相等」都证明了之后才能终结。所以导入的一定是已终结的 h−1 的状态，和治理选的镜像里写了什么无关。rv_rollup 静态成本 63 / 1 449。
+- 代价：死镜像只能从它最后一次**导出**恢复，导出之后到死亡之间的高度要重放（R4-M5）；治理是受信任角色。
+
+**④ 引擎高度（R4-H2，H）。** `SetHeight` 以前只是测试夹具（任意不小于当前的高度），`prod` 里根本不认，所以生产引擎的高度永远是 0：提现记录永不清理，每个账户 64 笔上限一满就再也提不了现；外部价格、TWAP 永远不过期。现在它就是上游的批次提交钩子（高度 + 1，按 2048 的重放窗口清理提现记录）；`prod` 只接受「当前 + 1」且只能是本段第一个 unit（每个 rollup 高度最多一次，每次都要押保证金、等挑战期）。剩下：引擎高度没和 rollup 高度绑定，operator 可以不推进（R4-M4）。
+
+**⑤ 长期运行的堆上界（R4-H1，H，止血）。** 会话常驻内存、账户永不删除，堆会一直涨，终有一次运行内存不够、会话作废、rollup 停摆。现在加了共识常数 `MAX_STATE_ACCOUNTS = 256`：会话满了以后，新作者的存款 / 强平（keeper 奖励会给调用者开户）被拒（代码 19）。其他状态都按账户有上限或者是全局常数，实测（`engine-diff statecap`，64 位宿主尺寸 = rv32 的上界）每个塞满的账户 ≤ 80 KB，256 个加碎片和单次运行的临时开销 ≈ 31 MB < 50.2 MB 堆。这只是止血：256 个用户是活性上限，被拒的存款还需要金库 AA 的退款路径；生产要么让 guest 无状态（状态作为见证输入），要么大得多的 guest 内存。`prod` 段末不再做 O(状态) 的从头重建自检和状态哈希。
+
+**⑥ 测试。** 第 4 轮全套见 `guest-engine/results-loop4/`：fuzz / witfuzz / advfuzz / segfuzz 300、证明、场景 47/47、liqfuzz、snaptest、capcheck、statecap、强平批次过 JS guest、snapguest（默认 + prod 镜像）、prodheight、sail 抽查、robust/limit、rolltest（303/303）、rolldevnet；变异测试 `loop4-mut.sh`。
+
 ## 8. 已知的缺口（诚实列出）
 
 1. ~~多付的钱不退~~ 已修（5b）。剩下：finalize / reclaim 触发交易里的 10 000（bounce_fees 下限）仍全部留在 rollup；submit 多付 ≤ FEE 不退。
 2. **烧掉的钱取不出来**：这是**有意的**（5c）：`burned` 永久锁定，不设 treasury 或奖励池。
 3. **反复作废的代价只有 OBOND/2**：骗子可以用自己的马甲当「第一个挑战者」拿回一半保证金。所以每作废一次整条链（h..最新），骗子只亏 100 000 + 手续费。被连带作废的诚实 operator 要 reclaim 再重新提交，浪费时间。
 4. **数据可用性（DA）没解决**：AA 读不到批次数据本身。挑战者拿不到输入数据就没法算根。「按块揭示」的 DA 挑战还没写。
-5. **单批上限 2^40 步**（MAXSTEPS）。guest 每次运行最多 16 384 个 unit；上游一批按 7.6 切段、一段一个高度，状态留在 guest 内存里；撤单和持仓总量已按 S1b 改成和状态大小无关（7.6）。剩下：每段末尾的从头重建自检和状态哈希仍是 O(状态)；guest 一旦 trap / 内存不够就永久作废，升级路径没设计；会话常驻内存，长期运行的堆上界（账户永不删除）没算。
+5. **单批上限 2^40 步**（MAXSTEPS）。guest 每次运行最多 16 384 个 unit；上游一批按 7.6 切段、一段一个高度，状态留在 guest 内存里；撤单和持仓总量已按 S1b 改成和状态大小无关（7.6）。第 4 轮（7.7）：`prod` 段末不再做 O(状态) 的重建和状态哈希；trap / 内存不够后靠升级镜像从最后一次导出恢复（rv_rollup `upgrade` + `xbind`）；堆上界目前靠 256 个账户的上限止血（R4-H1），生产需要无状态 guest 或更大内存。
 6. **operator 和挑战者都不能是 AA**（`is_aa` 禁止）。用多签 AA 当 operator 的方案目前不行。
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
 8. ~~没和 sail-riscv 对拍~~ 已做（7.1）：sail-riscv 0.16，0 处真不一致。剩下：对拍只覆盖单步语义；trap 的具体种类（mcause 等）rv_step 不建模，只比「都 trap 了」。
-9. **引擎只移植了一部分**（7.2）：下单/撤单/撮合/记账/保证金已经在 guest 里跑通并和真实引擎对拍一致；每个 unit 的 witness 根已按增量提案 MNWIT1 在 guest 里实现并逐 unit 对拍（7.3，**真实引擎还没改，是共识变更**），证明深度规则 MAX_WIT_DEPTH = 64 和 Oscript 验证器见 7.5（10 个 AA 还没改）；强平/ADL、提现、预言机/资金费率、治理、commit-reveal 还没移植。
+9. **引擎只移植了一部分**（7.2）：下单/撤单/撮合/记账/保证金已经在 guest 里跑通并和真实引擎对拍一致；每个 unit 的 witness 根已按增量提案 MNWIT1 在 guest 里实现并逐 unit 对拍（7.3，**真实引擎还没改，是共识变更**），证明深度规则 MAX_WIT_DEPTH = 64 和 Oscript 验证器见 7.5（10 个 AA 还没改）；强平/ADL、提现、报价/外部价格/资金费率第 4 轮已移植并对拍（7.7）；预言机质押/解押/罚没、治理、commit-reveal 还没移植；强平订单 id 需要 unit id，试点批次里没有，两边都屏蔽了（R4-M2）。
 10. tps fee：测试客户端已设 `max_aa_responses`（6.5），只降预付、不降最终费用，并且预付少了交易可能暂时不被选作父单元；主网 tps 参数没核对。
 
 ---
@@ -606,6 +627,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 - `js/tpsdiag.js` —— tps fee 诊断
 - `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
 - 第 3 轮：`aa/rv_seg_ref.oscript` + `js/mksegref.js`（第 1 层博弈）；`aa/rv_witbind.oscript`、`aa/rv_witproof.oscript` + `js/mkwitproof.js`（证明 AA）；`js/witkit.js`、`js/witproofe2e.js`、`js/segguest.js`、`js/unitsteps.js`、`js/aacost.js`；`engine-diff/src/seg.rs`（segrun / segfuzz）；`guest-engine/scripts/loop3-suite.sh`、`loop3-mut.sh`
+- 第 4 轮：`guest-engine/src/snapshot.rs`（导出 / 导入）、`engine-diff/src/liq.rs`（liqfuzz / liqgen）、`engine-diff/src/snap.rs`（snaptest / snapdir / capcheck / statecap）；`js/snapguest.js`、`js/prodheight.js`；`aa/rv_rollup.oscript` 的 `upgrade` / `xbind`（rolltest 组 `upgrade`）；`guest-engine/scripts/loop4-{build,quick,snapimg,suite,mut}.sh`
 - `guest-engine/` —— 真实引擎移植试点（no_std guest，`rvengine`）；`engine-diff/` —— 真实引擎 vs 移植版对拍、批次生成、`witstat`；`js/pilotrun.js`、`pilotbench.js`、`pilotprof.js`、`xval/pilotsail.js`
 - `guest-engine/src/wit.rs` —— 增量 witness 承诺 MNWIT1（7.3）；`engine-diff/src/smt_ref.rs` —— 独立的从头重建参考实现；`engine-diff` 子命令 `wroots` / `portroots` / `witfuzz` / `scen` / `genesis`；`engine-diff/scenarios/upstream.scn` —— 上游 `#[test]` 场景回放；`js/witrun.js`、`witbench.js`、`witscen.js`；`xval/witsail.js`；`guest-engine/scripts/wit-mut.sh`
 - `xval/` —— 和 sail-riscv 对拍：`mkconfig.py`（生成 sail 配置）、`rv32im-strict.json` / `rv32im-relaxed.json`、`lib.js`（跑 sail、解析轨迹、写 ELF、逐步比较）、`xtests.js`（riscv-tests）、`xfuzz.js`（随机单步）、`mutants.sh`（埋 bug 自测）、`summarize.js`、`run-xval.sh`（全套）

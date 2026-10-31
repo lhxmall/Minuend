@@ -18,6 +18,8 @@ Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ d78003a (loop round 2 resul
    height's segment end root from its final memory) and `rv_witproof` (membership / absence proofs).
 4. This review (below), fixes for every C/H and the cheap M/L.
 
+**Final (loop round 4 verification, 2026-10-31):** the whole round-3 suite re-ran green on the round-3 head (table at the end); mutation 34 / 44 (survivors analysed at the end). Follow-ups moved to `findings/rv-loop-4.md`: R3-H2 (dead session → upgrade path, now R4-S1/S2 + rv_rollup upgrade), R3-O1 (fixed by construction), and the 256-account heap bound (R4-H1).
+
 Severity as in rounds 1–2: **C** = honest party loses / wrong verdict on reachable input; **H** = guest ≠ host or
 undefined guest outcome on protocol-reachable input; **M** = design/spec gap with a concrete failure mode or a
 defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
@@ -68,8 +70,8 @@ of one crowded level; old = round-2 binary, new = this round):
 | batch (orders at one price) | old cancel units (steps) | new cancel units (steps) |
 |---|---|---|
 | crowdc256 (256) | 96 537 – 126 966 | 91 890 – 122 748 |
-| crowdc4k (4 096) | 233 524 – 263 966 | see results-loop3/l3-s1b-small.log |
-| crowdcmax (16 128, the MAX_UNITS cap) | see results-loop3 (2 h JS runs) | see results-loop3 |
+| crowdc4k (4 096) | 233 524 – 263 966 | 123 804 – 155 336 |
+| crowdcmax (16 128, the MAX_UNITS cap) | run stopped (CPU; > 2 h in the JS model) | `l3-s1b-max-new.log` if it finished (loop 4 kept it running), else extrapolated: flat in the level length (crowdc256 → crowdc4k barely moves) |
 
 (The remaining per-cancel cost is the MNWIT1 commit of the touched leaves, ~90 k steps; the level scan was ~35 steps per
 order ahead of the cancelled one.)
@@ -151,4 +153,46 @@ hand-off still happens.
 Commits on `spike/rv-bisect` (parent d78003a): f58a491 (S1b), 8ad4d5e + fa91c12 (segments, prod guest, layer 1,
 witbind/witproof), 7b8daf8 (review fixes G1/G2/W1, scripts), and the results commit (`guest-engine/results-loop3/`).
 
-RESULTS_TABLE
+### Round-3 suite (`guest-engine/results-loop3/`, run by `scripts/loop3-suite.sh` on the InstaBox VM, build target-l3d)
+
+| check | result |
+|---|---|
+| fuzz 300 × 300 (real engine vs port: hash + events) | 300 / 300 |
+| witfuzz 300 (per-unit MNWIT1 roots: real-scratch / port-incremental / port-scratch) | 300 / 300 |
+| advfuzz 300 (adversarial batches) | 300 / 300 |
+| segfuzz 300 (segment chaining vs the real engine, refused-header segments included) | 300 / 300 (12 621 segments) |
+| proofs (membership / absence vs the host reference) | 177 087 membership, 61 540 absence ok, 0 forged |
+| scen upstream.scn (host) / guest | 47 / 47 · 47 / 47 |
+| selftest / depthsel | clean |
+| depth8 (MAX_WIT_DEPTH = 8 build) host / guest | 20 / 20 |
+| prodflags (prod image refuses header flags) | ok |
+| segrun 300 / 3 000-unit batches | ok |
+| segguest small (default + prod image) / big3k | 7 / 7 · 5 / 5 |
+| segbig 20 000 units | segrun OOM-killed (harness, R3-T1) → segbig-adv 25 012 units ok |
+| extra-guest | 9 / 9 |
+| robust 15 / 15 + limit batch through the JS guest | ok (1.219 G steps) |
+| guest-poc (crowd1800, frag16, grind1any) | 3 / 3 |
+| witproof e2e (bind + prove through the guest's real OUT layout) | 8 / 8 |
+| sail-riscv spot check (incl. adv21, crowdc256) | 6 / 6 |
+| rolltest (rv_rollup + referees + witbind/witproof, real ocore evaluator) | 277 / 277 |
+| rolldevnet (devnet, 10 sections) | 149 / 149 |
+| Oscript verifier (synthetic + real proofs) | 36 / 36 + 12 / 12, 0 / 156 forged |
+| AA static cost | see "Static cost" above |
+| trap PoC (R3-G1/G2) old / new build | old: status 0 + previous root, later abort; new: 0xFFFF0001 + zero roots, then status 5 |
+
+### Round-3 mutation test (`scripts/loop3-mut.sh`, `results-loop3/l3-mut.log`)
+
+**34 / 44 killed.** The 10 survivors and what became of them in loop round 4:
+
+| # | mutant | why it survived | loop 4 |
+|---|---|---|---|
+| 3 | journal does not restore `next_arr` | arrival numbers only order entries inside a level; a gap after a rollback does not change the order | equivalent (order-preserving); kept in the round-4 list |
+| 5 | deposit inserts the account without `put_account` (OI index not updated) | deposit never changes positions, so the OI index stays right | removed by construction (R3-O1 fix: `Accounts` keeps the indexes on every insert) |
+| 7 | funding OI = 0 | no funding-rate market in the round-3 batches (R3-O1) | **killed by liqfuzz** (29 / 30) in round 4 |
+| 10 | `segs` not incremented | the segment counter is published but no check read it | re-tested in round 4 (snapshot carries `segs`) |
+| 15 | report band `dev < old/10` | no ReportPrice in round 3 | ReportPrice ported in round 4; re-tested |
+| 18 | liquidatable `<` instead of `<=` | no Liquidate in round 3 | Liquidate ported; re-tested |
+| 20 | ADL `collateral.max(0)` dropped | no liquidation / ADL in round 3 | ported; re-tested |
+| 35 | smt_ref absence check without `k2 == k` | the other disjunct already rejects every forged absence the generator produces | proof generator gap, documented |
+| 38 / 39 | journal rollback replays popped entries in the wrong order / not the pushed count | a rollback after a partially filled book walk is rare in random batches | re-tested in round 4 (liqfuzz rolls back liquidation book paths) |
+

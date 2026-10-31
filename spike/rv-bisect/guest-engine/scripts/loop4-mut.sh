@@ -106,7 +106,7 @@ PY
   sc=$($B scen $P/engine-diff/scenarios/upstream.scn | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/')
   wf=$($B witfuzz 30 300 20 | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/')
   af=$($B advfuzz 30 300 | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/')
-  stf=$($B selftest $P/poc/robust | tail -1)
+  stf=$($B selftest ${ROBUST:-/data/hark/spike-rv/loop3/poc/robust} | tail -1)
   pf=$($B proofs 10 25 | tail -1)
   sf=$($B segfuzz 30 300 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/')
   lq=$($B liqfuzz 30 300 2>/dev/null | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/')

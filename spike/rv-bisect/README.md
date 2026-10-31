@@ -160,3 +160,15 @@ slots; layer-1 referee `aa/rv_seg_ref.oscript` (bisection over unit-boundary mac
 on one unit) with `rv_rollup` `uopen`; `aa/rv_witbind.oscript` + `aa/rv_witproof.oscript` wire the depth-64 SMT
 verifier to finalized heights.
 
+
+## Loop round 4 (2026-10-31) — liquidation / oracle port, session export / import, upgrade path
+
+`findings/rv-loop-4.md` (C 1 · H 3 · M 6 · L 3 · I 5), design §7.7, results `guest-engine/results-loop4/`. Ported
+Withdraw, Liquidate (book IOC + ADL + funding-rate off-book close + haircut + keeper), ReportPrice, UpdateExternalPrice,
+the funding peg and the funding-rate mark block (batch kinds 6–10, header fixture bits 25 / 26; `engine-diff liqfuzz`
+vs the real engine); guarded account map (`Accounts` / `AcctMut`: OI, holders and dirty set kept by the type system);
+canonical session export / import (`snapshot.rs`) with an **import lock** (an upgrade image carries the export digest it
+may import, R4-S1) and **no batch before import** (R4-S2); `SetHeight` = the batch-commit hook (prod: +1 as unit 0);
+session account cap 256 (heap bound stopgap, R4-H1); `rv_rollup` `upgrade` (governance) + `xbind` (export / import
+digest proven from the heights' final memories before an upgrade height can finalize). Scripts:
+`guest-engine/scripts/loop4-{build,quick,snapimg,suite,mut}.sh`; JS: `js/snapguest.js`, `js/prodheight.js`.
