@@ -1,0 +1,23 @@
+[package]
+name = "engine-diff"
+version = "0.1.0"
+edition = "2021"
+description = "Host differential harness: real Minuend engine (fix/47-all @ 20326c0, std) vs the mnpilot port"
+
+[dependencies]
+# Real engine sources: ./fetch-engine.sh extracts fix/47-all @ 20326c0 into ../engine-src (not committed).
+minuend-exec = { path = "../engine-src/crates/minuend-exec" }
+minuend-dag = { path = "../engine-src/crates/minuend-dag" }
+minuend-state = { path = "../engine-src/crates/minuend-state" }
+minuend-types = { path = "../engine-src/crates/minuend-types" }
+minuend-book = { path = "../engine-src/crates/minuend-book" }
+minuend-account = { path = "../engine-src/crates/minuend-account" }
+ed25519-dalek = "3"
+sha2 = "0.10"
+mnpilot = { path = "../guest-engine" }
+
+[profile.release]
+opt-level = 3
+debug = false
+
+[workspace]

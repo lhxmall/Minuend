@@ -1,0 +1,2 @@
+[target.riscv32im-unknown-none-elf]
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "relocation-model=static"]
