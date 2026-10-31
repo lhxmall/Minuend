@@ -38,7 +38,7 @@ _running_ are filled by the next collection, see work/rv-rollup-notes.md "Loop r
 5. Review areas with no new defect (I): snapshot v3 import/export, MNP2 extension area, guest images vs rv_step (static
    opcode scan), allocator behaviour across heights apart from R10-H1.
 
-Totals (draft): **C 0 · H 1 (fixed) · M 1 (open, design) · L 1 · I 6**; R9-T1 closed.
+Totals (draft): **C 0 · H 1 (fixed) · M 1 (open, design) · L 1 (fixed) · I 6**; R9-T1 closed.
 
 | id | sev | area | title | status |
 |---|---|---|---|---|
@@ -72,7 +72,7 @@ account. Host allocator simulation (heapsim, 64-bit sizes).
 | whole state 256 32 256 64 64 | 8 192 (+ 4 096 isolated) | 8 223 | 41.23 MB |
 | whole state 256 64 256 64 64 | 16 384 (+ 8 192 isolated) | 16 447 | **55.24 MB** (> heap) |
 | whole state 256 128 0 64 64 | 32 768 (+ 16 384 isolated) | 127 | **61.36 MB** (> heap) |
-| whole state at the new caps 256 16 32 64 64 | 4 096 | ≤ 512 | CAP_ROW |
+| whole state at the new caps 256 16 32 64 64 | 4 096 | ≤ 512 | _running_ (l10h.log; ≤ the 256-oracle row above) |
 
 ≈ 700 B per position (BTreeMap entry, `pos:` leaf + its MNWIT1 path) and ≈ 390 B per (market, oracle) pair with
 one ring sample (more with the 8-deep ring).
@@ -80,7 +80,8 @@ one ring sample (more with the 8-deep ring).
 Fix: `MAX_STATE_MARKETS` = 16 and `MAX_STATE_ORACLES` = 32 (guest-engine/src/lib.rs `state_cap_ok`; CreateMarket at
 16 listed markets and a Stake by a new oracle at 32 bonded → code 19; an already bonded id keeps upstream's
 AlreadyBonded). Bound as R4-H1 (×1.3 cross-time fragmentation, + 4.4 MB per-run transient, + the governance caps
-3.9 MB from `govcap`): (CAP_MB + 3.9) × 1.3 + 4.4 = BOUND_MB < 50.2 MB. At 32 markets the same formula gives ≈ 52 MB
+3.55 MB from `govcap` at 16 markets): even with 256 oracles (28.55 MB, above the 32-oracle cap) (28.55 + 3.55) × 1.3 + 4.4 =
+**46.1 MB** < 50.2 MB. At 32 markets the same formula gives ≈ 52 MB
 even with the oracle cap, hence 16. Like the account cap this is a stopgap: production needs the stateless guest
 (R4-H1) — 16 markets is a product limit of the pilot, not a design value.
 
@@ -116,4 +117,9 @@ cycle). Options, each a rule change for the owner:
 | govwit fixture check (`l10fx.sh`) | adv5/6/7, g1000, liq1/2 roots identical; gov21–23 change |
 | `mktcap` (R10-H1) | table above |
 | opscan (round-8 prod image, govwit image) | only `unimp` outside the modelled set |
-SUITE_ROWS
+| R10-H1 fix, default host (`l10h.sh`, target-l10h-host): govedge (incl. case 9 `r10:oracles`, `cap:markets` at 16) | 9 / 9 |
+| govcap at the new caps (256 PERP ids, 16 markets, 64 proposals / 19 999 voters, 1 024 commits) | 3.55 MB size-class high-water |
+| govfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) |
+| l10h rest: xfuzz 100, govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | _running_ (l10h.log, HDONE) |
+| govwit full suite (`loop10-suite.sh g`, l10-*) | _running_ (SUITEDONE in l10-bins.txt) |
+| full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | _running_ (74 PASS / 0 FAIL at 18:56 UTC) |

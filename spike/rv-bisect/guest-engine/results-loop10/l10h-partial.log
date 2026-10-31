@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 2m 18s
+    Finished `release` profile [optimized] target(s) in 3m 34s
+    Finished `release` profile [optimized] target(s) in 1m 03s
+    Finished `release` profile [optimized] target(s) in 1m 04s
+d15e85466e1556749a5f8784cbd4639b87f7304c  /data/hark/target-l10h-host/release/engine-diff
+44046acc704d3fdfcefbf4157e15e40d050494cc  /data/hark/target-l10h-hostgw/release/engine-diff
+e07026764dadc6dfecb8295599efdebdcac185c3  /data/hark/target-l10h-g/riscv32im-unknown-none-elf/release/rvengine
+ccc9ab6cfb6c70bec2af158a06bb9b50014720c0  /data/hark/target-l10h-gprod/riscv32im-unknown-none-elf/release/rvengine
+BUILT
+== /data/hark/target-l10h-host/release/engine-diff
+{"cases":9,"ok":9,"fail":[]}
+{"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":289,"sizeclass_highwater":3545024,"peak_live":3496064,"sum_class_peaks":3544976,"snapshot_words":391905}
+{"seeds":100,"match":100,"units":33490,"why":"","coverage":{"commit:0x11":549,"commit:0x13":1336,"commit:ok":2318,"delisted":54,"final:0x7":659,"final:0xc":512,"final:ok":295,"gdep:0x7":502,"gdep:ok":1878,"gwd:0x13":2,"gwd:0x6":609,"gwd:0x9":456,"gwd:ok":752,"market:0x13":500,"market:0x7":324,"marke
