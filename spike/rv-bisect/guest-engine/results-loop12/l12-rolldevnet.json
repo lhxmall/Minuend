@@ -1,0 +1,1909 @@
+{
+ "mode": "maxr",
+ "results": [
+  {
+   "name": "deployed rv_step == address baked into the referee",
+   "expected": "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA",
+   "actual": "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA",
+   "pass": true
+  },
+  {
+   "name": "deployed referee == address baked into rv_rollup",
+   "expected": "W7OQFFFU6446637YBHIA7B74L6X4ZO5B",
+   "actual": "W7OQFFFU6446637YBHIA7B74L6X4ZO5B",
+   "pass": true
+  },
+  {
+   "name": "deployed rollup == computed address",
+   "expected": "NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5",
+   "actual": "NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5",
+   "pass": true
+  },
+  {
+   "name": "loop 3: deployed seg referee == address baked into rv_rollup",
+   "expected": "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY",
+   "actual": "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY",
+   "pass": true
+  },
+  {
+   "name": "loop 3: deployed witbind / witproof == computed",
+   "expected": [
+    "ZFGIXG6ASKY4RSVRWBCCNX5JMC7TBEGI",
+    "TDWP3ZRB6NMMYHHBAKRPWU3IZKRPJEFO"
+   ],
+   "actual": [
+    "ZFGIXG6ASKY4RSVRWBCCNX5JMC7TBEGI",
+    "TDWP3ZRB6NMMYHHBAKRPWU3IZKRPJEFO"
+   ],
+   "pass": true
+  },
+  {
+   "name": "race: two h1 submits in flight together -> exactly one wins",
+   "expected": "bounce+ok",
+   "actual": "bounce+ok",
+   "pass": true,
+   "loserError": {
+    "message": "height taken",
+    "formattedContext": "",
+    "codeLines": [
+     {
+      "lineNumber": 94,
+      "formula": "require($h > $top, 'height taken');"
+     }
+    ],
+    "trace": [
+     {
+      "type": "aa",
+      "aa": "NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5",
+      "xpath": "/init",
+      "line": 94
+     }
+    ]
+   }
+  },
+  {
+   "name": "race: winner recorded at h1",
+   "expected": true,
+   "actual": true,
+   "pass": true
+  },
+  {
+   "name": "fake s0 (genesis memory) at h2",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "final root not matching its parts",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "h2 chained on the race loser",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "an AA submits h2 (it could refuse payouts)",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"one of secondary AAs bounced with error: \",\"callChain\":{\"address\":\"2524IWQMP7B2QVHVQU77XDEJA7ESEPCK\",\"next\":{\"address\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"message\":\"an AA cannot be an oper"
+  },
+  {
+   "name": "honest h2 by op2",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "finalize h1 before 24 h",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"window open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":146,\"formula\":\"require($now >= $r[3] + $WIN, 'window open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\","
+  },
+  {
+   "name": "griefer opens a game on h1",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "referee received the open (secondary trigger)",
+   "expected": true,
+   "actual": true,
+   "pass": true
+  },
+  {
+   "name": "referee game record exists",
+   "expected": true,
+   "actual": true,
+   "pass": true
+  },
+  {
+   "name": "rollup forwarded GF to the referee",
+   "expected": 10000,
+   "actual": 10000,
+   "pass": true
+  },
+  {
+   "name": "finalize h1 with the game open",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":147,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"xpat"
+  },
+  {
+   "name": "griefer vs honest operator",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "rollup paid the operator CBOND - GF - FEE (real output)",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "rollup game marked d",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "finalize h1 after the game",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "finalize pays OBOND - FEE (real output)",
+   "expected": 198000,
+   "actual": 198000,
+   "pass": true
+  },
+  {
+   "name": "fraudulent h3 submitted",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "h4 on bad h3",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "h5 on h4",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "honest challenger vs fraudulent h3",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "challenger paid CBOND - GF - FEE + OBOND/2 (real output)",
+   "expected": 208000,
+   "actual": 208000,
+   "pass": true
+  },
+  {
+   "name": "top reset to 2",
+   "expected": 2,
+   "actual": 2,
+   "pass": true
+  },
+  {
+   "name": "burned += OBOND/2",
+   "expected": 100000,
+   "actual": 100000,
+   "pass": true
+  },
+  {
+   "name": "h3 flagged fraud",
+   "expected": 1,
+   "actual": 1,
+   "pass": true
+  },
+  {
+   "name": "h2 finalizes",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "finalize voided h3",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"voided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":145,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'voided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXP"
+  },
+  {
+   "name": "open on voided h5",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "fraudster reclaims h3",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "reclaim voided h4",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "h4 bond back OBOND - FEE (real output)",
+   "expected": 198000,
+   "actual": 198000,
+   "pass": true
+  },
+  {
+   "name": "reclaim voided h5",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "R10-M1: h3 after one fraud void with only OBOND",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"xp"
+  },
+  {
+   "name": "R10-M1: bond for h3 = 2 x OBOND",
+   "expected": 400000,
+   "actual": 400000,
+   "pass": true
+  },
+  {
+   "name": "race restarts: honest h3 resubmitted (2 x OBOND)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "extend the voided chain",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "new h3 finalizes",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6a honest h4 by op1",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6a ch1 opens on h4",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6a resolve before the move deadline",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"undecided\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":64,\"formula\":\"require($w, 'undecided');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"W7OQFFFU6446637YBHIA7B74L6X4ZO5B\",\"xpath\":\"/init\",\"line\":"
+  },
+  {
+   "name": "6a operator mids after its deadline",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":41,\"formula\":\"require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""
+  },
+  {
+   "name": "6a resolve after the deadline",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6a rollup game marked c (operator timed out)",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "6a challenger paid CBOND - GF - FEE + OBOND/2 (real output)",
+   "expected": 208000,
+   "actual": 208000,
+   "pass": true
+  },
+  {
+   "name": "6a operator paid nothing",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "6a burned += OBOND/2",
+   "expected": 100000,
+   "actual": 100000,
+   "pass": true
+  },
+  {
+   "name": "6a h4 flagged fraud",
+   "expected": 1,
+   "actual": 1,
+   "pass": true
+  },
+  {
+   "name": "6a top back to 3",
+   "expected": 3,
+   "actual": 3,
+   "pass": true
+  },
+  {
+   "name": "6a open games on h4 back to 0",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "6a timed-out operator reclaims h4",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":164,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"
+  },
+  {
+   "name": "6b R10-M1: op1 inside ch1 priority window at h4",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"priority: WAEK74MUMMVISXEZSMODBB6U53O3SMLU\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":102,\"formula\":\"require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'prior"
+  },
+  {
+   "name": "6b h4 resubmitted by op1 (after the window, 2 x OBOND)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6b ch2 opens on h4",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6b operator answered, challenger to move",
+   "expected": "stopped",
+   "actual": "stopped",
+   "pass": true
+  },
+  {
+   "name": "6b referee nets (0, KEEP] from a move (KEEP minus its refund-unit fee)",
+   "expected": true,
+   "actual": true,
+   "pass": true,
+   "gdelta": 1398
+  },
+  {
+   "name": "6b operator move costs KEEP + its unit fee (< KEEP + 3000), not 10000 + fee",
+   "expected": true,
+   "actual": true,
+   "pass": true,
+   "odelta": -3396
+  },
+  {
+   "name": "6b challenger pick after its deadline",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not your move\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":49,\"formula\":\"require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');\"}],\"trace\":[{\"type\":\"aa\",\""
+  },
+  {
+   "name": "6b resolve after the deadline",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6b rollup game marked d",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "6b operator paid CBOND - GF - FEE (real output)",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "6b challenger paid nothing",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "6b h4 live, not fraud",
+   "expected": [
+    4,
+    null
+   ],
+   "actual": [
+    4,
+    null
+   ],
+   "pass": true
+  },
+  {
+   "name": "6c R11-M1: global V = 1 -> h5 (never voided) needs 2 x OBOND",
+   "expected": 400000,
+   "actual": 400000,
+   "pass": true
+  },
+  {
+   "name": "6c R11-M1: h5 with only OBOND",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"xp"
+  },
+  {
+   "name": "6c honest h5 by op1",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6c two griefers open on h5",
+   "expected": "ok+ok",
+   "actual": "ok+ok",
+   "pass": true
+  },
+  {
+   "name": "6c open-games counter = 2",
+   "expected": 2,
+   "actual": 2,
+   "pass": true
+  },
+  {
+   "name": "6c finalize h4",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6c finalize h5 with 2 games open",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":147,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"xpat"
+  },
+  {
+   "name": "6c game A -> d",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "6c A pays the operator CBOND - GF - FEE",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "6c open-games counter = 1",
+   "expected": 1,
+   "actual": 1,
+   "pass": true
+  },
+  {
+   "name": "6c finalize h5 with game B still open",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"games open\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":147,\"formula\":\"require(!var['n' || $sid], 'games open');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED7XXPLE5\",\"xpat"
+  },
+  {
+   "name": "6c game B -> d",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "6c B pays the operator CBOND - GF - FEE",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "6c open-games counter = 0",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "6c finalize h5 after both games",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6c finalize pays the escalated bond - FEE (2 x OBOND - FEE)",
+   "expected": 398000,
+   "actual": 398000,
+   "pass": true
+  },
+  {
+   "name": "6c lf = 5",
+   "expected": 5,
+   "actual": 5,
+   "pass": true
+  },
+  {
+   "name": "6d fraudulent h6 by op2",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6d h7 by op1 on bad h6",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6d ch1 + ch2 open on h6, ch3 (griefer) on h7",
+   "expected": "ok+ok+ok",
+   "actual": "ok+ok+ok",
+   "pass": true
+  },
+  {
+   "name": "6d open-games counter on h6 = 2",
+   "expected": 2,
+   "actual": 2,
+   "pass": true
+  },
+  {
+   "name": "6d game A (ch1) -> c",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "6d first fraud win pays CBOND - GF - FEE + OBOND/2",
+   "expected": 208000,
+   "actual": 208000,
+   "pass": true
+  },
+  {
+   "name": "6d top = 5 (h6, h7 voided)",
+   "expected": 5,
+   "actual": 5,
+   "pass": true
+  },
+  {
+   "name": "6d burned += OBOND/2",
+   "expected": 100000,
+   "actual": 100000,
+   "pass": true
+  },
+  {
+   "name": "6d h6 still has 1 open game",
+   "expected": 1,
+   "actual": 1,
+   "pass": true
+  },
+  {
+   "name": "6d reclaim voided h7 while its game is open",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"cannot reclaim\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":164,\"formula\":\"require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');\"}],\"trace\":[{\"type"
+  },
+  {
+   "name": "6d new open on voided h6",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not live\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":128,\"formula\":\"require(length($r) == 8 AND $live($sid, $r), 'not live');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"NDF6KFUA3A4MTBPQBIGZAXMED"
+  },
+  {
+   "name": "6d honest h6 resubmitted by the winner ch1 (R10-M1 priority, 2 x OBOND) while old games run",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6d late game B (ch2) on voided h6 -> c",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "6d second win gets only CBOND - GF - FEE (no second slash)",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "6d late c-callback does not void the new h6",
+   "expected": [
+    6,
+    "lN0Mrkd1075ZQizn0s/VYRHvc+CuX3Acs9It06EDBJ0="
+   ],
+   "actual": [
+    6,
+    "lN0Mrkd1075ZQizn0s/VYRHvc+CuX3Acs9It06EDBJ0="
+   ],
+   "pass": true
+  },
+  {
+   "name": "6d burned unchanged by the second win",
+   "expected": 100000,
+   "actual": 100000,
+   "pass": true
+  },
+  {
+   "name": "6d h6 games counter = 0",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "6d late griefer game on voided h7 -> d",
+   "expected": "d",
+   "actual": "d",
+   "pass": true
+  },
+  {
+   "name": "6d late d-callback pays op1 CBOND - GF - FEE",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "6d top still 6 after the late d-callback",
+   "expected": 6,
+   "actual": 6,
+   "pass": true
+  },
+  {
+   "name": "6d reclaim voided h7 after its game",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6d h7 bond back OBOND - FEE",
+   "expected": 198000,
+   "actual": 198000,
+   "pass": true
+  },
+  {
+   "name": "6d fraudster reclaims old h6",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "6d new h6 finalizes",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "6d lf = 6",
+   "expected": 6,
+   "actual": 6,
+   "pass": true
+  },
+  {
+   "name": "7 submit h7 with OBOND + 50000",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "7 submit refund = 50000 - FEE (real output)",
+   "expected": 48000,
+   "actual": 48000,
+   "pass": true
+  },
+  {
+   "name": "7 open h7 with CBOND + 30000",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "7 open refund = 30000 in full (real output)",
+   "expected": 30000,
+   "actual": 30000,
+   "pass": true
+  },
+  {
+   "name": "7 the same response unit pays GF to the referee",
+   "expected": 10000,
+   "actual": 10000,
+   "pass": true
+  },
+  {
+   "name": "7 referee received the open (no refund back to the rollup)",
+   "expected": true,
+   "actual": true,
+   "pass": true
+  },
+  {
+   "name": "7 operator answered the overpaid game, challenger to move",
+   "expected": "stopped",
+   "actual": "stopped",
+   "pass": true
+  },
+  {
+   "name": "7 resolve with RK + 25000",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "7 resolve refund = 25000 (real output, same unit as the callback)",
+   "expected": 25000,
+   "actual": 25000,
+   "pass": true
+  },
+  {
+   "name": "7 callback payment GB to the rollup",
+   "expected": 1000,
+   "actual": 1000,
+   "pass": true
+  },
+  {
+   "name": "7 operator paid CBOND - GF - FEE = 108000",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "7 finalize h7",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "7 finalize pays OBOND - FEE",
+   "expected": 198000,
+   "actual": 198000,
+   "pass": true
+  },
+  {
+   "name": "7 submit h8 with OBOND + FEE (kept, no refund unit)",
+   "expected": [
+    "ok",
+    0
+   ],
+   "actual": [
+    "ok",
+    0
+   ],
+   "pass": true
+  },
+  {
+   "name": "7 direct referee open with GF + 5000 refunds 5000",
+   "expected": [
+    "ok",
+    5000
+   ],
+   "actual": [
+    "ok",
+    5000
+   ],
+   "pass": true
+  },
+  {
+   "name": "8 state before: lf = 7, top = 8",
+   "expected": [
+    7,
+    8
+   ],
+   "actual": [
+    7,
+    8
+   ],
+   "pass": true
+  },
+  {
+   "name": "8a honest h9 with units = 24",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8a units stored",
+   "expected": 24,
+   "actual": 24,
+   "pass": true
+  },
+  {
+   "name": "8a uopen with CBOND only",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "8a griefer uopen h9 (CBOND + GF)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8a the rollup response paid 2 GF to the seg referee",
+   "expected": 20000,
+   "actual": 20000,
+   "pass": true
+  },
+  {
+   "name": "8a griefer vs honest operator via layer 1 + layer 2 (real chain)",
+   "expected": "d",
+   "actual": "d",
+   "pass": true,
+   "unit": [
+    9,
+    10,
+    135,
+    150
+   ]
+  },
+  {
+   "name": "8a operator paid CBOND - GF - FEE (rollup response to the seg callback)",
+   "expected": 108000,
+   "actual": 108000,
+   "pass": true
+  },
+  {
+   "name": "8a no game open on h9",
+   "expected": 0,
+   "actual": 0,
+   "pass": true
+  },
+  {
+   "name": "8a finalize h8",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8a finalize h9 after its layer-1 game",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8b fraudulent h10 (units 5)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8b honest challenger uopen h10",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8b fraud proven through layer 1",
+   "expected": "c",
+   "actual": "c",
+   "pass": true,
+   "unit": [
+    2,
+    3,
+    24,
+    37
+   ]
+  },
+  {
+   "name": "8b challenger paid CBOND - GF - FEE + OBOND/2",
+   "expected": 208000,
+   "actual": 208000,
+   "pass": true
+  },
+  {
+   "name": "8b h10 voided (top = 9), fraud flag",
+   "expected": [
+    9,
+    1
+   ],
+   "actual": [
+    9,
+    1
+   ],
+   "pass": true
+  },
+  {
+   "name": "8 seg referee solvent: per game it keeps GF, plus MK - refund-unit fee per mids / pick (as rv_game_ref), minus its response-unit fees (2 games, 4 moves)",
+   "expected": true,
+   "actual": true,
+   "pass": true,
+   "balance": 23701
+  },
+  {
+   "name": "8c h10 with the witness memory image (by the winner ch1, 2 x OBOND)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8c bind before finalize",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not finalized\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":25,\"formula\":\"require(is_integer($h) AND $h >= 1 AND $h <= (var[$ROLL]['lf'] OTHERWISE 0), 'not finalized');\"}],\"trace\":[{\"t"
+  },
+  {
+   "name": "8c finalize h10",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8c bind with a flipped word bit",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "8c bind h10",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "8c W10 = the root",
+   "expected": "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=",
+   "actual": "Py+RCfjmlk27Zg0WAZVBoiyI8WuOWfg45W4fevreiZs=",
+   "pass": true
+  },
+  {
+   "name": "8c memberships proven against finalized h10",
+   "expected": 3,
+   "actual": 3,
+   "pass": true
+  },
+  {
+   "name": "8c absence proven",
+   "expected": [
+    "ok",
+    1
+   ],
+   "actual": [
+    "ok",
+    1
+   ],
+   "pass": true
+  },
+  {
+   "name": "8c tampered leaf",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "8c R3-W4 prove with 25000 refunds 23000 (real output)",
+   "expected": [
+    "ok",
+    23000
+   ],
+   "actual": [
+    "ok",
+    23000
+   ],
+   "pass": true
+  },
+  {
+   "name": "8c proof against unbound h9",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true
+  },
+  {
+   "name": "9 rollup-2 definition = rv_rollup.aa with $GOV = the gov wallet",
+   "expected": [
+    1,
+    0
+   ],
+   "actual": [
+    1,
+    0
+   ],
+   "pass": true
+  },
+  {
+   "name": "9 rollup-2 deployed by the gov wallet",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9a export h1 on rollup-2",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9a upgrade from a non-governance wallet",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not governance\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":171,\"formula\":\"require(trigger.address == $GOV, 'not governance');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32"
+  },
+  {
+   "name": "9a upgrade above top + 1",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bad upgrade height\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":173,\"formula\":\"require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');\"}],\"trace\":[{"
+  },
+  {
+   "name": "9a governance wallet schedules upgrade at 2 (U2 = image, uh = 2)",
+   "expected": [
+    "ok",
+    "SDdxJ29WJxOeItDmVBuTF7rfk6MVOwgdnzyOjYs39nk=",
+    2
+   ],
+   "actual": [
+    "ok",
+    "SDdxJ29WJxOeItDmVBuTF7rfk6MVOwgdnzyOjYs39nk=",
+    2
+   ],
+   "pass": true
+  },
+  {
+   "name": "9a h2 chained on the OLD memory refused",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bad s0\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":118,\"formula\":\"require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad "
+  },
+  {
+   "name": "9a import h2 from the new image",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9a finalize export h1",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9a finalize import h2 before xbind",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":155,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"
+  },
+  {
+   "name": "9a xbind with a flipped digest word",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"word proof\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":203,\"formula\":\"require(length(filter([0,1,2,3,4,5,6,7,8], 9, $k => !(is_integer($w[$k]) AND $w[$k] >= 0 AND $w[$k] < 4294967296"
+  },
+  {
+   "name": "9a xbind import h2 (real 9-word proof trigger)",
+   "expected": [
+    "ok",
+    "2:2654435769,1013904242,3668340011,2027808484,387276957,3041712726,1401181199,4055616968"
+   ],
+   "actual": [
+    "ok",
+    "2:2654435769,1013904242,3668340011,2027808484,387276957,3041712726,1401181199,4055616968"
+   ],
+   "pass": true
+  },
+  {
+   "name": "9a xbind twice",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bound\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":199,\"formula\":\"require(!var['x' || $sid], 'bound');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32XS77JMI\",\"xpath\":\"/init\""
+  },
+  {
+   "name": "9a finalize with only the import bound",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":155,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"
+  },
+  {
+   "name": "9a xbind export h1 (after its finalize)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9a finalize import h2 (digests equal)",
+   "expected": [
+    "ok",
+    2
+   ],
+   "actual": [
+    "ok",
+    2
+   ],
+   "pass": true
+  },
+  {
+   "name": "9a finalize pays OBOND - FEE (real output)",
+   "expected": 198000,
+   "actual": 198000,
+   "pass": true
+  },
+  {
+   "name": "9a upgrade at or below lf",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bad upgrade height\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":173,\"formula\":\"require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');\"}],\"trace\":[{"
+  },
+  {
+   "name": "9b normal h3 chained on the import memory",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b governance schedules upgrade at 4 (h3 is not an export)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b import h4 by op2",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b non-export h3 finalizes",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b xbind h3 refused (kind 0)",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"kind\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":202,\"formula\":\"require($w[0] == 1 OR $w[0] == 2, 'kind');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32XS77JMI\",\"xpath\":\"/"
+  },
+  {
+   "name": "9b PoC: import h4 can never finalize",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":155,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"
+  },
+  {
+   "name": "9b PoC: re-schedule above the stuck upgrade refused",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"upgrade pending at 4\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":179,\"formula\":\"require($p <= $lf OR $h <= $p, 'upgrade pending at ' || $p);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3"
+  },
+  {
+   "name": "9b cancel from a non-governance wallet",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"not governance\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":188,\"formula\":\"require(trigger.address == $GOV, 'not governance');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32"
+  },
+  {
+   "name": "9b governance cancel: U4 / uh cleared, top = 3",
+   "expected": [
+    "ok",
+    false,
+    false,
+    3
+   ],
+   "actual": [
+    "ok",
+    false,
+    false,
+    3
+   ],
+   "pass": true
+  },
+  {
+   "name": "9b cancel without a pending upgrade",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"no pending upgrade\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":190,\"formula\":\"require($p > $lf, 'no pending upgrade');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32XS77JMI"
+  },
+  {
+   "name": "9b voided import h4 bond reclaimable (real output OBOND - FEE)",
+   "expected": [
+    "ok",
+    198000
+   ],
+   "actual": [
+    "ok",
+    198000
+   ],
+   "pass": true
+  },
+  {
+   "name": "9b h4 from the cancelled image refused",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bad s0\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":118,\"formula\":\"require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad "
+  },
+  {
+   "name": "9b export h4 chained on m(3)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b upgrade re-scheduled at 5 (h4 is an export run)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b import h5",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "9b xbind h4 + h5",
+   "expected": "ok+ok",
+   "actual": "ok+ok",
+   "pass": true
+  },
+  {
+   "name": "9b the re-scheduled upgrade finalizes (lf = 5)",
+   "expected": [
+    "ok",
+    "ok",
+    5
+   ],
+   "actual": [
+    "ok",
+    "ok",
+    5
+   ],
+   "pass": true
+  },
+  {
+   "name": "9b cancel after the upgrade finalized",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"no pending upgrade\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":190,\"formula\":\"require($p > $lf, 'no pending upgrade');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"ZFXJYBKYD3WB6Q4NJTNYJIA32XS77JMI"
+  },
+  {
+   "name": "9 rollup-2 holds no outstanding bond (balance >= burned = 0)",
+   "expected": true,
+   "actual": true,
+   "pass": true,
+   "balance": 304781
+  },
+  {
+   "name": "10 rollup-3 deployed",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "10 fraudulent h1 by op2 (OBOND)",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "10 ch1 opens on h1",
+   "expected": "ok",
+   "actual": "ok",
+   "pass": true
+  },
+  {
+   "name": "10 fraud proven",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "10 v1 = 1, p1 = ch1, top 0, burned OBOND/2",
+   "expected": [
+    1,
+    "WAEK74MUMMVISXEZSMODBB6U53O3SMLU",
+    0,
+    100000
+   ],
+   "actual": [
+    1,
+    "WAEK74MUMMVISXEZSMODBB6U53O3SMLU",
+    0,
+    100000
+   ],
+   "pass": true
+  },
+  {
+   "name": "10 op1 inside the priority window",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"priority: WAEK74MUMMVISXEZSMODBB6U53O3SMLU\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":102,\"formula\":\"require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'prior"
+  },
+  {
+   "name": "10 the winner with only OBOND",
+   "expected": "bounce",
+   "actual": "bounce",
+   "pass": true,
+   "err": "{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"EFL3WVGYFJGH7SBA5LNJB57XX5SZ5GUK\",\"xp"
+  },
+  {
+   "name": "10 the winner submits the honest h1 with 2 x OBOND (b<sid> stored)",
+   "expected": [
+    "ok",
+    400000
+   ],
+   "actual": [
+    "ok",
+    400000
+   ],
+   "pass": true
+  },
+  {
+   "name": "10 R11-M1: V = 1 after the void; h2 (another height) with only OBOND bounces, bond 2 x OBOND",
+   "expected": [
+    "bounce",
+    1,
+    400000
+   ],
+   "actual": [
+    "bounce",
+    1,
+    400000
+   ],
+   "pass": true,
+   "err": "{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"EFL3WVGYFJGH7SBA5LNJB57XX5SZ5GUK\",\"xp"
+  },
+  {
+   "name": "10 h1 finalizes; pays 2 x OBOND - FEE (real output)",
+   "expected": [
+    "ok",
+    398000
+   ],
+   "actual": [
+    "ok",
+    398000
+   ],
+   "pass": true
+  },
+  {
+   "name": "10 R11-M1: one day after the void V has decayed to 0 (h2 bond back to OBOND)",
+   "expected": [
+    0,
+    200000
+   ],
+   "actual": [
+    0,
+    200000
+   ],
+   "pass": true
+  },
+  {
+   "name": "10 fraud at h2 proven by ch2",
+   "expected": "c",
+   "actual": "c",
+   "pass": true
+  },
+  {
+   "name": "10 op1 after the window with 2 x OBOND",
+   "expected": [
+    "ok",
+    400000
+   ],
+   "actual": [
+    "ok",
+    400000
+   ],
+   "pass": true
+  },
+  {
+   "name": "rollup balance >= burned (all bonds settled)",
+   "expected": true,
+   "actual": true,
+   "pass": true,
+   "balance": 760274,
+   "burned": 400000,
+   "lf": 10,
+   "top": 10
+  }
+ ],
+ "fees": {
+  "submit": {
+   "n": 17,
+   "avg": 1218,
+   "max": 1237
+  },
+  "submit+tps": {
+   "n": 17,
+   "avg": 576,
+   "max": 6653
+  },
+  "open": {
+   "n": 7,
+   "avg": 892,
+   "max": 946
+  },
+  "open+tps": {
+   "n": 7,
+   "avg": 406,
+   "max": 1021
+  },
+  "mids": {
+   "n": 22,
+   "avg": 1356,
+   "max": 1580
+  },
+  "mids+tps": {
+   "n": 22,
+   "avg": 358,
+   "max": 2986
+  },
+  "pick": {
+   "n": 20,
+   "avg": 924,
+   "max": 924
+  },
+  "pick+tps": {
+   "n": 20,
+   "avg": 123,
+   "max": 2240
+  },
+  "step": {
+   "n": 10,
+   "avg": 2601,
+   "max": 3350
+  },
+  "step+tps": {
+   "n": 10,
+   "avg": 81,
+   "max": 809
+  },
+  "resolve": {
+   "n": 12,
+   "avg": 918,
+   "max": 918
+  },
+  "resolve+tps": {
+   "n": 12,
+   "avg": 1435,
+   "max": 10298
+  },
+  "uopen": {
+   "n": 3,
+   "avg": 884,
+   "max": 884
+  },
+  "uopen+tps": {
+   "n": 3,
+   "avg": 639,
+   "max": 1245
+  },
+  "smids": {
+   "n": 2,
+   "avg": 1419,
+   "max": 1705
+  },
+  "smids+tps": {
+   "n": 2,
+   "avg": 112,
+   "max": 224
+  },
+  "spick-handoff": {
+   "n": 2,
+   "avg": 924,
+   "max": 924
+  },
+  "spick-handoff+tps": {
+   "n": 2,
+   "avg": 573,
+   "max": 573
+  },
+  "resolve3": {
+   "n": 2,
+   "avg": 918,
+   "max": 918
+  },
+  "resolve3+tps": {
+   "n": 2,
+   "avg": 5048,
+   "max": 8139
+  },
+  "bind": {
+   "n": 2,
+   "avg": 11488,
+   "max": 11488
+  },
+  "bind+tps": {
+   "n": 2,
+   "avg": 1844,
+   "max": 1844
+  },
+  "prove": {
+   "n": 5,
+   "avg": 1230,
+   "max": 1305
+  },
+  "prove+tps": {
+   "n": 5,
+   "avg": 0,
+   "max": 0
+  },
+  "upgrade": {
+   "n": 3,
+   "avg": 897,
+   "max": 897
+  },
+  "upgrade+tps": {
+   "n": 3,
+   "avg": 224,
+   "max": 224
+  },
+  "xbind": {
+   "n": 4,
+   "avg": 10469,
+   "max": 10469
+  },
+  "xbind+tps": {
+   "n": 4,
+   "avg": 503,
+   "max": 503
+  },
+  "cancel": {
+   "n": 1,
+   "avg": 849,
+   "max": 849
+  },
+  "cancel+tps": {
+   "n": 1,
+   "avg": 224,
+   "max": 224
+  }
+ },
+ "tps": {
+  "submit": {
+   "n": 40,
+   "avg": 616,
+   "median": 224,
+   "max": 6653,
+   "max_aa_responses": [
+    1
+   ]
+  },
+  "fwd": {
+   "n": 1,
+   "avg": 5730,
+   "median": 5730,
+   "max": 5730,
+   "max_aa_responses": [
+    2
+   ]
+  },
+  "finalize": {
+   "n": 24,
+   "avg": 0,
+   "median": 0,
+   "max": 0,
+   "max_aa_responses": [
+    1
+   ]
+  },
+  "open": {
+   "n": 14,
+   "avg": 1841,
+   "median": 1021,
+   "max": 5730,
+   "max_aa_responses": [
+    2
+   ]
+  },
+  "mids": {
+   "n": 25,
+   "avg": 324,
+   "median": 224,
+   "max": 2986,
+   "max_aa_responses": [
+    1
+   ]
+  },
+  "pick": {
+   "n": 23,
+   "avg": 157,
+   "median": 0,
+   "max": 2240,
+   "max_aa_responses": [
+    1,
+    2
+   ]
+  },
+  "step": {
+   "n": 42,
+   "avg": 158,
+   "median": 0,
+   "max": 1664,
+   "max_aa_responses": [
+    1,
+    2
+   ]
+  },
+  "resolve": {
+   "n": 15,
+   "avg": 1874,
+   "median": 797,
+   "max": 10298,
+   "max_aa_responses": [
+    2,
+    3
+   ]
+  },
+  "reclaim": {
+   "n": 8,
+   "avg": 224,
+   "median": 224,
+   "max": 224,
+   "max_aa_responses": [
+    1
+   ]
+  },
+  "ropen": {
+   "n": 1,
+   "avg": 0,
+   "median": 0,
+   "max": 0,
+   "max_aa_responses": [
+    1
+   ]
+  }
+ },
+ "units": {
+  "submit": [
+   "tA0F4btbCFYHi2ssE8VAu7tb4RjpgXdytY+G3YSQU0M=",
+   "EM4GwDmItp9/nYmqOTzrWqj+6Q9yChWDvLxDKyVEsLw=",
+   "2DhjCbbtSgW/KjND3CUiXMtDhunIi2dtNN7V2o1uqZ4=",
+   "IzQulq8fkgskP/g7SwnSsnV1pVYunCmibaf7XgGWp3o=",
+   "uZYIYVqq8J0lsg5UzOwZMFKBPl5xXe5mfLQnVfKKkv8=",
+   "48zeVLEs7D2DU7oTjv75E6ivaPmun4oQzOoxqSIKa4E=",
+   "u1wrMPFZYnXS9SptvhJ7+0dta8/dErjMkwBRGwNSTSg=",
+   "U5eRwqHsqTBc8Tv00vcnCu0Qi3sLQznjPLEK4rSOwBU=",
+   "HmIV1mvrtfnZI3c2Uyx/lfZW7nCREWfB4isA23ji97c=",
+   "pBlj+Gvxi1zbQD9VsZW2ObZIKRD4EPur3yhXwsjkhfw=",
+   "G/o64s4hNAmF9tHd7sh9aXYqgpqXZoqOjE736PlHxwY=",
+   "694AOajvLLd9uMP0UIi4+zcBHLjAigMhpFjgmafTutg=",
+   "oBcensGy75Fs3iV2s7E0m+NzeqkfgKM74nYmGztkLJA=",
+   "DH9XyiwNuVW6J0R2PSIHNv3tEoPaF32EFLwAUAf8Dbk=",
+   "ZD2/04lkBXlPQ7jiWAPLlAlkxe24YYicjPr4TOh3Aug=",
+   "zTroRjBrIWhTjmunO6L59qtVyD9Cqe9fF+wa4Wz9fo0=",
+   "ApSqZ4pcfTbT3JVe/8kQ/I8PTt+LjbqDj35zSO/5HH8=",
+   "VesvFmcCa+lkr49YDCNG2YspCFikVpg6lmvGLGrJu04=",
+   "JkKgJn/d4D4ZMLdnoVdixNiYkqPZQg7/76RdSR/SwmY=",
+   "lN0Mrkd1075ZQizn0s/VYRHvc+CuX3Acs9It06EDBJ0=",
+   "2LSvj2jZB+dU+zEOWxoAKvZqOGDE9tmSKdpOSdetSQE=",
+   "hE3NGEUgusGTaQ71ZIrp54pGRKIqgDNwq1i6WgB80y4=",
+   "oEbdz7syMdLSt+YPy/QcwRKv1Eofw3o95sv8fTMyq0Q=",
+   "i6szG5Y6wKQ3O+s59vKguoZ6AlMpgUXhK6UxNPCMJGU=",
+   "/oNIJZLCp5fFjx+hFx6Tv4HLWU2yM6Ma/oTfvT4bW9g=",
+   "ODKMK/6r5iYqs4/EoBOo7qQcEB7V1es+OkQ/zwnFaRk=",
+   "69hB5ywwSO3youMLpf0Bh5KfQULHSOkVZIpYDiB6ips=",
+   "g7/m5ugaCvnTrBl4EI8G9ig/6g7yD5iKbigc5NBRCVU=",
+   "K9J1jw/MJF7r6qMH7MuMeA7DFm5X+UhcyzGxGcVjsWE=",
+   "j4QHhXXJlDQhVSgK2fBrMieop2wWqc265kt2tWk54F0=",
+   "a/HvTPwyfJuyQEzF4at5Kdz2ElwF/7xGsa2ow1PKc+I=",
+   "0gyOiuSNDKvR4ZhEBO9G07/Edyem1AiILWEMb3AKkj8=",
+   "0Rui/6cc+kd7PviuAesKEbrhcMUl3uXFyxeK84UVE1o=",
+   "zruzCLgBdYB1K7IlQs3nWnaelERoxrmo8JfvBlSZLe8=",
+   "syDbznDF6PlxWatIn8sQkfuVvJFHFLAycRqKM7lo2DQ=",
+   "hKsqDEnsotKVm6pHlBvP/uVoh7vNY0svG6pDI1oBvTw=",
+   "wP+wbXsGvO8FGMdSJ1JryOujaNHa2i+gC/TY4ZkFKyQ=",
+   "HIa/AO/zUG6LnoiAsywuP4KVqA5FBbxdR1p5VWpD9uA=",
+   "diRgui5amT4K+X/CvOboELammO6yFa0oeNaAPjPEvtM=",
+   "4vT7UzNJAsWzH9GBdfez2R0TyO2XkuCoyYA4J/fYqdo="
+  ],
+  "fwd": [
+   "U1y1qHKIpSTNidLHt5xfadexZgyzWMHsRXZypOJbKfc="
+  ],
+  "finalize": [
+   "qwmG1hqkpDwITQVUReMsb1nhQu2p9hdnxOyNVxDar/Y=",
+   "sgU5ko+fZB2jRTl7+bPSvkZ6CpndAyYMYXQdbaTvA1Y=",
+   "OthJ+Yz8FM1PvLuY1NNq9+LAjakf8OdBkRYv6+mAvgs=",
+   "vhM/TYjk4c0unw57eOLUN58hFAlZ1ysRoltNIHVToUM=",
+   "sEg+piUd9Yp9QCzJoqD2piBM+twzeLmHwvUvQChh9o0=",
+   "Wta3xPuBzudLHT44OKfuOjU5jXdy5IBZDn+ngzJdgTw=",
+   "aia557ype7oEEXDJSNVcXy7KVcNA4pwY9dlhUOkfTe0=",
+   "VYoRcln9lNsN65mc2SScm1W+mUDzZQ9DY1berBKXDSo=",
+   "psGvb37JDKjNYvBwxt3Ttr8kUrbntBMxvfONkjr9ASc=",
+   "UTTNdd08DChuRW4m0jLOgX0gwIaLEOtlNqItD0dQJms=",
+   "FFMLCkBGw8cF3Pdq8h8IVOh5TcDtsysczOmxFN9qyl4=",
+   "0ZoBwDrflxNKCbMeOIKbsFw1K49BvVqregXR6acECPM=",
+   "R8oTs6H3lHT1c3QYd+dkQPK6OTwRnIieqLs82379A9Y=",
+   "YF/IO+iPG6Y6R/GvmaCkExbNE3PiIfp8/rUXXxqeH84=",
+   "6yZCy6wOwrYh/Y4di2n59pxLQefS5/1LjlaEMMYPU58=",
+   "Phow/qn/Z0d0dTCAAVDxvwFdTCi6HVeIemtWn3mgJ3s=",
+   "JY5+6UIW9qHBpW2YQj2v+nhJDk/fJKwWhFjYoBG+0wA=",
+   "VQmJb/NBOdL+OaDePTZrzts8Lk01wduNzOFZNvA3YIo=",
+   "XwMVxBXLJSJHdiv/nQ7Z4q2H2j8CDvuj4Z8U/ZvV+AI=",
+   "ynQG6SD22FofDKHPDWtSswc8Qv2UItCtofcdA38eiGY=",
+   "VTXwdxrh9Hs0WfQWVeoRd5sVr/N2enrOrrPV4LrudUY=",
+   "jKm9J+PWn5UrtoE2OTQKJouCJLlucqs2KJVINf8w4Lg=",
+   "ZwJuJEovrlCz5muABIOfWs7OZ7NKrqkqRU1gGfvgds8=",
+   "meqBm2TR16IjWeZGLPb4cmIix9nBL0PI73mR5iaiwB0="
+  ],
+  "open": [
+   "9Ct5PVUIyGMzPY/Aoj+bU3CAal3cvDUaABUW4YN/AuA=",
+   "zC+X82psxA00JXX6RPFt/cHf1PtELSsukKuS5Cot/Os=",
+   "ZFr6IBTWdHbwopQ8LFdQXFEjVqOGbJFMFcYhhP/VoDI=",
+   "qxd9YkrZ+/n/R726V2lEkPnsyF8kCM0aKBGp/5bQA34=",
+   "NZ0Rf5hrwfVezGYLY40CqmMXlSmHrjPwey0VHN4oDKw=",
+   "GRGV1fuNYE77/Eh77hFyyUci4+Qi0FjRwtxHokRwmcQ=",
+   "IiIf9KTZzYVTPFjklYCAmqeTN05oobY+EKyFzBv2qSg=",
+   "hJ6LEJvHGqi79oUcK7ERUbfxodlfLnbM9eWkv0SVGqg=",
+   "niDARCTCA1BChiVLvX8IEx9W7smSZ7BmiUBytV0B8uA=",
+   "xF2yI1DVnIslz2qN07ZL0riOtN+32mRtjTQCKs5xAWs=",
+   "c1Zz8U1523OLuFprShY9WNsPQ8H8NDc9o4CSQwCXQiY=",
+   "d3Wiy0iPkZlihe7bVEjtl5At5LjNX3+CZNLOrYzq94E=",
+   "dvhC2EiNM49sZX1KPY/rUwleiWisPE0vOJv3LZ3RCNo=",
+   "aln7ppv+R0mL8nGUyl2MmzToL9gzTXToKbZiJ5ed7HU="
+  ],
+  "mids": [
+   "M7QqWR3HGMtOW5nkVPe6oIZ0GeVR5uMeG4kPQ3Dml7k=",
+   "YDIDJEiLZW22z3CS0imFxx+lLKLaiWH65myegLuhmGQ=",
+   "0jXumgf22lvqo7yp1UABNdrfCatDZQKzWzN8Gs0X6pM=",
+   "Ah0EpnBfpe/Js0mcDk0jn7RfYrU49oAOJXVpOb4cFR4=",
+   "0JRH/S39ozT58z6Cs8jVga1Mzda4i5XGMyWX0ZZ9L7U=",
+   "UQVd5NImin7+GqwuYY6FHlpddVfxQ/pBzBWUXPzkPMA=",
+   "1cTmfQRuEVnfwfrYrz4xpddjnoefqLqmL66Wf77oKqo=",
+   "kklu60K7qGaWauThTfwY0PKHCAjGTMO0pZaEOolC70E=",
+   "uElDJ4a8/TIeBC2PDAEW187DKPxlATWsdNZVlK1zPnw=",
+   "CMmjDXI96CkPQ6HHUlatac8HS6SLKE7mm6FB6/3Pmtw=",
+   "++cG+VJGMzAX3Qk4+zMdjJjIN18oOksTTC6BZVeDCnU=",
+   "v40O9hMpq1XG1iRKJllv+CHE+Oji3g4Dczt9Nup+wN8=",
+   "5cS9gyeyKa6dkwVLprEwiP3L+dP4TUt2Zc2VW530S/E=",
+   "ioFyesnsaFoPIbiLpOLDI++MeH05cmHmZ2kuvGVWpZQ=",
+   "GLT+5fNul8U9HrGgLSKy9QsCw0GKHg53cV1it89ojRc=",
+   "rHwYly14K8qCQcZ931zhAMoLPtOtgafeXIOz80BwWBs=",
+   "6TEnLVfezVJsISz1w1jc2HRnDZNFDjP+MSKS///gPx0=",
+   "S3atoxSnzmeKbqNncBptCx9GS5G990MNk5wPlzfS6PI=",
+   "mTPYeoS7UZWflLq+0a+U7TwMGnGWewFJWGD04ueV2+Y=",
+   "+ZUoyqe8LzOoJT5Q7ps82LRgViceUcZVaazuCO0eD9o=",
+   "Hbab+oMzB6RfE9CFrUit5EyVAj6R6frdy3b+2TqyHVA=",
+   "UGRuvzEA/1/ZBjEyawxEUHaKLo6WelMMbzCZjQoJRC0=",
+   "VstaooIAuVjNLZqI7EY82e16l8Gzi9rykAsqBKCtwpk=",
+   "9Q+v3RjQwHybbJgxe6QPhY7j4UzWRvd5ialCVkRvH0c=",
+   "5o/8hq+lVqTcq2FiOVDy8AeEEMVtLE5vp0Q9xQW4O5s="
+  ],
+  "pick": [
+   "X6RK2hMhYmUnopb4ToLVVyLadw+FCBrSPOeEq2KsWtU=",
+   "BIVHhr2wolyLK7agojbW2LKpvpDbjIqtfeI1Y9b6Nl0=",
+   "WCfftgfEjgDg5bPOtT6JyDTj4djTbYhT611gVFakmrM=",
+   "yQMB9FCp727e/arQmask1d+8pIEhG+Am/573ADRr1ig=",
+   "RF/ay4PIVu+EuwQbFwK3emWxEPoLJAwjRgdhHMqu2UI=",
+   "6UGK5uKUvlAvR4bsUSQZzBHJ+7b6xtscrsDph3abuVE=",
+   "qcfRDL61vd2jiHbN8oPTeimTOM2I0J3FkEqZuJ0eKVk=",
+   "2tdlabjSs3zgjU3GYSL4MKUW4/Qpefc5aKBupjqRi9M=",
+   "pfk+bXnswTUXZShdI20fhTX6qIEw5XBuhzwpCHokI3w=",
+   "WeoNRwDpY1WfKnp9IkAoTdXBr/Ozvg0ElsZQTG3kQC8=",
+   "qbAJdE8USjEfhTGGygeuQ6GWsaXzQl5CdRKGMuY639k=",
+   "sQ81LsWbicZAUa5z03uOMwr68hO7Uwwi/+Z4IKA7i1g=",
+   "5WZNaZYPgKWWz8bBWAEFUfla+NOARhC0t+LZ5nQN8ig=",
+   "LCG2Ot2CXJy9SvfvHniPK5FRi6slZv1toXWhy3mh9sQ=",
+   "eWIDszF65XlyTqvc9kI5kvy/rB29hl2icGtOxElvbaI=",
+   "VocVefX4wDXNhrIrGYoKFY8+9omJpgRCWEZwGSqDmWI=",
+   "zPhVdKDvMVaKJp8QuQISnqX7b0puob15API9TmiMH6Q=",
+   "EFFFxLpIFY35k+sU4Kgc8J9t6W1HEc+OOF5yqsyeP10=",
+   "FNhNkZ3y+om+Wg54YI3drGnhYY/3zntSd+bdMEctWRo=",
+   "b2kJ8ShBBSEMZ1SIn09Lu5d8qIENl3ZQzGyHbtt28mY=",
+   "uoAcunsY3P5CtzAfeXyXiWbdqDICsmN8BqtaWLUhjy4=",
+   "E1yB15wS+/ANLUhwvmA0K5XLu53E6Xk4CA+vGM1hSz4=",
+   "DZhRIhLuHUqj4lyrnmTcgS5XW/A6TrMUGYK4k7Ivh1M="
+  ],
+  "step": [
+   "rM//dpBaBEAehEYuBKcNL2Lpe2lbdCO/vzv3NbJiJYc=",
+   "QIuzpguQuTYKQ59D8Nsl0usZ4l55JqklBA8g2d0gnoU=",
+   "084/jeShWc+jtbA3KRBoQZOrcdsyXj40LiPE+QbZR64=",
+   "YbIBqw8TXRz2HfH1m6gLik9myN80uYZISCiERxsadY8=",
+   "hbWOK6HFtTX5r53KyAryTsZRVEgx81TWuU5clhpYXAE=",
+   "tCjsLnk0DtDRKXqZp21+Zp8HixGFM+vkIK2XG3CicBw=",
+   "wz6ELRB9lglXHncfFOEQyRweuqBWOjQE4wMBNynyeUI=",
+   "VfWdtKdBArhpHCDcD/+Qee9fvXO8NG3zjpaohuRdiDE=",
+   "17BfDzmXPKvYtG0H/VkhCZz7eezBQdXmOU2PFHcZlG0=",
+   "x4aYCvVs4JY2VBQiSM0GMnP02wtbRpAYnCkFoGGDmj8=",
+   "zo5ghnXlc0KbUj6RQTBYe7+/5cPeVldhcQEIDlzoeoM=",
+   "tmlun9gUbacIkspC0wht0m9g23RlOMYwmrplTVkYVIk=",
+   "UGnQ9N2yE64QvTyDDdibNU4zHYDzHuM1AJBhS8NVkZ0=",
+   "Ic9tCDylXBYIkQWw0Gjf+4urIDL6nIMeATZfZwOwArY=",
+   "m2TmLOABfHzuGppQq0xQVJ2hRuho+Q+TBuz4LsRiYwY=",
+   "G92oMCqdYZ4lh0/hsnyuwkLKxVdccn3bNWDd9GuqBUI=",
+   "tWfPfxirxJ1Ww7yaREVU2r1HBwIKMwllaqvQvgKq2Fg=",
+   "fu0T2xeeT8ekboNxwcPJ1fOw2lf8pGAGzQ5M0SBWq18=",
+   "b1BjONzb5pTkHjPyjs3uN8Bvb0fYqnXFYfHbQz8lg3s=",
+   "ckr/hAfB3slCTSMJOcBE9U7qBQ2F7JZqUBgiq9MVIjI=",
+   "c5fHMlx/nFIhXiefkerWmHaVnzxBGkP4lWAj4NG7QU8=",
+   "4gLyYNqKc8a/zMGUflaOdIfUPOuKB035RHs0FHQxy8E=",
+   "8hfQMq2veWTuxjtzEJuXCyRFaGDoCIH7DXEpvbwVx5I=",
+   "vNUVxxAd0jfm3QqAnubiDfvWbl51oTlEQgaes2cRFuM=",
+   "KoWvMZUn31M1LOcNfGE13PK/PNnelwcj/wzp2bpvbmk=",
+   "usSomkfruW1E20xaCEWHww/9lbxxUWTdX00tZQKA1kY=",
+   "feqgFuYKC0edaifYkW7n1jjSLq4y50mM6ipa+FLajG8=",
+   "PjAJAUsTCKB911oHZnYeryUO4r69m7HtHLLI7pRpcvE=",
+   "d6xMYzgl8LjP3xqde6IYK2qBD1tbrjyMiAvXeWfzW5g=",
+   "e2Uiuzm1yUa6RzKXnaiwKZL2KLia/PqfeqTX78Tgfn0=",
+   "Np6DM85vkuktbfxRE/LaUF4WYMW0+KFn/T2/J8X3jJE=",
+   "Aw5AbuZ5ygsyUxt8DQH97iB7jaVZk5rN56IMNWTPWFA=",
+   "2FyWJazEH7f60TbprHWk8KdxGuRhTeIkOG9U2YNrVjk=",
+   "szI+5Jb7bcCbiXnwiotH271uzKERNbvYLWO1sK7Fd5U=",
+   "uOpXGeym2DEnp01O9xq2AArsO4lSfTz9OHlvPalrKSo=",
+   "1sADsA2QKzrOI7CxkzMa8Sd1NvZKotVty47jy9cwX4E=",
+   "Cne9avi9OJLWXZtNxFU6VCCtzViuAPp/ac+CApNaEdU=",
+   "0or+Snva/nJHzr3o94PTXMCdKwOPEIG30wxk+3koTKI=",
+   "6W/bNuEtlWlKJ2fDw2mE8dvrbltBYxq1CyZlGTVDJLE=",
+   "liJrxGeMGMDl7Xk2NpVIxibNMAoBzIb0G14iCTKE0ig=",
+   "uwfp4p8GhPuaxcXLpSeWbR+QGkm0ELmmVSyy3WX4Gzg=",
+   "0Qy1U4y5VAfQHBF15SIGMQMijwmvs6nIGeS6WTcYnDg="
+  ],
+  "resolve": [
+   "3FD2XSIDadKMkDUC49mSoOjPtRXW4lJB2U6XYiSLOvA=",
+   "/9zOvzZ89bBtB/3/vavh4t7hUuSiJI1U1YWfabAkxsw=",
+   "U+YsLeHaQ9ufNJfTxP79lzVTKETfL/ueBjAsmxmxjXw=",
+   "w9ISRPfshYCYFtTVBSjynchGEE3lC2YDCiVsirDBbLM=",
+   "qp6d98g7nHTmL3ym0Aq2Amnl7fpUG/NQ/YS+OZrCn8g=",
+   "HIImwBvq/CrHAL1M0sZZs0LBFFc9MQSJpt/4gGQU0Go=",
+   "zjMLk94q1c5qV1D1U673nLdygK4BD6NZCtNxi0yJHTU=",
+   "cEADIJ3jVBBfomBZaX9VGiMZWeMAIaQNUQvSlRAo38Y=",
+   "9+LasurV7Jz+69L+JMbsreJq4Hz3fE+8Q/NTk2WpdPM=",
+   "edfYnSAFHXXzuSf4REPdo5vDA5JyyV7pz/dYO85/2DQ=",
+   "shWYpOZrpONxjgcW0YniX9YOQzX0Wtbb1MmxdafXOi0=",
+   "bR/3U2K4Ljh11GFxK14j+xNOBaUQ0RUsaxjcyZLIyhs=",
+   "EsxylKohSBDCJjAKL6yC3EaqMoRIpd55LHeFaGAiE+M=",
+   "x80gTsqqruFFkX4tqvJr9x5+F34B9qpwbW3NWr4ywwg=",
+   "rFQXVd3bbpnv/B5eG5MK4EwmGKUkmork6/Kq44uP2oc="
+  ],
+  "reclaim": [
+   "zMDl/9SSpOzC8BuM8f1jCXfZq6k8bJfBtv0ddzWXxAM=",
+   "Cq6iVWfqsaC/AWPjjeIjF22gddRrm4449q1V+dSTGfQ=",
+   "n3+Wpll5s7bfEejsc+xF+KPfyFIAV0FkSlFckyw9Mjk=",
+   "+wS9XmhZeLni4ZYFRhqzLr6mrfIXfTu77/wnnCuxCjI=",
+   "SzYirSFzMk6jekD/i8RhHPZqv6YU2Tgze7HSVEVSbhI=",
+   "xQk7nf6jbtXo1yJWJYODX383c+AegPoQ+6PhwF/r+8o=",
+   "lvomkTDTO1wlG8GiYAMUksr7IcPwzcrI1JDeGpNcLAg=",
+   "VXLljLgnlmzWXTTf0/ZRqE7x0qP6F/N7uOPMsmNczTM="
+  ],
+  "ropen": [
+   "gY3UCRRYo3E7uaR8KPEwfLr8KWCsf2IRLvhh/40lI7w="
+  ]
+ }
+}
