@@ -1342,6 +1342,8 @@ fn main() {
         #[cfg(feature = "stateless")]
         Some("sldump") => println!("{}", sl::sldump(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5], a.get(6).map(|x| x == "adv").unwrap_or(false))), // loop round 14
         #[cfg(feature = "stateless")]
+        Some("slcaps") => println!("{}", sl::slcaps()), // loop round 14
+        #[cfg(feature = "stateless")]
         Some("sladv") => println!("{}", sl::sladv(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 14
         Some("fuzz") => {
             let n: u64 = a[2].parse().unwrap();

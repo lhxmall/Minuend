@@ -44,12 +44,18 @@ pub const ST_SL_MISSING: u32 = 13;
 /// op kind / market kind / feature not covered by the prototype
 pub const ST_SL_UNSUPPORTED: u32 = 14;
 /// per-segment touched-set limits (the ONLY caps; consensus constants of the stateless image)
-pub const SL_MAX_TREE_NODES: usize = 1 << 20;
+/// round 14 review (R14-M3): ~2 SHA-256 compressions per node hash -> <= ~2e9 steps of tree hashing
+pub const SL_MAX_TREE_NODES: usize = 1 << 18;
+/// orders loaded in total (all levels), R14-M3
+pub const SL_MAX_ORDERS: usize = 1 << 16;
+/// witness bytes (main.rs refuses more before reading), R14-M3
+pub const SL_MAX_WIT_BYTES: usize = 1 << 24;
 pub const SL_MAX_ACCOUNTS: usize = 4096;
 pub const SL_MAX_LEVELS: usize = 4096;
 pub const SL_MAX_LEVEL_ORDERS: usize = 4096;
 pub const SL_MAX_BMP: usize = 16384;
 pub const SL_MAX_MARKETS: usize = 256;
+/// R14-H1: per-account exposure cap (markets with a position or a live order); also the apos: bound
 pub const SL_MAX_POS: usize = 64;
 
 // ------------------------------------------------------------------------------------------------
@@ -995,6 +1001,9 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
             return Err(ST_SL_BADWIT);
         }
         let mut ids = Vec::with_capacity(k);
+        if sl.oloc.len() + k > SL_MAX_ORDERS {
+            return Err(ST_SL_BADWIT);
+        }
         for _ in 0..k {
             let o = Order {
                 id: OrderId(bad!(r.h32())),
@@ -1169,6 +1178,17 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
             }
             need_acct(sl, s, &INSURANCE_ACCOUNT).map_err(Ok)?;
             need_aord_full(sl, &author).map_err(Ok)?;
+            // R14-M1 rule input: the own-side level a GTC limit may join must be known (or absent per the trie), so
+            // the level-size rule below never depends on which extra records the witness carries
+            if let Place { side, typ: OrderType::Limit, tif: TimeInForce::Gtc, price, .. } = *op {
+                if price != 0 && !sl.levels.contains_key(&(market, side.as_u8(), price)) {
+                    match trie_has(sl, market, side.as_u8(), price) {
+                        Err(n) => return Err(Ok(n)),
+                        Ok(true) => return Err(Ok(Need::Level(market, side.as_u8(), price))),
+                        Ok(false) => {}
+                    }
+                }
+            }
             // resting_open_im walks every book of the state and reads its market's params
             for m in s.books.keys() {
                 if !sl.markets.contains_key(&m.0) {
@@ -1255,6 +1275,26 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], ev: &mut 
                     Err(st) => fin(&mut out, &sl, st, None),
                 }
                 return out;
+            }
+            // round 14 consensus rules of the stateless image (no global caps; per-account / per-level bounds that keep
+            // every record loadable -- R14-H1 / R14-M1). Inputs are fully loaded (pre), so the outcome does not depend
+            // on extra witness records.
+            if let crate::BatchOp::Place { market, side, typ, tif, price, .. } = op {
+                let m = MarketId(market);
+                let st = &eng.state;
+                let has = st.accounts.get(&a).is_some_and(|x| x.positions.contains_key(&m)) || st.books.get(&m).is_some_and(|b| b.live_orders_of(a).next().is_some());
+                let mut expo: BTreeSet<u32> = st.accounts.get(&a).map(|x| x.positions.keys().map(|k| k.0).collect()).unwrap_or_default();
+                if let Some((es, _)) = sl.aord.get(&a) {
+                    expo.extend(es.values().map(|e| e.0));
+                }
+                let lvl_full = typ == OrderType::Limit
+                    && tif == TimeInForce::Gtc
+                    && st.books.get(&m).and_then(|b| b.sl_level(side, price)).is_some_and(|v| v.len() >= SL_MAX_LEVEL_ORDERS);
+                if (!has && expo.len() >= SL_MAX_POS) || lvl_full {
+                    out.rejected += 1;
+                    ev(crate::STATE_CAP_CODE);
+                    continue;
+                }
             }
             // W2 depth rule on the MNWIT-S tree (keys the unit may create)
             let mut keys: Vec<H> = Vec::new();

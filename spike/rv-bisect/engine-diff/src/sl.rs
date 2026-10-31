@@ -637,3 +637,106 @@ pub fn sldump(seed: u64, ord: u32, size: u32, dir: &str, adv: bool) -> String {
     fs::write(format!("{}/manifest.json", dir), format!("[{}]", man.join(",\n"))).unwrap();
     format!("{{\"segments\":{},\"dir\":\"{}\"}}", refs.len(), dir)
 }
+
+/// slcaps (round 14, R14-H1 / R14-M1): the stateless image's per-account exposure cap and per-level size cap.
+/// Synthetic pre-state (no session reference: the session image has neither rule): 66 markets; account A holds
+/// SL_MAX_POS positions; market 1 has one ask level with SL_MAX_LEVEL_ORDERS orders from 64 makers.
+pub fn slcaps() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M, Side};
+    let mut s = mnpilot::state::ChainState::genesis();
+    let p0 = mnpilot::types::genesis_params();
+    for m in 2..=66u32 {
+        s.markets.insert(M(m), p0);
+        s.marks.insert(M(m), MID);
+    }
+    let id = |i: u32| A(acct_id(i).0);
+    // A = 0: SL_MAX_POS small long positions (cross) in markets 2..
+    let mut a = mnpilot::account::Account::new(id(0));
+    a.collateral = 1_000_000_000 * USD_SCALE as i128;
+    for m in 2..2 + sl::SL_MAX_POS as u32 {
+        a.positions.insert(M(m), mnpilot::account::Position { market: M(m), qty: (QTY_SCALE / 100) as i64, entry_price: MID, isolated: false });
+    }
+    s.put_account(id(0), a);
+    // makers 10..74: 64 orders each at one ask price P on market 1
+    let px = MID + 5 * DOLLAR;
+    let mut n = 0usize;
+    'outer: for mk in 10..74u32 {
+        let mut acc = mnpilot::account::Account::new(id(mk));
+        acc.collateral = 1_000_000_000 * USD_SCALE as i128;
+        s.put_account(id(mk), acc);
+        for c in 1..=64u64 {
+            if n >= sl::SL_MAX_LEVEL_ORDERS {
+                break 'outer;
+            }
+            let oid = mnpilot::types::order_id(id(mk), M(1), c);
+            s.book_mut(M(1)).sl_restore(mnpilot::Order {
+                id: oid, account: id(mk), market: M(1), side: Side::Ask, typ: mnpilot::types::OrderType::Limit,
+                tif: mnpilot::types::TimeInForce::Gtc, price: px, qty: QTY_SCALE / 100, remaining: QTY_SCALE / 100, seq: n as u64,
+                isolated: false, margin_left: 0,
+            });
+            s.seen_client_seq.insert(id(mk), c);
+            n += 1;
+        }
+    }
+    for b in [1u32, 2] {
+        let mut acc = mnpilot::account::Account::new(id(b));
+        acc.collateral = 1_000_000_000 * USD_SCALE as i128;
+        s.put_account(id(b), acc);
+    }
+    let _ = s.take_dirty();
+    // ops: (acct index in table, side 0 bid / 1 ask, typ, tif, price, market, client_seq)
+    let table = [0u32, 1, 2];
+    let op = |ai: u32, side: u32, ioc: bool, price: i64, m: u32, cs: u32| -> [u32; 8] {
+        let q = QTY_SCALE / 100;
+        [2 | (ai << 8), side | (if ioc { 4 } else { 0 }), price as u32, (price >> 32) as u32, q as u32, (q >> 32) as u32, cs, m]
+    };
+    let ops = [
+        op(0, 0, false, MID - 50 * DOLLAR, 66, 1), // A: new market 66 beyond the exposure cap -> 19
+        op(0, 0, false, MID - 50 * DOLLAR, 2, 1),  // A: market 2 (holds a position) -> not 19
+        op(1, 1, false, px, 1, 1),                 // B: GTC ask joining the full level -> 19
+        op(1, 1, false, px + DOLLAR, 1, 1),        // B: next price -> rests (client_seq 1 again: the 19 consumed none)
+        op(2, 0, true, px, 1, 1),                  // C: IOC bid at P -> one fill with the level head
+    ];
+    let mut w = vec![mnpilot::MAGIC, table.len() as u32, ops.len() as u32, 0];
+    for t in table {
+        let x = acct_id(t);
+        for k in 0..8 {
+            w.push(u32::from_le_bytes(x.0[k * 4..k * 4 + 4].try_into().unwrap()));
+        }
+    }
+    for o in &ops {
+        w.extend_from_slice(o);
+    }
+    let b = WitBuilder::new(&s);
+    let (needs, wit, o, ev, it) = match operate(&b, &w) {
+        Ok(x) => x,
+        Err(e) => return format!("{{\"ok\":false,\"why\":\"{}\"}}", e),
+    };
+    // event words per unit
+    let mut units: Vec<Vec<u32>> = Vec::new();
+    let mut k = 0;
+    while k < ev.len() {
+        let e = ev[k];
+        if e & EV_APPLIED != 0 {
+            let nf = (e & 0xff) as usize;
+            units.push(ev[k..k + 1 + 6 * nf].to_vec());
+            k += 1 + 6 * nf;
+        } else {
+            units.push(vec![e]);
+            k += 1;
+        }
+    }
+    let code = |u: &Vec<u32>| if u[0] & EV_APPLIED != 0 { format!("applied/{}", u[0] & 0xff) } else { u[0].to_string() };
+    let got: Vec<String> = units.iter().map(code).collect();
+    let ok = o.status == 0
+        && units.len() == 5
+        && units[0] == vec![mnpilot::STATE_CAP_CODE]
+        && units[1] != vec![mnpilot::STATE_CAP_CODE]
+        && units[2] == vec![mnpilot::STATE_CAP_CODE]
+        && units[3][0] == EV_APPLIED
+        && units[4][0] == EV_APPLIED | 1;
+    format!(
+        "{{\"ok\":{},\"status\":{},\"units\":{:?},\"level_orders\":{},\"needs\":{},\"iterations\":{},\"witness_bytes\":{},\"leaves_verified\":{}}}",
+        ok, o.status, got, n, needs.len(), it, wit.len(), o.leaves_verified
+    )
+}

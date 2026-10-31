@@ -194,7 +194,7 @@ mod rt {
     fn sl_run() -> u32 {
         let b = read_word(1);
         let wn = read_word(2) as usize;
-        if b > 4 + 8 * (mnpilot::MAX_ACCOUNTS + 2 * mnpilot::MAX_UNITS) + 1 + mnpilot::MAX_EXT || wn > 1 << 26 {
+        if b > 4 + 8 * (mnpilot::MAX_ACCOUNTS + 2 * mnpilot::MAX_UNITS) + 1 + mnpilot::MAX_EXT || wn > mnpilot::stateless::SL_MAX_WIT_BYTES {
             unsafe { OUT.add(ROOTS - 7).write_volatile(mnpilot::stateless::ST_SL_BADWIT) };
             return 0;
         }
