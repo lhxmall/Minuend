@@ -1,0 +1,90 @@
+===== testnet = false
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:824848) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+rundir /data/hark/spike-rv/loop11/devnet-testdata/runid-0001
+[INFO][genesis-node] Child started
+[INFO][obyte-witness-0002] Child started
+[INFO][obyte-witness-0001] Child started
+[INFO][obyte-hub-0001] Child started
+[INFO][headless-wallet-0003] Child started
+[INFO][headless-wallet-0005] Child started
+[INFO][headless-wallet-0006] Child started
+[INFO][headless-wallet-0004] Child started
+[INFO][headless-wallet-0008] Child started
+[INFO][headless-wallet-0001] Child started
+[INFO][headless-wallet-0007] Child started
+[INFO][headless-wallet-0002] Child started
+MODE max_aa_responses set {"STEP":"7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA","GAME":"W7OQFFFU6446637YBHIA7B74L6X4ZO5B","ROLL":"AIW36VRY2YVWZVGG5J4LYY7J5BZCS4RX"}
+PASS | deployed rv_step == address baked into the referee | expected "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" | actual "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" 
+PASS | deployed referee == address baked into rv_rollup | expected "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" | actual "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" 
+PASS | deployed rollup == computed address | expected "AIW36VRY2YVWZVGG5J4LYY7J5BZCS4RX" | actual "AIW36VRY2YVWZVGG5J4LYY7J5BZCS4RX" 
+PASS | loop 3: deployed seg referee == address baked into rv_rollup | expected "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" | actual "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" 
+PASS | loop 3: deployed witbind / witproof == computed | expected ["WPELOQ5TNQWQCW33XCNUQ6GDZQK5RLUW","IXO2KH36WHHGBYFHBR3L5NATLQ7QORTJ"] | actual ["WPELOQ5TNQWQCW33XCNUQ6GDZQK5RLUW","IXO2KH36WHHGBYFHBR3L5NATLQ7QORTJ"] 
+PASS | 10 rollup-3 deployed | expected "ok" | actual "ok" 
+PASS | 10 fraudulent h1 by op2 (OBOND) | expected "ok" | actual "ok" 
+PASS | 10 ch1 opens on h1 | expected "ok" | actual "ok" 
+PASS | 10 fraud proven | expected "c" | actual "c" 
+PASS | 10 v1 = 1, p1 = ch1, top 0, burned OBOND/2 | expected [1,"PSQ3PVUMWX6YLLC7TUVRSD5X4KKJBJMZ",0,100000] | actual [1,"PSQ3PVUMWX6YLLC7TUVRSD5X4KKJBJMZ",0,100000] 
+PASS | 10 op1 inside the priority window | expected "bounce" | actual "bounce" {"err":"{\"message\":\"priority: PSQ3PVUMWX6YLLC7TUVRSD5X4KKJBJMZ\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":102,\"formula\":\"require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'prior"}
+PASS | 10 the winner with only OBOND | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"JT47J7N3AF5H4BBMXOAAGSBERJBHS6KA\",\"xp"}
+PASS | 10 the winner submits the honest h1 with 2 x OBOND (b<sid> stored) | expected ["ok",400000] | actual ["ok",400000] 
+PASS | 10 R11-M1: V = 1 after the void; h2 (another height) with only OBOND bounces, bond 2 x OBOND | expected ["bounce",1,400000] | actual ["bounce",1,400000] {"err":"{\"message\":\"bond 400000\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":100,\"formula\":\"require($paid >= $bond, 'bond ' || $bond);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"JT47J7N3AF5H4BBMXOAAGSBERJBHS6KA\",\"xp"}
+PASS | 10 h1 finalizes; pays 2 x OBOND - FEE (real output) | expected ["ok",398000] | actual ["ok",398000] 
+PASS | 10 R11-M1: one day after the void V has decayed to 0 (h2 bond back to OBOND) | expected [0,200000] | actual [0,200000] 
+PASS | 10 fraud at h2 proven by ch2 | expected "c" | actual "c" 
+PASS | 10 op1 after the window with 2 x OBOND | expected ["ok",400000] | actual ["ok",400000] 
+PASS | rollup balance >= burned (all bonds settled) | expected true | actual true {"balance":0}
+FEES {"submit":{"n":2,"avg":1232,"max":1263},"submit+tps":{"n":2,"avg":1120,"max":2240},"open":{"n":1,"avg":946,"max":946},"open+tps":{"n":1,"avg":5730,"max":5730},"mids":{"n":4,"avg":1316,"max":1580},"mids+tps":{"n":4,"avg":68,"max":270},"pick":{"n":4,"avg":924,"max":924},"pick+tps":{"n":4,"avg":0,"max":0},"step":{"n":2,"avg":2312,"max":2343},"step+tps":{"n":2,"avg":1120,"max":2240},"resolve":{"n":2,"avg":918,"max":918},"resolve+tps":{"n":2,"avg":1945,"max":2545}}
+TPS {"submit":{"n":7,"avg":427,"median":0,"max":2240,"max_aa_responses":[1]},"open":{"n":2,"avg":7680,"median":9630,"max":9630,"max_aa_responses":[2]},"mids":{"n":4,"avg":68,"median":0,"max":270,"max_aa_responses":[1]},"pick":{"n":4,"avg":0,"median":0,"max":0,"max_aa_responses":[1]},"step":{"n":2,"avg":1120,"median":2240,"max":2240,"max_aa_responses":[1]},"resolve":{"n":2,"avg":1945,"median":2545,"max":2545,"max_aa_responses":[2]},"finalize":{"n":1,"avg":0,"median":0,"max":0,"max_aa_responses":[1]}}
+SUMMARY {"total":19,"pass":19,"fail":0}
+[INFO][headless-wallet-0004] Child exited
+[INFO][genesis-node] Child exited
+[INFO][headless-wallet-0006] Child exited
+[INFO][obyte-witness-0002] Child exited
+[INFO][headless-wallet-0001] Child exited
+[INFO][headless-wallet-0007] Child exited
+[INFO][obyte-witness-0001] Child exited
+[INFO][headless-wallet-0008] Child exited
+[INFO][headless-wallet-0002] Child exited
+[INFO][headless-wallet-0005] Child exited
+[INFO][headless-wallet-0003] Child exited
+[INFO][obyte-hub-0001] Child exited
+RDDONE exit 0
