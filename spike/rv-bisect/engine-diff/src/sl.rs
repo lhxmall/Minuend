@@ -56,8 +56,12 @@ pub fn session_refs(w: &[u32], s: u32) -> Vec<SegRef> {
 
 /// run with the chain binding of main.rs (R14-H2): `expect` = the last good end root (the honest pre-state root)
 pub fn run_sl_x(seg: &[u32], wit: &[u8], expect: Option<&[u8; 32]>) -> (sl::SlOut, Vec<u32>) {
+    run_sl_xh(seg, wit, expect, None)
+}
+/// round 15: with the height hook (`height` = the run number of a bound image)
+pub fn run_sl_xh(seg: &[u32], wit: &[u8], expect: Option<&[u8; 32]>, height: Option<u64>) -> (sl::SlOut, Vec<u32>) {
     let mut ev = Vec::new();
-    let o = sl::run_stateless(&mut |i| seg.get(i as usize).copied().unwrap_or(0), wit, expect, &mut |x| ev.push(x));
+    let o = sl::run_stateless(&mut |i| seg.get(i as usize).copied().unwrap_or(0), wit, expect, height, &mut |x| ev.push(x));
     (o, ev)
 }
 pub fn run_sl(seg: &[u32], wit: &[u8]) -> (sl::SlOut, Vec<u32>) {
@@ -107,10 +111,13 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
 
 /// operator fixpoint: Some((needs, witness, out, ev, iterations)) or None (need loop / not converging)
 pub fn operate(b: &WitBuilder, seg: &[u32]) -> Result<(BTreeSet<Need>, Vec<u8>, sl::SlOut, Vec<u32>, u32), String> {
+    operate_h(b, seg, None)
+}
+pub fn operate_h(b: &WitBuilder, seg: &[u32], height: Option<u64>) -> Result<(BTreeSet<Need>, Vec<u8>, sl::SlOut, Vec<u32>, u32), String> {
     let mut needs = guess(seg);
     for it in 0..20_000u32 {
         let wit = b.build(&needs);
-        let (o, ev) = run_sl_x(seg, &wit, Some(&b.root));
+        let (o, ev) = run_sl_xh(seg, &wit, Some(&b.root), height);
         if o.status == sl::ST_SL_MISSING {
             let n = o.need.unwrap();
             if !needs.insert(n) {
@@ -1207,5 +1214,215 @@ pub fn slpoc15() -> String {
         };
         res.push(line);
     }
+    // ---- P5 R15-M1: migration of a session state whose price level exceeds SL_MAX_LEVEL_ORDERS (reachable in the
+    // session: 256 accounts x 64 live orders at one price) -> refused (ST_SL_MIG_BOUNDS); at the bound -> accepted ----
+    {
+        let mk = |n: usize| {
+            let mut s = mnpilot::state::ChainState::genesis();
+            let px = MID + 5 * DOLLAR;
+            let mut k = 0usize;
+            'o: for a in 10..80u32 {
+                let mut acc = mnpilot::account::Account::new(id(a));
+                acc.collateral = 1_000_000_000 * USD_SCALE as i128;
+                s.put_account(id(a), acc);
+                for c in 1..=64u64 {
+                    if k >= n {
+                        break 'o;
+                    }
+                    s.book_mut(M(1)).sl_restore(mnpilot::Order {
+                        id: mnpilot::types::order_id(id(a), M(1), c), account: id(a), market: M(1), side: mnpilot::types::Side::Ask,
+                        typ: mnpilot::types::OrderType::Limit, tif: mnpilot::types::TimeInForce::Gtc, price: px, qty: QTY_SCALE / 100,
+                        remaining: QTY_SCALE / 100, seq: k as u64, isolated: false, margin_left: 0,
+                    });
+                    s.seen_client_seq.insert(id(a), c);
+                    k += 1;
+                }
+            }
+            let _ = s.take_dirty();
+            let mut sess = mnpilot::Session::genesis_with(0, mnpilot::WitMode::Off, &[]);
+            sess.eng.state = s;
+            let (dg, nw, words) = mnpilot::snapshot::export(&sess, true);
+            let mut inp = vec![sl::SL_MIG_MAGIC];
+            inp.extend_from_slice(&words.unwrap());
+            let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+            (mo.status, mo.root == sl::s_root(&sess.eng.state))
+        };
+        let (st_over, _) = mk(sl::SL_MAX_LEVEL_ORDERS + 1);
+        let (st_at, root_at) = mk(sl::SL_MAX_LEVEL_ORDERS);
+        let ok = st_over == sl::ST_SL_MIG_BOUNDS && st_at == 0 && root_at;
+        all_ok &= ok;
+        res.push(format!("{{\"case\":\"P5 R15-M1 migration bounds: level of 4097 refused, 4096 accepted\",\"ok\":{},\"status_over\":{},\"status_at\":{},\"root_at_ok\":{}}}", ok, st_over, st_at, root_at));
+    }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
+}
+
+
+// ------------------------------------------------------------------------------------------------
+// round 15: MNWIT-S genesis by migration + the height hook (lazy withdrawal expiry)
+// ------------------------------------------------------------------------------------------------
+type WdlSets = std::collections::BTreeMap<mnpilot::types::AccountId, Vec<(u64, i128, bool, u64)>>;
+fn wdl_sets(s: &mnpilot::state::ChainState) -> WdlSets {
+    let mut m: WdlSets = Default::default();
+    for ((a, n), w) in &s.withdrawals {
+        m.entry(*a).or_default().push((*n, w.amount, w.pending, w.height));
+    }
+    m
+}
+/// the stateless chain's full state: the session state with the COMMITTED withdrawal records (lazy expiry)
+fn lazy_state(s: &mnpilot::state::ChainState, committed: &WdlSets) -> mnpilot::state::ChainState {
+    let mut st = s.clone();
+    st.withdrawals.clear();
+    for (a, es) in committed {
+        for (n, amt, p, h) in es {
+            st.withdrawals.insert((*a, *n), mnpilot::types::Withdrawal { amount: *amt, pending: *p, height: *h });
+        }
+    }
+    st
+}
+
+/// slmig <n> <orders> <hstep>: per seed, a `wd` batch cut into segments. The session image (bind_height, run number =
+/// height, heights advancing by 1 + rand(hstep)) runs the first half; then an EXPORT snapshot of the session is
+/// MIGRATED (stateless::migrate: digest binding, MNWIT-S root over the decoded state) and the stateless image runs
+/// the second half with the height hook, chained on the migration root (expect = last end root). Reference per
+/// segment: the session at the same run number; the reference root = MNWIT-S root of the session post-state with
+/// the lazily committed withdrawal records (a set is rewritten only when its live set changed). Negative checks:
+/// migration with a wrong digest / a tampered word / a non-fresh lineage / no compiled digest is refused.
+pub fn slmig(n: u64, ord: u32, hstep: u64) -> String {
+    let (mut ok, mut segs_run, mut units, mut migs, mut neg_ok, mut expired_seen) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut first_bad = String::new();
+    for seed in 1..=n {
+        let w = wd_batch(seed, ord);
+        let n_acc = w[1];
+        let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+            .map(|a| {
+                let mut id = [0u8; 32];
+                for k in 0..8 {
+                    id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + (a * 8) as usize + k].to_le_bytes());
+                }
+                mnpilot::types::AccountId(id)
+            })
+            .collect();
+        let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
+        sess.as_mut().unwrap().bind_height = true;
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5151);
+        let size = 20 + rng.below(80) as u32;
+        let parts = seg::split(&w, size);
+        let cut = (parts.len() / 2).max(1).min(parts.len().saturating_sub(1));
+        let mut h: u64 = 0;
+        let mut root = [0u8; 32];
+        let mut committed: WdlSets = Default::default();
+        let mut bad: Option<String> = None;
+        for (i, mut sw) in parts.into_iter().enumerate() {
+            sw[3] = 0;
+            h += 1 + if hstep > 0 { rng.below(hstep) } else { 0 };
+            if i == cut {
+                // EXPORT (session image) -> MIGRATE (stateless image)
+                let (dg, nw, words) = mnpilot::snapshot::export(sess.as_ref().unwrap(), true);
+                let words = words.unwrap();
+                let mut inp = vec![sl::SL_MIG_MAGIC];
+                inp.extend_from_slice(&words);
+                let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+                let st = &sess.as_ref().unwrap().eng.state;
+                if mo.status != 0 || mo.root != sl::s_root(st) || mo.segs != sess.as_ref().unwrap().segs + 1 {
+                    bad = Some(format!("migrate status {} root_ok {}", mo.status, mo.root == sl::s_root(st)));
+                    break;
+                }
+                migs += 1;
+                // negatives
+                let mut t = inp.clone();
+                let k = 1 + rng.below(nw as u64) as usize;
+                t[k] ^= 1;
+                let m1 = sl::migrate(&mut |j| t.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+                let mut dg2 = dg;
+                dg2[0] ^= 1;
+                let m2 = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg2, nw)), true);
+                let m3 = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), false);
+                let m4 = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), None, true);
+                if m1.status == mnpilot::ST_BAD_SNAP && m2.status == mnpilot::ST_BAD_SNAP && m3.status == mnpilot::ST_SESSION_LIVE && m4.status == mnpilot::ST_IMPORT_LOCKED {
+                    neg_ok += 1;
+                } else {
+                    bad = Some(format!("migrate negatives {} {} {} {}", m1.status, m2.status, m3.status, m4.status));
+                    break;
+                }
+                root = mo.root;
+                committed = wdl_sets(st);
+                // the migration run is a rollup height of its own
+                h = mo.segs as u64 + if hstep > 0 { rng.below(hstep) } else { 0 };
+                h += 1;
+            }
+            let pre = sess.as_ref().unwrap().eng.state.clone();
+            let mut ev = Vec::new();
+            let (_, st, _) = mnpilot::run_segment_n(
+                &mut |j| sw.get(j as usize).copied().unwrap_or(0),
+                &mut |x| ev.push(x),
+                &mut |_, _, _| {},
+                mnpilot::WitMode::Incremental,
+                &mut sess,
+                mnpilot::SegOpt { run_no: Some(h as u32), bind: true },
+            );
+            if st.status != 0 {
+                bad = Some(format!("session status {} at seg {}", st.status, i));
+                break;
+            }
+            if i < cut {
+                continue;
+            }
+            segs_run += 1;
+            units += sw[2] as u64;
+            let post = &sess.as_ref().unwrap().eng.state;
+            let full = lazy_state(&pre, &committed);
+            let b = WitBuilder::new(&full);
+            if b.root != root {
+                bad = Some(format!("operator state root != chain root at seg {}", i));
+                break;
+            }
+            let res = operate_h(&b, &sw, Some(h));
+            // lazy commitment update: a set is rewritten iff its live set (at the new height) changed
+            let live_at = |es: &Vec<(u64, i128, bool, u64)>| -> Vec<(u64, i128, bool, u64)> { es.iter().copied().filter(|e| e.3.saturating_add(mnpilot::types::REPLAY_WINDOW) > h.max(pre.height)).collect() };
+            let post_sets = wdl_sets(post);
+            let mut keys: BTreeSet<mnpilot::types::AccountId> = committed.keys().copied().collect();
+            keys.extend(post_sets.keys().copied());
+            for a in keys {
+                let c = committed.get(&a).cloned().unwrap_or_default();
+                let lv = live_at(&c);
+                if lv.len() != c.len() {
+                    expired_seen += 1;
+                }
+                let p = post_sets.get(&a).cloned().unwrap_or_default();
+                if p != lv {
+                    if p.is_empty() {
+                        committed.remove(&a);
+                    } else {
+                        committed.insert(a, p);
+                    }
+                }
+            }
+            let want = sl::s_root(&lazy_state(post, &committed));
+            match res {
+                Err(e) => {
+                    bad = Some(format!("operator: {} at seg {}", e, i));
+                    break;
+                }
+                Ok((_, _, o, evs, _)) => {
+                    if o.status != 0 || o.end_root != want || evs != ev {
+                        bad = Some(format!("seg {} h {}: status {} {:?} root_ok {} ev_ok {}", i, h, o.status, o.need, o.end_root == want, evs == ev));
+                        break;
+                    }
+                    root = o.end_root;
+                }
+            }
+        }
+        match bad {
+            None => ok += 1,
+            Some(b) => {
+                if first_bad.is_empty() {
+                    first_bad = format!("seed {}: {}", seed, b);
+                }
+            }
+        }
+    }
+    format!(
+        "{{\"batches\":{},\"ok\":{},\"migrations\":{},\"migration_negatives_ok\":{},\"stateless_segments\":{},\"units\":{},\"sets_with_expired_records_seen\":{},\"first_bad\":\"{}\"}}",
+        n, ok, migs, neg_ok, segs_run, units, expired_seen, first_bad
+    )
 }

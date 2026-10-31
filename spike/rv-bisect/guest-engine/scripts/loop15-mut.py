@@ -9,6 +9,16 @@ ENV = dict(os.environ, CARGO_TARGET_DIR='/data/hark/target-l15-mut')
 UPD = [('P::L(_, _, false) => Err(()),\n            P::L(k2, lh2, true) => {', 'P::L(k2, lh2, _) => {'),
        ('P::L(_, _, false) => Err(()),\n            P::L(k, _, true) =>', 'P::L(k, _, _) =>')]
 MUTS = [
+  # R15-H1 PoC: the round-14 decimal apos: form (slpoc15 P1 must panic / fail)
+  ('R15-H1-preFix-decimal-apos', '''pub fn apos_leaf(b: &mut Buf, id: &AccountId, flags: u8, mkts: &[u32]) {
+    apos_leaf_d(b, id, flags, mkts.len() as u32, &apos_digest(mkts));
+}''', '''pub fn apos_leaf(b: &mut Buf, id: &AccountId, flags: u8, mkts: &[u32]) {
+    apos_kid(b, id);
+    let _ = write!(b, ":{}:", flags);
+    for (i, m) in mkts.iter().enumerate() {
+        let _ = write!(b, "{}{}", if i > 0 { "," } else { "" }, m);
+    }
+}'''),
   ('light-any-account', '''            if id != INSURANCE_ACCOUNT {
                 return Err(ST_SL_BADWIT);
             }''', ''),

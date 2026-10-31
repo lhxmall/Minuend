@@ -198,6 +198,11 @@ mod rt {
     #[cfg(feature = "stateless")]
     #[link_section = ".data.sess"]
     static mut SL_INIT: u32 = 0;
+    /// round 15 height hook: the stateless lineage's run count (every run is a rollup height, like the session's RUNS;
+    /// a migration run sets it to the imported lineage's count). `prod` binds the engine height to it.
+    #[cfg(feature = "stateless")]
+    #[link_section = ".data.sess"]
+    static mut SL_RUNS: u32 = 0;
     /// the MNWIT-S root the first stateless run of an image must start from (compiled in, so the image's memory root
     /// commits it -- like MNPILOT_IMPORT_DIGEST); required in `prod`
     #[cfg(feature = "stateless")]
@@ -215,8 +220,38 @@ mod rt {
         }
         Some(o)
     }
+    /// round 15: MNWIT-S genesis by migration -- input [SL_MIG_MAGIC, snapshot words]; only a fresh lineage, only
+    /// the compiled-in export digest (MNPILOT_IMPORT_DIGEST). Status 0 -> SEG_START = SEG_END = the MNWIT-S root,
+    /// SNAP_DIGEST / SNAP_N / SNAP_KIND 3; SL_ROOT / SL_RUNS start the lineage.
+    #[cfg(feature = "stateless")]
+    fn sl_migrate() -> u32 {
+        let expect = IMPORT_DIGEST.and_then(mnpilot::parse_expect);
+        let o = mnpilot::stateless::migrate(&mut |i| read_word(i), expect.as_ref(), unsafe { SL_INIT == 0 });
+        unsafe {
+            if o.status == mnpilot::ST_OK {
+                put_root(SEG_START, &o.root);
+                put_root(SEG_END, &o.root);
+                put_root(SNAP_DIGEST, &o.digest);
+                OUT.add(SNAP_N).write_volatile(o.words);
+                OUT.add(SNAP_KIND).write_volatile(3);
+                SL_ROOT = o.root;
+                SL_INIT = 1;
+                SL_RUNS = o.segs;
+            }
+            put_root(0, &o.root);
+            for k in 8..13 {
+                OUT.add(k).write_volatile(0);
+            }
+            OUT.add(12).write_volatile((HEAP - HEAP0) as u32);
+            OUT.add(ROOTS - 6).write_volatile(PEAK as u32);
+            OUT.add(ROOTS - 7).write_volatile(o.status);
+        }
+        o.status
+    }
     #[cfg(feature = "stateless")]
     fn sl_run() -> u32 {
+        // every run is a rollup height (also a refused one), like the session's RUNS
+        unsafe { SL_RUNS += 1 };
         let b = read_word(1);
         let wn = read_word(2) as usize;
         if b > 4 + 8 * (mnpilot::MAX_ACCOUNTS + 2 * mnpilot::MAX_UNITS) + 1 + mnpilot::MAX_EXT || wn > mnpilot::stateless::SL_MAX_WIT_BYTES {
@@ -248,10 +283,12 @@ mod rt {
                 }
             }
         };
+        let height = if cfg!(feature = "prod") { Some(unsafe { SL_RUNS } as u64) } else { None };
         let o = mnpilot::stateless::run_stateless(
             &mut |i| if i < b { read_word(3 + i) } else { 0 },
             &wit,
             expect.as_ref(),
+            height,
             &mut |w| unsafe {
                 if n_ev < mnpilot::EV_CAP {
                     OUT.add(13 + n_ev as usize).write_volatile(w);
@@ -304,6 +341,10 @@ mod rt {
             #[cfg(feature = "stateless")]
             if read_word(0) == mnpilot::stateless::SL_MAGIC {
                 return sl_run();
+            }
+            #[cfg(feature = "stateless")]
+            if read_word(0) == mnpilot::stateless::SL_MIG_MAGIC {
+                return sl_migrate();
             }
             if DEAD != 0 || IN_RUN != 0 {
                 DEAD = 1;

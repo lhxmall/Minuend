@@ -46,6 +46,10 @@ pub const ST_SL_UNSUPPORTED: u32 = 14;
 /// R14-H2 fix: the witness's claimed start root is not the chain's last good end root (main.rs keeps it in the carried
 /// memory: the rollup builds s0(h) on the final memory of h-1)
 pub const ST_SL_BADROOT: u32 = 15;
+/// round 15 (R15-M1): a migration snapshot violates a per-object bound of the stateless image (a price level with more
+/// than SL_MAX_LEVEL_ORDERS orders, an account with more than SL_MAX_POS markets of exposure): such an object could
+/// never be loaded afterwards (its market / account would halt), so the migration is refused
+pub const ST_SL_MIG_BOUNDS: u32 = 16;
 /// per-segment touched-set limits (the ONLY caps; consensus constants of the stateless image)
 /// round 14 review (R14-M3): ~2 SHA-256 compressions per node hash -> <= ~2e9 steps of tree hashing
 pub const SL_MAX_TREE_NODES: usize = 1 << 18;
@@ -828,7 +832,7 @@ fn read_params(r: &mut Rd) -> Option<MarketParams> {
 }
 
 /// Load + verify the witness into a partial ChainState.
-fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
+fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     let mut r = Rd { b: w, i: 0 };
     if bad!(r.u32()) != SL_MAGIC {
         return Err(ST_SL_BADWIT);
@@ -860,6 +864,14 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
     s.height = bad!(r.u64());
     glob_leaf(&mut b, s.seq, s.height);
     sl.check(&b, true)?;
+    // round 15 height hook (lazy): a bound run (prod: run number = rollup height, like the session's bind_height)
+    // moves the engine height first; every height-dependent record read below (withdrawal expiry) is filtered at
+    // the new height, and nothing else is pruned eagerly (design §11 item 2)
+    if let Some(h) = height {
+        if h > s.height {
+            s.height = h;
+        }
+    }
     // markets
     let n = bad!(r.u16()) as usize;
     if n > SL_MAX_MARKETS {
@@ -1375,13 +1387,15 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
 /// Run one segment statelessly: `rd` = the MNP1/MNP2 batch words (flags must be 0), `wit` = the witness
 /// bytes. Events as `run_segment`. Status 0 => end_root is the MNWIT-S root after the segment.
 /// `expect`: the chain's last good end root (None = not bound: host tests of other properties, non-prod first run).
-pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: Option<&H>, ev: &mut dyn FnMut(u32)) -> SlOut {
+/// `height`: round 15 height hook -- Some(run number) in a bound (prod) image: the engine height moves to it before the
+/// units (when greater), as the session's `commit_height` with lazy pruning (withdrawal records expire on read).
+pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: Option<&H>, height: Option<u64>, ev: &mut dyn FnMut(u32)) -> SlOut {
     let mut out = SlOut { status: 0, start_root: EMPTY, end_root: EMPTY, applied: 0, rejected: 0, fills: 0, need: None, leaves_verified: 0, tree_nodes: 0, node_hashes: 0, leaf_hashes: 0, puts: Vec::new(), dels: Vec::new() };
     out.status = crate::check_header_seg(rd, true);
     if out.status != crate::ST_OK {
         return out;
     }
-    let (mut sl, s, claimed) = match load(wit_bytes) {
+    let (mut sl, s, claimed) = match load(wit_bytes, height) {
         Ok(x) => x,
         Err(st) => {
             out.status = st;
@@ -1736,6 +1750,82 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         sl.t.remove(&k).map_err(|_| Need::Path(k))?;
     }
     Ok(sl.t.root_hash())
+}
+
+// ------------------------------------------------------------------------------------------------
+// round 15: MNWIT-S genesis by migration (session snapshot -> MNWIT-S root)
+// ------------------------------------------------------------------------------------------------
+/// input word 0 of a migration run; words 1..=n are the session snapshot (snapshot.rs encoding)
+pub const SL_MIG_MAGIC: u32 = 0x4D4E_534D; // "MNSM"
+pub struct MigOut {
+    pub status: u32,
+    pub digest: H,
+    pub words: u32,
+    /// MNWIT-S root of the decoded state (the stateless lineage's start root)
+    pub root: H,
+    /// the imported lineage's run count (export run number + 1: the migration run is a height of its own)
+    pub segs: u32,
+}
+/// Migration run: accepted only for a fresh stateless lineage (`fresh`) and a snapshot whose digest / length equal the
+/// compiled-in expectation (the export digest of the session image, chosen by governance -- the R4-S1 binding).
+/// The MNWIT-S root is computed over the whole decoded state; the stateless image then carries it as SL_ROOT.
+/// State the MNWIT-S leaf set does not commit (oracle rings / TWAPs / unbonding, proposals' voter sets and weight
+/// snapshots, funding clocks) is NOT carried: a production migration needs leaves for it first (design §11).
+pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh: bool) -> MigOut {
+    let mut o = MigOut { status: crate::ST_OK, digest: EMPTY, words: 0, root: EMPTY, segs: 0 };
+    if !fresh {
+        o.status = crate::ST_SESSION_LIVE;
+        return o;
+    }
+    let Some((digest, words)) = expect else {
+        o.status = crate::ST_IMPORT_LOCKED;
+        return o;
+    };
+    if *words > crate::SNAP_LIMIT {
+        o.status = crate::ST_BAD_SNAP;
+        return o;
+    }
+    let mut h = Sha256::new();
+    for i in 0..*words {
+        h.update(rd(1 + i).to_le_bytes());
+    }
+    let d: H = h.finalize().into();
+    if d != *digest {
+        o.status = crate::ST_BAD_SNAP;
+        return o;
+    }
+    let mut rd1 = |i: u32| rd(1 + i);
+    let mut r = crate::snapshot::SnapR::new(&mut rd1, *words);
+    match crate::snapshot::decode(&mut r) {
+        Ok(sess) if r.i == *words => {
+            let st = &sess.eng.state;
+            // R15-M1: every object must stay loadable under the stateless image's per-object bounds
+            let mut expo: BTreeMap<AccountId, BTreeSet<u32>> = BTreeMap::new();
+            for (id, a) in st.accounts.iter() {
+                expo.entry(*id).or_default().extend(a.positions.keys().map(|m| m.0));
+            }
+            for (m, bk) in &st.books {
+                if bk.sl_levels().iter().any(|(_, _, ids)| ids.len() > SL_MAX_LEVEL_ORDERS) {
+                    o.status = ST_SL_MIG_BOUNDS;
+                    return o;
+                }
+                for od in bk.live_orders() {
+                    expo.entry(od.account).or_default().insert(m.0);
+                }
+            }
+            // the insurance account is loaded light (R14-M2): its position count is unbounded
+            if expo.iter().any(|(id, e)| *id != INSURANCE_ACCOUNT && e.len() > SL_MAX_POS) {
+                o.status = ST_SL_MIG_BOUNDS;
+                return o;
+            }
+            o.root = s_root(st);
+            o.digest = d;
+            o.words = *words;
+            o.segs = sess.segs + 1;
+        }
+        _ => o.status = crate::ST_BAD_SNAP,
+    }
+    o
 }
 
 // ------------------------------------------------------------------------------------------------
