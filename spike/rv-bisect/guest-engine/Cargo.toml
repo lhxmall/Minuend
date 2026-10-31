@@ -21,6 +21,8 @@ nowit = []
 legacywit = []
 # test build: MNWIT1 MAX_WIT_DEPTH = 8 instead of 64 (loop round 2, W2: grind-able on a laptop)
 depth8 = []
+# loop round 3 (H1): the rollup's committed image -- header flags (word 3) must be 0 (status 4)
+prod = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }

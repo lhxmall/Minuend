@@ -32,6 +32,7 @@ mod smt_ref;
 mod adv;
 mod heapsim;
 mod l2;
+mod seg;
 #[global_allocator]
 static GA: heapsim::Sim = heapsim::Sim;
 
@@ -779,6 +780,14 @@ fn main() {
         }
         Some("crowd") => {
             let w = adv::crowd(a[2].parse().unwrap(), a[3].parse().unwrap());
+            write_words(&a[4], &w);
+            println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
+        }
+        Some("segrun") => println!("{}", seg::segrun(&read_words(&a[2]), a[3].parse().unwrap(), a.get(4).map(|x| x.as_str()), a.get(5).map(|x| x.parse().unwrap()))),
+        Some("segfuzz") => println!("{}", seg::segfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("genbig") => {
+            // loop round 3: an "upstream" batch larger than MAX_UNITS (for segrun)
+            let (w, _, _) = gen(a[2].parse().unwrap(), 12, 50, 2, a[3].parse().unwrap(), a.get(5).map(|x| x == "stress").unwrap_or(false));
             write_words(&a[4], &w);
             println!("{{\"ops\":{},\"words\":{}}}", w[2], w.len());
         }

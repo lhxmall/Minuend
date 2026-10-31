@@ -1,7 +1,7 @@
 // Adversarial tests for rv_rollup + rv_game (referee) + rv_step on the real ocore evaluator (simulated chain, chain.js).
 // usage: node rolltest.js [filter]     -> prints PASS/FAIL lines and SUMMARY {...}; writes rolltest-results.json
 'use strict';
-const { Chain, ROLL, GAME, STEP, M, rnd, BOUNCER } = require('./chain.js'); const T = require('./rolltrace.js'); const ref = require('./ref.js'); const fs = require('fs');
+const { Chain, ROLL, GAME, STEP, SEG, BIND, PROOF, M, rnd, BOUNCER } = require('./chain.js'); const T = require('./rolltrace.js'); const ref = require('./ref.js'); const fs = require('fs');
 const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const A = s => require(OCP + '/object_hash.js').getChash160(['sig', { pubkey: require('crypto').createHash('sha256').update(s).digest('base64').slice(0, 44) }]); // valid Obyte address per name
@@ -24,7 +24,7 @@ async function S(C, from, to, amt, data) { const r = await C.send(from, to, amt,
 // ---------- protocol helpers
 const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (const k in sv[a]) o[a][k] = { ...sv[a][k] }; } return o; };
 const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
-const subData = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, ...o });
+const subData = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
 async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
 async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
 const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
@@ -410,6 +410,173 @@ groups.fuzz = async () => { const RUNS = +(process.env.FUZZ || 6), STEPS = +(pro
   rec('fuzz', 'no game stuck', 0, stuck); rec('fuzz', 'every fraudulent submission caught by the watcher', fraudsSubmitted, fraudsCaught);
   rec('fuzz', 'garbage never accepted', 0, garbageAccepted); rec('fuzz', 'after the drain every bond is paid out (no liabilities left)', 0, leftover);
   rec('fuzz', 'every non-fraud submission finalized or reclaimed', 0, unreclaimed); };
+
+
+// ---------- loop round 3: layer-1 game (rv_seg_ref): bisection over unit-boundary machine roots, then rv_game_ref on one unit
+const H64 = x => require('crypto').createHash('sha256').update(x).digest('base64');
+async function uopen(C, ch, sid, amt) { const r = await S(C, ch, ROLL, amt === undefined ? CBOND + GF : amt, { uopen: sid }); return r.err ? r : { ...r, sgid: ROLL + r.unit, ref: r.unit, ch }; }
+const sv = (C, gid) => String(C.v(SEG, 'g_' + gid) || '');
+// sg = {sgid, def, ch, defRoots, chRoots, honest, U, steps, bnd (k -> defender's step index for unit boundary k),
+//       defSilent, chSilent, noMemo, defDelay, chDelay}
+async function playSeg(C, sg) {
+  sg.l1 = 0; sg.bnd = sg.bnd || (k => Math.floor(k * sg.steps / sg.U));
+  for (let it = 0; it < 200; it++) {
+    const s = sv(C, sg.sgid).split(':');
+    if (s[0] === 'done') { sg.winner = s[1]; return sg; }
+    if (s.length !== 11) { sg.winner = 'none: ' + s.join(':').slice(0, 40); return sg; }
+    const lo = +s[3], hi = +s[4], slo = +s[5], shi = +s[6], turn = s[9], dl = +s[10]; const { cnt, pt } = pts(lo, hi); let r;
+    if (turn === 'x') { // layer 2 on the one unit [slo, shi]
+      const g2 = { gid: SEG + H64(sg.sgid), def: s[1], ch: s[2], defRoots: sg.defRoots.slice(slo, shi + 1), chRoots: sg.chRoots.slice(slo, shi + 1),
+        honest: { roots: sg.honest.roots.slice(slo), wits: sg.honest.wits.slice(slo) }, noMemo: sg.noMemo, defSilent: sg.l2DefSilent };
+      sg.unit = [lo, hi, slo, shi]; await playAll(C, [g2]); sg.l2 = g2; sg.l2moves = g2.moves;
+      const s2 = sv(C, sg.sgid); sg.winner = s2.startsWith('done:') ? s2.slice(5) : 'l2 ' + g2.winner + ' / seg ' + s2.slice(0, 30); return sg; }
+    if (turn === 'd') {
+      if (sg.defSilent) { C.ts = Math.max(C.ts, dl); r = await S(C, W, SEG, 0, { resolve: sg.sgid }); }
+      else { C.ts += sg.defDelay || 60; const st = Array.from({ length: cnt }, (_, i) => sg.bnd(pt(i + 1)));
+        r = await S(C, sg.def, SEG, 0, { mids: sg.sgid, steps: st, roots: st.map(x => sg.defRoots[x]) }); sg.l1++; }
+    } else {
+      if (sg.chSilent) { C.ts = Math.max(C.ts, dl); r = await S(C, W, SEG, 0, { resolve: sg.sgid }); }
+      else { C.ts += sg.chDelay || 60; const m = String(C.v(SEG, 'm_' + sg.sgid)).split(','), n = String(C.v(SEG, 'n_' + sg.sgid)).split(',').map(Number);
+        const rootAt = i => i == 0 ? s[7] : i == cnt + 1 ? s[8] : m[i - 1], stepAt = i => i == 0 ? slo : i == cnt + 1 ? shi : n[i - 1];
+        let j = 0; while (j < cnt && rootAt(j + 1) === sg.chRoots[stepAt(j + 1)]) j++; r = await S(C, sg.ch, SEG, 0, { pick: sg.sgid, j }); sg.l1++; }
+    }
+    if (r.err) { sg.winner = 'stuck: ' + r.err; return sg; }
+  }
+  sg.winner = 'loop'; return sg;
+}
+const sgame = (o, def, ch, honest, extra) => ({ sgid: o.sgid, def: def.op, ch: o.ch, defRoots: def.roots, chRoots: ch.roots, honest, U: def.units || Math.min(8, def.steps), steps: def.steps, ...extra });
+
+groups.l1flow = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
+  rec('layer1 flow', 'units stored with the submission', Math.min(8, b1.steps), C.r('u' + b1.sid));
+  let r = await uopen(C, CH1, b1.sid, CBOND); rec('layer1 flow', 'uopen with CBOND only (needs CBOND + GF)', 'bounce', bnc(r, /bond/));
+  const L = T.batch(G0, 1, { k: 30, mut: T.MUT.reg });
+  const o = await uopen(C, CH1, b1.sid); rec('layer1 flow', 'uopen with CBOND + GF', 'ok', ok(o));
+  rec('layer1 flow', 'seg game opened: u units, n steps, defender to move', ['0', String(Math.min(8, b1.steps)), '0', String(b1.steps), b1.s0, b1.final, 'd'], sv(C, o.sgid).split(':').slice(3, 10));
+  rec('layer1 flow', 'rollup counts the game (n = 1)', 1, C.r('n' + b1.sid));
+  const op0 = C.b(OP1), seg0 = C.b(SEG); const g = await playSeg(C, sgame(o, b1, L, b1));
+  rec('layer1 flow', 'griefer (register lie) vs honest operator via layer 1', 'd', g.winner, { l1moves: g.l1, l2moves: g.l2moves, unit: g.unit });
+  rec('layer1 flow', 'operator paid CBOND - GF - FEE', CBOND - GF - FEE, C.b(OP1) - op0);
+  rec('layer1 flow', 'seg referee keeps GF of its 2 GF (GF to layer 2; GB in from rv_game_ref, GB out to the rollup)', GF, C.b(SEG));
+  rec('layer1 flow', 'game counter back to 0', 0, C.r('n' + b1.sid) || 0);
+  C.ts += WIN; rec('layer1 flow', 'finalize after the layer-1 game', 'ok', ok(await S(C, W, ROLL, 0, { finalize: 1 })));
+  // fraud at h2, honest challenger takes the layer-1 route
+  const h2 = T.batch(b1.mem, 2), L2 = T.batch(b1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C, OP2, 2, L2, b1.final);
+  const c0 = C.b(CH2); const o2 = await uopen(C, CH2, L2.sid); const g2 = await playSeg(C, sgame(o2, L2, h2, h2));
+  rec('layer1 flow', 'fraudulent h2 (hidden memory write) vs honest challenger via layer 1', 'c', g2.winner, { l1moves: g2.l1, l2moves: g2.l2moves, unit: g2.unit });
+  rec('layer1 flow', 'challenger paid CBOND - GF - FEE + OBOND/2 (it paid CBOND + GF)', CBOND - GF - FEE + OBOND / 2 - (CBOND + GF), C.b(CH2) - c0);
+  rec('layer1 flow', 'h2 voided (top = 1), fraud flag, burned OBOND/2', [1, 1, OBOND / 2], [C.r('top'), C.r('f' + L2.sid), C.r('burned')]);
+  const C3 = new Chain(); const t1 = T.batch(G0, 1); await submit(C3, OP1, 1, t1, 'genesis'); const c3 = C3.b(CH3);
+  r = await uopen(C3, CH3, t1.sid, CBOND + GF + 5000); rec('layer1 flow', 'uopen overpay 5000 refunded', CBOND + GF, c3 - C3.b(CH3)); };
+
+groups.l1deep = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1, { extra: 4000 }); b1.units = 300;
+  for (const [nm, defT, chT, honest, exp, fraud] of [
+    ['griefer (lie at step 2000) vs honest operator, 300 units', b1, T.batch(G0, 1, { extra: 4000, k: 2000, mut: T.MUT.reg }), b1, 'd', false],
+    ['fraudulent operator (lie at step 3001) vs honest challenger, 300 units', Object.assign(T.batch(G0, 1, { extra: 4000, k: 3001, mut: T.MUT.mem }), { units: 300 }), b1, b1, 'c', true]]) {
+    const C = new Chain(); await submit(C, OP1, 1, defT, 'genesis'); const o = await uopen(C, CH1, defT.sid);
+    const g = await playSeg(C, sgame(o, defT, chT, honest));
+    rec('layer1 deep', nm, exp, g.winner, { steps: defT.steps, units: 300, l1moves: g.l1, l2moves: g.l2moves, unit: g.unit });
+    rec('layer1 deep', nm + ': layer-1 moves <= 2 x ceil(log16 300) = 6', true, g.l1 <= 6, { l1moves: g.l1 });
+    if (fraud) rec('layer1 deep', 'fraud voids h1', 0, C.r('top')); }
+  // the instruction game alone on the same batch, for the round count comparison
+  const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const o = await open(C, CH1, b1.sid);
+  const g = game(o, b1, T.batch(G0, 1, { extra: 4000, k: 2000, mut: T.MUT.reg }), b1); await playAll(C, [g]);
+  rec('layer1 deep', 'same griefer via the whole-run instruction game', 'd', g.winner, { moves: g.moves }); };
+
+groups.l1bnd = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1, { extra: 600 }); b1.units = 40;
+  // boundaries anywhere (not at unit ends), strictly increasing: soundness must not depend on them
+  const rnd = (seed) => { let x = seed; return () => (x = (x * 1103515245 + 12345) % 2147483648) / 2147483648; };
+  for (let t = 0; t < 4; t++) { const R = rnd(7 + t); const cuts = [0]; for (let k = 1; k < 40; k++) cuts.push(cuts[k - 1] + 1 + Math.floor(R() * ((b1.steps - cuts[k - 1] - (40 - k)) / (40 - k + 1) * 1.6)));
+    cuts.push(b1.steps); const bnd = k => cuts[k]; const fraud = t % 2 === 1;
+    const def = fraud ? Object.assign(T.batch(G0, 1, { extra: 600, k: 50 + 97 * t, mut: T.MUT.reg }), { units: 40 }) : b1;
+    const C = new Chain(); await submit(C, OP1, 1, def, 'genesis'); const o = await uopen(C, CH1, def.sid);
+    const g = await playSeg(C, sgame(o, def, fraud ? b1 : T.batch(G0, 1, { extra: 600, k: 300, mut: T.MUT.pc }), b1, { bnd }));
+    rec('layer1 boundaries', (fraud ? 'fraudster' : 'honest operator') + ' with arbitrary increasing boundaries #' + t, fraud ? 'c' : 'd', g.winner, { unit: g.unit }); } };
+
+groups.l1edges = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1);
+  { for (const [nm, u, re] of [['units 0', 0, /bad units/], ['units > steps', b1.steps + 1, /bad units/], ['units 1.5', 1.5, /bad units/], ['units "4" string', '4', /./], ['units missing', undefined, /bad units/], ['units 16385', 16385, /bad units/]]) {
+      const C = new Chain(); const d = subData(b1, 1, 'genesis', { units: u }); if (u === undefined) delete d.units;
+      const r = await S(C, OP1, ROLL, OBOND, d); if (nm === 'units "4" string') rec('layer1 edges', 'submit ' + nm + ' (bounce, or stored as the number 4)', true, !!r.err || C.r('u' + r.unit) === 4, { outcome: ok(r) });
+      else rec('layer1 edges', 'submit ' + nm, 'bounce', bnc(r, re)); } }
+  { // U = 1: straight to layer 2
+    const C = new Chain(); b1.units = 1; await submit(C, OP1, 1, b1, 'genesis'); const o = await uopen(C, CH1, b1.sid); delete b1.units;
+    rec('layer1 edges', 'U = 1: turn x right after uopen', 'x', sv(C, o.sgid).split(':')[9]);
+    rec('layer1 edges', 'resolve while layer 2 runs', 'bounce', bnc(await S(C, W, SEG, 0, { resolve: o.sgid }), /layer 2 running/));
+    const g = await playSeg(C, sgame(o, b1, T.batch(G0, 1, { k: 20, mut: T.MUT.reg }), b1, { U: 1 })); rec('layer1 edges', 'U = 1 griefer loses', 'd', g.winner); }
+  const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const o = await uopen(C, CH1, b1.sid); const U = Math.min(8, b1.steps); const { cnt, pt } = pts(0, U);
+  const st = Array.from({ length: cnt }, (_, i) => Math.floor(pt(i + 1) * b1.steps / U)); const rt = st.map(x => b1.roots[x]);
+  const mids = (o2) => S(C, OP1, SEG, 0, { mids: o.sgid, steps: st, roots: rt, ...o2 });
+  rec('layer1 edges', 'mids by the challenger', 'bounce', bnc(await S(C, CH1, SEG, 0, { mids: o.sgid, steps: st, roots: rt }), /not your move/));
+  rec('layer1 edges', 'mids with one point too few', 'bounce', bnc(await mids({ steps: st.slice(1), roots: rt.slice(1) }), /points/));
+  rec('layer1 edges', 'mids with equal steps', 'bounce', bnc(await mids({ steps: [st[0], st[0], ...st.slice(2)] }), /increase/));
+  rec('layer1 edges', 'mids with a step = 0 (= slo)', 'bounce', bnc(await mids({ steps: [0, ...st.slice(1)] }), /increase/));
+  rec('layer1 edges', 'mids with last step = shi', 'bounce', bnc(await mids({ steps: [...st.slice(0, -1), b1.steps] }), /increase/));
+  rec('layer1 edges', 'mids with a fractional step', 'bounce', bnc(await mids({ steps: [st[0] + 0.5, ...st.slice(1)] }), /increase/));
+  rec('layer1 edges', 'mids with a root containing ":"', 'bounce', bnc(await mids({ roots: [':'.repeat(43) + '=', ...rt.slice(1)] }), /bad root/));
+  rec('layer1 edges', 'resolve before the deadline', 'bounce', bnc(await S(C, W, SEG, 0, { resolve: o.sgid }), /undecided/));
+  rec('layer1 edges', 'honest mids', 'ok', ok(await mids({})));
+  rec('layer1 edges', 'pick by the defender', 'bounce', bnc(await S(C, OP1, SEG, 0, { pick: o.sgid, j: 0 }), /not your move/));
+  rec('layer1 edges', 'pick j = cnt + 1', 'bounce', bnc(await S(C, CH1, SEG, 0, { pick: o.sgid, j: cnt + 1 }), /bad j/));
+  rec('layer1 edges', 'a stranger sends a fake result {res, w} to the seg referee', 'bounce', bnc(await S(C, W, SEG, 0, { res: H64(o.sgid), w: 'c' }), /no game/));
+  // front-run: a stranger opens its own seg game under the same ref (itself as opener); the honest hand-off must still work
+  const X = A('FRONTRUN'); rec('layer1 edges', 'stranger opens a seg game with the rollup game ref', 'ok', ok(await S(C, X, SEG, 2 * GF, { uopen: o.ref, s0: b1.s0, sN: b1.final, n: b1.steps, u: 1, d: X, c: X })));
+  C.ts += 60; const j = cnt; const r = await S(C, CH1, SEG, 0, { pick: o.sgid, j }); rec('layer1 edges', 'honest pick down to one unit -> layer 2 opened despite the front-run game', 'ok', ok(r));
+  rec('layer1 edges', 'layer-2 game exists under SEG || sha256(gid)', true, gv(C, SEG + H64(o.sgid)).length > 0);
+  // timeouts: defender silent / challenger silent
+  { const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const o = await uopen(C, CH1, b1.sid); const c0 = C.b(CH1);
+    const g = await playSeg(C, sgame(o, b1, T.batch(G0, 1, { k: 30, mut: T.MUT.reg }), b1, { defSilent: true })); rec('layer1 edges', 'operator silent at layer 1 -> challenger wins (as 6a)', 'c', g.winner);
+    rec('layer1 edges', 'its payout includes OBOND/2', CBOND - GF - FEE + OBOND / 2, C.b(CH1) - c0); }
+  { const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const o = await uopen(C, CH1, b1.sid);
+    const g = await playSeg(C, sgame(o, b1, T.batch(G0, 1, { k: 30, mut: T.MUT.reg }), b1, { chSilent: true })); rec('layer1 edges', 'challenger silent at layer 1 -> operator wins', 'd', g.winner); }
+  { const C = new Chain(); await submit(C, OP1, 1, b1, 'genesis'); const o = await uopen(C, CH1, b1.sid);
+    const g = await playSeg(C, sgame(o, b1, b1, b1, { noMemo: true })); rec('layer1 edges', 'challenger agrees with every point (no fraud): it loses at the single step', 'd', g.winner); } };
+
+
+// ---------- loop round 3: rv_witbind + rv_witproof (depth-64 SMT verifier against a finalized height's segment end root)
+groups.witproof = async () => { const K = require('./witkit.js'); const dir = __dirname + '/testdata/proofs/';
+  const Hc = (s, enc) => require('crypto').createHash('sha256').update(s).digest(enc);
+  const kidJs = l => { const p = l.split(':'); const f = l.startsWith('pos:') ? 3 : 2; return p.length <= f ? l : p.slice(0, f).join(':'); };
+  const synth = (d, seed) => { const leaf = `acct:${Hc('seed' + seed, 'hex')}:${1000 + seed}:0:0`; const kt = Hc('~K1:' + kidJs(leaf), 'hex');
+    const bits = [...kt].map(c => parseInt(c, 16).toString(2).padStart(4, '0')).join(''); let h = Hc('~L1:' + kt + ':' + leaf, 'base64');
+    const sib = [...Array(d).keys()].map(i => Hc('sib' + seed + ':' + i, 'base64')); for (let i = d - 1; i >= 0; i--) h = Hc('~N1:' + (bits[i] === '0' ? h + sib[i] : sib[i] + h), 'base64');
+    return { root: h, members: [{ leaf, sib: sib.slice().reverse(), depth: d }] }; };
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
+  const sets = files.map(f => ({ name: f, ...JSON.parse(fs.readFileSync(dir + f, 'utf8')) }));
+  sets.push({ name: 'synth64', ...synth(64, 64) }); sets.push({ name: 'synth65', ...synth(65, 65) });
+  const C = new Chain(); let prev = T.genesis(), prevFinal = 'genesis'; const H = [];
+  const addHeight = async (rootB64, status) => { const h = H.length + 1; const b = T.batch(prev, h); const m = K.memWithRoot(rootB64, status);
+    const final = ref.H(b.fpc + ':' + b.fregs + ':' + m.root() + ':' + b.inpRoot + ':' + b.steps);
+    const r = await S(C, OP1, ROLL, OBOND, subData(b, h, prevFinal, { fmem: m.root(), final })); H.push({ h, m, sid: r.unit, err: r.err }); prev = m; prevFinal = final; return H[h - 1]; };
+  for (const st of sets) st.H = await addHeight(st.root, 0);
+  const bad = await addHeight(sets[0].root, 4);   // a height whose guest run reported status 4: no root to bind
+  rec('witproof', 'heights submitted (one memory image per proof set, + a status-4 image)', sets.length + 1, H.filter(x => !x.err).length);
+  rec('witproof', 'bind before finalize', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, 1)), /not finalized/));
+  C.ts += WIN; for (const x of H) await S(C, W, ROLL, 0, { finalize: x.h }); rec('witproof', 'all heights finalized', H.length, C.r('lf'));
+  rec('witproof', 'bind with a wrong word', 'bounce', bnc(await S(C, W, BIND, 0, { ...K.bindData(sets[0].H.m, 1), words: K.bindData(sets[0].H.m, 1).words.map((w, k) => k === 3 ? (w ^ 1) >>> 0 : w) }), /word proof/));
+  rec('witproof', 'bind with the words of another height', 'bounce', bnc(await S(C, W, BIND, 0, { ...K.bindData(sets[1].H.m, 1), bind: 1 }), /word proof/));
+  rec('witproof', 'bind a status-4 height', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(bad.m, bad.h)), /status/));
+  rec('witproof', 'bind a height above lf', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, H.length + 1)), /not finalized/));
+  let bound = 0; for (const st of sets) { const r = await S(C, W, BIND, 0, K.bindData(st.H.m, st.H.h)); if (!r.err && C.v(BIND, 'W' + st.H.h) === st.root) bound++; else console.log('bind fail', st.name, r.err); }
+  rec('witproof', 'bind every finalized height: W<h> = the guest-layout root', sets.length, bound);
+  rec('witproof', 'bind twice', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, 1)), /bound/));
+  rec('witproof', 'prove against an unbound height', 'bounce', bnc(await S(C, W, PROOF, 0, { prove: bad.h, leaf: sets[0].members[0].leaf, sib: sets[0].members[0].sib }), /not bound/));
+  let mok = 0, mn = 0, aok = 0, an = 0, forged = 0, tries = 0, maxd = 0;
+  for (const st of sets) { const h = st.H.h;
+    for (const m of st.members) { mn++; maxd = Math.max(maxd, m.depth); const r = await S(C, W, PROOF, 0, { prove: h, leaf: m.leaf, sib: m.sib });
+      const want = st.name === 'synth65' ? false : true;
+      if (!!r.err !== want && (want ? C.v(PROOF, 'L' + h + ':' + kidJs(m.leaf)) === m.leaf : true)) mok++; else console.log('member', st.name, m.depth, r.err);
+      const kt = Hc('~K1:' + kidJs(m.leaf), 'hex');
+      const fs_ = [{ prove: h, leaf: m.leaf + '0', sib: m.sib }, { prove: h, leaf: m.leaf, sib: m.sib.slice(1) }, { prove: h, leaf: m.leaf, sib: m.sib, key: kt }];
+      if (m.sib.length > 1) fs_.push({ prove: h, leaf: m.leaf, sib: [m.sib[1], m.sib[0], ...m.sib.slice(2)] });
+      for (const t of fs_) { tries++; if (!(await S(C, W, PROOF, 0, t)).err) { forged++; console.log('FORGED', st.name, JSON.stringify(t).slice(0, 100)); } } }
+    if (st.absent) { an++; const a = st.absent; const r = await S(C, W, PROOF, 0, { prove: h, leaf: a.term, sib: a.sib, key: a.key });
+      if (!r.err && C.v(PROOF, 'A' + h + ':' + a.key) === 1) aok++; else console.log('absent', st.name, r.err);
+      tries++; if (!(await S(C, W, PROOF, 0, { prove: h, leaf: a.term === '' ? st.members[0].leaf : '', sib: a.sib, key: a.key })).err) forged++;
+      tries++; if (!(await S(C, W, PROOF, 0, { prove: h, leaf: a.term, sib: a.sib, key: a.key.toUpperCase() })).err) forged++;
+      tries++; if (!(await S(C, W, PROOF, 0, { prove: h + 1, leaf: a.term, sib: a.sib, key: a.key })).err) forged++; } }
+  rec('witproof', 'memberships accepted (and recorded L<h>:<kid> = leaf); synthetic depth 65 refused', mn, mok, { maxDepth: maxd });
+  rec('witproof', 'absences accepted (A<h>:<key> = 1)', an, aok);
+  rec('witproof', 'forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height)', 0, forged, { tries });
+  rec('witproof', 'a proof for height h does not verify against h+1', true, tries > 0); };
 
 (async () => {
   for (const [nm, fn] of Object.entries(groups)) { if (FILTER && !nm.includes(FILTER)) continue; try { await fn(); } catch (e) { rec(nm, 'group crashed', 'no crash', String(e.stack || e).slice(0, 300)); } }

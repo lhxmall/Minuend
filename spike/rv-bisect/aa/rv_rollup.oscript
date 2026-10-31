@@ -3,6 +3,7 @@
 // only after the window AND every game on it resolved for the operator; losing any game = fraud; later heights
 // keep being submitted, each chained on the previous root; fraud at h voids h..top and the race restarts at h.
 $GAME = 'RV_GAME_AA_ADDRESS';   // rv_game referee (mkrollup.js bakes chash160(rv_game_ref.aa))
+$SEG = 'RV_SEG_AA_ADDRESS';     // layer-1 referee rv_seg_ref (loop round 3; mkrollup.js bakes chash160(rv_seg_ref.aa))
 $GENMEM = 'GENESIS_MEM_ROOT';   // memory root of the program image before height 1 (mkrollup.js)
 $OBOND = 200000;    // operator bond per submitted height
 $CBOND = 120000;    // challenger bond per game (owner 2026-10-31): payout CBOND-GF-FEE = 108000 >= 2.2x the honest
@@ -27,8 +28,13 @@ $isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) =
 // submission s<sid> = h:operator:final_root:submitted_at:steps:s0:input_root:prev_root ; sid = submit unit
 // a submission is live while it is the current winner of its height and that height is not voided (h <= top)
 $live = ($sid, $r) => var['h' || $r[0]] == $sid AND $r[0] <= $top;
-// ---- callback from the referee: {res: game ref, w: 'd' | 'c'}  (must not bounce for a real result)
-if (trigger.address == $GAME) {
+// Loop round 3 (layer 1): a submission also names U = units (1 <= U <= steps; var u<sid>), the number of unit
+// boundaries of its guest run (one height = one segment of <= 16 384 units). A challenger opens EITHER the whole-run
+// instruction game (open, rv_game_ref) OR the layer-1 game (uopen, rv_seg_ref: bisection over unit-boundary machine
+// roots, then rv_game_ref on one unit). uopen costs CBOND + GF: rv_seg_ref needs GF for its own callback and GF for
+// the layer-2 game it opens; payouts are the same as for open.
+// ---- callback from a referee: {res: game ref, w: 'd' | 'c'}  (must not bounce for a real result)
+if (trigger.address == $GAME OR trigger.address == $SEG) {
 	$ref = $d.res;
 	$g = split(var['G' || $ref] OTHERWISE '', ':');     // sid:challenger:open
 	require(length($g) == 3 AND $g[2] == 'open', 'unknown game');
@@ -52,6 +58,7 @@ else if ($d.submit) {
 	require(!is_aa(trigger.address), 'an AA cannot be an operator');
 	require($isR($d.s0) AND $isR($d.final) AND $isR($d.inp) AND $isR($d.fmem), 'bad root');
 	require(is_integer($d.steps) AND $d.steps >= 1 AND $d.steps <= $MAXSTEPS, 'bad steps');
+	require(is_integer($d.units) AND $d.units >= 1 AND $d.units <= $d.steps AND $d.units <= 16384, 'bad units');
 	require(($d.fpc == 1 OR $d.fpc == 2) AND typeof($d.fregs) == 'string' AND length($d.fregs) <= 400 AND !contains($d.fregs, ':'), 'bad final state');
 	$pr = $h == 1 ? [] : split(var['s' || var['h' || ($h - 1)]], ':');
 	$prev = $h == 1 ? 'genesis' : $pr[2];
@@ -64,18 +71,21 @@ else if ($d.submit) {
 	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
 	$st = {sid: trigger.unit, h: $h, rf: max($paid - $OBOND - $FEE, 0), rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
 }
-// ---- open a game against submission sid (one per challenger, in parallel)
-else if ($d.open) {
-	$sid = $d.open;
+// ---- open a game against submission sid (one per challenger, in parallel); uopen = layer-1 game
+else if ($d.open OR $d.uopen) {
+	$U = !!$d.uopen;
+	$sid = $U ? $d.uopen : $d.open;
 	$r = split(var['s' || $sid] OTHERWISE '', ':');
 	require(length($r) == 8 AND $live($sid, $r), 'not live');
 	require($r[0] > $lf AND $now < $r[3] + $WIN, 'window closed');
 	$paid = trigger.output[[asset=base]];
-	require($paid >= $CBOND, 'bond');
+	$bond = $CBOND + ($U ? $GF : 0);
+	require($paid >= $bond, 'bond');
 	require(trigger.address != $r[1], 'self');
 	require(!is_aa(trigger.address), 'an AA cannot be a challenger');   // pass 1, bug R1
-	$st = {sid: $sid, rf: $paid - $CBOND, g: $sid || ':' || trigger.address || ':open',
-		call: {open: trigger.unit, s0: $r[5], sN: $r[2], n: $r[4], d: $r[1], c: trigger.address}};
+	$st = {sid: $sid, rf: $paid - $bond, g: $sid || ':' || trigger.address || ':open', to: $U ? $SEG : $GAME, gf: $U ? 2 * $GF : $GF,
+		call: $U ? {uopen: trigger.unit, s0: $r[5], sN: $r[2], n: +$r[4], u: var['u' || $sid], d: $r[1], c: trigger.address}
+			: {open: trigger.unit, s0: $r[5], sN: $r[2], n: $r[4], d: $r[1], c: trigger.address}};
 }
 // ---- finalize height h: next in order, live, window over, no open games, no fraud, chained on finalized h-1
 else if ($d.finalize) {

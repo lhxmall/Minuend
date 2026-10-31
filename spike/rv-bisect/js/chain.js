@@ -8,7 +8,7 @@
 const { run, val } = require('./oc.js'); const fs = require('fs'); const crypto = require('crypto');
 const isDec = v => v && typeof v === 'object' && typeof v.toNumber === 'function' && 'd' in v && 'e' in v;
 const M = require('./mkrollup.js');
-const ROLL = M.addr, GAME = M.gameAddr, STEP = M.stepAddr;
+const ROLL = M.addr, GAME = M.gameAddr, STEP = M.stepAddr, SEG = M.segAddr;
 const STEPF = fs.readFileSync(__dirname + '/../aa/rv_step.oscript', 'utf8') + "\nvar['s_' || $pre] = $post;";
 const plain = v => { if (v === undefined || v === null) return v; if (isDec(v)) return v.toNumber();
   if (Array.isArray(v)) return v.map(plain); if (typeof v === 'object') { if (v.obj !== undefined && Object.keys(v).length <= 2) return plain(v.obj); const o = {}; for (const k in v) o[k] = plain(v[k]); return o; } return v; };
@@ -17,12 +17,19 @@ const rnd = () => crypto.randomBytes(32).toString('base64');
 const errMsg = e => e && String((e.formattedError || e).message || e.bounce_message || JSON.stringify(e)).slice(0, 140);
 const AAS = {
   [ROLL]: { f: M.body + '\n' + M.state, out: (st, L, from) => { const o = [];
-      if (st.call) o.push({ to: GAME, amt: +L('GF'), data: st.call });
+      if (st.call) o.push({ to: st.to, amt: +st.gf, data: st.call }); // open -> GAME (GF), uopen -> SEG (2 GF)
       if (+st.rf > 0) o.push({ to: from, amt: +st.rf }); // overpayment refund (submit: - OBOND - FEE, open: - CBOND)
       if (st.pay && +st.amt > 0) o.push({ to: st.pay, amt: +st.amt }); return o; } },
   [GAME]: { f: M.ref.body + '\n' + M.ref.state, out: (st, L, from) => [...(st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : []), ...(+st.rf > 0 ? [{ to: from, amt: +st.rf }] : [])] }, // rf: move refund (trigger - MK), open refund (trigger - GF), resolve refund (trigger - RK)
   [STEP]: { f: STEPF, out: () => [] },
+  // loop round 3: layer-1 referee. call = layer-2 open on GAME (GF); cb = result to the opener (GB); rf = refunds
+  [SEG]: { f: M.seg.body + '\n' + M.seg.state, out: (st, L, from) => [...(st.call ? [{ to: GAME, amt: +L('GF'), data: st.call }] : []),
+      ...(st.cb ? [{ to: st.to, amt: +L('GB'), data: st.cb }] : []), ...(+st.rf > 0 ? [{ to: from, amt: +st.rf }] : [])] },
 };
+// loop round 3: rv_witbind / rv_witproof (state only, no payments)
+const WP = require('./mkwitproof.js'); const BIND = WP.bind.addr, PROOF = WP.proof.addr;
+AAS[BIND] = { f: WP.bind.body + '\n' + WP.bind.state, out: () => [] };
+AAS[PROOF] = { f: WP.proof.body + '\n' + WP.proof.state, out: () => [] };
 // an AA that bounces every trigger (used as a hostile operator / challenger that refuses payouts)
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const BOUNCER = require(OCP + '/object_hash.js').getChash160(['autonomous agent', { init: "{ bounce('no payouts please'); }" }]);
@@ -60,4 +67,4 @@ class Chain {
   v(aa, k) { const x = this.sv[aa] && this.sv[aa][k]; return x ? (typeof x.value === 'object' ? x.value.toNumber() : x.value) : undefined; }
   r(k) { return this.v(ROLL, k); }
 }
-module.exports = { Chain, ROLL, GAME, STEP, M, rnd, BOUNCER };
+module.exports = { Chain, ROLL, GAME, STEP, SEG, BIND, PROOF, M, rnd, BOUNCER };

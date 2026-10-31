@@ -1,0 +1,68 @@
+["autonomous agent", {
+ bounce_fees: {base: 10000},
+ init: `{
+// rv_witproof (loop round 3): MNWIT1 leaf proofs against a FINALIZED rollup height -- the depth-64 SMT verifier of
+// loop round 2 (js/smtverify.js, design §7.3.3 / §7.5) wired to rv_rollup through rv_witbind (which binds the
+// height's segment end root W<h> from the final machine memory).
+//  {prove: h, leaf, sib: [<= 64 siblings, deepest first], key?}
+//  membership of leaf (no key) -> var L<h>:<kid> = leaf; absence of key (64 lowercase hex; leaf = the terminal leaf
+//  text, or '' for an EMPTY terminal) -> var A<h>:<key> = 1. A vault / bridge AA reads these vars (a withdrawal =
+//  membership of the account's acct: leaf in a finalized root).
+$BIND = 'BIU4BXUHLO26265ANIJUGQGUV6QRXN4R';   // mkwitproof.js bakes chash160(rv_witbind.aa)
+// trigger.data is read in place: a local copy of a ~10 KB proof object exceeds ocore's local-variable size limit
+if (exists(trigger.data.prove)) {
+	$h = trigger.data.prove;
+	require(is_integer($h), 'bad height');
+	$WR = var[$BIND]['W' || $h];
+	require($WR, 'height not bound');
+	// ---- verifier: js/smtverify.js verifierBinary(64), root = $WR ----
+	$D = 64;
+	$HX = '0123456789abcdef';
+	require(is_array(trigger.data.sib) AND length(trigger.data.sib) <= $D AND typeof(trigger.data.leaf) == 'string', 'sib');
+	// kid = text before the 2nd ':' (3rd for pos:), whole text if there are fewer. NOT split() (finding W5).
+	$kid = ($l) => {
+		$i1 = index_of($l, ':');
+		$r1 = substring($l, $i1 + 1);
+		$i2 = index_of($r1, ':');
+		$r2 = substring($r1, $i2 + 1);
+		$i3 = index_of($r2, ':');
+		($i1 < 0 OR $i2 < 0) ? $l : (starts_with($l, 'pos:') ? (($i3 < 0) ? $l : substring($l, 0, $i1 + $i2 + $i3 + 2)) : substring($l, 0, $i1 + $i2 + 1))
+	};
+	$nib = ($k, $d) => index_of($HX, substring($k, floor($d / 4), 1));
+	$t = trigger.data.leaf;
+	$kt = sha256('~K1:' || $kid($t), 'hex');
+	$ht = sha256('~L1:' || $kt || ':' || $t, 'base64');
+	$n = length(trigger.data.sib);
+	$abs = exists(trigger.data.key);
+	if ($abs) {
+		$k = trigger.data.key;
+		require(typeof($k) == 'string' AND length($k) == 64, 'key');   // lowercase hex: checked through $bits below
+		if ($t != '') {
+			require($kt != $k, 'own leaf');
+			require(substring($kt, 0, floor($n / 4)) == substring($k, 0, floor($n / 4)), 'prefix');
+			$P16 = [16, 8, 4, 2];
+			require(floor($nib($kt, $n) / $P16[$n % 4]) == floor($nib($k, $n) / $P16[$n % 4]), 'prefix bits');
+		}
+	}
+	else require($t != '', 'empty leaf');
+	$path = $abs ? trigger.data.key : $kt;
+	$h0 = ($abs AND $t == '') ? 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' : $ht;
+	$BS = '0000000100100011010001010110011110001001101010111100110111101111';
+	// only the first 16 hex chars (64 bits) of the path are used; a non-lowercase-hex char there is refused ('x'), so an
+	// absence can only be recorded under a canonical key name
+	$bits = reduce([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15], 16, ($a, $j) => { $c = index_of($HX, substring($path, $j, 1)); $a || (($c < 0) ? 'xxxx' : substring($BS, 4 * $c, 4)) }, '');
+	require(!contains($bits, 'x'), 'key');
+	$root = reduce(trigger.data.sib, 64, ($acc, $i, $s) => sha256('~N1:' || ((substring($bits, $n - 1 - $i, 1) == '0') ? $acc || $s : $s || $acc), 'base64'), $h0);
+	require($root == $WR, 'root');
+	$st = $abs ? {k: 'A' || $h || ':' || trigger.data.key, v: 1} : {k: 'L' || $h || ':' || $kid($t), v: $t};
+}
+else bounce('unknown command');
+
+}`,
+ messages: [
+  {app: 'state', state: `{
+	var[$st.k] = $st.v;
+	response['proven'] = $st.k;
+}`}
+ ]
+}]

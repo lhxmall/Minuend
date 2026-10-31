@@ -1,0 +1,92 @@
+// rv_seg_ref: layer-1 referee (loop round 3). K-ary bisection over the UNIT BOUNDARIES of one guest run (one rollup
+// height = one segment of <= 16 384 units), then hand-off to the instruction game (rv_game_ref) on the one unit left.
+// A point is (step, machine root): the machine state root of the run's trace after `step` instructions, where the
+// defender says a unit ended. The defender picks the step indices (strictly increasing); the challenger picks the
+// first interval whose start it agrees with and whose end it does not. Soundness does not depend on the defender
+// placing the boundaries at true unit ends: every point is a claim about the ONE trace (state after `step` steps), so
+// some interval always has a true start and a false end, and the instruction game on that interval finds the step.
+// What layer 1 buys: the challenger / defender need full per-step memory Merkle roots only for one unit's instructions
+// (~1e5-3e6 steps) instead of the whole segment (up to ~5e10), and the per-unit MNWIT1 roots the guest writes are
+// exactly the per-unit commitments a vault proof reads (rv_witproof).
+// Opened by an opener AA (rv_rollup) with {uopen: ref, s0, sN, n: steps, u: units, d, c} and SF = 2 x GF bytes: GF
+// pays this AA's result callback, GF is forwarded to rv_game_ref when the game reaches one unit. The result goes back
+// to the opener as {res: ref, w: 'd'|'c'}; only the opener handles money.
+$GAME = 'RV_GAME_AA_ADDRESS';   // rv_game_ref (mksegref.js bakes chash160(rv_game_ref.aa))
+$K = 16;            // branching factor (as rv_game_ref)
+$T = 3600;          // seconds per move
+$GF = 10000;        // per game: this AA's callback unit; and again for the layer-2 game it opens
+$GB = 1000;         // bytes sent back with the result
+$MK = 2000;         // kept from a move trigger for the refund unit's fee; the rest is refunded (as rv_game_ref)
+$RK = 10000;        // kept by resolve (one tx per game)
+$d = trigger.data;
+$now = timestamp;
+$isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) == '=' AND !contains($x, ':') AND !contains($x, ',');
+$isN = $x => is_integer($x) AND $x >= 0 AND $x <= 1099511627776;   // a step index (<= MAXSTEPS 2^40)
+// game record: ref:d:c:lo:hi:slo:shi:rlo:rhi:turn:deadline   (lo/hi = unit indices, slo/shi = step indices,
+// rlo/rhi = machine roots at those steps; turn d = defender posts points, c = challenger picks, x = layer 2 running)
+// layer-2 game: rv_game_ref game id = this AA || sha256(gid). Keyed by the hash of OUR game id (opener || ref), not by
+// the opener's ref: anyone can open a game here under the same ref with itself as opener, and a shared layer-2 slot
+// would make the honest game's hand-off bounce ('game exists') -> its picker times out.
+$l2 = ($gid, $dd, $cc, $slo, $shi, $rlo, $rhi) => {open: sha256($gid), s0: $rlo, sN: $rhi, n: $shi - $slo, d: $dd, c: $cc};
+if (trigger.address == $GAME) {
+	// result of the layer-2 game -> this game's result, forwarded to the opener (must not bounce for a real result)
+	$gid = var['x_' || $d.res] OTHERWISE '';
+	$g = split(var['g_' || $gid] OTHERWISE '', ':');
+	require(length($g) == 11 AND $g[9] == 'x', 'unknown game');
+	require($d.w == 'd' OR $d.w == 'c', 'bad result');
+	$st = {k: 'g_' || $gid, v: 'done:' || $d.w, to: substring($gid, 0, 32), cb: {res: $g[0], w: $d.w}};
+}
+else if ($d.uopen) {
+	require($isR($d.uopen) AND $isR($d.s0) AND $isR($d.sN) AND $isN($d.n) AND $d.n >= 1 AND is_integer($d.u) AND $d.u >= 1 AND $d.u <= $d.n, 'bad open');
+	require(is_valid_address($d.d) AND is_valid_address($d.c), 'bad players');
+	require(trigger.output[[asset=base]] >= 2 * $GF, 'fee');
+	$gid = trigger.address || $d.uopen;
+	require(!var['g_' || $gid], 'game exists');
+	$one = $d.u == 1;
+	$st = {k: 'g_' || $gid, rf: trigger.output[[asset=base]] - 2 * $GF,
+		v: $d.uopen || ':' || $d.d || ':' || $d.c || ':0:' || $d.u || ':0:' || $d.n || ':' || $d.s0 || ':' || $d.sN || ':' || ($one ? 'x' : 'd') || ':' || ($now + $T),
+		xg: $gid,
+		call: $one ? $l2($gid, $d.d, $d.c, 0, $d.n, $d.s0, $d.sN) : ''};
+}
+else {
+	$gid = $d.mids OTHERWISE $d.pick OTHERWISE $d.resolve;
+	$g = split(var['g_' || $gid] OTHERWISE '', ':');
+	require(length($g) == 11, 'no game');
+	$lo = +$g[3]; $hi = +$g[4]; $slo = +$g[5]; $shi = +$g[6]; $turn = $g[9]; $dl = +$g[10];
+	$cnt = min($K, $hi - $lo) - 1;   // interior points
+	$pt = $j => $j == 0 ? $lo : $j == $cnt + 1 ? $hi : $lo + floor($j * ($hi - $lo) / ($cnt + 1));
+	$pre = $g[0] || ':' || $g[1] || ':' || $g[2] || ':';
+	if ($d.mids) {
+		require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');
+		$r = $d.roots; $s = $d.steps;
+		require(is_array($r) AND length($r) == $cnt AND is_array($s) AND length($s) == $cnt, 'need ' || $cnt || ' points');
+		require(length(filter($r, 15, $x => !$isR($x))) == 0, 'bad root');
+		// steps strictly increasing inside (slo, shi): every unit has >= 1 instruction
+		$last = reduce($s, 15, ($a, $x) => ($a >= 0 AND $isN($x) AND $x > $a) ? $x : -1, $slo);
+		require($last >= 0 AND $last < $shi, 'steps must increase');
+		$st = {k: 'g_' || $gid, v: $pre || $lo || ':' || $hi || ':' || $slo || ':' || $shi || ':' || $g[7] || ':' || $g[8] || ':c:' || ($now + $T),
+			m: join($r, ','), ms: join($s, ','), rf: max(trigger.output[[asset=base]] - $MK, 0)};
+	}
+	else if ($d.pick) {
+		require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');
+		$j = $d.j;
+		require(is_integer($j) AND $j >= 0 AND $j <= $cnt, 'bad j');
+		$m = split(var['m_' || $gid], ',');
+		$ms = split(var['n_' || $gid], ',');
+		$rootAt = $i => $i == 0 ? $g[7] : $i == $cnt + 1 ? $g[8] : $m[$i - 1];
+		$stepAt = $i => $i == 0 ? $slo : $i == $cnt + 1 ? $shi : +$ms[$i - 1];
+		$nlo = $pt($j); $nhi = $pt($j + 1);
+		$one = $nhi - $nlo == 1;
+		$st = {k: 'g_' || $gid, rf: max(trigger.output[[asset=base]] - $MK, 0),
+			v: $pre || $nlo || ':' || $nhi || ':' || $stepAt($j) || ':' || $stepAt($j + 1) || ':' || $rootAt($j) || ':' || $rootAt($j + 1) || ':' || ($one ? 'x' : 'd') || ':' || ($now + $T),
+			xg: $gid,
+			call: $one ? $l2($gid, $g[1], $g[2], $stepAt($j), $stepAt($j + 1), $rootAt($j), $rootAt($j + 1)) : ''};
+	}
+	else {
+		// resolve: whoever's move it is loses after the deadline; turn x is decided by the layer-2 game only
+		require($turn != 'x', 'layer 2 running');
+		$w = $now >= $dl ? ($turn == 'd' ? 'c' : 'd') : '';
+		require($w, 'undecided');
+		$st = {k: 'g_' || $gid, v: 'done:' || $w, to: substring($gid, 0, 32), cb: {res: $g[0], w: $w}, rf: max(trigger.output[[asset=base]] - $RK, 0)};
+	}
+}

@@ -7,7 +7,14 @@
 //! [0x1FFF9] = status (mnpilot::ST_*: 0 ok, 1 bad magic, 2 n_accounts > MAX_ACCOUNTS, 3 n_ops >
 //! MAX_UNITS; 0xFFFF0077 = abort: panic or out of memory, exit code a0 = 77), [0x1FFF8] = event
 //! log overflow (never 1 within MAX_UNITS). [12] = heap high-water (bytes carved). Features: `nowit` = no commitment (2d01fe8
-//! pilot), `legacywit` = legacy full rebuild per unit for units >= input word 3.
+//! pilot), `legacywit` = legacy full rebuild per unit for units >= input word 3, `prod` = header flags must be 0.
+//! Segments (loop round 3): [0x1FFF0..8] = segment start root (MNWIT1 root before the first unit of
+//! this run), [0x1FFE8..8] = segment end root (after the last unit; = start root if no unit ran),
+//! [0x1FFE7] = segments run by this session (1 = genesis run). The session (engine + witness tree +
+//! allocator) persists in memory: the rollup's s0 for height h carries the final memory of h-1, the
+//! guest restarts at pc 0 and resumes from `SESS` (a .data pointer). `.bss` is zeroed in `_start`
+//! (round 2 A4); every value that must survive a run lives in `.data`. A run that aborts (panic /
+//! OOM, status 0xFFFF0077) marks the session dead: later runs execute nothing (status ST_DEAD = 5).
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
 #[cfg(not(target_os = "none"))]
@@ -19,7 +26,10 @@ mod rt {
     use core::alloc::{GlobalAlloc, Layout};
     core::arch::global_asm!(
         ".section .text._start", ".global _start", "_start:",
-        "li sp, 0x3F00000", "call rmain", "li a7, 93", "ecall", "1: j 1b");
+        // loop round 3 (A4): zero .bss (word-aligned bounds, link.x) before any Rust code runs
+        "la t0, _bss_start", "la t1, _bss_end",
+        "2: bgeu t0, t1, 3f", "sw zero, 0(t0)", "addi t0, t0, 4", "j 2b",
+        "3: li sp, 0x3F00000", "call rmain", "li a7, 93", "ecall", "1: j 1b");
     #[cfg(not(feature = "embed"))]
     fn read_word(i: u32) -> u32 {
         let r: u32;
@@ -42,11 +52,23 @@ mod rt {
     // exit a0 = 77 with OUT[0x1FFF9] = ST_ABORT (deterministic on every RISC-V implementation).
     struct Heap;
     const NCLASS: usize = 22;
+    // loop round 3: allocator state persists across runs (the heap holds the session) -> .data
+    #[link_section = ".data.alloc"]
     static mut FREE: [usize; NCLASS] = [0; NCLASS];
+    #[link_section = ".data.alloc"]
     pub static mut HEAP: usize = 0; // top of carved region
+    #[link_section = ".data.alloc"]
     pub static mut HEAP0: usize = 0;
+    #[link_section = ".data.alloc"]
     pub static mut LIVE: usize = 0; // bytes in live blocks (class sizes)
+    #[link_section = ".data.alloc"]
     pub static mut PEAK: usize = 0;
+    /// the persistent session (Box<mnpilot::Session> leaked), 0 = none yet (genesis run)
+    #[link_section = ".data.sess"]
+    static mut SESS: usize = 0;
+    /// 1 after an aborted run (panic / OOM)
+    #[link_section = ".data.sess"]
+    static mut DEAD: u32 = 0;
     extern "C" { static _heap_start: u8; }
     const HEAP_END: usize = 0x0300_0000; // below the embed input region; stack has 15 MiB above
     #[inline]
@@ -109,20 +131,42 @@ mod rt {
     #[panic_handler]
     fn panic(_: &core::panic::PanicInfo) -> ! {
         unsafe {
+            DEAD = 1;
             OUT.add(ROOTS - 7).write_volatile(ST_ABORT);
             core::arch::asm!("li a0, 77", "li a7, 93", "ecall", options(noreturn));
+        }
+    }
+    const SEG_START: usize = 0x1FFF0;
+    const SEG_END: usize = 0x1FFE8;
+    const SEG_N: usize = 0x1FFE7;
+    fn put_root(at: usize, r: &[u8; 32]) {
+        for k in 0..8 {
+            unsafe { OUT.add(at + k).write_volatile(u32::from_le_bytes([r[4 * k], r[4 * k + 1], r[4 * k + 2], r[4 * k + 3]])) };
         }
     }
     #[no_mangle]
     extern "C" fn rmain() -> u32 {
         let mut n_ev: u32 = 0;
+        // this run's counters start at 0 (OUT words survive from the previous run)
+        unsafe {
+            OUT.add(ROOTS - 1).write_volatile(0);
+            OUT.add(ROOTS - 8).write_volatile(0);
+            OUT.add(8).write_volatile(0);
+            if DEAD != 0 {
+                OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
+                return 0;
+            }
+        }
+        let mut sess: Option<mnpilot::Session> = unsafe {
+            if SESS == 0 { None } else { Some(*alloc::boxed::Box::from_raw(SESS as *mut mnpilot::Session)) }
+        };
         #[cfg(feature = "nowit")]
         let mode = mnpilot::WitMode::Off;
         #[cfg(all(feature = "legacywit", not(feature = "nowit")))]
         let mode = mnpilot::WitMode::Legacy { skip: read_word(3) & 0xFF_FFFF };
         #[cfg(not(any(feature = "nowit", feature = "legacywit")))]
         let mode = mnpilot::WitMode::Incremental;
-        let (h, st, wo) = mnpilot::run_batch_wit(
+        let (h, st, wo) = mnpilot::run_segment(
             &mut |i| read_word(i),
             &mut |w| unsafe {
                 // bounded: never reaches the counters at 0x1FFF0.. (cannot trigger within
@@ -143,8 +187,21 @@ mod rt {
                 OUT.add(ROOTS - 1).write_volatile(i + 1);
             },
             mode,
+            &mut sess,
         );
         unsafe {
+            let segs = sess.as_ref().map(|s| s.segs).unwrap_or(0);
+            if let Some(s) = sess {
+                SESS = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(s)) as usize;
+            }
+            OUT.add(SEG_N).write_volatile(segs);
+            if st.status == mnpilot::ST_OK {
+                put_root(SEG_START, &wo.start_root);
+                put_root(SEG_END, &wo.root);
+            } else {
+                put_root(SEG_START, &[0; 32]);
+                put_root(SEG_END, &[0; 32]);
+            }
             OUT.add(ROOTS - 2).write_volatile(wo.scratch_ok as u32);
             OUT.add(ROOTS - 3).write_volatile(wo.leaves);
             OUT.add(ROOTS - 4).write_volatile(wo.leaf_updates as u32);

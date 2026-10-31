@@ -1,0 +1,48 @@
+["autonomous agent", {
+ bounce_fees: {base: 10000},
+ init: `{
+// rv_witbind (loop round 3): binds a FINALIZED rollup height's MNWIT1 segment end root, for rv_witproof.
+//  {bind: h, words: [8 x u32], wsib: [8 x [24 siblings]], ssib: [24 siblings]}
+//  h must be finalized in rv_rollup. The guest (feature prod) writes the segment end root (MNWIT1 root after the
+//  height's last unit) at OUT[0x1FFE8..8] and the batch status at OUT[0x1FFF9]; the final memory root of the height
+//  (rv_rollup var m<sid>) commits both. bind checks the 8 words and status == 0 with memory Merkle proofs (the
+//  rv_step tree, depth 24) and stores the root base64-encoded: var W<h>. A height whose status != 0 (rejected header)
+//  has no root and cannot be bound (its zero words would make every absence "provable" against EMPTY).
+//  Separate AA from rv_witproof: ocore's static budget is per AA (ops 2000 summed over all branches); bind + verifier
+//  together measured 2 935 ops.
+$ROLL = '32RWV3M5HE3IP3BHSNEUBCUI4MKLVTEC';   // mkwitproof.js bakes chash160(rv_rollup.aa)
+$MD = 24;                          // memory tree depth (rv_step $D)
+$OUTW = 16646120;                  // word index of OUT[0x1FFE8] = 0x03F00000/4 + 0x1FFE8
+$STW = 16646137;                   // word index of OUT[0x1FFF9] (status)
+$B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+// trigger.data is read in place: a local copy of a ~10 KB proof object exceeds ocore's local-variable size limit
+if (exists(trigger.data.bind)) {
+	$h = trigger.data.bind;
+	require(is_integer($h) AND $h >= 1 AND $h <= (var[$ROLL]['lf'] OTHERWISE 0), 'not finalized');
+	require(!var['W' || $h], 'bound');
+	$mem = var[$ROLL]['m' || var[$ROLL]['h' || $h]];
+	$w = trigger.data.words;
+	require(is_array($w) AND length($w) == 8 AND is_array(trigger.data.wsib) AND length(trigger.data.wsib) == 8, 'words');
+	require(length(filter([0,1,2,3,4,5,6,7], 8, $k => !(is_integer($w[$k]) AND $w[$k] >= 0 AND $w[$k] < 4294967296
+		AND is_array(trigger.data.wsib[$k]) AND length(trigger.data.wsib[$k]) == $MD
+		AND is_valid_merkle_proof($w[$k], {root: $mem, siblings: trigger.data.wsib[$k], index: $OUTW + $k})))) == 0, 'word proof');
+	require(is_array(trigger.data.ssib) AND length(trigger.data.ssib) == $MD AND is_valid_merkle_proof(0, {root: $mem, siblings: trigger.data.ssib, index: $STW}), 'status');
+	// 8 little-endian words -> 32 bytes -> standard base64 (44 chars, '=' pad), as wit::b64_32
+	$P = [1, 256, 65536, 16777216];
+	$byte = $i => $i >= 32 ? 0 : floor($w[floor($i / 4)] / $P[$i % 4]) % 256;
+	$enc = reduce([0,1,2,3,4,5,6,7,8,9,10], 11, ($a, $g) => {
+		$v = $byte(3 * $g) * 65536 + $byte(3 * $g + 1) * 256 + $byte(3 * $g + 2);
+		$a || substring($B64, floor($v / 262144), 1) || substring($B64, floor($v / 4096) % 64, 1) || substring($B64, floor($v / 64) % 64, 1) || substring($B64, $v % 64, 1)
+	}, '');
+	$st = {bind: 1, k: 'W' || $h, v: substring($enc, 0, 43) || '='};
+}
+else bounce('unknown command');
+
+}`,
+ messages: [
+  {app: 'state', state: `{
+	var[$st.k] = $st.v;
+	response['proven'] = $st.k;
+}`}
+ ]
+}]

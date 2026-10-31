@@ -22,6 +22,18 @@
 //!              (order id = order_id(account, market, client_seq), computed in the guest)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
 //!
+//! Segments (loop round 3): an upstream batch (<= 200 000 units) is cut into guest runs of
+//! <= MAX_UNITS units. One guest run = one segment = one rollup height. The guest keeps its
+//! engine state in memory between runs (`Session`, see main.rs: the rollup carries the final
+//! memory of height h-1 into s0 of height h), so segment k starts exactly where k-1 ended. A run
+//! starts from genesis only when no session exists yet (first height). Segment boundary
+//! commitment: the MNWIT1 root BEFORE the segment's first unit (`WitOut::start_root`, guest
+//! OUT[0x1FFF0..8]) and AFTER its last unit (`WitOut::root`, guest OUT[0x1FFE8..8]); segment
+//! k's start root == segment k-1's end root (the rollup chains them, design §7.6).
+//! Header flags (word 3): test fixtures only (bit 24 market 2 at genesis, bits 0-23 legacywit
+//! skip). Feature `prod` (the rollup's committed image) requires flags == 0, else status
+//! ST_BAD_FLAGS; a resumed session always requires flags == 0 (genesis flags cannot apply).
+//!
 //! Input validation (loop round 1, findings/rv-loop-1.md G1/G2): the header is checked BEFORE any
 //! op runs; a batch with a bad magic, `n_accounts > MAX_ACCOUNTS` or `n_ops > MAX_UNITS` runs no op
 //! and returns status != 0 with a zero state hash (host and guest share this code, so both agree).
@@ -92,13 +104,19 @@ pub const MARKET2_FLAG: u32 = 1 << 24;
 pub const MAX_UNITS: u32 = 16_384;
 /// Max entries of the batch's account table.
 pub const MAX_ACCOUNTS: u32 = 4_096;
-/// Event-log word capacity in the guest's OUT area (words 13 .. 0x1FFF0).
-pub const EV_CAP: u32 = 0x1FFF0 - 13;
+/// Event-log word capacity in the guest's OUT area (words 13 .. 0x1FFE0; 0x1FFE0.. holds the
+/// segment words and counters, loop round 3).
+pub const EV_CAP: u32 = 0x1FFE0 - 13;
 /// Batch status (OUT[0x1FFF9] in the guest; `Stats::status` on the host).
 pub const ST_OK: u32 = 0;
 pub const ST_BAD_MAGIC: u32 = 1;
 pub const ST_TOO_MANY_ACCOUNTS: u32 = 2;
 pub const ST_TOO_MANY_UNITS: u32 = 3;
+/// header word 3 != 0 where it must be 0 (feature `prod`, or any resumed session)
+pub const ST_BAD_FLAGS: u32 = 4;
+/// a previous run of this session aborted (panic / out of memory): its state may be torn
+/// mid-unit, so every later run refuses to execute (guest only; main.rs)
+pub const ST_DEAD: u32 = 5;
 /// Event code of a unit rejected by the MNWIT1 depth rule (wit::MAX_WIT_DEPTH, loop round 2 W2);
 /// outside the engine's RejectReason codes (1..17, 0x100+).
 pub const WIT_DEPTH_CODE: u32 = 18;
@@ -125,21 +143,26 @@ pub fn wit_depth_ok(w: &wit::Wit, s: &state::ChainState, op: &BatchOp, author: A
         _ => true,
     }
 }
-const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFF0);
+const _: () = assert!(13 + 7 * MAX_UNITS <= 0x1FFE0);
 const _: () = assert!(0x03F0_0000 / 4 + 0x20000 + 8 * MAX_UNITS <= 1 << 24);
 const _: () = assert!(4 + 8 * (MAX_ACCOUNTS + MAX_UNITS) < 1 << 24);
 
-/// Header check shared by host and guest.
-pub fn check_header(rd: &mut dyn FnMut(u32) -> u32) -> u32 {
+/// Header check shared by host and guest. `resumed` = a session already exists (not genesis).
+pub fn check_header_seg(rd: &mut dyn FnMut(u32) -> u32, resumed: bool) -> u32 {
     if rd(0) != MAGIC {
         ST_BAD_MAGIC
     } else if rd(1) > MAX_ACCOUNTS {
         ST_TOO_MANY_ACCOUNTS
     } else if rd(2) > MAX_UNITS {
         ST_TOO_MANY_UNITS
+    } else if rd(3) != 0 && (resumed || cfg!(feature = "prod")) {
+        ST_BAD_FLAGS
     } else {
         ST_OK
     }
+}
+pub fn check_header(rd: &mut dyn FnMut(u32) -> u32) -> u32 {
+    check_header_seg(rd, false)
 }
 
 impl state::ChainState {
@@ -269,13 +292,32 @@ pub enum WitMode {
 }
 
 pub struct WitOut {
-    /// final incremental root (Incremental) or last legacy root
+    /// final incremental root (Incremental) or last legacy root; = segment end root
     pub root: [u8; 32],
+    /// MNWIT1 root before the first unit of this run (segment start root; Incremental only)
+    pub start_root: [u8; 32],
     /// Incremental: final root == root of a tree rebuilt from scratch over the final state
     pub scratch_ok: bool,
     pub leaves: u32,
     pub leaf_updates: u64,
     pub node_hashes: u64,
+}
+
+/// Engine state carried from one segment (guest run) to the next.
+pub struct Session {
+    pub eng: Engine,
+    pub w: Option<wit::Wit>,
+    pub mode: WitMode,
+    /// segments run so far (incl. ones whose header was rejected)
+    pub segs: u32,
+}
+impl Session {
+    pub fn genesis(flags: u32, mode: WitMode) -> Self {
+        let mut eng = Engine { state: state::ChainState::genesis_flags(flags) };
+        let w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
+        eng.state.wit_dirty = Default::default();
+        Session { eng, w, mode, segs: 0 }
+    }
 }
 
 /// Run one batch (no witness), as in 2d01fe8.
@@ -295,9 +337,26 @@ pub fn run_batch_wit(
     unit: &mut dyn FnMut(u32, &state::ChainState, &[u8; 32]),
     mode: WitMode,
 ) -> ([u8; 32], Stats, WitOut) {
+    let mut sess = None;
+    run_segment(rd, ev, unit, mode, &mut sess)
+}
+
+/// Run one segment on `sess` (None = no session yet: start from genesis with the header's flags,
+/// and leave the new session in `sess`). A rejected header runs no op and leaves `sess` as it was
+/// (hash zero). The returned hash is the state hash after the segment.
+pub fn run_segment(
+    rd: &mut dyn FnMut(u32) -> u32,
+    ev: &mut dyn FnMut(u32),
+    unit: &mut dyn FnMut(u32, &state::ChainState, &[u8; 32]),
+    mode: WitMode,
+    sess: &mut Option<Session>,
+) -> ([u8; 32], Stats, WitOut) {
     let mut st = Stats { status: ST_OK, applied: 0, rejected: 0, fills: 0 };
-    let mut wo = WitOut { root: [0; 32], scratch_ok: false, leaves: 0, leaf_updates: 0, node_hashes: 0 };
-    st.status = check_header(rd);
+    let mut wo = WitOut { root: [0; 32], start_root: [0; 32], scratch_ok: false, leaves: 0, leaf_updates: 0, node_hashes: 0 };
+    if let Some(s) = sess.as_mut() {
+        s.segs += 1;
+    }
+    st.status = check_header_seg(rd, sess.is_some());
     if st.status != ST_OK {
         return ([0u8; 32], st, wo);
     }
@@ -312,11 +371,15 @@ pub fn run_batch_wit(
         accts.push(AccountId(id));
     }
     let base = 4 + n_acc * 8;
-    let mut eng = Engine { state: state::ChainState::genesis_flags(rd(3)) };
-    let mut w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
-    eng.state.wit_dirty = Default::default();
+    if sess.is_none() {
+        let mut s = Session::genesis(rd(3), mode);
+        s.segs = 1;
+        *sess = Some(s);
+    }
+    let Session { eng, w, .. } = sess.as_mut().unwrap();
     if let Some(w) = w.as_mut() {
         wo.root = w.root();
+        wo.start_root = wo.root;
     }
     for i in 0..n_ops {
         let mut ow = [0u32; 8];
