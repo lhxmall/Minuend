@@ -3,7 +3,9 @@
 const fs=require('fs'); const R=require('./mkref.js'); const SR=require('./mksegref.js');
 let genMem = process.env.GENMEM;
 if (!genMem) genMem = require('./rolltrace.js').genesis().root();
-const body=fs.readFileSync(__dirname+'/../aa/rv_rollup.oscript','utf8').split('RV_GAME_AA_ADDRESS').join(R.addr).split('RV_SEG_AA_ADDRESS').join(SR.addr).split('GENESIS_MEM_ROOT').join(genMem);
+// loop round 4: GOV env = governance address allowed to schedule upgrades (default: a fixed test address)
+const govAddr = process.env.GOV || 'GOVXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+const body=fs.readFileSync(__dirname+'/../aa/rv_rollup.oscript','utf8').split('RV_GOV_ADDRESS').join(govAddr).split('RV_GAME_AA_ADDRESS').join(R.addr).split('RV_SEG_AA_ADDRESS').join(SR.addr).split('GENESIS_MEM_ROOT').join(genMem);
 const state=`
 	if ($d.submit) {
 		var['top'] = $st.h;
@@ -23,6 +25,15 @@ const state=`
 		var['r' || $st.sid] = 'F';
 	}
 	else if ($d.reclaim) var['r' || $st.sid] = 'R';
+	else if ($d.upgrade) {
+		var['U' || $st.up] = $d.mem;
+		var['top'] = $st.up - 1;
+		response['upgrade'] = $st.up;
+	}
+	else if ($st.xb) {
+		var['x' || $st.xb] = $st.v;
+		response['xbind'] = $st.v;
+	}
 	else {
 		var['G' || $ref] = $st.sid || ':' || $g[1] || ':' || $d.w;
 		var['n' || $st.sid] -= 1;
@@ -47,4 +58,4 @@ ${esc(body)}
  ]
 }]`;
 fs.writeFileSync(__dirname+'/../aa/rv_rollup.aa', aa);
-module.exports={body, state, gameAddr: R.addr, stepAddr: R.stepAddr, genMem, addr: R.chashOf(aa), ref: R, seg: SR, segAddr: SR.addr};
+module.exports={body, state, govAddr, gameAddr: R.addr, stepAddr: R.stepAddr, genMem, addr: R.chashOf(aa), ref: R, seg: SR, segAddr: SR.addr};

@@ -583,6 +583,55 @@ groups.witproof = async () => { const K = require('./witkit.js'); const dir = __
   rec('witproof', 'forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height)', 0, forged, { tries });
   rec('witproof', 'a proof for height h does not verify against h+1', true, tries > 0); };
 
+// ---------- loop round 4: guest-image upgrade (governance U<h>) + export / import digest binding (xbind)
+groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = M.govAddr; const Z32 = Array(32).fill(0).join(',');
+  const memX = (kind, dw, tag) => { const m = new ref.Mem(); m.set(XK, kind); dw.forEach((w, k) => m.set(XK + 2 + k, w)); m.set(0x100, tag); m.root(); return m; };
+  const xb = (m, sid, o = {}) => ({ xbind: sid, words: [m.get(XK), ...Array.from({ length: 8 }, (_, k) => m.get(XK + 2 + k))], wsib: [m.proof(XK), ...Array.from({ length: 8 }, (_, k) => m.proof(XK + 2 + k))], ...o });
+  const D = Array.from({ length: 8 }, (_, k) => (0x9e3779b9 * (k + 1)) >>> 0), D2 = D.map((w, k) => k === 5 ? (w ^ 1) >>> 0 : w);
+  const sub = async (C, h, pmem, fm, prevFinal, seed) => { const inp = new ref.Mem(); inp.set(0, seed); inp.root(); const steps = 100 + seed, fpc = 2, fregs = Z32.split(',').join(',');
+    const s0 = ref.H('0:' + Z32 + ':' + pmem + ':' + inp.root() + ':0'); const final = ref.H(fpc + ':' + fregs + ':' + fm.root() + ':' + inp.root() + ':' + steps);
+    const r = await S(C, OP1, ROLL, OBOND, { submit: h, s0, steps, final, inp: inp.root(), fpc, fregs, fmem: fm.root(), prev: prevFinal, units: 1 }); return { ...r, final, fm }; };
+  const G = T.genesis().root(); const UM = memX(0, [0, 0, 0, 0, 0, 0, 0, 0], 777).root(); // the new image's memory root
+  { const C = new Chain();
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); rec('upgrade', 'export height 1 submitted', 'accepted', bnc(e));
+    rec('upgrade', 'upgrade from a non-governance address', 'bounce', bnc(await S(C, OP1, ROLL, 0, { upgrade: 2, mem: UM }), /not governance/));
+    rec('upgrade', 'upgrade of a height above top + 1', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM }), /bad upgrade height/));
+    rec('upgrade', 'upgrade of height 1', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 1, mem: UM }), /bad upgrade height/));
+    rec('upgrade', 'upgrade with a malformed root', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 2, mem: 'x' }), /bad root/));
+    rec('upgrade', 'upgrade height 2 by governance', 'accepted', bnc(await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM })));
+    rec('upgrade', 'height 2 chained on the OLD memory refused (s0 must start from the new image)', 'bounce', bnc(await sub(C, 2, e.fm.root(), memX(2, D, 2), e.final, 2), /bad s0/));
+    const i = await sub(C, 2, UM, memX(2, D, 2), e.final, 2); rec('upgrade', 'import height 2 from the new image accepted', 'accepted', bnc(i));
+    C.ts += WIN; rec('upgrade', 'finalize export height 1', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 1 })));
+    rec('upgrade', 'finalize import height 2 before any xbind', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    rec('upgrade', 'xbind with a wrong digest word', 'bounce', bnc(await S(C, W, ROLL, 0, xb(i.fm, i.unit, { words: xb(i.fm, i.unit).words.map((w, k) => k === 4 ? (w ^ 1) >>> 0 : w) })), /word proof/));
+    rec('upgrade', 'xbind claiming kind 1 for an import memory', 'bounce', bnc(await S(C, W, ROLL, 0, xb(i.fm, i.unit, { words: [1, ...xb(i.fm, i.unit).words.slice(1)] })), /word proof/));
+    rec('upgrade', 'xbind of a memory with kind 0 (no snapshot run)', 'bounce', bnc(await S(C, W, ROLL, 0, xb(memX(0, D, 9), i.unit)), /kind/));
+    rec('upgrade', 'xbind import height 2', 'accepted', bnc(await S(C, W, ROLL, 0, xb(i.fm, i.unit))));
+    rec('upgrade', 'xbind twice', 'bounce', bnc(await S(C, W, ROLL, 0, xb(i.fm, i.unit)), /bound/));
+    rec('upgrade', 'finalize import height 2 with only the import bound', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    rec('upgrade', 'xbind export height 1', 'accepted', bnc(await S(C, W, ROLL, 0, xb(e.fm, e.unit))));
+    rec('upgrade', 'finalize import height 2 (export digest == import digest)', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 2 })));
+    rec('upgrade', 'upgrade at or below lf', 'bounce', bnc(await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM }), /bad upgrade height/));
+    const n3 = await sub(C, 3, i.fm.root(), memX(0, D, 3), (await 0, String(C.r('s' + i.unit)).split(':')[2]), 3);
+    rec('upgrade', 'height 3 chains on the import memory again (normal height)', 'accepted', bnc(n3)); }
+  { const C = new Chain(); // a mismatching import: never finalizes; governance re-schedules (voids h..top), bonds reclaimable
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM });
+    const bad = await sub(C, 2, UM, memX(2, D2, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(bad.fm, bad.unit));
+    rec('upgrade', 'import whose digest differs from the export never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    const swapped = await sub(C, 3, bad.fm.root(), memX(1, D, 3), bad.final, 3);
+    rec('upgrade', 'governance re-schedules height 2 (voids 2..top)', ['accepted', 1], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM })), C.r('top')]);
+    rec('upgrade', 'voided import height 2 bond reclaimable (not fraud)', 'accepted', bnc(await S(C, OP1, ROLL, 0, { reclaim: bad.unit })));
+    rec('upgrade', 'voided height 3 bond reclaimable', 'accepted', bnc(await S(C, OP1, ROLL, 0, { reclaim: swapped.unit })));
+    const ok = await sub(C, 2, UM, memX(2, D, 22), e.final, 22); C.ts += WIN; await S(C, W, ROLL, 0, xb(ok.fm, ok.unit));
+    rec('upgrade', 're-submitted matching import finalizes', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 2 }))); }
+  { const C = new Chain(); // kinds swapped: export height publishes kind 2, import height kind 1
+    const e = await sub(C, 1, G, memX(2, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: UM });
+    const i = await sub(C, 2, UM, memX(1, D, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(i.fm, i.unit));
+    rec('upgrade', 'kinds swapped (export run at h, import at h-1) never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/)); }
+};
+
 (async () => {
   for (const [nm, fn] of Object.entries(groups)) { if (FILTER && !nm.includes(FILTER)) continue; try { await fn(); } catch (e) { rec(nm, 'group crashed', 'no crash', String(e.stack || e).slice(0, 300)); } }
   rec('invariant', 'rollup balance >= outstanding bonds + burned after every tx', 0, invFail);

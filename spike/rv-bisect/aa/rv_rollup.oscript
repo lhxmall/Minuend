@@ -5,6 +5,7 @@
 $GAME = 'RV_GAME_AA_ADDRESS';   // rv_game referee (mkrollup.js bakes chash160(rv_game_ref.aa))
 $SEG = 'RV_SEG_AA_ADDRESS';     // layer-1 referee rv_seg_ref (loop round 3; mkrollup.js bakes chash160(rv_seg_ref.aa))
 $GENMEM = 'GENESIS_MEM_ROOT';   // memory root of the program image before height 1 (mkrollup.js)
+$GOV = 'RV_GOV_ADDRESS';        // loop round 4: governance address allowed to schedule a guest-image upgrade (mkrollup.js)
 $OBOND = 200000;    // operator bond per submitted height
 $CBOND = 120000;    // challenger bond per game (owner 2026-10-31): payout CBOND-GF-FEE = 108000 >= 2.2x the honest
                     // operator's worst cost to answer one game at MAXSTEPS (10 rounds, ~49300 bytes incl. tps fee)
@@ -20,7 +21,8 @@ $MAXSTEPS = 1099511627776;   // 2^40 (kept, owner 2026-10-31): a challenger must
 // out. Any exit (a treasury key, or a reward pool for challengers) brings back a trusted key, or lets a fraudster's own
 // puppet challenger recoup it (owner decision 2026-10-31).
 $Z32 = '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';
-$d = trigger.data;
+// loop round 4: an xbind trigger (~9 KB of proofs) is read in place (R3-W2: a local copy exceeds the size limit)
+$d = exists(trigger.data.xbind) ? {} : trigger.data;
 $now = timestamp;
 $top = var['top'] OTHERWISE 0;       // highest live height
 $lf = var['lf'] OTHERWISE 0;         // last finalized height
@@ -33,6 +35,14 @@ $live = ($sid, $r) => var['h' || $r[0]] == $sid AND $r[0] <= $top;
 // instruction game (open, rv_game_ref) OR the layer-1 game (uopen, rv_seg_ref: bisection over unit-boundary machine
 // roots, then rv_game_ref on one unit). uopen costs CBOND + GF: rv_seg_ref needs GF for its own callback and GF for
 // the layer-2 game it opens; payouts are the same as for open.
+// Loop round 4 (R3-H2 / R4-S1 upgrade path): governance schedules an upgrade at height h (U<h> = memory root of the
+// new image, which carries the expected export digest compiled in). Height h then starts from that image instead of
+// the memory of h-1, its input is the snapshot, and it finalizes only when BOTH digests are proven equal (xbind):
+// the export run at h-1 published kind 1 + digest D at OUT[0x1FFD6] / OUT[0x1FFD8..8] (status 0) and the import run
+// at h published kind 2 + the same D (a guest writes the kind word only on status 0). So the imported state is the
+// state of the finalized height h-1, independently of what digest the governance-chosen image carries.
+$XK = 16646102;     // word index of OUT[0x1FFD6] (snapshot kind); digest words at OUT[0x1FFD8..8] = $XK + 2 ..
+$MD = 24;           // memory tree depth (rv_step $D)
 // ---- callback from a referee: {res: game ref, w: 'd' | 'c'}  (must not bounce for a real result)
 if (trigger.address == $GAME OR trigger.address == $SEG) {
 	$ref = $d.res;
@@ -65,7 +75,7 @@ else if ($d.submit) {
 	require(typeof($d.prev) == 'string' AND $d.prev == $prev, 'prev must be ' || $prev);
 	// s0 is not chosen by the operator: memory carried from the previous final state, this batch's input,
 	// pc 0, registers 0, step 0 (closes the "s0 unbound" gap)
-	$pmem = $h == 1 ? $GENMEM : var['m' || var['h' || ($h - 1)]];
+	$pmem = var['U' || $h] OTHERWISE ($h == 1 ? $GENMEM : var['m' || var['h' || ($h - 1)]]);   // loop round 4: upgrade
 	require($d.s0 == sha256('0:' || $Z32 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
 	// the final root must be the hash of a halted (pc 2) or trapped (pc 1) state; its memory root seeds h+1
 	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
@@ -99,6 +109,12 @@ else if ($d.finalize) {
 	require(!var['f' || $sid], 'fraud');
 	$pf = $h == 1 ? [] : split(var['s' || var['h' || ($h - 1)]], ':');
 	require($h == 1 OR $r[7] == $pf[2], 'prev');
+	// loop round 4: an upgrade height finalizes only on a proven export(h-1) / import(h) digest match
+	if (var['U' || $h]) {
+		$xi = split(var['x' || $sid] OTHERWISE '', ':');
+		$xe = split(var['x' || var['h' || ($h - 1)]] OTHERWISE '', ':');
+		require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'import digest');
+	}
 	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
 }
 // ---- reclaim the bond of a voided (not fraudulent) submission after its games are over
@@ -108,5 +124,30 @@ else if ($d.reclaim) {
 	require(length($r) == 8 AND !$live($sid, $r), 'live or unknown');
 	require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');
 	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+}
+// ---- loop round 4: governance schedules a guest-image upgrade at h (lf < h <= top + 1); live heights >= h are
+//      voided (top = h - 1; not fraud: their bonds are reclaimable), so a stuck upgrade (failed import) can be
+//      re-scheduled with another image
+else if ($d.upgrade) {
+	require(trigger.address == $GOV, 'not governance');
+	$h = $d.upgrade;
+	require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');
+	require($isR($d.mem), 'bad root');
+	$st = {up: $h};
+}
+// ---- loop round 4: xbind {xbind: sid, words: [kind, 8 digest words], wsib: [9 x [24 siblings]]}: proves a
+//      submission's snapshot kind and digest against its final memory root (anyone; once per submission)
+else if (exists(trigger.data.xbind)) {
+	$sid = trigger.data.xbind;
+	$mem = var['m' || $sid];
+	require($mem, 'unknown submission');
+	require(!var['x' || $sid], 'bound');
+	$w = trigger.data.words;
+	require(is_array($w) AND length($w) == 9 AND is_array(trigger.data.wsib) AND length(trigger.data.wsib) == 9, 'words');
+	require($w[0] == 1 OR $w[0] == 2, 'kind');
+	require(length(filter([0,1,2,3,4,5,6,7,8], 9, $k => !(is_integer($w[$k]) AND $w[$k] >= 0 AND $w[$k] < 4294967296
+		AND is_array(trigger.data.wsib[$k]) AND length(trigger.data.wsib[$k]) == $MD
+		AND is_valid_merkle_proof($w[$k], {root: $mem, siblings: trigger.data.wsib[$k], index: $XK + ($k == 0 ? 0 : $k + 1)})))) == 0, 'word proof');
+	$st = {xb: $sid, v: $w[0] || ':' || $w[1] || ',' || $w[2] || ',' || $w[3] || ',' || $w[4] || ',' || $w[5] || ',' || $w[6] || ',' || $w[7] || ',' || $w[8]};
 }
 else bounce('unknown command');
