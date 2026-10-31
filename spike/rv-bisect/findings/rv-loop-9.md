@@ -1,7 +1,8 @@
 # rv loop round 9 — R8-L4 test, round-8 suite, R7-L3 design refinement, fresh review of the rollup / AA layer (2026-11-01)
 
-**Status: DRAFT (loop round 9, 2026-11-01 ~01:00 CST, branch spike/rv-bisect).** Suite rows marked *running* were not
-finished when the shared VM's logs were collected; the VM auto-suspends ~02:58 CST and keeps its processes.
+**Status: FINAL for round 9 (2026-11-01 ~02:10 CST, branch spike/rv-bisect).** The round-8 full suite (rv-loop-8) was
+still running on the shared VM at close; its remaining rows are filled from `l8-*` logs in a later round (the VM
+auto-suspends ~02:58 CST and keeps its processes).
 
 Target: `lhxmall/Minuend` branch `spike/rv-bisect` @ 95f79e9 (loop round 8). Reference engine read only via
 `git archive 20326c0` (engine-diff/engine-src); fix/47-all, main and PR #51 untouched.
@@ -177,4 +178,4 @@ gnon:<account_hex> ':' last_nonce
 | R7-L3 govwit guest image, govgen 21–23 through the JS guest (`l9w-govguest.log`) | 3 / 3 engine + per-unit roots (1 009 units, 96.9 M steps) |
 | R7-L3 default build of the same sources (govwit off) | govwit refuses ("needs the govwit build"), govedge 8 / 8, govfuzz 30 / 30 (`l9w-2.log`) |
 | rolltest witproof with the govwit leaf kinds (sandbox) | 19 / 19 (41 memberships incl. 3 govwit, 0 / 200 forged); full rolltest 357 / 357 |
-| rolldevnet round 9 (`l9rd.sh`, after the round-8 devnet) | RD9 |
+| rolldevnet round 9 (round-9 AAs incl. `cancel`, devnet clock ts, `l9rd.sh`) | **149 / 149** (RDDONE exit 0); the cancel path itself is not exercised on the devnet (R9-T1) |
