@@ -151,7 +151,7 @@ of that class's peak live bytes + alignment pads; heapsim now prints `sum_class_
 < 100 B on every batch. Numbers (64-bit host sim, high-water / peak live / Σ class peaks): crowd1800 2.04 / 1.78 /
 2.04 MB; crowdmax (16 384 orders at one price) 20.16 / 17.01 / 20.16 MB; limit batch 4.31 / 3.78 MB; genmax 1.15 MB;
 `frag` (crowded level → cancel all → 3 968 distinct levels → cancel all → fills, 16 384 units) 4.08 / 3.33 MB
-(1.23×); heap 50.2 MB. Guest (rv32) measured: {{GUEST_HEAP}}.
+(1.23×); heap 50.2 MB. Guest (rv32) measured (OUT[12] carved / OUT[0x1FFFA] peak live): crowd1800 2.04 / 1.77 MB, limit batch 4.25 / 3.72 MB, frag16 1.22 / 0.96 MB (1.27×) — all close to the host simulation, ≥ 11× below the heap.
 
 ## H1 / D8 (L) — see table.
 
@@ -180,10 +180,24 @@ rejected (status 2 / 3), `n_ops = 0` (genesis root, empty log) and `n_accounts =
 
 ## Fix status / tests
 
-Commits on `spike/rv-bisect`: db1683c (code + tools), {{COMMITS}}.
+Commits on `spike/rv-bisect`: db1683c (code + tools), fb23d3f (docs, scripts, Oscript results), and the results commit that adds `guest-engine/results-loop2/` (logs; binaries sha1 in l2-bins.txt).
 Fixed: W2, W2b, W5, S1, W4 (port), A1; documented: W6, A2, A4, H1, D8. Open: S1b (upstream list above), AA-side
 integration of the verifier into the 10 dispute AAs, layer-1 segmenting (round-1 G2).
 
 | test | result |
 |---|---|
-{{TESTS}}
+| fuzz 300×300 real vs port | 300/300 (same event statistics as round 1) |
+| witfuzz 300 (per-unit roots real-scratch / port-incremental / port-scratch; history; pure tree) | 300/300, 112 794 units; history 300/300; tree 300/300 (34 894 ops) |
+| advfuzz 300×300 | 300/300, 92 300 units |
+| proofs 300 batches (reference verifier, MAX_DEPTH 64) | membership 177 087 / 0 bad, absence 61 540 / 0 bad, 829 291 forgeries rejected, max depth 16 |
+| scen upstream.scn real vs port + roots | 47/47 |
+| selftest (+ new acc_at_limit, acc_zero_ops_zero, depthsel 64 and 8) | no failures |
+| depth rule, depth8 build: 20 ground batches (rule vs independent depth; port = real engine minus rejected units) | 20/20 (64–79 of 184 units rejected per batch) |
+| guest (JS) depth8 ELF vs host depth8 | 20/20 |
+| guest (JS) scen / extra batches | 47/47 (82.1 M steps) / 8/8 (2 395 units, 445.1 M steps) |
+| guest robust (15 malformed / boundary cases) + limit batch (4 096 acc × 16 384 units) | 15/15 + 1/1 (1.219 G steps, heap 4.25 MB carved / 3.72 MB live) |
+| guest crowd1800 (S1/W4) | = real engine, 640.5 M steps (round 1: 833.2 M), heap 2.04 MB |
+| guest frag16 (6 000-unit fragmentation stress) / grind1any (22-deep ground leaf) | = host: 1.293 G steps, heap 1.22 MB carved / 0.96 MB live / 418 units, 113.9 M steps |
+| sail-riscv 0.16 spot-check (embed build): fee-guard scenario, crowd168, insurance_author, ops_over_limit, adv21 (journal rollbacks) | 5/5: instruction counts equal (2 195 245 / 39 535 382 / 12 011 131 / 267 / 15 386 267), all result words equal, hash = host |
+| Oscript verifier (ocore 0.4.8): static cost / real proofs / synthetic full depth | D=64: complexity 68, ops 1 369; 36/36 + 12/12 accepted, 0/156 forged; 9/9, depth 65 refused |
+| mutation (loop2-mut.sh: fuzz 100 + scen + witfuzz 30 + advfuzz 30 + selftest + proofs 10 + depth8 5 per mutant) | 29/34 killed; survivors: round-1 equivalents 5 (mark band), 8 (liquidatable), 10 (claw from negative), 25 (redundant prefix check), new 29 (resting-push undo; equivalent, see S1) |

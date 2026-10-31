@@ -1,0 +1,4 @@
+{"batch":"crowd1800.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":14717379,"units":1830,"applied":1830,"rejected":0,"steps":640478005,"heap":2036736,"heap_peak_live":1774656,"ms":709417}
+{"batch":"frag16.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":2623727152,"units":6000,"applied":6000,"rejected":0,"steps":1293373124,"heap":1216208,"heap_peak_live":958976,"ms":1238423}
+{"batch":"grind1any.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":1747430510,"units":418,"applied":418,"rejected":0,"steps":113877512,"heap":588864,"heap_peak_live":523456,"ms":91679}
+{"batches":3,"match":3}

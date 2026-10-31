@@ -1,0 +1,6 @@
+{"mode":"target","accounts_tried":4080,"tries_per_s":298626,"attacker_index":768,"common_prefix_bits":13,"leaves":421,"max_depth_before":18,"max_depth_after":18,"median_depth":10}
+{"mode":"any","accounts_tried":4080,"tries_per_s":165062,"attacker_index":687,"common_prefix_bits":21,"leaves":421,"max_depth_before":18,"max_depth_after":22,"median_depth":10}
+{"mode":"target","accounts_tried":4080,"tries_per_s":312260,"attacker_index":768,"common_prefix_bits":13,"leaves":421,"max_depth_before":18,"max_depth_after":18,"median_depth":10}
+{"mode":"any","accounts_tried":4080,"tries_per_s":252577,"attacker_index":687,"common_prefix_bits":21,"leaves":421,"max_depth_before":18,"max_depth_after":22,"median_depth":10}
+{"mode":"target","accounts_tried":4080,"tries_per_s":283007,"attacker_index":768,"common_prefix_bits":13,"leaves":421,"max_depth_before":18,"max_depth_after":18,"median_depth":10}
+{"mode":"any","accounts_tried":4080,"tries_per_s":315940,"attacker_index":687,"common_prefix_bits":21,"leaves":421,"max_depth_before":18,"max_depth_after":22,"median_depth":10}
