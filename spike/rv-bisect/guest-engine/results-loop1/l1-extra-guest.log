@@ -1,0 +1,9 @@
+{"batch":"adv21.bin","units":309,"engine_match":true,"roots_match":true,"steps":10003401,"halted":true}
+{"batch":"adv22.bin","units":309,"engine_match":true,"roots_match":true,"steps":9064409,"halted":true}
+{"batch":"adv23.bin","units":305,"engine_match":true,"roots_match":true,"steps":12516927,"halted":true}
+{"batch":"crowd168.bin","units":168,"engine_match":true,"roots_match":true,"steps":36103960,"halted":true}
+{"batch":"depth200-n100.bin","units":326,"engine_match":true,"roots_match":true,"steps":89429931,"halted":true}
+{"batch":"depth200-n100.setup.bin","units":226,"engine_match":true,"roots_match":true,"steps":50388819,"halted":true}
+{"batch":"stress200-n300.bin","units":526,"engine_match":true,"roots_match":true,"steps":144742421,"halted":true}
+{"batch":"stress200-n300.setup.bin","units":226,"engine_match":true,"roots_match":true,"steps":50411998,"halted":true}
+{"batches":8,"match":8,"units":2395,"steps":402661866}

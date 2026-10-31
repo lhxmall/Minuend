@@ -177,4 +177,19 @@ replaced; header comment corrected (isolated comes from kind 4/5).
 
 ## Fix status / tests
 
-See `work/rv-rollup-notes.md` "loop round 1" for the commit hashes and the full test table.
+Commits on `spike/rv-bisect`: fe4c592 (code + tools), 5e0ad21 (docs/scripts), final results commit (logs in
+`guest-engine/results-loop1/`). Fixed: G3, G1, G2, G4, G5, S1 (pilot), W1, W3, G6, DOC1, DOC2. Open: W2 (AA verifier
+budget), W4 (upstream journal), S1 for the full guest (global live-order bound), layer-1 segmenting (G2 spec).
+
+| test | result |
+|---|---|
+| fuzz 300×300 real vs port | 300/300 |
+| witfuzz 300 (per-unit roots, history, pure tree) | 300/300, 112 794 units; history 300/300; tree 300/300 (34 894 ops) |
+| advfuzz 300×300 (new, edge values) | 300/300, 92 300 units |
+| proofs 300 batches (new) | membership 177 087 / 0 bad, absence 61 540 / 0 bad, 829 291 forgeries rejected |
+| scen upstream.scn real vs port + roots | 47/47 |
+| guest (JS) scen / extra batches | 47/47 (73.8M steps) / 8/8 (2 395 units, 402.7M steps) |
+| robust guest vs host (13 malformed) + limit batch (4 096 acc × 16 384 units) | 13/13 + 1/1 (1.235G steps, heap 3.80 MB) |
+| crowd1800 PoC: old guest / new guest | abort a0=77 at unit 1 723 / halts, = real engine, heap 1.91 MB |
+| sail-riscv 0.16 spot-check (4 batches) | instruction counts and all result words equal |
+| mutation | 21/25 killed (survivors: 3 known equivalent port mutants + redundant prefix check) |

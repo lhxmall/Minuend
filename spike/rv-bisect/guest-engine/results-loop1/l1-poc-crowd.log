@@ -1,0 +1,7 @@
+{"ops":1830,"words":14884}
+{"hash":"c391e00045b1c8719e73aafbf41d49a9d78f10ae222f118e06c3688d10857103","applied":1830,"rejected":0,"fills":0,"ev":[2
+OLD
+{"hash": "0000000000000000000000000000000000000000000000000000000000000000", "applied": 0, "rejected": 0, "fills": 0, "steps": 669581253, "halted": true, "a0": 77, "heap": 0, "units": 1723, "scratch_ok": 0, "leaves": 0, "leaf_updates": 0, "node_hashes": 0, "ms": 698072}
+NEW
+{"hash": "c391e00045b1c8719e73aafbf41d49a9d78f10ae222f118e06c3688d10857103", "applied": 1830, "rejected": 0, "fills": 0, "steps": 833159560, "halted": true, "a0": 14717379, "heap": 1909648, "units": 1830, "scratch_ok": 1, "leaves": 1833, "leaf_updates": 1833, "node_hashes": 19598, "heap_peak_live": 1646144, "status": 0, "ev_overflow": 0, "trapped": false, "ms": 661532}
+DONE
