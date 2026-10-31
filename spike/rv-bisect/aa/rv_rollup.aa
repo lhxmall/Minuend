@@ -15,6 +15,18 @@ $CBOND = 120000;    // challenger bond per game (owner 2026-10-31): payout CBOND
 $GF = 10000;        // forwarded to the referee per game (pays its result unit)
 $FEE = 2000;        // kept back from every payout for this AA's response-unit fees
 $WIN = 86400;       // challenge window, seconds
+// Loop round 11 (R10-M1, owner decision 2026-11-01): escalating operator bond per height. Every fraud void at height h
+// (a winning challenger's result on the live submission of h) doubles the bond the NEXT submission of h must post:
+// bond_h = OBOND * 2^min(voids_h, MAXESC) (var v<h> = fraud voids at h; var b<sid> = the bond a submission posted when it
+// is above OBOND; every payout -- finalize, reclaim, the first winner's half, the burned half -- uses the stored bond).
+// The cap 2^10 (204 800 000 bytes) keeps the bond payable by an honest operator; at the cap the stall cost per cycle stays
+// constant (>= OBOND * 2^9 even through a puppet challenger) instead of growing. After a fraud void at h, only the
+// winning challenger whose result voided it may submit h for PRIO seconds (var p<h> = winner:until), so an honest
+// challenger can re-submit the honest h before the fraudster races it. A puppet challenger that wins first gets the
+// window instead -- then the escalation is what bounds the attack.
+$MAXESC = 10;       // exponent cap: bond_h <= OBOND * 1024
+$PRIO = 1800;       // seconds of submit priority for the winning challenger after a fraud void at h
+$bondOf = $sid => var['b' || $sid] OTHERWISE $OBOND;
 $MAXSTEPS = 1099511627776;   // 2^40 (kept, owner 2026-10-31): a challenger must be able to recompute any root (pass 1, bug R2)
 // Overpayment refunds (2026-10-31): bytes sent above the bond go back to the sender.
 //  - submit: trigger - OBOND - FEE (the refund needs a response unit of its own; FEE pays it, as for every payout);
@@ -64,8 +76,9 @@ if (trigger.address == $GAME OR trigger.address == $SEG) {
 	$cw = $d.w == 'c';
 	$first = $cw AND !var['f' || $sid];
 	// fraud at a live height voids it and everything above it: top = h - 1, the race restarts at h
-	$st = {sid: $sid, fraud: $cw, first: $first, void: $cw AND $live($sid, $r), h: +$r[0],
-		pay: $cw ? $g[1] : $r[1], amt: $CBOND - $GF - $FEE + ($first ? $OBOND / 2 : 0)};
+	$bd = $bondOf($sid);
+	$st = {sid: $sid, fraud: $cw, first: $first, void: $cw AND $live($sid, $r), h: +$r[0], bd: $bd,
+		pay: $cw ? $g[1] : $r[1], amt: $CBOND - $GF - $FEE + ($first ? $bd / 2 : 0)};
 }
 // ---- submit height h: {submit: h, ts, s0, steps, final, inp, fpc, fregs, fmem, prev}
 else if ($d.submit) {
@@ -74,7 +87,10 @@ else if ($d.submit) {
 	require($h > $top, 'height taken');
 	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
 	$paid = trigger.output[[asset=base]];
-	require($paid >= $OBOND, 'bond');
+	$bond = $OBOND * 2^min(var['v' || $h] OTHERWISE 0, $MAXESC);   // loop round 11 (R10-M1)
+	require($paid >= $bond, 'bond ' || $bond);
+	$pw = split(var['p' || $h] OTHERWISE '', ':');
+	require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]);
 	// pass 1, bug R1: an AA operator could bounce its payouts and freeze resolve / finalize forever
 	require(!is_aa(trigger.address), 'an AA cannot be an operator');
 	require($isR($d.s0) AND $isR($d.final) AND $isR($d.inp) AND $isR($d.fmem), 'bad root');
@@ -93,7 +109,7 @@ else if ($d.submit) {
 	require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
 	// the final root must be the hash of a halted (pc 2) or trapped (pc 1) state; its memory root seeds h+1
 	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
-	$st = {sid: trigger.unit, h: $h, rf: max($paid - $OBOND - $FEE, 0), rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
+	$st = {sid: trigger.unit, h: $h, bd: $bond, rf: max($paid - $bond - $FEE, 0), rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
 }
 // ---- open a game against submission sid (one per challenger, in parallel); uopen = layer-1 game
 else if ($d.open OR $d.uopen) {
@@ -129,7 +145,7 @@ else if ($d.finalize) {
 		$xe = split(var['x' || var['h' || ($h - 1)]] OTHERWISE '', ':');
 		require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'import digest');
 	}
-	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+	$st = {sid: $sid, pay: $r[1], amt: $bondOf($sid) - $FEE};
 }
 // ---- reclaim the bond of a voided (not fraudulent) submission after its games are over
 else if ($d.reclaim) {
@@ -137,7 +153,7 @@ else if ($d.reclaim) {
 	$r = split(var['s' || $sid] OTHERWISE '', ':');
 	require(length($r) == 8 AND !$live($sid, $r), 'live or unknown');
 	require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');
-	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+	$st = {sid: $sid, pay: $r[1], amt: $bondOf($sid) - $FEE};
 }
 // ---- loop round 4: governance schedules a guest-image upgrade at h (lf < h <= top + 1); live heights >= h are
 //      voided (top = h - 1; not fraud: their bonds are reclaimable), so a stuck upgrade (failed import) can be
@@ -196,6 +212,7 @@ else bounce('unknown command');
 		var['m' || $st.sid] = $d.fmem;
 		var['u' || $st.sid] = $d.units;
 		var['t' || $st.sid] = $d.ts;   // loop round 7 (R6-M2)
+		if ($st.bd > $OBOND) var['b' || $st.sid] = $st.bd;   // loop round 11 (R10-M1): escalated bond
 		response['sid'] = $st.sid;
 	}
 	else if ($d.open OR $d.uopen) {
@@ -229,8 +246,12 @@ else bounce('unknown command');
 		var['G' || $ref] = $st.sid || ':' || $g[1] || ':' || $d.w;
 		var['n' || $st.sid] -= 1;
 		if ($st.fraud) var['f' || $st.sid] = 1;
-		if ($st.first) var['burned'] += $OBOND - $OBOND / 2;
-		if ($st.void) var['top'] = $st.h - 1;
+		if ($st.first) var['burned'] += $st.bd - $st.bd / 2;
+		if ($st.void) {
+			var['top'] = $st.h - 1;
+			var['v' || $st.h] += 1;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
+			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO);   // ... and only this winner may submit h for PRIO s
+		}
 		response['result'] = $d.w;
 	}
 }`}

@@ -17,6 +17,7 @@ const state=`
 		var['m' || $st.sid] = $d.fmem;
 		var['u' || $st.sid] = $d.units;
 		var['t' || $st.sid] = $d.ts;   // loop round 7 (R6-M2)
+		if ($st.bd > $OBOND) var['b' || $st.sid] = $st.bd;   // loop round 11 (R10-M1): escalated bond
 		response['sid'] = $st.sid;
 	}
 	else if ($d.open OR $d.uopen) {
@@ -50,8 +51,12 @@ const state=`
 		var['G' || $ref] = $st.sid || ':' || $g[1] || ':' || $d.w;
 		var['n' || $st.sid] -= 1;
 		if ($st.fraud) var['f' || $st.sid] = 1;
-		if ($st.first) var['burned'] += $OBOND - $OBOND / 2;
-		if ($st.void) var['top'] = $st.h - 1;
+		if ($st.first) var['burned'] += $st.bd - $st.bd / 2;
+		if ($st.void) {
+			var['top'] = $st.h - 1;
+			var['v' || $st.h] += 1;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
+			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO);   // ... and only this winner may submit h for PRIO s
+		}
 		response['result'] = $d.w;
 	}
 `;

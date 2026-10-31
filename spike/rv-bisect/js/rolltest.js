@@ -2,7 +2,7 @@
 // usage: node rolltest.js [filter]     -> prints PASS/FAIL lines and SUMMARY {...}; writes rolltest-results.json
 'use strict';
 const { Chain, ROLL, GAME, STEP, SEG, BIND, PROOF, M, rnd, BOUNCER } = require('./chain.js'); const T = require('./rolltrace.js'); const ref = require('./ref.js'); const fs = require('fs');
-const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
+const OBOND = 200000, MAXESC = 10, PRIO = 1800, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, TM = 3600;
 const OCP = process.env.OCORE || '/workspace/projects/4ecc28f7-451e-450a-b62c-b8b357f0cc38/wt-aa/vendor/aa-testkit/node_modules/ocore';
 const A = s => require(OCP + '/object_hash.js').getChash160(['sig', { pubkey: require('crypto').createHash('sha256').update(s).digest('base64').slice(0, 44) }]); // valid Obyte address per name
 const OP1 = A('OPONE'), OP2 = A('OPTWO'), OP3 = A('OPTHREE'), CH1 = A('CHONE'), CH2 = A('CHTWO'), CH3 = A('CHTHREE'), W = A('WATCHER');
@@ -14,7 +14,7 @@ const bnc = (r, re) => r.err ? (re && !re.test(r.err) ? 'other bounce: ' + r.err
 
 // ---------- invariant: the rollup AA always holds every outstanding bond + the burned counter
 function liabilities(C) { const sv = C.sv[ROLL] || {}; let L = 0; const v = k => sv[k] ? (typeof sv[k].value === 'object' ? sv[k].value.toNumber() : sv[k].value) : undefined;
-  for (const k in sv) { if (k[0] === 's' && k.length === 45) { const sid = k.slice(1); if (!v('r' + sid) && !v('f' + sid)) L += OBOND; }
+  for (const k in sv) { if (k[0] === 's' && k.length === 45) { const sid = k.slice(1); if (!v('r' + sid) && !v('f' + sid)) L += v('b' + sid) || OBOND; } // loop round 11: escalated bond b<sid>
     if (k[0] === 'G' && k.length === 45 && String(v(k)).endsWith(':open')) L += CBOND - GF; }
   return L + (v('burned') || 0); }
 let invFail = 0;
@@ -35,7 +35,9 @@ async function S(C, from, to, amt, data) { data = prep(C, data); const r = await
 const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (const k in sv[a]) o[a][k] = { ...sv[a][k] }; } return o; };
 const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
 const subData = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
-async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
+// loop round 11 (R10-M1): the bond the next submission of h must post = OBOND * 2^min(fraud voids at h, MAXESC)
+const bondFor = (C, h) => OBOND * 2 ** Math.min(+(C.r('v' + h) || 0), MAXESC);
+async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, Number.isInteger(h) && h >= 1 ? bondFor(C, h) : OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
 async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
 const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
 const pts = (lo, hi) => { const cnt = Math.min(16, hi - lo) - 1; return { cnt, pt: j => j == 0 ? lo : j == cnt + 1 ? hi : lo + Math.floor(j * (hi - lo) / (cnt + 1)) }; };
@@ -179,6 +181,11 @@ groups.fraud = async () => { const C = new Chain(); const G0 = T.genesis(); cons
   r = await S(C, OP3, ROLL, 0, { reclaim: L4.sid }); rec('fraud', 'reclaim h4 twice', 'bounce', bnc(r, /cannot reclaim/));
   // race restarts at h2
   const n2a = h2, n2b = T.batch(b1.mem, 12);
+  // loop round 11 (R10-M1): v2 = 1, the winner CH1 holds h2 for PRIO s, the next h2 posts 2 x OBOND
+  rec('fraud', 'R10-M1: v2 = 1, priority p2 = CH1 until now + PRIO', [1, CH1], [+C.r('v2'), String(C.r('p2')).split(':')[0]]);
+  r = await submit(C, OP3, 2, n2b, b1.final); rec('fraud', 'R10-M1: another address inside the priority window', 'bounce', bnc(r, /priority/));
+  r = await S(C, OP3, ROLL, 2 * OBOND - 1, subData(T.batch(b1.mem, 12), 2, b1.final)); rec('fraud', 'R10-M1: bond 2 x OBOND - 1', 'bounce', bnc(r, /bond 400000|priority/));
+  C.ts += PRIO; r = await S(C, OP3, ROLL, 2 * OBOND - 1, subData(T.batch(b1.mem, 12), 2, b1.final)); rec('fraud', 'R10-M1: bond 2 x OBOND - 1 after the window', 'bounce', bnc(r, /bond 400000/));
   r = await submit(C, OP3, 2, n2b, b1.final); const r2 = await submit(C, OP1, 2, n2a, b1.final);
   rec('fraud', 'race restarts at h2: first resubmission wins', 'ok', ok(r)); rec('fraud', 'second resubmission at h2', 'bounce', bnc(r2, /height taken/));
   r = await submit(C, OP1, 3, T.batch(n2b.mem, 3), L2.final); rec('fraud', 'new h3 still referencing the voided h2 root', 'bounce', bnc(r, /prev must be/));
@@ -190,7 +197,8 @@ groups.fraud = async () => { const C = new Chain(); const G0 = T.genesis(); cons
   const o1b = C.b(OP1); r = await S(C, OP1, ROLL, 0, { reclaim: L3.sid }); rec('fraud', 'reclaim voided h3 after its game', 'ok', ok(r)); rec('fraud', 'h3 bond back', OBOND - FEE, C.b(OP1) - o1b);
   C.ts += WIN; r = await S(C, W, ROLL, 0, { finalize: 1 }); rec('fraud', 'h1 still finalizes', 'ok', ok(r));
   r = await S(C, W, ROLL, 0, { finalize: 3 }); rec('fraud', 'finalize h3 before h2 (out of order)', 'bounce', bnc(r, /finalize 2 first/));
-  r = await S(C, W, ROLL, 0, { finalize: 2 }); rec('fraud', 'new h2 finalizes', 'ok', ok(r)); r = await S(C, W, ROLL, 0, { finalize: 3 }); rec('fraud', 'new h3 finalizes', 'ok', ok(r));
+  const o3f = C.b(OP3); r = await S(C, W, ROLL, 0, { finalize: 2 }); rec('fraud', 'new h2 finalizes', 'ok', ok(r));
+  rec('fraud', 'R10-M1: escalated bond back at finalize (2 x OBOND - FEE)', 2 * OBOND - FEE, C.b(OP3) - o3f); r = await S(C, W, ROLL, 0, { finalize: 3 }); rec('fraud', 'new h3 finalizes', 'ok', ok(r));
   rec('fraud', 'reclaim a finalized submission', 'bounce', bnc(await S(C, OP1, ROLL, 0, { reclaim: n3.sid }), /live or unknown|cannot reclaim/));
   rec('fraud', 'reclaim the old fraudulent h2 later', 'bounce', bnc(await S(C, OP2, ROLL, 0, { reclaim: L2.sid }), /cannot reclaim/)); };
 
@@ -213,6 +221,7 @@ groups.latefraud = async () => { const C = new Chain(); const G0 = T.genesis(); 
   const oa = await open(C, CH1, L2.sid), ob = await open(C, CH2, L3.sid);
   const ga = game(oa, L2, h2, h2), gb = game(ob, L3, h3x, h3x, { chDelay: 'slow' }); // h3 game is slow, ends after h2's
   await playAll(C, [ga], C.ts + 30 * TM); rec('late fraud', 'h2 fraud proven first', 'c', ga.winner); rec('late fraud', 'top = 1', 1, C.r('top'));
+  C.ts += PRIO; // loop round 11: CH1's priority window at h2 passes
   const n2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, n2, b1.final); const n3 = T.batch(n2.mem, 3); await submit(C, OP1, 3, n3, n2.final);
   const c2 = C.b(CH2); await playAll(C, [gb]); rec('late fraud', 'old h3 fraud proven later', 'c', gb.winner);
   rec('late fraud', 'top unchanged (replacement h2,h3 stay live)', 3, C.r('top'));
@@ -259,19 +268,50 @@ groups.delay = async () => { const K = +(process.env.PUPPETS || 40); const X = +
 //            race the honest re-submission) and defends each challenger game as slowly as the deadlines allow. Measures
 //            the finalization stall per cycle and the fraudster's cost per cycle (OBOND / 2 burned + OBOND / 2 to the
 //            first winning challenger). Nothing here is wrong in the AA: it quantifies a documented gap (design §8.3).
-groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.env.EXTRA || 4000); const CYC = +(process.env.CYCLES || 3);
-  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'); const t0 = C.ts; const x0 = C.b(OPX); let hours = [];
+groups.stall10 = async () => { const g = 'stall (R10-M1)'; const X = +(process.env.EXTRA || 4000); const CYC = +(process.env.CYCLES || 4);
+  // loop round 11 (R10-M1 fixed): escalating bond per height + priority window for the winning challenger.
+  // (a) worst case for the defence: the fraudster's own puppet wins first every cycle (it times its win just before the
+  //     honest challenger's), so the puppet holds the priority window and re-submits the fraud with the doubled bond.
+  //     Stall per cycle stays ~ one slow game; the fraudster's net cost per cycle doubles every cycle.
+  const C = new Chain(); const G0 = T.genesis(); const OPX = A('FRAUDSTER'), PUP = A('FRAUDPUPPET'); const t0 = C.ts; let hours = [], costs = [], bonds = [];
+  const wealth = () => C.b(OPX) + C.b(PUP);
   for (let c = 0; c < CYC; c++) { const L = T.batch(G0, 1, { extra: X, k: 1 + c, mut: T.MUT.mem }), H = T.batch(G0, 1, { extra: X });
-    const ts0 = C.ts; let r = await submit(C, OPX, 1, L, 'genesis'); rec(g, 'cycle ' + c + ': fraudulent h1 submitted first', 'accepted', bnc(r));
-    const o = await open(C, CH1, L.sid); rec(g, 'cycle ' + c + ': honest challenger opens at once', 'ok', ok(o));
-    const gm = game(o, L, H, H, { defDelay: 'slow', chDelay: 60 }); await playAll(C, [gm]);
-    rec(g, 'cycle ' + c + ': challenger wins (fraud), h1 voided', ['c', 0], [gm.winner, +(C.r('top') || 0)]);
-    hours.push(+((gm.resolvedAt - ts0) / 3600).toFixed(2)); }
+    const w0 = wealth(), ts0 = C.ts; // the fraudster's two identities: whichever won the last game holds the window and submits
+    const subber = c > 0 ? String(C.r('p1')).split(':')[0] : OPX, pch = subber === OPX ? PUP : OPX;
+    if (c > 0) { rec(g, 'cycle ' + c + ': v1 = ' + c + ', priority holder = a fraudster identity', [c, true], [+C.r('v1'), [OPX, PUP].includes(subber)]);
+      rec(g, 'cycle ' + c + ': honest operator inside the puppet window', 'bounce', bnc(await submit(C, OP1, 1, T.batch(G0, 1, { extra: X }), 'genesis'), /priority/));
+      rec(g, 'cycle ' + c + ': fraud with bond_h - 1', 'bounce', bnc(await S(C, subber, ROLL, bondFor(C, 1) - 1, subData(T.batch(G0, 1, { extra: X, k: 1 + c, mut: T.MUT.mem }), 1, 'genesis')), /bond/)); }
+    bonds.push(bondFor(C, 1));
+    let r = await submit(C, subber, 1, L, 'genesis'); rec(g, 'cycle ' + c + ': fraudulent h1 submitted first with bond ' + bondFor(C, 1), 'accepted', bnc(r));
+    const ch = A('HONESTCH' + c); // a fresh honest challenger each cycle; the puppet challenger is the fraudster's other identity
+    const oh = await open(C, ch, L.sid); const op = await open(C, pch, L.sid); rec(g, 'cycle ' + c + ': honest + puppet challengers open', ['ok', 'ok'], [ok(oh), ok(op)]);
+    const gh = game(oh, L, H, H, { defDelay: 'slow', chDelay: 60 }), gp = game(op, L, H, H, { defDelay: 'slow', chDelay: 10 });
+    await playAll(C, [gh, gp]);
+    rec(g, 'cycle ' + c + ': both win; the puppet first (holds priority); h1 voided', ['c', 'c', 0, op.ch], [gh.winner, gp.winner, +(C.r('top') || 0), String(C.r('p1')).split(':')[0]]);
+    hours.push(+((Math.max(gh.resolvedAt, gp.resolvedAt) - ts0) / 3600).toFixed(2)); costs.push(w0 - wealth()); }
   const rounds = Math.ceil(Math.log(T.batch(G0, 1, { extra: X }).steps) / Math.log(16));
   rec(g, 'stall per cycle ~ one slow game (<= rounds + 1 hours)', true, hours.every(x => x <= rounds + 1.5), { hoursPerCycle: hours, rounds, steps: T.batch(G0, 1, { extra: X }).steps });
-  const cost = x0 - C.b(OPX); rec(g, 'fraudster cost per cycle = OBOND (half burned, half to the challenger) + unit fees', CYC * OBOND, cost, { burned: C.r('burned'), perCycleBytes: cost / CYC,
-    stallHoursPerCycle: hours[0], bytesPerStallDay: Math.round(cost / CYC * 24 / hours[0]) });
-  rec(g, 'no height ever finalized during the attack', 0, +(C.r('lf') || 0)); };
+  // net cost of cycle c = bond_c / 2 (burned; the other half returns to the puppet as first winner) + GF + FEE (puppet game)
+  // (+ 10 000 bounce fee for the test's own under-bonded attempt in cycles >= 1)
+  rec(g, 'fraudster net cost per cycle = bond_c / 2 + GF + FEE, bond_c = OBOND x 2^c', bonds.map((b, c) => b / 2 + GF + FEE + (c ? 10000 : 0)), costs, { bonds, costs, hours });
+  rec(g, 'cost grows geometrically (ratio -> 2)', true, costs.slice(1).every((x, k) => x / costs[k] > 1.8), { ratios: costs.slice(1).map((x, k) => +(x / costs[k]).toFixed(3)) });
+  rec(g, 'cumulative cost after n cycles ~ OBOND x 2^(n-1) (n = ' + CYC + ')', true, costs.reduce((a, b) => a + b, 0) >= OBOND * 2 ** (CYC - 1) - OBOND / 2);
+  rec(g, 'no height finalized during the attack', 0, +(C.r('lf') || 0));
+  // after the window anyone may submit h1 (at the escalated bond); the honest h1 then finalizes and gets it back
+  C.ts += PRIO; const Hn = T.batch(G0, 1, { extra: X }); const b0 = C.b(OP1); const bn = bondFor(C, 1);
+  rec(g, 'after the window the honest operator submits h1 at bond OBOND x 2^' + CYC, ['accepted', OBOND * 2 ** CYC], [bnc(await submit(C, OP1, 1, Hn, 'genesis')), bn]);
+  C.ts += WIN; rec(g, 'honest h1 finalizes; escalated bond back (bond - FEE)', ['accepted', -FEE], [bnc(await S(C, W, ROLL, 0, { finalize: 1 })), C.b(OP1) - b0]);
+  // (b) the honest challenger wins first: it holds the window, the fraudster cannot race it, the stall ends after 1 cycle
+  { const C2 = new Chain(); const L = T.batch(G0, 1, { k: 3, mut: T.MUT.mem }), H = T.batch(G0, 1); await submit(C2, OPX, 1, L, 'genesis');
+    const o = await open(C2, CH1, L.sid); await playAll(C2, [game(o, L, H, H)]);
+    rec(g, '(b) honest winner: fraudster re-submit inside the window', 'bounce', bnc(await submit(C2, OPX, 1, T.batch(G0, 1, { k: 4, mut: T.MUT.mem }), 'genesis'), /priority/));
+    rec(g, '(b) the winning challenger submits the honest h1 (2 x OBOND)', ['accepted', 2 * OBOND], [bnc(await submit(C2, CH1, 1, T.batch(G0, 1), 'genesis')), +C2.r('b' + C2.r('h1'))]);
+    C2.ts += WIN; rec(g, '(b) honest h1 finalizes', 'accepted', bnc(await S(C2, W, ROLL, 0, { finalize: 1 }))); }
+  // (c) exponent cap: with v1 forced to 15 the bond is OBOND x 2^10
+  { const C3 = new Chain(); C3.sv[ROLL] = { v1: { value: new (require(OCP + '/../decimal.js'))(15) } };
+    rec(g, '(c) cap: bond at v = 15 is OBOND x 2^MAXESC', ['bounce', 'accepted'], [bnc(await S(C3, OP1, ROLL, OBOND * 1024 - 1, subData(T.batch(G0, 1), 1, 'genesis')), /bond 204800000/),
+      bnc(await S(C3, OP1, ROLL, OBOND * 1024, subData(T.batch(G0, 1), 1, 'genesis')))]); }
+};
 
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const b2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, b2, b1.final);
@@ -718,7 +758,7 @@ groups.cancel9 = async () => { const G0 = T.genesis(); const g = 'cancel (R9-H1)
   rec(g, 'upgrade scheduled at 3 while the (fraudulent) h2 is live', ['accepted', 2], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM })), +C.r('top')]);
   const o = await open(C, CH1, L2.sid); const gm = game(o, L2, h2, h2); await playAll(C, [gm]);
   rec(g, 'fraud at h2 proven: top = 1 < uh - 1 = 2', ['c', 1, 3], [gm.winner, +C.r('top'), +C.r('uh')]);
-  const r2 = await submit(C, OP1, 2, h2, b1.final); rec(g, 'PoC: anyone re-submits h2 as a normal run (U3 still pending)', 'accepted', bnc(r2));
+  C.ts += PRIO; const r2 = await submit(C, OP1, 2, h2, b1.final); rec(g, 'PoC: anyone re-submits h2 as a normal run (U3 still pending; after the R10-M1 priority window)', 'accepted', bnc(r2));
   rec(g, 'cancel keeps top (min(top, uh - 1) = 2 here: h2 is live again only because it was re-submitted)', ['accepted', 2, false], [bnc(await S(C, GOV, ROLL, 0, { cancel: 1 })), +C.r('top'), !!C.r('U3')]);
   // second chain: cancel right after the void, before any re-submission -> top stays 1 (the voided h2 stays voided)
   const C2 = new Chain(); const c1 = T.batch(G0, 1); await submit(C2, OP1, 1, c1, 'genesis');
@@ -726,7 +766,7 @@ groups.cancel9 = async () => { const G0 = T.genesis(); const g = 'cancel (R9-H1)
   await S(C2, GOV, ROLL, 0, { upgrade: 3, mem: UM }); const o2 = await open(C2, CH1, M2.sid); await playAll(C2, [game(o2, M2, k2, k2)]);
   rec(g, 'cancel after a void below uh - 1 keeps top = 1', ['accepted', 1], [bnc(await S(C2, GOV, ROLL, 0, { cancel: 1 })), +C2.r('top')]);
   C2.ts += WIN; rec(g, 'h1 finalizes; the voided fraudulent h2 cannot', ['accepted', 'bounce'], [bnc(await S(C2, W, ROLL, 0, { finalize: 1 })), bnc(await S(C2, W, ROLL, 0, { finalize: 2 }), /voided/)]);
-  rec(g, 'h2 re-submitted from m(1) after the cancel', 'accepted', bnc(await submit(C2, OP1, 2, k2, c1.final))); };
+  rec(g, 'h2 re-submitted from m(1) after the cancel (by the winning challenger: R10-M1 priority)', 'accepted', bnc(await submit(C2, CH1, 2, k2, c1.final))); };
 
 // ---------- loop round 7 (R6-M2): per-height timestamp bound into s0 (register x10 = ts)
 groups.ts = async () => { const G0 = T.genesis(); const g = 'ts (R6-M2)';
@@ -758,7 +798,7 @@ groups.ts = async () => { const G0 = T.genesis(); const g = 'ts (R6-M2)';
   { const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
     const h2 = T.batch(b1.mem, 2), L2 = T.batch(b1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C, OP2, 2, L2, b1.final); const tL = +C.r('t' + L2.sid);
     const o = await open(C, CH1, L2.sid); const gm = game(o, L2, h2, h2); await playAll(C, [gm]); rec(g, 'fraud at h2 proven (top = 1)', ['c', 1], [gm.winner, C.r('top')]);
-    const r = await submit(C, OP1, 2, h2, b1.final); rec(g, 'new h2 after the void: ts >= ts(h1) + MINGAP only', ['accepted', true], [bnc(r), +C.r('t' + h2.sid) >= +C.r('t' + b1.sid) + MINGAP]);
+    const r = await submit(C, CH1, 2, h2, b1.final); rec(g, 'new h2 after the void (by the winner, R10-M1 priority): ts >= ts(h1) + MINGAP only', ['accepted', true], [bnc(r), +C.r('t' + h2.sid) >= +C.r('t' + b1.sid) + MINGAP]);
     rec(g, 'its ts may be below the voided h2 ts', true, +C.r('t' + h2.sid) <= Math.max(tL, C.ts)); }
   // the challenge game starts from the AA-computed s0 (x10 = ts): a trace started from registers 0 disagrees at root 0
   { const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis'); const z = T.batch(G0, 1);
