@@ -9,10 +9,11 @@
 //!   [0] MAGIC  [1] n_accounts  [2] n_ops  [3] 0
 //!   n_accounts x 8 words: 32-byte AccountId (little-endian words)
 //!   n_ops x 8 words:
-//!     w0 = kind | acct_idx << 8          kind 1 Deposit, 2 Place, 3 Cancel
+//!     w0 = kind | acct_idx << 8          kind 1 Deposit, 2 Place, 3 Cancel, 4 isolated Place
 //!     Deposit: w1,w2 = amount (i64 lo,hi, USD_SCALE units)
 //!     Place:   w1 = side | typ<<1 | tif<<2 | isolated<<3; w2,w3 = price i64; w4,w5 = qty u64;
 //!              w6 = client_seq; w7 = market id
+//!     Place4:  as Place but isolated, market = BTC_USD (1), w7 = margin in whole USD
 //!     Cancel:  w6 = client_seq of the account's own order to cancel; w7 = market id
 //!              (order id = order_id(account, market, client_seq), computed in the guest)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
@@ -148,7 +149,7 @@ pub struct Stats {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchOp {
     Deposit { acct: u32, amount: i64 },
-    Place { acct: u32, side: Side, typ: OrderType, tif: TimeInForce, isolated: bool, price: i64, qty: u64, client_seq: u64, market: u32 },
+    Place { acct: u32, side: Side, typ: OrderType, tif: TimeInForce, isolated: bool, price: i64, qty: u64, client_seq: u64, market: u32, margin: u64 },
     Cancel { acct: u32, client_seq: u64, market: u32 },
     Bad,
 }
@@ -157,16 +158,17 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
     let lo64 = |a: u32, b: u32| (a as u64) | ((b as u64) << 32);
     match w[0] & 0xff {
         1 => BatchOp::Deposit { acct, amount: lo64(w[1], w[2]) as i64 },
-        2 => BatchOp::Place {
+        k @ (2 | 4) => BatchOp::Place {
             acct,
             side: if w[1] & 1 == 0 { Side::Bid } else { Side::Ask },
             typ: if w[1] & 2 == 0 { OrderType::Limit } else { OrderType::Market },
             tif: if w[1] & 4 == 0 { TimeInForce::Gtc } else { TimeInForce::Ioc },
-            isolated: w[1] & 8 != 0,
+            isolated: k == 4,
             price: lo64(w[2], w[3]) as i64,
             qty: lo64(w[4], w[5]),
             client_seq: w[6] as u64,
-            market: w[7],
+            market: if k == 4 { 1 } else { w[7] },
+            margin: if k == 4 { w[7] as u64 * USD_SCALE } else { 0 },
         },
         3 => BatchOp::Cancel { acct, client_seq: w[6] as u64, market: w[7] },
         _ => BatchOp::Bad,
@@ -205,8 +207,8 @@ pub fn run_batch(rd: &mut dyn FnMut(u32) -> u32, ev: &mut dyn FnMut(u32)) -> ([u
                 Some(a) => eng.deposit(a, amount as Usd),
                 None => Err(RejectReason::BadAccount),
             },
-            BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market } => match acct_of(acct) {
-                Some(a) => eng.place(a, MarketId(market), side, typ, tif, price, qty, client_seq, [0u8; 32], seq, isolated, 0),
+            BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => match acct_of(acct) {
+                Some(a) => eng.place(a, MarketId(market), side, typ, tif, price, qty, client_seq, [0u8; 32], seq, isolated, margin),
                 None => Err(RejectReason::BadAccount),
             },
             BatchOp::Cancel { acct, client_seq, market } => match acct_of(acct) {

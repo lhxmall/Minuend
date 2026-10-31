@@ -140,6 +140,10 @@ impl Out {
 }
 
 fn run_real(w: &[u32]) -> Out {
+    run_real_eng(w).0
+}
+
+fn run_real_eng(w: &[u32]) -> (Out, Engine) {
     assert_eq!(w[0], mnpilot::MAGIC);
     let n_acc = w[1];
     let n_ops = w[2];
@@ -171,7 +175,7 @@ fn run_real(w: &[u32]) -> Out {
                 eng.state.deposits_allowed.insert((aa, false));
                 (acct, Op::Deposit { account: ids[acct as usize], addr: addr(acct), amount: amount as i128, aa_unit: aa })
             }
-            mnpilot::BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market } => {
+            mnpilot::BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => {
                 let cv = |s: mnpilot::types::Side| if s == mnpilot::types::Side::Bid { Side::Bid } else { Side::Ask };
                 let ct = |t: mnpilot::types::OrderType| if t == mnpilot::types::OrderType::Limit { OrderType::Limit } else { OrderType::Market };
                 let cf = |t: mnpilot::types::TimeInForce| if t == mnpilot::types::TimeInForce::Gtc { TimeInForce::Gtc } else { TimeInForce::Ioc };
@@ -187,7 +191,7 @@ fn run_real(w: &[u32]) -> Out {
                         qty,
                         client_seq,
                         isolated,
-                        margin: 0,
+                        margin,
                     },
                 )
             }
@@ -223,7 +227,28 @@ fn run_real(w: &[u32]) -> Out {
         parent = id;
     }
     out.hash = real_hash(&eng.state);
-    out
+    (out, eng)
+}
+
+/// Size of the per-unit witness tree upstream `apply_one` rebuilds after EVERY unit
+/// (`wit_root` = obyte_merkle::root(wit_leaves(state))), at the batch's final state:
+/// leaves, bytes and sha256 compression blocks (leaf: ceil((len+9)/64); node: 88-char
+/// base64 pair = 2 blocks).
+fn witstat(w: &[u32]) -> String {
+    let (_, eng) = run_real_eng(w);
+    let leaves = minuend_state::wit_leaves(&eng.state);
+    let bytes: usize = leaves.iter().map(|l| l.len()).sum();
+    let leaf_blocks: usize = leaves.iter().map(|l| (l.len() + 9).div_ceil(64)).sum();
+    let (mut n, mut nodes) = (leaves.len(), 0usize);
+    while n > 1 {
+        n = n.div_ceil(2);
+        nodes += n;
+    }
+    let live: usize = eng.state.books.values().map(|b| b.live_orders().count()).sum();
+    format!(
+        "{{\"leaves\":{},\"bytes\":{},\"leaf_blocks\":{},\"nodes\":{},\"blocks\":{},\"accounts\":{},\"live_orders\":{}}}",
+        leaves.len(), bytes, leaf_blocks, nodes, leaf_blocks + 2 * nodes, eng.state.accounts.len(), live
+    )
 }
 
 fn run_port(w: &[u32]) -> Out {
@@ -265,8 +290,8 @@ impl Gen {
         let seq = self.eng.state.seq;
         let r = match mnpilot::decode_op(&w) {
             mnpilot::BatchOp::Deposit { acct, amount } => self.eng.deposit(self.ids[acct as usize], amount as i128),
-            mnpilot::BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market } => {
-                self.eng.place(self.ids[acct as usize], M(market), side, typ, tif, price, qty, client_seq, [0; 32], seq, isolated, 0)
+            mnpilot::BatchOp::Place { acct, side, typ, tif, isolated, price, qty, client_seq, market, margin } => {
+                self.eng.place(self.ids[acct as usize], M(market), side, typ, tif, price, qty, client_seq, [0; 32], seq, isolated, margin)
             }
             mnpilot::BatchOp::Cancel { acct, client_seq, market } => {
                 let a = self.ids[acct as usize];
@@ -295,16 +320,25 @@ impl Gen {
         self.book().live_orders().filter(|o| o.account == id).count()
     }
     fn place(&mut self, a: u32, bid: bool, typ_mkt: bool, ioc: bool, price: i64, qty: u64) {
+        self.place_m(a, bid, typ_mkt, ioc, price, qty, None)
+    }
+    /// `iso = Some(margin_usd)` places an isolated order (kind 4).
+    #[allow(clippy::too_many_arguments)]
+    fn place_m(&mut self, a: u32, bid: bool, typ_mkt: bool, ioc: bool, price: i64, qty: u64, iso: Option<u32>) {
         let c = self.next_cseq(a);
         let flags = (!bid as u32) | ((typ_mkt as u32) << 1) | ((ioc as u32) << 2);
-        let w = [2 | (a << 8), flags, price as u32, (price >> 32) as u32, qty as u32, (qty >> 32) as u32, c as u32, 1];
+        let (k, w7) = match iso { Some(m) => (4, m), None => (2, 1) };
+        let w = [k | (a << 8), flags, price as u32, (price >> 32) as u32, qty as u32, (qty >> 32) as u32, c as u32, w7];
         if self.apply(w) && !typ_mkt && !ioc && self.is_live(a, c) {
             self.live.push((a, c));
         }
     }
 }
 
-fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (Vec<u32>, Vec<u32>, u32) {
+/// `stress`: half the traders are thin (2k-20k USD), 15% of trader orders are isolated
+/// (1k-20k USD margin) and the live-order cap (64) is sometimes exceeded -- exercises the
+/// IM / reduce-only / escrow / claw / cap paths that the default (well-funded) mix never hits.
+fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32, stress: bool) -> (Vec<u32>, Vec<u32>, u32) {
     let traders = 16u32;
     let n_acc = makers + traders;
     let ids_real: Vec<AccountId> = (0..n_acc).map(acct_id).collect();
@@ -314,7 +348,9 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (V
     let qty_rand = |rng: &mut Rng| (1 + rng.below(200)) * (QTY_SCALE / 100); // 0.01 .. 2 BTC
     // setup: deposits + resting depth (`levels` per side, `per_level` orders each)
     for a in 0..n_acc {
-        let amt = 10_000_000i64 * USD_SCALE as i64;
+        let thin = stress && a >= makers && (a - makers) % 2 == 1;
+        let usd = if thin { 2_000 + rng.below(18_000) as i64 } else { 10_000_000 };
+        let amt = usd * USD_SCALE as i64;
         g.apply([1 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]);
     }
     let mut m = 0u32;
@@ -334,13 +370,18 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (V
     for _ in 0..n_orders {
         let r = rng.below(100);
         let a = rng.below(n_acc as u64) as u32;
+        // stress: one trader (index `makers`) spams a third of the passive orders, so the
+        // 64 live-order cap is reached and exceeded (Risk rejections at the cap).
+        let a = if stress && (12..55).contains(&r) && rng.below(3) == 0 { makers } else { a };
         let bid = rng.below(2) == 0;
         let (bb, ba) = (g.book().best_bid().map(|x| x.0), g.book().best_ask().map(|x| x.0));
         let passive_px = |rng: &mut Rng| {
             let k = 1 + rng.below(levels.max(1) as u64) as i64;
             if bid { ba.unwrap_or(MID) - k * DOLLAR } else { bb.unwrap_or(MID) + k * DOLLAR }
         };
-        if r < 12 || g.live_count(a) >= 60 {
+        let iso = if stress && a >= makers && rng.below(100) < 15 { Some(1_000 + rng.below(19_000) as u32) } else { None };
+        let cap_hit = if stress { g.live_count(a) >= 64 && rng.below(3) != 0 } else { g.live_count(a) >= 60 };
+        if r < 12 || cap_hit {
             // cancel one of a's (or anyone's) live orders
             let mine: Vec<usize> = (0..g.live.len()).filter(|&i| g.live[i].0 == a).collect();
             let pick = if !mine.is_empty() { Some(mine[rng.below(mine.len() as u64) as usize]) } else if !g.live.is_empty() { Some(rng.below(g.live.len() as u64) as usize) } else { None };
@@ -354,7 +395,7 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (V
         if r < 55 {
             let px = passive_px(&mut rng);
             let q = qty_rand(&mut rng);
-            g.place(a, bid, false, false, px, q);
+            g.place_m(a, bid, false, false, px, q, iso);
         } else if r < 75 {
             // aggressive limit sized to the first maker: exactly one fill
             let taker = mnpilot::types::AccountId(ids_real[a as usize].0);
@@ -362,7 +403,7 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (V
             match (g.book().first_maker_qty(side, taker), if bid { ba } else { bb }) {
                 (Some(mq), Some(px)) => {
                     let q = 1 + rng.below(mq);
-                    g.place(a, bid, false, false, px, q.min(mq));
+                    g.place_m(a, bid, false, false, px, q.min(mq), iso);
                 }
                 _ => {
                     let px = passive_px(&mut rng);
@@ -371,7 +412,7 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32) -> (V
             }
         } else if r < 90 {
             // market IOC (takes the first maker only)
-            g.place(a, bid, true, true, 0, qty_rand(&mut rng));
+            g.place_m(a, bid, true, true, 0, qty_rand(&mut rng), iso);
         } else {
             // oversized crossing GTC (usually refused whole: MultiFill) or IOC limit through the book
             let px = if bid { ba.unwrap_or(MID) + 3 * DOLLAR } else { bb.unwrap_or(MID) - 3 * DOLLAR };
@@ -399,23 +440,27 @@ fn main() {
     match a.get(1).map(|s| s.as_str()) {
         Some("gen") => {
             let p = |i: usize| a[i].parse::<u64>().unwrap();
-            let (full, setup, n_setup) = gen(p(2), p(3) as u32, p(4) as u32, p(5) as u32, p(6) as u32);
+            let stress = a.get(8).map(|x| x == "stress").unwrap_or(false);
+            let (full, setup, n_setup) = gen(p(2), p(3) as u32, p(4) as u32, p(5) as u32, p(6) as u32, stress);
             let out = &a[7];
             write_words(out, &full);
             write_words(&out.replace(".bin", ".setup.bin"), &setup);
             println!("{{\"ops\":{},\"setup_ops\":{},\"words\":{}}}", full[2], n_setup, full.len());
         }
         Some("real") => println!("{}", run_real(&read_words(&a[2])).json()),
+        Some("witstat") => println!("{}", witstat(&read_words(&a[2]))),
         Some("port") => println!("{}", run_port(&read_words(&a[2])).json()),
         Some("fuzz") => {
             let n: u64 = a[2].parse().unwrap();
             let ord: u32 = a[3].parse().unwrap();
             let (mut ok, mut evs, mut fills, mut rej) = (0, 0usize, 0u32, 0u32);
+            let mut codes: std::collections::BTreeMap<u32, u32> = Default::default();
             for s in 1..=n {
                 let makers = 4 + (s % 9) as u32;
                 let levels = 1 + (s % 25) as u32;
                 let per = 1 + (s % 3) as u32;
-                let (w, _, _) = gen(s, makers, levels, per, ord);
+                let stress = s % 2 == 0;
+                let (w, _, _) = gen(s, makers, levels, per, ord, stress);
                 let r = run_real(&w);
                 let p = run_port(&w);
                 if r.hash == p.hash && r.ev == p.ev && r.applied == p.applied {
@@ -424,11 +469,17 @@ fn main() {
                     let first = r.ev.iter().zip(&p.ev).position(|(x, y)| x != y);
                     println!("MISMATCH seed {} makers {} levels {} per {}: first ev diff at {:?}", s, makers, levels, per, first);
                 }
+                let mut k = 0;
+                while k < r.ev.len() {
+                    let e = r.ev[k];
+                    if e & EV_APPLIED != 0 { *codes.entry(EV_APPLIED | (e & 0xff)).or_default() += 1; k += 1 + 6 * (e & 0xff) as usize; } else { *codes.entry(e).or_default() += 1; k += 1; }
+                }
                 evs += r.ev.len();
                 fills += r.fills;
                 rej += r.rejected;
             }
-            println!("{{\"seeds\":{},\"match\":{},\"ev_words\":{},\"fills\":{},\"rejected\":{}}}", n, ok, evs, fills, rej);
+            let cs: Vec<String> = codes.iter().map(|(k, v)| format!("\"{:#x}\":{}", k, v)).collect();
+            println!("{{\"seeds\":{},\"match\":{},\"ev_words\":{},\"fills\":{},\"rejected\":{},\"codes\":{{{}}}}}", n, ok, evs, fills, rej, cs.join(","));
         }
         _ => eprintln!("usage: see header"),
     }

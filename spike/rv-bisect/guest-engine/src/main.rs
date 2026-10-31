@@ -13,10 +13,15 @@ mod rt {
     core::arch::global_asm!(
         ".section .text._start", ".global _start", "_start:",
         "li sp, 0x3F00000", "call rmain", "li a7, 93", "ecall", "1: j 1b");
+    #[cfg(not(feature = "embed"))]
     fn read_word(i: u32) -> u32 {
         let r: u32;
         unsafe { core::arch::asm!("ecall", inlateout("a0") i => r, in("a7") 63u32); }
         r
+    }
+    #[cfg(feature = "embed")]
+    fn read_word(i: u32) -> u32 {
+        unsafe { ((0x0300_0000 + 4 * i) as *const u32).read_volatile() }
     }
     // Deterministic bump allocator (never frees), as in ../guest.
     struct Bump;
@@ -28,7 +33,7 @@ mod rt {
             if HEAP == 0 { HEAP = &_heap_start as *const u8 as usize; HEAP0 = HEAP; }
             let p = (HEAP + l.align() - 1) & !(l.align() - 1);
             HEAP = p + l.size();
-            if HEAP >= 0x3E00000 { panic!() } // keep 1 MiB for the stack
+            if HEAP >= 0x3000000 { panic!() } // below the embed input region; stack has 15 MiB
             p as *mut u8
         }
         unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
