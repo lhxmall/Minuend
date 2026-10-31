@@ -1,0 +1,57 @@
+// rv_game, referee mode (rollup prototype). Same K-ary bisection as rv_game.oscript, but it holds no bonds:
+// the opener (normally the rv_rollup AA) passes s0 / sN / n / defender / challenger and its own game ref;
+// when the game is decided, the result goes back to the opener as a secondary trigger {res: ref, w: 'd'|'c'}.
+// The opener alone handles money, so a game opened by anyone else cannot touch the rollup.
+$STEP = 'RV_STEP_AA_ADDRESS';   // replaced by mkref.js with chash160(rv_step.aa)
+$K = 16;            // branching factor
+$T = 3600;          // seconds per move
+$GF = 10000;        // the opener pays this per game; it covers the referee's callback unit
+$GB = 1000;         // bytes sent back with the result (a trigger needs a payment)
+$d = trigger.data;
+$now = timestamp;
+// a root (and a ref) is 44 base64 chars ending in '=' and has no record separator ':' / ','
+$isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) == '=' AND !contains($x, ':') AND !contains($x, ',');
+if ($d.open) {
+	require($isR($d.open) AND $isR($d.s0) AND $isR($d.sN) AND is_integer($d.n) AND $d.n >= 1 AND $d.n <= 1e15, 'bad open');
+	require(is_valid_address($d.d) AND is_valid_address($d.c), 'bad players');
+	require(trigger.output[[asset=base]] >= $GF, 'fee');
+	// game id = opener address || ref: nobody can occupy another opener's game slot
+	$gid = trigger.address || $d.open;
+	require(!var['g_' || $gid], 'game exists');
+	// game: ref:defender:challenger:lo:hi:rlo:rhi:turn:deadline
+	$st = {k: 'g_' || $gid, v: $d.open || ':' || $d.d || ':' || $d.c || ':0:' || $d.n || ':' || $d.s0 || ':' || $d.sN || ':' || ($d.n == 1 ? 's' : 'd') || ':' || ($now + $T)};
+}
+else {
+	$gid = $d.mids OTHERWISE $d.pick OTHERWISE $d.resolve;
+	$g = split(var['g_' || $gid] OTHERWISE '', ':');
+	require(length($g) == 9, 'no game');
+	$lo = +$g[3]; $hi = +$g[4]; $turn = $g[7]; $dl = +$g[8];
+	$cnt = min($K, $hi - $lo) - 1;   // number of interior points
+	$pt = $j => $j == 0 ? $lo : $j == $cnt + 1 ? $hi : $lo + floor($j * ($hi - $lo) / ($cnt + 1));
+	$pre = $g[0] || ':' || $g[1] || ':' || $g[2] || ':';
+	if ($d.mids) {
+		require($turn == 'd' AND $now < $dl AND trigger.address == $g[1], 'not your move');
+		$r = $d.roots;
+		require(is_array($r) AND length($r) == $cnt, 'need ' || $cnt || ' roots');
+		require(length(filter($r, 15, $x => !$isR($x))) == 0, 'bad root');
+		$st = {k: 'g_' || $gid, v: $pre || $lo || ':' || $hi || ':' || $g[5] || ':' || $g[6] || ':c:' || ($now + $T), m: join($r, ',')};
+	}
+	else if ($d.pick) {
+		require($turn == 'c' AND $now < $dl AND trigger.address == $g[2], 'not your move');
+		$j = $d.j;
+		require(is_integer($j) AND $j >= 0 AND $j <= $cnt, 'bad j');
+		$m = split(var['m_' || $gid], ',');
+		$rootAt = $i => $i == 0 ? $g[5] : $i == $cnt + 1 ? $g[6] : $m[$i - 1];
+		$nlo = $pt($j); $nhi = $pt($j + 1);
+		$st = {k: 'g_' || $gid, v: $pre || $nlo || ':' || $nhi || ':' || $rootAt($j) || ':' || $rootAt($j + 1) || ':' || ($nhi - $nlo == 1 ? 's' : 'd') || ':' || ($now + $T)};
+	}
+	else {
+		// resolve: one-step memo decides at a single step; otherwise whoever's move it is loses after the deadline
+		$memo = var[$STEP]['s_' || $g[5]];
+		$w = $turn == 's' AND $memo ? ($memo == $g[6] ? 'd' : 'c')
+			: $now >= $dl ? ($turn == 'd' ? 'c' : 'd')
+			: '';
+		require($w, 'undecided');
+		$st = {k: 'g_' || $gid, v: 'done:' || $w, to: substring($gid, 0, 32), cb: {res: $g[0], w: $w}};
+	}
+}

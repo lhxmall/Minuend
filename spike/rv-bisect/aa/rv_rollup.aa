@@ -1,0 +1,130 @@
+["autonomous agent", {
+ bounce_fees: {base: 10000},
+ init: `{
+// rv_rollup: minimal rollup prototype (spike). Heights, operator bonds, parallel challenge games, finalize.
+// Decisions (owner, 2026-10-31): 24 h window; parallel independent games, one per challenger; a height finalizes
+// only after the window AND every game on it resolved for the operator; losing any game = fraud; later heights
+// keep being submitted, each chained on the previous root; fraud at h voids h..top and the race restarts at h.
+$GAME = 'I6YN4VNYMPPWNXNWJGDBW5EUOZILOPOC';   // rv_game referee (mkrollup.js bakes chash160(rv_game_ref.aa))
+$GENMEM = 'EZ1pDCSmbuwmhx9jR7OkTn0FFiOqmZLaQrDoeV498s8=';   // memory root of the program image before height 1 (mkrollup.js)
+$OBOND = 200000;    // operator bond per submitted height
+$CBOND = 100000;    // challenger bond per game (> operator's cost to answer one game, 13-23 txs)
+$GF = 10000;        // forwarded to the referee per game (pays its result unit)
+$FEE = 2000;        // kept back from every payout for this AA's response-unit fees
+$WIN = 86400;       // challenge window, seconds
+$MAXSTEPS = 1099511627776;   // 2^40: a challenger must be able to recompute any root of the batch (pass 1, bug R2)
+$Z32 = '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';
+$d = trigger.data;
+$now = timestamp;
+$top = var['top'] OTHERWISE 0;       // highest live height
+$lf = var['lf'] OTHERWISE 0;         // last finalized height
+$isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) == '=' AND !contains($x, ':') AND !contains($x, ',');
+// submission s<sid> = h:operator:final_root:submitted_at:steps:s0:input_root:prev_root ; sid = submit unit
+// a submission is live while it is the current winner of its height and that height is not voided (h <= top)
+$live = ($sid, $r) => var['h' || $r[0]] == $sid AND $r[0] <= $top;
+// ---- callback from the referee: {res: game ref, w: 'd' | 'c'}  (must not bounce for a real result)
+if (trigger.address == $GAME) {
+	$ref = $d.res;
+	$g = split(var['G' || $ref] OTHERWISE '', ':');     // sid:challenger:open
+	require(length($g) == 3 AND $g[2] == 'open', 'unknown game');
+	$sid = $g[0];
+	$r = split(var['s' || $sid], ':');
+	$cw = $d.w == 'c';
+	$first = $cw AND !var['f' || $sid];
+	// fraud at a live height voids it and everything above it: top = h - 1, the race restarts at h
+	$st = {sid: $sid, fraud: $cw, first: $first, void: $cw AND $live($sid, $r), h: +$r[0],
+		pay: $cw ? $g[1] : $r[1], amt: $CBOND - $GF - $FEE + ($first ? $OBOND / 2 : 0)};
+}
+// ---- submit height h: {submit: h, s0, steps, final, inp, fpc, fregs, fmem, prev}
+else if ($d.submit) {
+	$h = $d.submit;
+	require(is_integer($h) AND $h >= 1, 'bad height');
+	require($h > $top, 'height taken');
+	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
+	require(trigger.output[[asset=base]] >= $OBOND, 'bond');
+	// pass 1, bug R1: an AA operator could bounce its payouts and freeze resolve / finalize forever
+	require(!is_aa(trigger.address), 'an AA cannot be an operator');
+	require($isR($d.s0) AND $isR($d.final) AND $isR($d.inp) AND $isR($d.fmem), 'bad root');
+	require(is_integer($d.steps) AND $d.steps >= 1 AND $d.steps <= $MAXSTEPS, 'bad steps');
+	require(($d.fpc == 1 OR $d.fpc == 2) AND typeof($d.fregs) == 'string' AND length($d.fregs) <= 400 AND !contains($d.fregs, ':'), 'bad final state');
+	$pr = $h == 1 ? [] : split(var['s' || var['h' || ($h - 1)]], ':');
+	$prev = $h == 1 ? 'genesis' : $pr[2];
+	require(typeof($d.prev) == 'string' AND $d.prev == $prev, 'prev must be ' || $prev);
+	// s0 is not chosen by the operator: memory carried from the previous final state, this batch's input,
+	// pc 0, registers 0, step 0 (closes the "s0 unbound" gap)
+	$pmem = $h == 1 ? $GENMEM : var['m' || var['h' || ($h - 1)]];
+	require($d.s0 == sha256('0:' || $Z32 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s0');
+	// the final root must be the hash of a halted (pc 2) or trapped (pc 1) state; its memory root seeds h+1
+	require($d.final == sha256($d.fpc || ':' || $d.fregs || ':' || $d.fmem || ':' || $d.inp || ':' || $d.steps), 'bad final root');
+	$st = {sid: trigger.unit, h: $h, rec: $h || ':' || trigger.address || ':' || $d.final || ':' || $now || ':' || $d.steps || ':' || $d.s0 || ':' || $d.inp || ':' || $prev};
+}
+// ---- open a game against submission sid (one per challenger, in parallel)
+else if ($d.open) {
+	$sid = $d.open;
+	$r = split(var['s' || $sid] OTHERWISE '', ':');
+	require(length($r) == 8 AND $live($sid, $r), 'not live');
+	require($r[0] > $lf AND $now < $r[3] + $WIN, 'window closed');
+	require(trigger.output[[asset=base]] >= $CBOND, 'bond');
+	require(trigger.address != $r[1], 'self');
+	require(!is_aa(trigger.address), 'an AA cannot be a challenger');   // pass 1, bug R1
+	$st = {sid: $sid, g: $sid || ':' || trigger.address || ':open',
+		call: {open: trigger.unit, s0: $r[5], sN: $r[2], n: $r[4], d: $r[1], c: trigger.address}};
+}
+// ---- finalize height h: next in order, live, window over, no open games, no fraud, chained on finalized h-1
+else if ($d.finalize) {
+	$h = $d.finalize;
+	require(is_integer($h) AND $h == $lf + 1, 'finalize ' || ($lf + 1) || ' first');
+	$sid = var['h' || $h];
+	$r = split(var['s' || $sid] OTHERWISE '', ':');
+	require(length($r) == 8 AND $live($sid, $r), 'voided');
+	require($now >= $r[3] + $WIN, 'window open');
+	require(!var['n' || $sid], 'games open');
+	require(!var['f' || $sid], 'fraud');
+	$pf = $h == 1 ? [] : split(var['s' || var['h' || ($h - 1)]], ':');
+	require($h == 1 OR $r[7] == $pf[2], 'prev');
+	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+}
+// ---- reclaim the bond of a voided (not fraudulent) submission after its games are over
+else if ($d.reclaim) {
+	$sid = $d.reclaim;
+	$r = split(var['s' || $sid] OTHERWISE '', ':');
+	require(length($r) == 8 AND !$live($sid, $r), 'live or unknown');
+	require(!var['f' || $sid] AND !var['r' || $sid] AND !var['n' || $sid], 'cannot reclaim');
+	$st = {sid: $sid, pay: $r[1], amt: $OBOND - $FEE};
+}
+else bounce('unknown command');
+
+}`,
+ messages: [
+  {if: `{$st.call}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{$GAME}`, amount: `{$GF}`}]}},
+  {if: `{$st.call}`, app: 'data', payload: `{$st.call}`},
+  {if: `{$st.pay}`, app: 'payment', payload: {asset: 'base', outputs: [{address: `{$st.pay}`, amount: `{$st.amt}`}]}},
+  {app: 'state', state: `{
+	if ($d.submit) {
+		var['top'] = $st.h;
+		var['h' || $st.h] = $st.sid;
+		var['s' || $st.sid] = $st.rec;
+		var['m' || $st.sid] = $d.fmem;
+		response['sid'] = $st.sid;
+	}
+	else if ($d.open) {
+		var['G' || trigger.unit] = $st.g;
+		var['n' || $st.sid] += 1;
+		response['game'] = $GAME || trigger.unit;
+	}
+	else if ($d.finalize) {
+		var['lf'] = $d.finalize;
+		var['r' || $st.sid] = 'F';
+	}
+	else if ($d.reclaim) var['r' || $st.sid] = 'R';
+	else {
+		var['G' || $ref] = $st.sid || ':' || $g[1] || ':' || $d.w;
+		var['n' || $st.sid] -= 1;
+		if ($st.fraud) var['f' || $st.sid] = 1;
+		if ($st.first) var['burned'] += $OBOND - $OBOND / 2;
+		if ($st.void) var['top'] = $st.h - 1;
+		response['result'] = $d.w;
+	}
+}`}
+ ]
+}]

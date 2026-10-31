@@ -37,10 +37,10 @@ function evalInit(formula, data, extra = {}) {
 }
 const val = (locals, k) => { const x = locals[k]; if (x === undefined) return undefined; if (x && x.obj !== undefined) return x.obj; return (typeof x === 'object' && x.toString) ? x.toString() : x; };
 // full-flow runner: shared stateVars across calls; returns {err, locals, stateVars}
-function run(formula, { data, address = 'USERADDRESSXXXXXXXXXXXXXXXXXXXXX', unit, ts = 1e9, stateVars = {}, outputs = { base: 20000 }, aa = 'GAMEAAXXXXXXXXXXXXXXXXXXXXXXXXXX', responseVars = {} }) {
+function run(formula, { data, address = 'USERADDRESSXXXXXXXXXXXXXXXXXXXXX', unit, ts = 1e9, stateVars = {}, outputs = { base: 20000 }, aa = 'GAMEAAXXXXXXXXXXXXXXXXXXXXXXXXXX', responseVars = {}, conn = null }) {
   return new Promise(res => {
     const locals = {};
-    fp.evaluate({ conn: null, formula, bStatementsOnly: true, bStateVarAssignmentAllowed: true, stateVars, responseVars,
+    fp.evaluate({ conn, formula, bStatementsOnly: true, bStateVarAssignmentAllowed: true, stateVars, responseVars,
       trigger: { address, data, outputs, unit: unit || require('crypto').randomBytes(32).toString('base64') },
       objValidationState: { last_ball_mci: 1e9, last_ball_timestamp: ts }, address: aa, locals },
     [], '', (e) => res({ err: e && ((e.formattedError || e).message || e), locals, stateVars, responseVars }));
