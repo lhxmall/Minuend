@@ -1,0 +1,402 @@
+# Upstream #[test] scenarios (fix/47-all @ 20326c0) replayed as batches through the REAL engine
+# (signed units -> Engine::ingest) and the mnpilot port. Each `== name` block is one batch from a
+# fresh genesis (BTC_USD, mark 100 000 USD; `m2` also lists market 2 with genesis params + mark
+# 100 000). Book/account/state-level tests are driven through Engine::place with deposits added,
+# since the batch format only carries deposit/place/cancel ops. Comments note where a test had to
+# be approximated (direct state edits, mark moves, market listings, cross-with-margin are not
+# expressible). Syntax: engine-diff/src/main.rs `scen_batches`.
+
+# ---------------------------------------------------------------- minuend-book (lib.rs tests)
+== book_limit_buy_crosses_one_sell
+dep A 1000000
+dep B 1000000
+ask A 100 1
+bid B 101 2
+
+== book_partial_fill_then_rest
+dep A 1000000
+dep B 1000000
+ask A 50 0.5
+bid B 50 1
+
+== book_market_buy_eats_two_ask_levels      # engine: one fill per unit -> MultiFill/IOC path
+dep A 1000000
+dep B 1000000
+ask A 100 1
+ask A 101 1
+bid B 0 2 mkt
+
+== book_cancel_resting_then_missing_errors
+dep A 1000000
+bid A 10 1
+cancel A 1
+cancel A 1
+
+== book_self_trade_cancel_taker             # engine uses SelfTrade::Reject
+dep A 1000000
+dep B 1000000
+ask A 100 1
+ask B 100 1
+bid A 100 2
+
+== book_escrowed_self_trade_rejects         # margins scaled so the IM gate (mark 100k) passes
+dep A 1000000
+ask A 100 1 iso=10000
+bid A 100 1 iso=10000
+bid A 100 1 isou=0
+
+== book_reject_after_prior_maker_match_preserves_book
+dep A 1000000
+dep B 1000000
+ask B 100 1
+ask A 100 1 iso=10000
+bid A 100 2 iso=20000
+
+== book_price_time_fifo_same_price
+dep A 1000000
+dep B 1000000
+dep C 1000000
+ask A 100 1
+ask B 100 1
+bid C 100 1
+bid C 100 1
+
+== book_full_fill_does_not_disturb_opposite_side
+dep A 1000000
+dep B 1000000
+dep C 1000000
+dep D 1000000
+bid A 99 1
+ask B 101 1
+ask B 100 1
+bid C 0 1 mkt
+ask D 0 1 mkt
+
+== book_cancel_non_head_decrements_cache
+dep A 1000000
+dep B 1000000
+ask A 100 1
+ask B 100 3
+cancel B 1
+cancel A 1
+bid A 100 1
+
+== book_cancel_non_head_bid_side_mirror
+dep A 1000000
+dep B 1000000
+bid A 99 2
+bid B 99 1
+cancel B 1
+cancel A 1
+ask B 99 1
+
+# ---------------------------------------------------------------- minuend-account / minuend-state
+== acct_close_long_at_profit
+dep A 10000
+dep B 1000000
+ask B 100000 1
+bid A 100000 1
+bid B 110000 1
+ask A 110000 1
+
+== acct_isolated_bucket_release             # 2 BTC @ $100 / $100 post scaled to 0.002 BTC (IM at mark)
+dep A 1000
+dep B 1000000
+ask B 100 0.002
+bid A 100 0.002 iso=100
+bid B 70 0.001
+ask A 70 0.001 iso=0
+bid B 60 0.001
+ask A 60 0.001 iso=0
+
+== acct_isolated_bucket_release_blowthrough
+dep A 1000
+dep B 1000000
+ask B 100 0.001
+bid A 100 0.001 iso=100
+bid B -50 0.001
+ask A -50 0.001 iso=0
+
+== acct_isolated_bucket_release_rounding    # bucket 100 USD over 0.003: releases 33.333333.. (floor)
+dep A 1000
+dep B 1000000
+ask B 100 0.003
+bid A 100 0.003 iso=100
+bid B 70 0.001
+ask A 70 0.001 iso=0
+bid B 60 0.001
+ask A 60 0.001 iso=0
+bid B 60 0.001
+ask A 60 0.001 iso=0
+
+== acct_isolated_release_rounding_odd       # 7 USD over 0.007 BTC, closes of 0.003 / 0.004
+dep A 1000
+dep B 1000000
+ask B 100000 0.007
+bid A 100000 0.007 isou=77777777
+bid B 99999 0.003
+ask A 99999 0.003 iso=0
+bid B 99998 0.004
+ask A 99998 0.004 iso=0
+
+== state_taker_fee_flows_to_insurance
+dep A 1000000
+dep B 1000000
+ask B 100000 1
+bid A 100000 1
+
+== state_claw_from_counterparty             # loser's deficit clawed from the winner
+dep A 20000
+dep B 1000000
+dep C 1000000
+ask C 100000 1
+bid A 100000 1
+bid B 10000 1
+ask A 10000 1
+
+== state_claw_capped_by_counterparty        # winner can pay only part (claw_cannot_cover analogue)
+dep A 20000
+dep B 1000000
+dep C 10001
+ask B 100000 1
+bid A 100000 1
+bid C 10000 1
+ask A 10000 1
+
+# ---------------------------------------------------------------- minuend-exec
+== exec_two_crossing_orders_fill
+dep A 10000
+dep B 10000
+ask B 100000 1
+bid A 100000 1
+
+== exec_r7_one_fill_per_unit
+dep A 10000
+dep B 10000
+ask B 100000 0.01
+ask B 100001 0.01
+bid A 100001 0.02
+bid A 100001 0.02 ioc cs=1
+bid A 100001 0.02
+
+== exec_duplicate_client_seq_rejected
+dep A 10000
+bid A 90000 1
+bid A 91000 1 cs=1
+
+== exec_overflow_place_rejected
+dep A 10000
+bid A 4611686018427387903r 18446744073709551615r
+
+== exec_live_order_cap
+dep A 10000
+64x bid A 50000 0.01
+bid A 50000 0.01
+
+== exec_flip_position_requires_full_im
+dep A 15000
+dep B 1000000
+ask B 100000 1
+bid A 100000 1
+ask A 100000 2
+
+== exec_rejected_unit_does_not_consume_seq
+dep A 10000
+bid A 90000 1 cs=99
+bid A 90000 1 cs=1
+
+== exec_isolated_escrow_conserved
+dep A 10000
+dep B 1000000
+bid A 100000 0.001 iso=4000
+cancel A 1
+bid A 100000 0.001 iso=4000
+ask B 100000 0.001
+
+== exec_isolated_open_collateral_identity
+dep A 10000
+dep B 1000000
+ask B 100000 0.001
+bid A 100000 0.001 iso=40
+ask B 100000 0.0005
+bid A 100000 0.001 iso=40
+
+== exec_isolated_self_trade_place_rejected
+dep A 10000
+bid A 100000 0.001 iso=40
+ask A 100000 0.001 iso=40
+
+== exec_place_reject_after_prior_maker_match_is_atomic
+dep A 10000
+dep B 10000
+ask B 100000 0.001
+ask A 100000 0.001 iso=40
+bid A 100000 0.002 iso=80
+
+== exec_isolated_shields_cross m2           # mirrored: isolated on BTC, cross on market 2
+dep A 1000000
+dep B 1000000
+ask B 1000 1
+bid A 1000 1 iso=100000
+ask B 100000 1 m=2
+bid A 100000 1 m=2
+ask A 500 1 iso=0
+bid B 500 1
+
+== exec_isolated_mode_gates
+dep K 10000
+dep L 10000
+dep M 10000
+dep N 10000
+dep B 1000000
+bid M 100000 0.001 isou=9999999
+bid L 100000 0.001 iso=1000
+ask B 100000 0.001
+ask L 100000 0.001 iso=5
+bid L 100000 0.001
+ask L 100000 0.0005 iso=0
+bid B 100000 0.0005
+ask N 100000 0.001
+bid N 100000 0.001 iso=100
+
+== exec_isolated_blowthrough_insurance
+dep A 10.05
+dep B 1000
+ask B 100000 0.001
+bid A 100000 0.001 iso=10
+bid B 50000 0.001
+ask A 0 0.001 mkt iso=0
+
+== exec_resting_open_im_not_truncated_at_low_prices
+dep A 1000000
+bid A 1 1
+bid A 50 1
+bid A 99 1
+bid A 150 1
+bid A 1234 1
+
+== exec_resting_im_prices_open_only
+dep A 100000
+dep B 100000
+ask B 100000 2
+bid A 100000 2
+ask A 100000 1
+dep C 100000
+ask C 100000 1
+
+== exec_r2e6_isolated_taker_fee_no_cushion
+dep A 10
+dep B 1000
+ask B 100000 0.001
+bid A 100000 0.001 iso=10
+
+== exec_r2e6_isolated_taker_fee_cushion
+dep A 10.05
+dep B 1000
+ask B 100000 0.001
+bid A 100000 0.001 iso=10
+
+== exec_r2e9_resting_open_im_does_not_overflow m2
+dep A 1000000
+bid A 1r 5000000000000000000r m=2
+bid A 1r 5000000000000000000r m=2
+
+== exec_r6h1_qty_cap_counts_position_and_orders m2
+dep A 1000000
+dep B 1000000
+bid A 1r 1000000000000000r m=2
+bid A 1r 600000000000000r m=2
+bid A 1r 400000000000000r m=2
+bid A 1r 399999999999999r m=2
+ask B 1r 100000000000000r m=2
+bid A 1r 1r m=2
+
+== exec_r3e4_fee_check_sees_earlier_claws_bankrupt
+dep M 11000
+dep S 20000
+dep H 20000
+dep T 50000
+bid M 100000 1
+ask S 100000 1 ioc
+ask M 50000 1
+ask H 100000 1
+bid T 100000 2 ioc iso=20000
+
+== exec_r3e4_fee_check_sees_earlier_claws_solvent
+dep M 60000
+dep S 20000
+dep H 20000
+dep T 50000
+bid M 100000 1
+ask S 100000 1 ioc
+ask M 50000 1
+ask H 100000 1
+bid T 100000 2 ioc iso=20000
+
+== exec_negative_price_short_lifecycle m2
+dep A 1000000
+dep B 1000000
+ask B -100000 1 m=2
+bid A -100000 1 m=2
+bid B -110000 1 m=2
+ask A -110000 1 m=2
+
+# ---------------------------------------------------------------- boundary scenarios (surviving mutants)
+# Isolated cross-pool gate `equity - margin < im + resting`: margin == equity exactly.
+== bnd_isolated_margin_equals_equity
+dep A 1000
+bid A 100000 0.001 iso=1000
+dep B 1000
+bid B 100000 0.001 iso=999
+dep C 2000
+bid C 90000 0.001
+ask C 110000 0.001 iso=1990
+
+# Taker-fee guard's equity clause `pre_eq >= 0 && pre_eq < fee` with cash >= fee: an isolated close
+# whose blow-through leaves cross cash 10 020 USD but cross equity 20 USD (market-2 long 10k under
+# the mark) against a 40 USD fee -> Risk. Brackets: pre_eq 0 (reject) and 40 (accept).
+== bnd_fee_guard_equity_clause m2
+dep T 30125
+dep R 1000000
+dep S 1000000
+ask R 100000 1
+bid T 100000 1 iso=10000
+ask S 110000 1 m=2
+bid T 110000 1 m=2
+bid R 80000 1
+ask T 80000 1 iso=0
+
+== bnd_fee_guard_equity_zero m2
+dep T 30105
+dep R 1000000
+dep S 1000000
+ask R 100000 1
+bid T 100000 1 iso=10000
+ask S 110000 1 m=2
+bid T 110000 1 m=2
+bid R 80000 1
+ask T 80000 1 iso=0
+
+== bnd_fee_guard_equity_at_fee m2
+dep T 30145
+dep R 1000000
+dep S 1000000
+ask R 100000 1
+bid T 100000 1 iso=10000
+ask S 110000 1 m=2
+bid T 110000 1 m=2
+bid R 80000 1
+ask T 80000 1 iso=0
+
+# Claw when BOTH parties end the fill with negative collateral (counterparty negative).
+== bnd_claw_both_negative
+dep A 20000
+dep B 1000000
+dep C 13000
+ask B 100000 1
+bid A 100000 1
+ask C 100000 0.1
+bid B 100000 0.1
+ask C 100000 0.01
+bid C 10000 0.1
+ask A 10000 0.1

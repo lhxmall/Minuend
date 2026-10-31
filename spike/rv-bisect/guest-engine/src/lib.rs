@@ -14,6 +14,9 @@
 //!     Place:   w1 = side | typ<<1 | tif<<2 | isolated<<3; w2,w3 = price i64; w4,w5 = qty u64;
 //!              w6 = client_seq; w7 = market id
 //!     Place4:  as Place but isolated, market = BTC_USD (1), w7 = margin in whole USD
+//!     Place5:  as Place4 but w7 = margin in USD_SCALE units (<= 4294.967295 USD)
+//!   header [3]: bits 0..23 = legacywit skip (units before it get no legacy root), bit 24 = also list
+//!     market 2 (genesis params, mark 100 000 USD; upstream test fixtures insert markets the same way)
 //!     Cancel:  w6 = client_seq of the account's own order to cancel; w7 = market id
 //!              (order id = order_id(account, market, client_seq), computed in the guest)
 //! Each op is one unit: seq advances only when it applies (upstream `apply_one`).
@@ -71,10 +74,20 @@ pub fn book_code(e: &BookError) -> u32 {
     }
 }
 pub const EV_APPLIED: u32 = 0x8000_0000;
+pub const MARKET2_FLAG: u32 = 1 << 24;
 
 impl state::ChainState {
     /// Mirrors the parts of upstream `ChainState::new()` the pilot keeps, plus the
     /// test-fixture `allow_all` market seed (BTC_USD genesis params).
+    /// genesis plus market 2 when `flags` bit 24 is set (batch header word 3)
+    pub fn genesis_flags(flags: u32) -> Self {
+        let mut s = Self::genesis();
+        if flags & MARKET2_FLAG != 0 {
+            s.markets.insert(MarketId(2), genesis_params());
+            s.marks.insert(MarketId(2), 100_000 * PRICE_SCALE as i64);
+        }
+        s
+    }
     pub fn genesis() -> Self {
         let mut s = Self::default();
         s.books.insert(BTC_USD, book::OrderBook::new(BTC_USD));
@@ -159,17 +172,17 @@ pub fn decode_op(w: &[u32; 8]) -> BatchOp {
     let lo64 = |a: u32, b: u32| (a as u64) | ((b as u64) << 32);
     match w[0] & 0xff {
         1 => BatchOp::Deposit { acct, amount: lo64(w[1], w[2]) as i64 },
-        k @ (2 | 4) => BatchOp::Place {
+        k @ (2 | 4 | 5) => BatchOp::Place {
             acct,
             side: if w[1] & 1 == 0 { Side::Bid } else { Side::Ask },
             typ: if w[1] & 2 == 0 { OrderType::Limit } else { OrderType::Market },
             tif: if w[1] & 4 == 0 { TimeInForce::Gtc } else { TimeInForce::Ioc },
-            isolated: k == 4,
+            isolated: k >= 4,
             price: lo64(w[2], w[3]) as i64,
             qty: lo64(w[4], w[5]),
             client_seq: w[6] as u64,
-            market: if k == 4 { 1 } else { w[7] },
-            margin: if k == 4 { w[7] as u64 * USD_SCALE } else { 0 },
+            market: if k >= 4 { 1 } else { w[7] },
+            margin: match k { 4 => w[7] as u64 * USD_SCALE, 5 => w[7] as u64, _ => 0 },
         },
         3 => BatchOp::Cancel { acct, client_seq: w[6] as u64, market: w[7] },
         _ => BatchOp::Bad,
@@ -230,7 +243,7 @@ pub fn run_batch_wit(
         accts.push(AccountId(id));
     }
     let base = 4 + n_acc * 8;
-    let mut eng = Engine { state: state::ChainState::genesis() };
+    let mut eng = Engine { state: state::ChainState::genesis_flags(rd(3)) };
     let mut w = if mode == WitMode::Incremental { Some(wit::Wit::from_state(&eng.state)) } else { None };
     eng.state.wit_dirty = Default::default();
     if let Some(w) = w.as_mut() {

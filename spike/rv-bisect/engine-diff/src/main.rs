@@ -175,6 +175,10 @@ fn run_real_eng_cb(w: &[u32], per_unit: &mut dyn FnMut(&Engine)) -> (Out, Engine
     let mut eng = Engine::new();
     // tests' allow_all: genesis BTC_USD params (ChainState::new already seeds them).
     eng.state.markets.insert(BTC_USD, minuend_types::genesis_params());
+    if w[3] & mnpilot::MARKET2_FLAG != 0 {
+        eng.state.markets.insert(MarketId(2), minuend_types::genesis_params());
+        eng.state.marks.insert(MarketId(2), 100_000 * PRICE_SCALE as i64);
+    }
     let mut parent = genesis_id();
     let mut out = Out { hash: [0; 32], applied: 0, rejected: 0, fills: 0, ev: Vec::new() };
     for i in 0..n_ops as usize {
@@ -578,6 +582,148 @@ fn witfuzz(n: u64, ord: u32, smt_rounds: u64) -> String {
     )
 }
 
+// ---------------------------------------------------------------- scenario DSL
+/// Decimal string -> fixed point with `scale` (e.g. "100000.5" * 1e8).
+fn fixed(s: &str, scale: u64) -> i64 {
+    if let Some(r) = s.strip_suffix('r') {
+        return r.parse::<i64>().unwrap(); // raw units
+    }
+    let neg = s.starts_with('-');
+    let s = s.trim_start_matches('-');
+    let (i, f) = s.split_once('.').unwrap_or((s, ""));
+    let mut v = i.parse::<i64>().unwrap() * scale as i64;
+    let mut m = scale as i64 / 10;
+    for c in f.chars() {
+        v += (c as i64 - '0' as i64) * m;
+        m /= 10;
+    }
+    if neg { -v } else { v }
+}
+/// Compile a scenario file into batches. Syntax (one op per line, `#` comments):
+///   == <name> [m2]                 new scenario (fresh genesis; m2 = also list market 2)
+///   dep <A-Z> <usd>                deposit (decimal USD)
+///   bid|ask <A-Z> <price usd> <qty btc> [mkt] [ioc] [iso=<whole usd>] [isou=<usd micro units>] [m=<market>] [cs=<client_seq>]
+///   cancel <A-Z> <client_seq> [m=<market>]
+///   `<n>x <op>` repeats an op; a number with suffix `r` is raw units (price 1e-8 USD, qty 1e-8 BTC)
+/// client_seq defaults to the account's next one (tracked with the port engine, as `gen`).
+fn scen_batches(text: &str) -> Vec<(String, Vec<u32>)> {
+    let n_acc = 26u32;
+    let ids_real: Vec<AccountId> = (0..n_acc).map(acct_id).collect();
+    let ids: Vec<mnpilot::types::AccountId> = ids_real.iter().map(|a| mnpilot::types::AccountId(a.0)).collect();
+    let mut out = Vec::new();
+    let mut cur: Option<(String, u32, Gen)> = None;
+    let finish = |cur: &mut Option<(String, u32, Gen)>, out: &mut Vec<(String, Vec<u32>)>| {
+        if let Some((name, flags, g)) = cur.take() {
+            let mut w = vec![mnpilot::MAGIC, n_acc, g.ops.len() as u32, flags];
+            for id in &ids_real {
+                for k in 0..8 {
+                    w.push(u32::from_le_bytes(id.0[k * 4..k * 4 + 4].try_into().unwrap()));
+                }
+            }
+            for o in &g.ops {
+                w.extend_from_slice(o);
+            }
+            out.push((name, w));
+        }
+    };
+    for (ln, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut t: Vec<&str> = line.split_whitespace().collect();
+        // `<n>x <op> ...` repeats the op n times
+        let reps = match t[0].strip_suffix('x').and_then(|n| n.parse::<usize>().ok()) {
+            Some(n) => {
+                t.remove(0);
+                n
+            }
+            None => 1,
+        };
+        if t[0] == "==" {
+            finish(&mut cur, &mut out);
+            let flags = if t.contains(&"m2") { mnpilot::MARKET2_FLAG } else { 0 };
+            let g = Gen { eng: mnpilot::engine::Engine { state: mnpilot::state::ChainState::genesis_flags(flags) }, ops: Vec::new(), live: Vec::new(), ids: ids.clone() };
+            cur = Some((t[1].to_string(), flags, g));
+            continue;
+        }
+        let g = &mut cur.as_mut().unwrap_or_else(|| panic!("line {}: op before ==", ln + 1)).2;
+        let a = (t[1].as_bytes()[0] - b'A') as u32;
+        let opt = |k: &str| t.iter().find_map(|x| x.strip_prefix(k).map(|v| v.to_string()));
+        let w = match t[0] {
+            "dep" => {
+                let amt = fixed(t[2], USD_SCALE);
+                [1 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]
+            }
+            "bid" | "ask" => {
+                let mkt = t.contains(&"mkt");
+                let ioc = mkt || t.contains(&"ioc");
+                let price = if mkt { 0 } else { fixed(t[2], PRICE_SCALE) };
+                let qty = match t[3].strip_suffix('r') { Some(r) => r.parse::<u64>().unwrap(), None => fixed(t[3], QTY_SCALE) as u64 };
+                let flags = (t[0] == "ask") as u32 | ((mkt as u32) << 1) | ((ioc as u32) << 2);
+                let cs = opt("cs=").map(|v| v.parse::<u64>().unwrap()).unwrap_or_else(|| g.next_cseq(a));
+                let (k, w7) = match (opt("iso="), opt("isou=")) {
+                    (Some(m), _) => (4, m.parse::<u32>().unwrap()),
+                    (None, Some(m)) => (5, m.parse::<u32>().unwrap()),
+                    _ => (2, opt("m=").map(|v| v.parse::<u32>().unwrap()).unwrap_or(1)),
+                };
+                [k | (a << 8), flags, price as u32, (price >> 32) as u32, qty as u32, (qty >> 32) as u32, cs as u32, w7]
+            }
+            "cancel" => {
+                let m = opt("m=").map(|v| v.parse::<u32>().unwrap()).unwrap_or(1);
+                [3 | (a << 8), 0, 0, 0, 0, 0, t[2].parse::<u32>().unwrap(), m]
+            }
+            x => panic!("line {}: unknown op {}", ln + 1, x),
+        };
+        g.apply(w);
+        for _ in 1..reps {
+            let mut w2 = w;
+            if matches!(t[0], "bid" | "ask") && opt("cs=").is_none() {
+                w2[6] = g.next_cseq(a) as u32;
+            }
+            g.apply(w2);
+        }
+    }
+    finish(&mut cur, &mut out);
+    out
+}
+/// Run every scenario: real engine vs port (hash + event log) and per-unit MNWIT1 roots
+/// (real state rebuilt from scratch vs port incremental vs port from scratch).
+fn scen(path: &str, outdir: Option<&str>) -> String {
+    let text = fs::read_to_string(path).expect("scenario file");
+    let (mut ok, mut n, mut units, mut fills, mut rej) = (0, 0, 0usize, 0u32, 0u32);
+    for (name, w) in scen_batches(&text) {
+        n += 1;
+        let mut a = Vec::new();
+        let (r, _) = run_real_eng_cb(&w, &mut |e| a.push(smt_ref::root(&real_pilot_leaves(e))));
+        let p = run_port(&w);
+        let (b, c, wo) = port_roots(&w);
+        let same = r.hash == p.hash && r.ev == p.ev && r.applied == p.applied;
+        let roots = a == b && b == c && wo.scratch_ok;
+        if same && roots { ok += 1 }
+        units += a.len();
+        fills += r.fills;
+        rej += r.rejected;
+        let mut codes: Vec<String> = Vec::new();
+        let mut k = 0;
+        while k < r.ev.len() {
+            let e = r.ev[k];
+            if e & EV_APPLIED != 0 {
+                codes.push(format!("ok{}", e & 0xff));
+                k += 1 + 6 * (e & 0xff) as usize;
+            } else {
+                codes.push(format!("{:#x}", e));
+                k += 1;
+            }
+        }
+        println!("{} units {} applied {} rejected {} [{}] fills {} engine_match {} roots_match {}", name, a.len(), r.applied, r.rejected, codes.join(" "), r.fills, same, roots);
+        if let Some(d) = outdir {
+            write_words(&format!("{}/{}.bin", d, name), &w);
+        }
+    }
+    format!("{{\"scenarios\":{},\"match\":{},\"units\":{},\"fills\":{},\"rejected\":{}}}", n, ok, units, fills, rej)
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(|s| s.as_str()) {
@@ -603,6 +749,7 @@ fn main() {
             println!("{{\"scratch_equal\":{},\"scratch_ok\":{},\"leaves\":{},\"leaf_updates\":{},\"node_hashes\":{},\"roots\":[{}]}}",
                 inc == scr, wo.scratch_ok, wo.leaves, wo.leaf_updates, wo.node_hashes, r.join(","));
         }
+        Some("scen") => println!("{}", scen(&a[2], a.get(3).map(|x| x.as_str()))),
         Some("witfuzz") => {
             let p = |i: usize, d: u64| a.get(i).map(|x| x.parse().unwrap()).unwrap_or(d);
             println!("{}", witfuzz(p(2, 300), p(3, 300) as u32, p(4, 300)));

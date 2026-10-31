@@ -55,7 +55,7 @@ mod rt {
         #[cfg(feature = "nowit")]
         let mode = mnpilot::WitMode::Off;
         #[cfg(all(feature = "legacywit", not(feature = "nowit")))]
-        let mode = mnpilot::WitMode::Legacy { skip: read_word(3) };
+        let mode = mnpilot::WitMode::Legacy { skip: read_word(3) & 0xFF_FFFF };
         #[cfg(not(any(feature = "nowit", feature = "legacywit")))]
         let mode = mnpilot::WitMode::Incremental;
         const ROOTS: usize = 0x20000;

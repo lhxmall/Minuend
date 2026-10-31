@@ -38,7 +38,7 @@ for (const c of cfgs) for (const N of Ns) {
     R_flow: R(fi.flow), cost_flow: cost(R(fi.flow)), R_unit_max: R(fi.max), cost_unit_max: cost(R(fi.max)),
     R_full: R(inc.steps), steps_full: inc.steps, heap: inc.heap, halted: inc.halted && now.halted, js_ms: inc.ms + now.ms };
   if (LNs.includes(N)) {
-    const w = fs.readFileSync(f); w.writeUInt32LE(nSetup, 12); const lf = f.replace('.bin', '.legacy.bin'); fs.writeFileSync(lf, w);
+    const w = fs.readFileSync(f); w.writeUInt32LE(((w.readUInt32LE(12) & 0xFF000000) | nSetup) >>> 0, 12); const lf = f.replace('.bin', '.legacy.bin'); fs.writeFileSync(lf, w);
     const leg = run(ELEG, lf); const lwr = JSON.parse(sh(['wroots', f, 'legacy', String(nSetup)]));
     const fl = flow(leg, nSetup, N);
     Object.assign(r, { legacy_roots_equal: JSON.stringify(lwr.roots) === JSON.stringify(leg.roots), legacy_match_real: same(real, leg),
