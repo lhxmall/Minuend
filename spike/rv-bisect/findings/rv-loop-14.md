@@ -10,7 +10,7 @@ Box logs: `guest-engine/results-loop14/`. Notes: work/rv-rollup-notes.md "Loop r
 |---|---|---|---|---|
 | R14-C1 | C | stateless multiproof | a hash-only leaf `L(key, hash)` in the pruned tree carries an **unverified key**: the decoder checks only the first d bits (its path) and the root only its hash. An operator flips deep key bits of an existing leaf and "proves" it absent: the guest runs the batch as if the account did not exist and returns **status 0 with a wrong end root** — the instruction game cannot catch it (the run is a correct execution of the forged input) | **fixed** (c27b289): unverified leaves may be hashed, lifted and used for inclusion checks only (the record's recomputed leaf hash binds hex(key) → then marked verified); exclusion / split / update / delete through one → MISSING; verified leaves come as tag 4 (kid + rest, key and hash recomputed). PoC `sladv` case `forge:absent-via-leaf-key`: before the fix 15 / 15 status 0 with a wrong result (`results-loop14/l14-sladv-preC1.log`), after 273 / 273 refused |
 | R14-H1 | H | stateless image rules | no global market cap any more → an account can hold positions in > `SL_MAX_POS` markets; its record (positions + apos) can then never be loaded, and one resting order of it at the top of a book halts that market (every taker needs the maker's record) | **fixed** (b1a4f3f): per-account exposure cap — a Place by an account with no position and no live order in the market is refused (code 19) when it already has 64 markets of exposure; inputs fully loaded, so the rule is witness-independent. `slcaps` unit 1 |
-| R14-H2 | H | rollup integration | the stateless guest accepts any self-consistent witness and outputs its claimed root as the segment start root (sladv `wrong-root`: 94 / 285 runs status 0 with another start root; `forge:self-consistent` likewise). In the session image the chain is implied by the carried memory; for the stateless image **rv_rollup must bind start root(h) = end root(h-1)** and void a submission whose OUT status ≠ 0 without a game | **open — design requirement before the stateless image is used** (not exploitable today: the rollup runs the session image). Proposed rule in the design doc §9 (memory proofs of OUT[SEG_START] in m(h) and OUT[SEG_END] in m(h-1), as xbind does for kinds) |
+| R14-H2 | H | rollup integration | the stateless guest accepts any self-consistent witness and outputs its claimed root as the segment start root (sladv `wrong-root`: 94 / 285 runs status 0 with another start root; `forge:self-consistent` likewise). In the session image the chain is implied by the carried memory; for the stateless image **rv_rollup must bind start root(h) = end root(h-1)** and void a submission whose OUT status ≠ 0 without a game | **fixed in the guest** (713d55c): the rollup already builds s0(h) on the final memory of h-1, so the stateless image keeps its last good end root in `.data` (`SL_ROOT`; the first run starts from the compiled-in `MNPILOT_SL_GENESIS`, required in `prod`) and refuses any witness claiming another start root (`ST_SL_BADROOT` = 15; a failed height leaves the root unchanged). sladv `wrong-root:bound` and `forge:self-consistent:bound` refused 100 %. A height whose run fails (MISSING / BADWIT / BADROOT) changes nothing, like a rejected header in the session image: rv_witbind binds only status-0 heights (unchanged), the next height starts from the same root |
 | R14-M1 | M | order book | levels are loaded whole; a level with more than `SL_MAX_LEVEL_ORDERS` orders could never be loaded (liveness) and a big level makes every touch O(level) | **fixed (bounded)** (b1a4f3f): a GTC limit joining a level with 4 096 live orders is refused (19); the own-side level must be known (or proven empty by the trie) for every GTC limit, so the rule is witness-independent. `slcaps` unit 3. Production: linked-FIFO leaves (design §6) |
 | R14-M2 | M | insurance record | every Place loads the insurance account with all its positions (fee / claw path needs only its collateral); with unbounded markets the insurance account can acquire > 64 positions through liquidations / ADL and then no Place can be proven | **open** (liquidation is not in the prototype's scope, so not reachable here): a light record (acct leaf + apos digest, positions untouched) for the fee leg; listed in design §11 |
 | R14-M3 | M | cost bound | the first limits allowed 2^20 tree nodes and 4 096 × 4 096 orders per segment: a witness whose verification alone costs > 10^10 steps (an operator-chosen DoS on challengers / step bound) | **fixed** (b1a4f3f): tree nodes 2^18, orders 2^16 in total, witness 16 MiB; worst case ≈ 2^18 × 2 + 2^16 × ~4 compressions ≈ 0.8 M compressions ≈ 3 × 10^9 steps; honest segments use ~8 nodes per unit (§ measurements) |
@@ -31,13 +31,30 @@ Box logs: `guest-engine/results-loop14/`. Notes: work/rv-rollup-notes.md "Loop r
 * Guard mutants (`loop14-mut.py`, `results-loop14/l14-mut.log`): see "Mutants".
 * riscv32im: session vs stateless steps per segment (`results-loop14/l14-steps.log`): see "Steps".
 
-## Mutants
+## Mutants (`guest-engine/scripts/loop14-mut.py`; each must make sladv report an unsound case or slfuzz gen / adv / ora a bad segment)
 
-_filled from l14-mut.log_
+| mutant | pass 1 (l14-mut.log, b1a4f3f harness) | pass 2 (l14-mut2.log, + A13 / R14-H2 harness) |
+|---|---|---|
+| walk-check-off (no post-unit walk check over the price trie) | killed (sladv, 5 unsound) | – |
+| dirty-acct-guard-off (accounts written by the unit need not be loaded) | killed (sladv, 125) | – |
+| own-orders-pre-off (Place does not require the author's aord + levels) | killed (slfuzz gen, 8 bad segments) | – |
+| trie-update-off (bmp nodes not updated when a level appears / empties) | killed (sladv, 313) | – |
+| oracled-not-loaded (mkx oracle facts ignored by the loader) | killed (slfuzz ora, 30 / 30 bad) | – |
+| cancel-order-pre-off (Cancel target neither loaded nor proven absent) | killed (sladv, 2) | – |
+| collapse-opaque-ok (deletion collapses a node with a lone O sibling) | survived (no test hid a single leaf as O) | **killed** by the new A13 `tree:leaf-as-opaque` (4 unsound) |
+| resting-trie-check-off (post check only) | survived: equivalent (the GTC pre-guard checks the same level first) | `resting-level-checks-off` (both checks) **killed** (146) |
+| C1-unverified-absent (layer 1 of the R14-C1 fix: unverified leaf proves absence) | survived | survives: caught by layer 2 (an insert / update / delete through an unverified leaf is refused, and a leaf becomes verified only by its check); `C1-both-layers` **killed** (A12 `forge:absent-via-leaf-key`) |
+| lvl-digest-skipped (level record not checked against `lvl:`) | survived | survives: caught by layer 2 (the end root re-puts every known level through its still-unverified leaf → MISSING); `lvl-digest+update-unverified` **killed** (17) |
 
-## Steps
+Every non-redundant guard is killed; the two single-layer survivors are defence in depth (each is backed by the
+"only verified leaves can be modified" rule), kept as documented.
 
-_filled from l14-steps.log_
+## Steps (riscv32im, JS reference model; session = `prod` image carried from height to height, stateless = the bound image
+with its carried end root; `js/slsteps.js`, `results-loop14/l14-steps.log`)
+
+_see below (filled when l14s.sh finished)_
+
+
 
 ## R14-C1 (C) — exclusion through an unverified leaf key
 
@@ -52,16 +69,17 @@ Status 0, wrong root, 15 / 15 segments. Fix: the three-valued leaf (unverified /
 tag 4 for leaves that end another key's path and for single-leaf siblings (which a deletion may lift into a later
 split). After the fix the PoC is refused 273 / 273 and the 5 mutants of this class are killed (C1-unverified-absent).
 
-## R14-H2 (H) — start-root binding is a rollup duty now
+## R14-H2 (H) — start-root binding
 
-`run_stateless` checks the tree against the claimed root and outputs it; it cannot know the previous height's end root.
-`sladv` `wrong-root` (witness of the previous segment's state) and `forge:self-consistent` (a forged state with its own
-root) show status-0 runs whose start root differs from the chain. Required rule (not implemented — the AAs still run the
-session image): finalize(h) or a void trigger checks OUT[SEG_START] of m(h) against OUT[SEG_END] of m(h-1) with memory
-proofs (24 siblings each, like rv_witbind), and a submission whose OUT status ≠ 0 is voidable by one memory proof.
+`run_stateless` checks the tree against the claimed root and outputs it; by itself it cannot know the previous height's
+end root. `sladv` `wrong-root` (witness of the previous segment's state: 94 / 285 runs status 0 with another start root)
+and `forge:self-consistent` (a forged state with its own root) show it. Fix: the memory the rollup carries from h-1 to h
+holds the image's last good end root (`.data`), the run compares the claimed root with it; genesis = a root compiled into
+the image (the image memory root, chosen by governance, commits it — the same pattern as the R4-S1 import digest). An
+on-chain rule comparing OUT[SEG_START](h) with OUT[SEG_END](h-1) is then unnecessary.
 
 ## What remains
 
 See design §11: the remaining ops (withdraw, liquidation / ADL, oracles, funding, governance, commit-reveal, listing), the
-height hook, the rollup integration (R14-H2, input layout, DA, MNWIT-S migration), linked-FIFO levels, the light insurance
+height hook, the rollup integration (DA of the witness, MNWIT-S migration / genesis root), linked-FIFO levels, the light insurance
 record (R14-M2), operator touched-set tracking.

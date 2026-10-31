@@ -208,7 +208,7 @@ instead (≤ 64 markets of exposure per account, ≤ 4 096 orders per level) and
 session port (`engine-diff slfuzz`): gen 300 / 300 + 100 / 100 (1000 orders), adv 300 / 300, ora 200 / 200 — events and
 MNWIT-S start / end roots equal on every segment. Review: **R14-C1 (C, fixed)** exclusion proofs through a hash-only
 leaf with a forged key (status 0, wrong root) — PoC 15 / 15 before, 273 / 273 refused after; R14-H1 (fixed, exposure
-cap), **R14-H2 (H, open: rv_rollup must bind start root(h) = end root(h-1) before the stateless image is used)**,
+cap), R14-H2 (H, fixed in the guest: the image keeps its last good end root in the carried memory and refuses a witness for another start root),
 R14-M1 / M3 fixed, R14-M2 open. `sladv` 31 260 adversarial cases, 0 unsound.
 
 ## Loop round 13 (2026-11-01) — R12-M1 fixed: global term capped separately (rv_rollup rule change)

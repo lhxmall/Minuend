@@ -183,10 +183,12 @@ memory whose OUT words say status 0, start root S and end root E.
   claim of status 0 / E is false → a normal instruction-level dispute, which the challenger wins. "Exclusion proof
   mismatch" is exactly this: a key the operator claims absent but whose path shows a leaf with that key (or a
   verified leaf proves nothing / an unverified leaf is refused, R14-C1) makes the honest run report BADWIT.
-* Wrong start root: the guest accepts any self-consistent witness and outputs the claimed root as S. **The rollup must
-  bind S = E(h-1)** (R14-H2) — in the session image this is implied by the carried memory; for the stateless image it
-  needs an on-chain rule (e.g. finalize(h) / a cheap void trigger with memory proofs of OUT[SEG_START] in m(h) and
-  OUT[SEG_END] in m(h-1); likewise a submission whose OUT status ≠ 0 must be voidable without a game).
+* Wrong start root (R14-H2): `run_stateless` alone would accept any self-consistent witness and output its claimed
+  root. Fixed in the image: the rollup builds s0(h) on the final memory of h-1, so the image keeps its last good end
+  root in `.data` (`SL_ROOT`) and refuses a witness claiming another start root (`ST_SL_BADROOT = 15`); the first run
+  starts from `MNPILOT_SL_GENESIS`, compiled in (the image memory root, chosen by governance, commits it; required in
+  `prod`). A failed run (status ≠ 0) leaves the root unchanged and binds nothing (rv_witbind binds status-0 heights
+  only), like a rejected header in the session image. No new AA rule is needed.
 * Data availability: the challenger needs the witness (input tree of the height) to replay — the same DA assumption
   as the batch itself; the witness is part of the height's input.
 
@@ -214,8 +216,7 @@ findings/rv-loop-14.md "Steps".
    leaves exist; `weight_snapshot` is O(holders) — needs a different snapshot design), CreateMarket.
 2. The height hook (`commit_height`: withdrawals / unbonding / commits pruning) is O(state) → expiry-queue leaves
    keyed by height, or lazy pruning on touch.
-3. Rollup integration: R14-H2 start-root binding + status ≠ 0 void; the input layout with a fixed slot for the claimed
-   start root; DA of the witness; a one-off MNWIT-S genesis / migration run from a session snapshot.
+3. Rollup integration: the MNWIT-S genesis root (`MNPILOT_SL_GENESIS`) from a one-off migration run over a session snapshot; DA of the witness.
 4. Linked-FIFO levels (§6) to drop whole-level loading and the level cap; a light insurance record (R14-M2).
 5. Operator: direct touched-set tracking instead of Need iteration; witness compression (shared path prefixes).
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
