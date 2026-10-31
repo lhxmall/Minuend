@@ -355,6 +355,12 @@ impl ChainState {
     }
     /// Verbatim `prune_commits` (batch-commit hook, loop round 6).
     pub fn prune_commits(&mut self, min_height: Height) {
+        #[cfg(feature = "govwit")]
+        {
+            // loop round 9 (R7-L3): a pruned commit deletes its cmt: leaf
+            let gone: alloc::vec::Vec<[u8; 32]> = self.commits.iter().filter(|(_, e)| e.ttl_height < min_height).map(|(h, _)| *h).collect();
+            self.wit_dirty.cmts.extend(gone);
+        }
         self.commits.retain(|_, e| e.ttl_height >= min_height);
     }
     /// Verbatim `prune_oracle_unbonding` (batch-commit hook).

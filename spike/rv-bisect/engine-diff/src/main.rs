@@ -886,7 +886,48 @@ fn gen(seed: u64, makers: u32, levels: u32, per_level: u32, n_orders: u32, stres
 
 /// Pilot-modelled leaves of the REAL engine state (upstream wit_leaves, filtered by tag).
 fn real_pilot_leaves(e: &Engine) -> Vec<String> {
-    minuend_state::wit_leaves(&e.state).into_iter().filter(|l| smt_ref::pilot_leaf(l)).collect()
+    #[allow(unused_mut)]
+    let mut v: Vec<String> = minuend_state::wit_leaves(&e.state).into_iter().filter(|l| smt_ref::pilot_leaf(l)).collect();
+    // loop round 9 (R7-L3, feature govwit): upstream wit_leaves has no governance leaves -- mirror the port's texts
+    // (wit.rs prop_leaf / cmt_leaf / gnon_leaf) from the REAL engine's state
+    #[cfg(feature = "govwit")]
+    {
+        let s = &e.state;
+        for (id, p) in &s.proposals {
+            v.push(format!(
+                "prop:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                id,
+                smt_ref::hex(&p.creator.0),
+                p.market.0,
+                p.key.as_u8(),
+                p.value,
+                p.created_seq,
+                p.deadline_seq,
+                p.supply_at_create,
+                p.yes,
+                p.no,
+                p.voted.len(),
+                p.weight_snapshot.len()
+            ));
+        }
+        for (h, c) in &s.commits {
+            v.push(format!(
+                "cmt:{}:{}:{}:{}:{}:{}",
+                smt_ref::hex(h),
+                smt_ref::hex(&c.account.0),
+                smt_ref::hex(&c.commit_unit.0),
+                c.commit_height,
+                c.ttl_height,
+                if c.revealed { 1 } else { 0 }
+            ));
+        }
+        let mut ns: Vec<_> = s.seen_gov_nonces.iter().collect();
+        ns.sort();
+        for (a, n) in ns {
+            v.push(format!("gnon:{}:{}", smt_ref::hex(&a.0), n));
+        }
+    }
+    v
 }
 fn legacy_real_root(e: &Engine) -> [u8; 32] {
     let mut l = real_pilot_leaves(e);
@@ -1221,6 +1262,7 @@ fn main() {
         Some("xfuzz") => println!("{}", gov::govfuzz_x(a[2].parse().unwrap(), a[3].parse().unwrap(), true)), // loop round 7
         Some("govedge") => println!("{}", gov::govedge()),
         Some("govd8") => println!("{}", gov::govd8()),
+        Some("govwit") => println!("{}", gov::govwit()),
         Some("govcap") => println!("{}", gov::govcap()),
         Some("govgen") => {
             let w = gov::gov_batch(a[2].parse().unwrap(), a[3].parse().unwrap());

@@ -43,7 +43,7 @@ fn sha(parts: &[&[u8]]) -> H {
 
 /// Leaf tags the pilot models (upstream also has adr/adrx/dep/obond and the `~:end` sentinel).
 pub fn pilot_leaf(l: &str) -> bool {
-    matches!(l.split(':').next(), Some("acct" | "pos" | "ord" | "band" | "meta"))
+    matches!(l.split(':').next(), Some("acct" | "pos" | "ord" | "band" | "meta" | "prop" | "cmt" | "gnon"))
 }
 
 /// Identity prefix of a leaf: `pos:` keeps 3 fields (account, market), every other tag 2.

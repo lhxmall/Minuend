@@ -23,6 +23,9 @@ legacywit = []
 depth8 = []
 # loop round 3 (H1): the rollup's committed image -- header flags (word 3) must be 0 (status 4)
 prod = []
+# loop round 9 (R7-L3): governance state (proposals, commits, gov nonces) as MNWIT1 leaves prop: / cmt: / gnon:
+# (pilot-only kinds; upstream wit_leaves has none). Off by default: every MNWIT1 root of a governance batch changes.
+govwit = []
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }

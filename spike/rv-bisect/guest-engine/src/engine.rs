@@ -953,6 +953,8 @@ impl Engine {
         self.state.set_perp(account, bal - amount); // PILOT (MNWIT1)
         self.state.perp_supply -= amount;
         self.state.seen_gov_nonces.insert(account, nonce);
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.gnon.insert(account); // loop round 9 (R7-L3)
         Ok(Vec::new())
     }
 
@@ -1066,6 +1068,8 @@ impl Engine {
         }
         let id = self.state.next_proposal_id;
         self.state.next_proposal_id += 1;
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.props.insert(id); // loop round 9 (R7-L3)
         let weight_snapshot = self.state.perp_balances.iter().filter(|(_, &b)| b != 0).map(|(a, &b)| (*a, b)).collect();
         self.state.proposals.insert(
             id,
@@ -1088,6 +1092,8 @@ impl Engine {
 
     /// upstream `vote`
     pub fn vote(&mut self, voter: AccountId, proposal_id: u64, approve: bool, seq: Seq) -> Result<Vec<Fill>, RejectReason> {
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.props.insert(proposal_id); // loop round 9 (R7-L3)
         let p = self.state.proposals.get_mut(&proposal_id).ok_or(RejectReason::NoProposal)?;
         if seq >= p.deadline_seq {
             return Err(RejectReason::Risk);
@@ -1137,6 +1143,8 @@ impl Engine {
             }
         }
         self.state.proposals.remove(&proposal_id);
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.props.insert(proposal_id); // loop round 9 (R7-L3)
         Ok(Vec::new())
     }
 
@@ -1157,6 +1165,8 @@ impl Engine {
             commit,
             minuend_state::CommitEntry { account, commit_unit: id, commit_height, ttl_height, revealed: false },
         );
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.cmts.insert(commit); // loop round 9 (R7-L3)
         Ok(Vec::new())
     }
 
@@ -1184,12 +1194,16 @@ impl Engine {
             return Err(RejectReason::BadCommit);
         }
         self.state.commits.get_mut(&commit_ref).unwrap().revealed = true;
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.cmts.insert(commit_ref); // loop round 9 (R7-L3)
         Ok(())
     }
     pub fn reveal_undo(&mut self, commit_ref: [u8; 32]) {
         if let Some(e) = self.state.commits.get_mut(&commit_ref) {
             e.revealed = false;
         }
+        #[cfg(feature = "govwit")]
+        self.state.wit_dirty.cmts.insert(commit_ref); // loop round 9 (R7-L3)
     }
 
     pub fn report_price(&mut self, oracle: AccountId, market: MarketId, price: Price) -> Result<Vec<Fill>, RejectReason> {

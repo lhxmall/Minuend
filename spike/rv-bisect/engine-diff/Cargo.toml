@@ -19,6 +19,8 @@ mnpilot = { path = "../guest-engine" }
 [features]
 # loop round 2 (W2) test build: MNWIT1 MAX_WIT_DEPTH = 8 in the port and the reference verifier
 depth8 = ["mnpilot/depth8"]
+# loop round 9 (R7-L3): governance leaves prop: / cmt: / gnon: in the port and in the real-engine mirror
+govwit = ["mnpilot/govwit"]
 
 [profile.release]
 opt-level = 3

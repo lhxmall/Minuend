@@ -156,6 +156,60 @@ pub fn meta_leaf(b: &mut Buf, m: MarketId, p: &MarketParams, mark: Price) {
     );
 }
 
+// ---- loop round 9 (R7-L3, feature govwit): governance leaves (pilot-only kinds; kid = text before the 2nd ':')
+//   prop:<id>:<creator hex>:<market>:<key u8>:<value>:<created_seq>:<deadline_seq>:<supply>:<yes>:<no>:<|voted|>:<|snapshot|>
+//   cmt:<hash hex>:<account hex>:<commit unit hex>:<commit_height>:<ttl_height>:<revealed 0|1>
+//   gnon:<account hex>:<last nonce>
+// The weight snapshot is committed by its size only (a digest would re-hash up to ~20 000 entries per Vote, rv-loop-9).
+pub fn prop_kid(b: &mut Buf, id: u64) {
+    b.n = 0;
+    let _ = write!(b, "prop:{}", id);
+    b.mark_kid();
+}
+pub fn prop_leaf(b: &mut Buf, id: u64, p: &crate::state::Proposal) {
+    prop_kid(b, id);
+    b.raw(b":");
+    b.hex(&p.creator.0);
+    let _ = write!(
+        b,
+        ":{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        p.market.0,
+        p.key.as_u8(),
+        p.value,
+        p.created_seq,
+        p.deadline_seq,
+        p.supply_at_create,
+        p.yes,
+        p.no,
+        p.voted.len(),
+        p.weight_snapshot.len()
+    );
+}
+pub fn cmt_kid(b: &mut Buf, h: &[u8; 32]) {
+    b.n = 0;
+    b.raw(b"cmt:");
+    b.hex(h);
+    b.mark_kid();
+}
+pub fn cmt_leaf(b: &mut Buf, h: &[u8; 32], e: &crate::state::CommitEntry) {
+    cmt_kid(b, h);
+    b.raw(b":");
+    b.hex(&e.account.0);
+    b.raw(b":");
+    b.hex(&e.commit_unit);
+    let _ = write!(b, ":{}:{}:{}", e.commit_height, e.ttl_height, if e.revealed { 1 } else { 0 });
+}
+pub fn gnon_kid(b: &mut Buf, a: &AccountId) {
+    b.n = 0;
+    b.raw(b"gnon:");
+    b.hex(&a.0);
+    b.mark_kid();
+}
+pub fn gnon_leaf(b: &mut Buf, a: &AccountId, n: u64) {
+    gnon_kid(b, a);
+    let _ = write!(b, ":{}", n);
+}
+
 pub fn key_of(kid: &[u8]) -> H {
     let mut h = Sha256::new();
     h.update(b"~K1:");
@@ -445,10 +499,14 @@ pub struct WitDirty {
     pub accounts: BTreeSet<AccountId>,
     pub orders: BTreeSet<(MarketId, OrderId)>,
     pub markets: BTreeSet<MarketId>,
+    /// loop round 9 (R7-L3, feature govwit): proposals / commits / gov nonces touched by the unit
+    pub props: BTreeSet<u64>,
+    pub cmts: BTreeSet<[u8; 32]>,
+    pub gnon: BTreeSet<AccountId>,
 }
 impl WitDirty {
     pub fn is_empty(&self) -> bool {
-        self.accounts.is_empty() && self.orders.is_empty() && self.markets.is_empty()
+        self.accounts.is_empty() && self.orders.is_empty() && self.markets.is_empty() && self.props.is_empty() && self.cmts.is_empty() && self.gnon.is_empty()
     }
 }
 
@@ -481,6 +539,12 @@ impl Wit {
             }
         }
         d.markets.extend(s.markets.keys().copied());
+        #[cfg(feature = "govwit")]
+        {
+            d.props.extend(s.proposals.keys().copied());
+            d.cmts.extend(s.commits.keys().copied());
+            d.gnon.extend(s.seen_gov_nonces.keys().copied());
+        }
         w.apply(s, &d);
         w
     }
@@ -554,6 +618,45 @@ impl Wit {
                 }
             }
         }
+        #[cfg(feature = "govwit")]
+        {
+            for id in &d.props {
+                match s.proposals.get(id) {
+                    Some(p) => {
+                        prop_leaf(&mut b, *id, p);
+                        put(&mut self.smt, &b, &mut self.leaf_updates);
+                    }
+                    None => {
+                        prop_kid(&mut b, *id);
+                        self.smt.remove(&key_of(&b.b[..b.kid]));
+                    }
+                }
+            }
+            for h in &d.cmts {
+                match s.commits.get(h) {
+                    Some(e) => {
+                        cmt_leaf(&mut b, h, e);
+                        put(&mut self.smt, &b, &mut self.leaf_updates);
+                    }
+                    None => {
+                        cmt_kid(&mut b, h);
+                        self.smt.remove(&key_of(&b.b[..b.kid]));
+                    }
+                }
+            }
+            for a in &d.gnon {
+                match s.seen_gov_nonces.get(a) {
+                    Some(n) => {
+                        gnon_leaf(&mut b, a, *n);
+                        put(&mut self.smt, &b, &mut self.leaf_updates);
+                    }
+                    None => {
+                        gnon_kid(&mut b, a);
+                        self.smt.remove(&key_of(&b.b[..b.kid]));
+                    }
+                }
+            }
+        }
     }
     fn put_positions(&mut self, b: &mut Buf, a: &Account) -> Vec<MarketId> {
         let mut cur = Vec::new();
@@ -605,6 +708,21 @@ pub fn all_leaves(s: &ChainState) -> Vec<String> {
         push(&b);
         meta_leaf(&mut b, *m, p, s.marks.get(m).copied().unwrap_or(0));
         push(&b);
+    }
+    #[cfg(feature = "govwit")]
+    {
+        for (id, p) in &s.proposals {
+            prop_leaf(&mut b, *id, p);
+            push(&b);
+        }
+        for (h, e) in &s.commits {
+            cmt_leaf(&mut b, h, e);
+            push(&b);
+        }
+        for (a, n) in &s.seen_gov_nonces {
+            gnon_leaf(&mut b, a, *n);
+            push(&b);
+        }
     }
     out
 }

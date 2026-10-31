@@ -1155,6 +1155,50 @@ pub fn govedge() -> String {
     format!("{{\"cases\":{},\"ok\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, fj.join(","))
 }
 
+/// loop round 9 (R7-L3, feature govwit): every governance writer flips exactly its leaf in the REAL mirror, and the
+/// port's per-unit roots agree with it (check_batch). Counts `prop:` / `cmt:` / `gnon:` leaves after each step.
+pub fn govwit() -> String {
+    if !cfg!(feature = "govwit") {
+        return "{\"govwit\":\"needs the govwit build\",\"ok\":0}".to_string();
+    }
+    let mut fails: Vec<String> = Vec::new();
+    let flags = mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG;
+    let mut g = GB::new(16, flags);
+    let cnt = |g: &GB, tag: &str| real_pilot_leaves(&g.eng).iter().filter(|l| l.starts_with(tag)).count();
+    let mut chk = |n: &str, c: bool| if !c { fails.push(n.to_string()) };
+    chk("w:genesis_none", cnt(&g, "prop:") + cnt(&g, "cmt:") + cnt(&g, "gnon:") == 0);
+    g.op(GB::w_gdep(10, 66_666));
+    chk("w:prop_create", g.op(GB::w_prop(4, 1, 0, 1200)) == OK && cnt(&g, "prop:") == 1);
+    let before = real_pilot_leaves(&g.eng).into_iter().find(|l| l.starts_with("prop:")).unwrap_or_default();
+    chk("w:vote", g.op(GB::w_vote(10, 1, true)) == OK);
+    let after = real_pilot_leaves(&g.eng).into_iter().find(|l| l.starts_with("prop:")).unwrap_or_default();
+    chk("w:vote_changes_prop_leaf", before != after && smt_ref::kid(&before) == smt_ref::kid(&after));
+    chk("w:gwd_nonce", g.op(GB::w_gwd(10, 5, 1)) == OK && cnt(&g, "gnon:") == 1);
+    g.op(GB::w_gdep(14, 1_500));
+    let salt = [3u8; 32];
+    let inner = GB::w_gwd(14, 0, 1); // applies for a PERP holder (r7:gwd0_holder), keeps the bond
+    let h = g.commit_hash(&inner, &salt);
+    let w = g.w_commit(14, &h, 5);
+    chk("w:commit", g.op(w) == OK && cnt(&g, "cmt:") == 1);
+    let cu = *g.uids.last().unwrap();
+    let c0 = real_pilot_leaves(&g.eng).into_iter().find(|l| l.starts_with("cmt:")).unwrap_or_default();
+    let p1 = g.last();
+    let w = g.w_reveal(14, &h, &salt, &inner, p1, cu);
+    g.op(w);
+    let c1 = real_pilot_leaves(&g.eng).into_iter().find(|l| l.starts_with("cmt:")).unwrap_or_default();
+    chk("w:reveal_flips_revealed", c0.ends_with(":0") && c1.ends_with(":1"));
+    g.op(GB::w_height(6));
+    chk("w:prune_deletes_cmt", cnt(&g, "cmt:") == 0);
+    let d1 = g.eng.state.proposals[&1].deadline_seq;
+    g.op(GB::w_seq(d1));
+    chk("w:finalize_deletes_prop", g.op(GB::w_fin(4, 1)) == OK && cnt(&g, "prop:") == 0);
+    if let Err(e) = check_batch(&g.words()) {
+        fails.push(format!("w:diff {}", e).replace('"', "'"));
+    }
+    let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
+    format!("{{\"govwit\":1,\"ok\":{},\"fail\":[{}]}}", fails.is_empty() as u32, fj.join(","))
+}
+
 /// loop round 9 (R8-L4): the MNWIT1 depth rule (W2) on a Reveal's INNER op. Depth8 build only (a 2^8 prefix grind
 /// over the account table is cheap; at MAX_WIT_DEPTH 64 it is not feasible). Since the commit bond a committer already
 /// has an `acct:` leaf, so the reachable too-deep inner-op key is the `pos:` (or `ord:`) key of an inner Place: pick a

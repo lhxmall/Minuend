@@ -33,7 +33,10 @@ Work items:
 4. **Round-8 full suite** (`loop8-suite.sh c`, sources = round-8 code + govd8, builds `target-l8c-*`; + xfuzz 300 and
    govd8 added) started 16:54 UTC; round-8 devnet (`l8rd.sh`, roll8) after the round-7 devnet; rolltest / aacost on the
    round-8 and round-9 AAs on the box (`l9rt.sh`); round-9 devnet queued (`l9rd.sh`).
-5. **R7-L3** — not implemented in this round (estimate below); the design is refined to an implementable spec.
+5. **R7-L3** — design refined, then **implemented as an opt-in cargo feature `govwit`** (default builds unchanged): governance
+   leaves `prop:` / `cmt:` / `gnon:` in the port's MNWIT1 tree and in the harness's real-engine mirror; quick differential
+   suite green on the govwit build (results below). Not yet the default: rv_witproof has no rolltest case for the new kinds
+   and the full suite has not run on it.
 6. **Fresh adversarial review of the rollup / AA layer** (rv_rollup incl. ts / upgrade / xbind, rv_seg_ref, rv_game_ref,
    rv_step, rv_witbind, rv_witproof): one **H** (R9-H1, fixed), three L, eight I.
 
@@ -41,13 +44,13 @@ Severity as in rounds 1–8: **C** = honest party loses / wrong verdict on reach
 undefined guest outcome, or a protocol-reachable state loss / halt; **M** = design/spec gap with a concrete failure
 mode or a defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
 
-Totals: **C 0 · H 1 (fixed) · M 0 · L 4 (R8-L4 closed, R9-L1, R9-L2, R9-T1 open) + R7-L3 deferred · I 8**.
+Totals: **C 0 · H 1 (fixed) · M 0 · L 4 (R8-L4 closed, R9-L1, R9-L2, R9-T1 open) + R7-L3 implemented opt-in (`govwit`) · I 8**.
 
 | id | sev | area | title | status |
 |---|---|---|---|---|
 | R9-H1 | H | rv_rollup upgrade | **an upgrade at h whose h−1 is not a proven export run bricks finalization for good**: `finalize h` needs `x(h)` kind 2 and `x(h−1)` kind 1 with equal digests; once h−1 is finalized as a normal run (kind 0) that can never hold, and a re-schedule must satisfy `h' > lf` and `h' ≤ uh` (R5-M1), i.e. `h' = h` — no command could leave the state. Reachable (a) by a governance mistake (schedule at `top + 1` while `top` is a normal run, then 24 h pass — `finalize` is permissionless) and (b) **permissionlessly**: with an upgrade pending, any fraud void at a height ≤ h−1 (one's own pre-placed fraudulent height, half its bond burned) re-opens the race at h−1, and any submitter may re-submit h−1 as a valid normal run that no challenger can dispute | **fixed** (2dd7811, f48109e): governance `cancel` clears `U<uh>` / `uh` and voids the live heights ≥ uh (`top = min(top, uh − 1)`, not fraud, bonds reclaimable). PoC + fix in rolltest `upgrade R9-H1` (17) and `cancel9` (7); rolltest 357 / 357; AA mutation `aamut-l9.py` 6 / 6 killed; rv_rollup complexity 73, ops 1 573 |
 | R8-L4 | L | tests | round-7 guest mutant 6 (inner-op W2 depth check dropped) survived every check | **closed**: `govd8` kills it (item 3) |
-| R7-L3 | L | witness | proposals, commits and gov nonces are not MNWIT1 leaves | deferred; design refined below (exact leaf texts, kid rule, dirty hooks, depth arms, harness mirror, tests, cost) |
+| R7-L3 | L | witness | proposals, commits and gov nonces are not MNWIT1 leaves | **implemented behind feature `govwit`** (opt-in; GOVWITROW); default off until the full suite and rv_witproof cases run on it |
 | R9-L1 | L | rv_rollup upgrade | `finalize` of uh−1 does not require its export proof, so a non-export uh−1 still finalizes and the stall only shows at uh | documented: a guard (`U<h+1>` pending ⇒ `x(h)` kind 1 before `finalize h`) would stop h−1 instead — still a stall that needs governance; `cancel` is the recovery either way. Operational rule: schedule an upgrade at `top + 1` only when `top` is an export run that has been xbound (`x(top)` kind 1), and cancel if a void re-opens uh−1 |
 | R9-L2 | L | rv_rollup trust | the governance address can void every live height ≥ lf + 1 at will (upgrade / cancel), discarding operators' work (bonds are reclaimable) | documented trust assumption (as R3-H2 / R4-S1): `$GOV` is a fixed address baked by mkrollup |
 | R9-T1 | L | tests | upgrade / xbind / cancel run only on the sim chain (real ocore evaluator, `chain.js`), never on a devnet: rolldevnet bakes `GOV` = the fixed test address `GOVXXX…`, which no devnet wallet controls | open: rolldevnet with `GOV` = a devnet wallet and one upgrade → xbind → finalize + one cancel flow |
@@ -94,7 +97,26 @@ without voiding them would let them finalize as **normal** heights (no digest ch
 `min(top, uh − 1)` keeps a top a fraud void already lowered (otherwise a voided fraudulent height would become live
 again; `aamut-l9` mutant 3).
 
-## R7-L3 — governance state in MNWIT1 (refined design; not implemented in round 9)
+## R7-L3 — governance state in MNWIT1 (refined design, then implemented behind feature `govwit`)
+
+### As implemented (round 9, feature `govwit`; guest-engine + engine-diff)
+
+* `wit.rs`: `prop_leaf` / `cmt_leaf` / `gnon_leaf` (+ `*_kid`), texts exactly as in the design below except that the
+  weight snapshot is committed **by its size** (`|weight_snapshot|`, no digest: the cost trap below); `WitDirty` gains
+  `props` / `cmts` / `gnon`; `Wit::apply` puts / deletes them; `Wit::from_state` (genesis, snapshot import) and
+  `all_leaves` (scratch roots) include them.
+* Dirty marks at every write site (all `#[cfg(feature = "govwit")]`): GovWithdraw nonce, CreateProposal, Vote (marked
+  before the lookup; a rejected vote re-puts an unchanged leaf), FinalizeProposal (delete), Commit, Reveal + reveal_undo,
+  `prune_commits` (every pruned hash; runs in the height hook, so empty segments carry it, R5-L4).
+* Harness: `real_pilot_leaves` mirrors the three kinds from the REAL engine's `proposals` / `commits` /
+  `seen_gov_nonces` (HashMap / HashSet iterated sorted); `smt_ref::pilot_leaf` accepts the tags; `engine-diff govwit`
+  checks each writer flips exactly its leaf (create, vote changes the value but not the kid, nonce, commit, reveal flips
+  `revealed`, prune deletes `cmt:`, finalize deletes `prop:`) and real == port per unit.
+* Not done: W2 depth arms for `cmt:<hash>` (author-chosen hash; at MAX_WIT_DEPTH 64 a too-deep key needs a 2^64 grind,
+  so this is the same class as the unchecked side-effect insertions), rv_witproof rolltest cases for the new kinds (the
+  Oscript kid rule handles them by construction: one ':' in each kid), full suite / JS-guest-at-scale on the govwit image.
+
+### Design (as refined before implementation)
 
 Leaves (text as `wit.rs` writes it; kid = text before the 2nd ':' — rv_witproof's rule needs no change because every
 new kid has exactly one ':'):
@@ -133,9 +155,9 @@ gnon:<account_hex> ':' last_nonce
   `Proposal::voted` a HashSet (iterate sorted); `ParamKey` must print as the port's u8.
 * Cost estimate: ~250 lines guest + ~120 harness + tests; all MNWIT1 roots of governance batches change (round-6+ fixtures
   and JS-guest expectations are recomputed by the harness, not hand-kept); one full suite (~3–4 h on the shared VM).
-  **Not implemented in round 9** (judgment call): the change touches the guest's per-unit commitment, snapshot import
-  and every differential check, and the VM window left ~2 h with the round-8 suite still running on it — not enough to
-  validate a commitment-format change to this project's standard.
+  First judged too large for the round; once the round-8 suite was moving it was implemented **opt-in** (feature
+  `govwit`), so the default images and every running suite stay on the round-8 commitment format until the govwit build
+  has had its own full suite.
 
 ## Round-9 results (sandbox + InstaBox VM; logs `guest-engine/results-loop8/`, `results-loop9/`)
 
