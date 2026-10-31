@@ -424,9 +424,9 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     const dep = await w.deployAgent(body4); rec('11 rollup-4 deployed', 'ok', dep.error ? String(dep.error).slice(0, 120) : 'ok');
     await net.witnessUntilStable(dep.unit); const R4 = dep.address; const keepRoll = ROLLA; ROLLA = R4;
     const G0 = T.genesis(); let prev = { mem: G0, final: 'genesis' }; const hon = {}, own = {}; let fraudBonds = 0, r, v;
-    for (let c = 0; c < 7; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { k: 60 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h);
+    for (let c = 0; c < 7; c++) { const h = c + 1; const L = T.batch(prev.mem, h, { k: 3 + c, mut: T.MUT.mem }), H = T.batch(prev.mem, h);
       const b = await bondAt(h, R4); rec('11a cycle ' + c + ': bond for the fraud at h' + h + ' = OBOND x 2^' + Math.min(c, VCAP), OBOND * 2 ** Math.min(c, VCAP), b);
-      if (c === 6) { r = await trig(op2, R4, sub(T.batch(prev.mem, h, { k: 90, mut: T.MUT.mem }), h, prev.final), b - 1); rec('11a cycle 6: 64 x OBOND - 1 bounces', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err }); }
+      if (c === 6) { r = await trig(op2, R4, sub(T.batch(prev.mem, h, { k: 30, mut: T.MUT.mem }), h, prev.final), b - 1); rec('11a cycle 6: 64 x OBOND - 1 bounces', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err }); }
       r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11a cycle ' + c + ': fraudulent h' + h + ' accepted', 'ok', r.err || 'ok'); const sf = r.unit; fraudBonds += b;
       const o = await trig(ch1, R4, { open: sf }, CBOND, 'open'); T.retime(H, L.ts);
       const win = await play(R4 + o.unit, L.roots, H.roots, ch1, H, op2); const paid = await paidTo(play.last, A.ch1); v = await vars(R4);
@@ -436,7 +436,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
       rec('11a cycle ' + c + ': ch1 re-submits the honest h' + h + ' at max(v_h, min(V, 6)) = OBOND x 2^' + Math.min(c + 1, VCAP) + ' (b<sid> stored)', ['ok', OBOND * 2 ** Math.min(c + 1, VCAP)], [r.err || 'ok', +v['b' + r.unit]]);
       hon[h] = r.unit; own[h] = A.ch1; prev = H; }
     // (b) layer-1 end-to-end at h8
-    { const h = 8, L = Object.assign(T.batch(prev.mem, h, { k: 70, mut: T.MUT.mem }), { units: 5 }), X = T.batch(prev.mem, h); const b = await bondAt(h, R4);
+    { const h = 8, L = Object.assign(T.batch(prev.mem, h, { k: 20, mut: T.MUT.mem }), { units: 5 }), X = T.batch(prev.mem, h); const b = await bondAt(h, R4);
       rec('11b bond at h8 (V = 6, v8 = 0) = 64 x OBOND', OBOND * 64, b);
       r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11b fraudulent h8 (units 5)', 'ok', r.err || 'ok'); const sf = r.unit; fraudBonds += b; const bu0 = +((await vars(R4)).burned || 0);
       const o = await trig(ch2, R4, { uopen: sf }, CBOND + GF, 'uopen', 2); rec('11b ch2 uopen h8 (CBOND + GF; 2 GF to the seg referee)', ['ok', 2 * GF], [o.err || 'ok', await paidTo(o.response, SEG)]);
@@ -447,7 +447,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
       r = await trig(ch2, R4, sub(X, h, prev.final), await bondAt(h, R4), 'submit'); v = await vars(R4); rec('11b ch2 re-submits the honest h8 at 64 x OBOND', ['ok', OBOND * 64], [r.err || 'ok', +v['b' + r.unit]]);
       hon[h] = r.unit; own[h] = A.ch2; prev = X; }
     // (c) defender silent in the layer-1 game at h9
-    { const h = 9, L = Object.assign(T.batch(prev.mem, h, { k: 71, mut: T.MUT.mem }), { units: 5 }), X = Object.assign(T.batch(prev.mem, h), { units: 5 }); const b = await bondAt(h, R4);
+    { const h = 9, L = Object.assign(T.batch(prev.mem, h, { k: 21, mut: T.MUT.mem }), { units: 5 }), X = Object.assign(T.batch(prev.mem, h), { units: 5 }); const b = await bondAt(h, R4);
       r = await trig(op2, R4, sub(L, h, prev.final), b, 'submit'); rec('11c fraudulent h9 at 64 x OBOND', ['ok', OBOND * 64], [r.err || 'ok', b]); const sf = r.unit; fraudBonds += b;
       const o = await trig(ch1, R4, { uopen: sf }, CBOND + GF, 'uopen', 2); const sg = R4 + o.unit;
       r = await trig(w, SEG, { resolve: sg }, 10000); rec('11c seg resolve before the defender deadline', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
