@@ -1,0 +1,5 @@
+depth200-n10 {"leaves":310,"bytes":42735,"leaf_blocks":789,"nodes":313,"blocks":1415,"accounts":27,"live_orders":198}
+depth200-n1000 {"leaves":526,"bytes":77781,"leaf_blocks":1415,"nodes":531,"blocks":2477,"accounts":27,"live_orders":392}
+depth800-n10 {"leaves":940,"bytes":146869,"leaf_blocks":2645,"nodes":942,"blocks":4529,"accounts":33,"live_orders":800}
+depth800-n1000 {"leaves":1166,"bytes":183691,"leaf_blocks":3299,"nodes":1171,"blocks":5641,"accounts":33,"live_orders":1002}
+stress200-n1000 {"leaves":415,"bytes":58950,"leaf_blocks":1082,"nodes":417,"blocks":1916,"accounts":27,"live_orders":281}

@@ -17,6 +17,11 @@ Prototype only. Not wired into the rollup; not audited. Report (Chinese): `work/
 - `guest/` — no_std riscv32im guest (sha256 / ed25519-dalek verify_strict / BTreeMap order-book workload),
   built with rustc 1.99 `--target riscv32im-unknown-none-elf`.
 
+- `guest-engine/` — **Minuend engine pilot port** (no_std + alloc): real `OrderBook`, `Account`, `apply_fill_pair`,
+  `Engine::place`/`cancel` from fix/47-all @ 20326c0, mostly verbatim; bin `rvengine` (batch via `ecall a7=63`).
+  `engine-diff/` — host harness: real engine (signed units → `Engine::ingest`) vs port; batch generator; `witstat`.
+  `js/pilotrun.js` / `pilotbench.js` / `pilotprof.js`, `xval/pilotsail.js` — guest runner, step bench, profiler, sail check.
+
 ## State commitment
 `state_root = sha256(pc ':' join(regs, ',') ':' mem_root ':' inp_root ':' step)` (base64).
 Memory = 2^D 32-bit words, Obyte merkle (`leaf = H(String(word))`, `node = H(left + right)`), zero subtrees
@@ -126,3 +131,22 @@ was run as well as a build cross-check (identical results).
   equivalent mutant in JS, whose shift operators already use 5 bits.)
 - Result: **no oracle bug found; rv_step and js/ref.js unchanged** (ops 1850, address `7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA`),
   so the rollup sim / devnet were not rerun. Logs on the VM: `/data/hark/logs/rv/xval-*.log`, `xval-*-summary.json`.
+
+## Engine pilot port (2026-10-31) — `guest-engine/`, `engine-diff/`
+Details, tables and reproduction: `guest-engine/README.md`; raw results `guest-engine/results-2026-10-31/`.
+- **Ported** (no_std riscv32im, ~2 700 lines, mostly verbatim from fix/47-all @ 20326c0): minuend-book `OrderBook`
+  (price-time priority, one fill per unit, STP, journal/rollback), minuend-account (apply_fill, snapshot, isolated risk,
+  spot requirements), minuend-state `apply_fill_pair[_journaled]` (taker fee, claw, mark guard) + journal, minuend-exec
+  `Engine::place` (all admission / margin gates incl. resting IM and isolated escrow) and `cancel`. Only changes:
+  `HashMap/HashSet` → `BTreeMap/BTreeSet`, serde/thiserror derives dropped; funding-rate mark block stubbed; deposit
+  reduced to its account effect.
+- **Blockers** (survey): no floats; i128 works (soft, ~12.5k steps per `position_risk`); HashMap swap is order-safe;
+  bincode/persist/env/WAL/dag stay off-chain. The real cost blocker is `apply_one`'s per-unit **full witness rebuild**.
+- **Diff test**: real engine vs port, `fuzz 300 300` → 300/300 identical (state hash + full event log); 3-way real ↔ port
+  ↔ guest-in-JS-model on 9 batches (depth 200/800, normal + stress, up to 1 832 units) → 9/9; sail-riscv spot check
+  16 196 951 = 16 196 951 instructions, identical result memory and hash. Port mutants: 7/13 killed (2 equivalent).
+- **Steps per order** (one unit each): 72–94k at ~200–400 resting orders, 189–204k at ~800–1 000; ≈ 43k + 170 × L
+  (`place` scans every live order 5×). Rounds R = ceil(log16): 10 orders → 5–6, 100 → 6–7, 1 000 → 7; operator cost
+  R × 3372 + 11 467 = 28.3k–35.1k bytes (≥ +69.5k margin on the 108 000 payout). One unit alone: R = 5.
+- **Not included and dominant in a full port**: `wit_root` per unit ≈ 5.7 sha256 blocks ≈ 20k steps per live order
+  (5M at L=200, 20M at L=1 000) → recommend an incremental witness commitment before porting further.

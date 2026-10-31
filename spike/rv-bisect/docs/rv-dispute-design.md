@@ -393,6 +393,17 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 
 ---
 
+### 7.2 真实引擎移植试点（2026-10-31）
+
+目录 `guest-engine/`（guest）和 `engine-diff/`（对拍工具），详细表格见 `guest-engine/README.md`。
+
+- **移植了什么**：从 fix/47-all @ 20326c0 原样复制（只改 `use` 行、HashMap→BTreeMap、去掉 serde/thiserror）：订单簿 `OrderBook`（价格-时间优先、每个 unit 最多一笔成交、自成交、撤销日志）、账户 `Account`（成交记账、风险快照、逐仓、现货保证金）、`apply_fill_pair`（taker 手续费、claw、mark 规则）、`Engine::place`（全部下单检查：client_seq、价格/数量上限、挂单数上限、tick、价格带、模式、只减仓、初始保证金含挂单占用、逐仓托管）和 `cancel`。资金费率市场的 mark 段落没移植（试点里不开这种市场）；deposit 只保留记账效果。
+- **编译障碍调查**：没有浮点数；i128 能用但是软件实现（一次 `position_risk` 约 1.25 万步）；HashMap 换 BTreeMap 不影响结果（遍历的地方都与顺序无关，或者之后会排序）；bincode、快照、WAL、环境变量、DAG 都留在链下。**真正的问题是成本**：`apply_one` 每个 unit 之后都把整棵 witness 树重算一遍。
+- **对拍**：`engine-diff` 直接链接真实引擎，用签名 unit 喂给 `Engine::ingest`，和移植版比较状态哈希 + 每个 unit 的事件（成交明细或拒绝原因）。随机 300 个种子 × 300 单：**300/300 完全一致**。真实引擎 ↔ 移植版 ↔ riscv32im guest（JS 模型）三方对拍 9 个批次（挂单深度 200/800，普通 + 压力场景，最多 1 832 个 unit）：**9/9 一致**。sail-riscv 抽查：**16 196 951 条指令，和 JS 模型完全相同**，结果内存和哈希一致。对移植版埋 13 个 bug，抓到 7 个（2 个在试点范围内等价，4 个是随机批次很少碰到的边界）。
+- **每单步数**（一单 = 一个 unit）：挂单 200–400 张时 7.3–9.4 万步，800–1 000 张时 18.9–20.4 万步，约等于 **4.3 万 + 170 × 挂单数**（`place` 每次把所有挂单扫 5 遍）。
+- **轮数和成本**（R = ceil(log16 步数)，operator 成本 = R × 3372 + 11 467）：10 单 R=5–6，100 单 R=6–7，1000 单 R=7，成本 2.83–3.51 万 bytes，赔付 108 000 至少还剩 6.95 万。单个 unit 的第 2 层博弈 R=5。
+- **没算进去、但完整移植后会占大头的部分**：每个 unit 重算 witness 根，约每张挂单 5.7 个 sha256 块 ≈ 2 万步（挂单 200 张约 500 万步，1000 张约 2000 万步），是撮合本身的 100 倍。建议在继续移植前把 witness 承诺改成增量式（只更新被改动的叶子）。
+
 ## 8. 已知的缺口（诚实列出）
 
 1. ~~多付的钱不退~~ 已修（5b）。剩下：finalize / reclaim 触发交易里的 10 000（bounce_fees 下限）仍全部留在 rollup；submit 多付 ≤ FEE 不退。
@@ -403,7 +414,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 6. **operator 和挑战者都不能是 AA**（`is_aa` 禁止）。用多签 AA 当 operator 的方案目前不行。
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
 8. ~~没和 sail-riscv 对拍~~ 已做（7.1）：sail-riscv 0.16，0 处真不一致。剩下：对拍只覆盖单步语义；trap 的具体种类（mcause 等）rv_step 不建模，只比「都 trap 了」。
-9. **引擎还没移植到 no_std**：真正的 Minuend 执行引擎还不能编译成 riscv32im guest，所以现在测的是测试程序，不是真实撮合。
+9. **引擎只移植了一部分**（7.2）：下单/撤单/撮合/记账/保证金已经在 guest 里跑通并和真实引擎对拍一致；强平/ADL、提现、预言机/资金费率、治理、commit-reveal、每个 unit 的 witness 根还没移植。
 10. tps fee：测试客户端已设 `max_aa_responses`（6.5），只降预付、不降最终费用，并且预付少了交易可能暂时不被选作父单元；主网 tps 参数没核对。
 
 ---
@@ -418,6 +429,7 @@ guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影�
 - `js/rolltest.js` —— 求值器测试；`js/rolldevnet.js` —— devnet 测试
 - `js/tpsdiag.js` —— tps fee 诊断
 - `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
+- `guest-engine/` —— 真实引擎移植试点（no_std guest，`rvengine`）；`engine-diff/` —— 真实引擎 vs 移植版对拍、批次生成、`witstat`；`js/pilotrun.js`、`pilotbench.js`、`pilotprof.js`、`xval/pilotsail.js`
 - `xval/` —— 和 sail-riscv 对拍：`mkconfig.py`（生成 sail 配置）、`rv32im-strict.json` / `rv32im-relaxed.json`、`lib.js`（跑 sail、解析轨迹、写 ELF、逐步比较）、`xtests.js`（riscv-tests）、`xfuzz.js`（随机单步）、`mutants.sh`（埋 bug 自测）、`summarize.js`、`run-xval.sh`（全套）
 
 怎么跑（在机器上）：
