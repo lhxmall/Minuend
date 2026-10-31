@@ -464,15 +464,18 @@ pub fn mktcap(n: u32, m: u32, r: u32) -> String {
         let r1 = e.deposit(a, 10_000_000 * USD_SCALE as i128);
         ok(r1, e);
         if i > 0 {
+            // account i buys (i + 1) units from i - 1 and later sells (i + 2) to i + 1: every account keeps a
+            // position of -1 unit (the last one +n) in every market (equal sizes would net to zero and delete it)
+            let q = (i as u64 + 1) * (QTY_SCALE / 10_000);
             for &mk in &markets {
                 let b = id(i - 1);
                 let seq = e.state.seq;
                 let cs = e.state.seen_client_seq.get(&b).copied().unwrap_or(0) + 1;
-                let r2 = e.place(b, M(mk), S::Ask, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, QTY_SCALE / 100, cs, [0; 32], seq, false, 0);
+                let r2 = e.place(b, M(mk), S::Ask, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, false, 0);
                 ok(r2, e);
                 let seq = e.state.seq;
                 let cs = e.state.seen_client_seq.get(&a).copied().unwrap_or(0) + 1;
-                let r3 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, QTY_SCALE / 100, cs, [0; 32], seq, false, 0);
+                let r3 = e.place(a, M(mk), S::Bid, OrderType::Limit, T::Gtc, MID + 7 * DOLLAR, q, cs, [0; 32], seq, false, 0);
                 ok(r3, e);
             }
         }

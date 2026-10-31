@@ -1,0 +1,114 @@
+===== testnet = false
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:813215) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+rundir /data/hark/spike-rv/roll10/devnet-testdata/runid-0001
+[INFO][genesis-node] Child started
+[INFO][obyte-witness-0001] Child started
+[INFO][obyte-witness-0002] Child started
+[INFO][obyte-hub-0001] Child started
+[INFO][headless-wallet-0007] Child started
+[INFO][headless-wallet-0008] Child started
+[INFO][headless-wallet-0003] Child started
+[INFO][headless-wallet-0004] Child started
+[INFO][headless-wallet-0005] Child started
+[INFO][headless-wallet-0002] Child started
+[INFO][headless-wallet-0001] Child started
+[INFO][headless-wallet-0006] Child started
+MODE max_aa_responses set {"STEP":"7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA","GAME":"W7OQFFFU6446637YBHIA7B74L6X4ZO5B","ROLL":"VESZRMZW5W5EXLL3DPQ7IMF32H5CCN7D"}
+PASS | deployed rv_step == address baked into the referee | expected "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" | actual "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" 
+PASS | deployed referee == address baked into rv_rollup | expected "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" | actual "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" 
+PASS | deployed rollup == computed address | expected "VESZRMZW5W5EXLL3DPQ7IMF32H5CCN7D" | actual "VESZRMZW5W5EXLL3DPQ7IMF32H5CCN7D" 
+PASS | loop 3: deployed seg referee == address baked into rv_rollup | expected "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" | actual "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" 
+PASS | loop 3: deployed witbind / witproof == computed | expected ["IGWIDGJWQESWPNZGLCE5KTZIYFTOVGLK","VHH4UJV2B5XZCJP7LS22EFMGDFQSYZOE"] | actual ["IGWIDGJWQESWPNZGLCE5KTZIYFTOVGLK","VHH4UJV2B5XZCJP7LS22EFMGDFQSYZOE"] 
+PASS | 9 rollup-2 definition = rv_rollup.aa with $GOV = the gov wallet | expected [1,0] | actual [1,0] 
+PASS | 9 rollup-2 deployed by the gov wallet | expected "ok" | actual "ok" 
+PASS | 9a export h1 on rollup-2 | expected "ok" | actual "ok" 
+PASS | 9a upgrade from a non-governance wallet | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not governance\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":144,\"formula\":\"require(trigger.address == $GOV, 'not governance');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRY"}
+PASS | 9a upgrade above top + 1 | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bad upgrade height\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":146,\"formula\":\"require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');\"}],\"trace\":[{"}
+PASS | 9a governance wallet schedules upgrade at 2 (U2 = image, uh = 2) | expected ["ok","SDdxJ29WJxOeItDmVBuTF7rfk6MVOwgdnzyOjYs39nk=",2] | actual ["ok","SDdxJ29WJxOeItDmVBuTF7rfk6MVOwgdnzyOjYs39nk=",2] 
+PASS | 9a h2 chained on the OLD memory refused | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bad s0\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":91,\"formula\":\"require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s"}
+PASS | 9a import h2 from the new image | expected "ok" | actual "ok" 
+PASS | 9a finalize export h1 | expected "ok" | actual "ok" 
+PASS | 9a finalize import h2 before xbind | expected "bounce" | actual "bounce" {"err":"{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":128,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"}
+PASS | 9a xbind with a flipped digest word | expected "bounce" | actual "bounce" {"err":"{\"message\":\"word proof\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":176,\"formula\":\"require(length(filter([0,1,2,3,4,5,6,7,8], 9, $k => !(is_integer($w[$k]) AND $w[$k] >= 0 AND $w[$k] < 4294967296"}
+PASS | 9a xbind import h2 (real 9-word proof trigger) | expected ["ok","2:2654435769,1013904242,3668340011,2027808484,387276957,3041712726,1401181199,4055616968"] | actual ["ok","2:2654435769,1013904242,3668340011,2027808484,387276957,3041712726,1401181199,4055616968"] 
+PASS | 9a xbind twice | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bound\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":172,\"formula\":\"require(!var['x' || $sid], 'bound');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRYCEOWSNQ\",\"xpath\":\"/init\""}
+PASS | 9a finalize with only the import bound | expected "bounce" | actual "bounce" {"err":"{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":128,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"}
+PASS | 9a xbind export h1 (after its finalize) | expected "ok" | actual "ok" 
+PASS | 9a finalize import h2 (digests equal) | expected ["ok",2] | actual ["ok",2] 
+PASS | 9a finalize pays OBOND - FEE (real output) | expected 198000 | actual 198000 
+PASS | 9a upgrade at or below lf | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bad upgrade height\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":146,\"formula\":\"require(is_integer($h) AND $h >= 2 AND $h > $lf AND $h <= $top + 1, 'bad upgrade height');\"}],\"trace\":[{"}
+PASS | 9b normal h3 chained on the import memory | expected "ok" | actual "ok" 
+PASS | 9b governance schedules upgrade at 4 (h3 is not an export) | expected "ok" | actual "ok" 
+PASS | 9b import h4 by op2 | expected "ok" | actual "ok" 
+PASS | 9b non-export h3 finalizes | expected "ok" | actual "ok" 
+PASS | 9b xbind h3 refused (kind 0) | expected "bounce" | actual "bounce" {"err":"{\"message\":\"kind\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":175,\"formula\":\"require($w[0] == 1 OR $w[0] == 2, 'kind');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRYCEOWSNQ\",\"xpath\":\"/"}
+PASS | 9b PoC: import h4 can never finalize | expected "bounce" | actual "bounce" {"err":"{\"message\":\"import digest\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":128,\"formula\":\"require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'impo"}
+PASS | 9b PoC: re-schedule above the stuck upgrade refused | expected "bounce" | actual "bounce" {"err":"{\"message\":\"upgrade pending at 4\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":152,\"formula\":\"require($p <= $lf OR $h <= $p, 'upgrade pending at ' || $p);\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2"}
+PASS | 9b cancel from a non-governance wallet | expected "bounce" | actual "bounce" {"err":"{\"message\":\"not governance\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":161,\"formula\":\"require(trigger.address == $GOV, 'not governance');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRY"}
+PASS | 9b governance cancel: U4 / uh cleared, top = 3 | expected ["ok",false,false,3] | actual ["ok",false,false,3] 
+PASS | 9b cancel without a pending upgrade | expected "bounce" | actual "bounce" {"err":"{\"message\":\"no pending upgrade\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":163,\"formula\":\"require($p > $lf, 'no pending upgrade');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRYCEOWSNQ"}
+PASS | 9b voided import h4 bond reclaimable (real output OBOND - FEE) | expected ["ok",198000] | actual ["ok",198000] 
+PASS | 9b h4 from the cancelled image refused | expected "bounce" | actual "bounce" {"err":"{\"message\":\"bad s0\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":91,\"formula\":\"require($d.s0 == sha256('0:' || $Z10 || ',' || $d.ts || ',' || $Z21 || ':' || $pmem || ':' || $d.inp || ':0'), 'bad s"}
+PASS | 9b export h4 chained on m(3) | expected "ok" | actual "ok" 
+PASS | 9b upgrade re-scheduled at 5 (h4 is an export run) | expected "ok" | actual "ok" 
+PASS | 9b import h5 | expected "ok" | actual "ok" 
+PASS | 9b xbind h4 + h5 | expected "ok+ok" | actual "ok+ok" 
+PASS | 9b the re-scheduled upgrade finalizes (lf = 5) | expected ["ok","ok",5] | actual ["ok","ok",5] 
+PASS | 9b cancel after the upgrade finalized | expected "bounce" | actual "bounce" {"err":"{\"message\":\"no pending upgrade\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":163,\"formula\":\"require($p > $lf, 'no pending upgrade');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"YJ7PXFCRK2EFQEZXJEPOTGRRYCEOWSNQ"}
+PASS | 9 rollup-2 holds no outstanding bond (balance >= burned = 0) | expected true | actual true {"balance":304781}
+PASS | rollup balance >= burned (all bonds settled) | expected true | actual true {"balance":0}
+FEES {"submit":{"n":6,"avg":1217,"max":1265},"submit+tps":{"n":6,"avg":32,"max":100},"upgrade":{"n":3,"avg":897,"max":897},"upgrade+tps":{"n":3,"avg":13,"max":28},"xbind":{"n":4,"avg":10469,"max":10469},"xbind+tps":{"n":4,"avg":505,"max":511},"cancel":{"n":1,"avg":849,"max":849},"cancel+tps":{"n":1,"avg":0,"max":0}}
+TPS {"submit":{"n":8,"avg":26,"median":8,"max":100,"max_aa_responses":[1]},"step":{"n":19,"avg":9,"median":2,"max":92,"max_aa_responses":[1]},"finalize":{"n":8,"avg":16,"median":8,"max":80,"max_aa_responses":[1]},"reclaim":{"n":1,"avg":0,"median":0,"max":0,"max_aa_responses":[1]}}
+SUMMARY {"total":43,"pass":43,"fail":0}
+[INFO][headless-wallet-0007] Child exited
+[INFO][headless-wallet-0003] Child exited
+[INFO][headless-wallet-0005] Child exited
+[INFO][obyte-hub-0001] Child exited
+[INFO][headless-wallet-0001] Child exited
+[INFO][obyte-witness-0001] Child exited
+[INFO][headless-wallet-0008] Child exited
+[INFO][headless-wallet-0002] Child exited
+[INFO][obyte-witness-0002] Child exited
+[INFO][headless-wallet-0006] Child exited
+[INFO][genesis-node] Child exited
+[INFO][headless-wallet-0004] Child exited
+RDDONE exit 0
