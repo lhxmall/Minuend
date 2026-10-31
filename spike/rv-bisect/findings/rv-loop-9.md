@@ -106,9 +106,18 @@ gnon:<account_hex> ':' last_nonce
 
 * `snap_digest` = sha256 over the proposal's `weight_snapshot` in key order (`acct_hex ':' weight` joined by ','), so a
   vault can prove a voter's weight with the snapshot it reads elsewhere; `voted` is committed as a count only (the set is
-  bounded by R6-H2's 64 + snapshot).
-* Writers / dirty hooks (guest `engine.rs`, like `meta:`): CreateProposal / Vote / FinalizeProposal → `prop:<id>`;
-  Commit / Reveal / `prune_commits` → `cmt:<hash>` (a pruned commit deletes its leaf); GovWithdraw → `gnon:<acct>`.
+  bounded by R6-H2's 64 + snapshot). **Cost trap found while refining:** the snapshot is immutable after CreateProposal
+  but can hold ~20 000 entries (govcap: 19 999 voters), so re-hashing it whenever `prop:<id>` is dirty (every Vote) costs
+  ~1.6 MB of SHA-256 per vote unit in the guest. The digest must be computed once at creation and cached next to the
+  proposal (a pilot-only field, recomputed on snapshot import, not part of the snapshot format or the state hash), or the
+  leaf commits `|weight_snapshot|` only (weaker: no weight proofs).
+* Writers / dirty hooks (guest @ 95f79e9, every write site of the three maps): `engine.rs` 955
+  (`seen_gov_nonces.insert`, GovWithdraw) → `gnon:<acct>`; 1067–1070 (CreateProposal, `next_proposal_id`), 1091 (Vote,
+  `get_mut`), 1139 (FinalizeProposal, `remove` → delete the leaf) → `prop:<id>`; 1156 (Commit `insert`), 1186 / 1190
+  (Reveal `revealed = true`) → `cmt:<hash>`; `state.rs` 358 (`prune_commits` `retain` → mark every removed hash; it runs
+  in the height hook, so the empty-segment end root must include it, cf. R5-L4); snapshot import (`snapshot.rs` 648 /
+  654 / 665) is covered by `Wit::from_state`. A dirty mark on a unit that is then rolled back is harmless (an unchanged
+  leaf re-puts to the same hash; an absent one is a no-op remove).
   A per-kind dirty set in ChainState (`dirty_props`, `dirty_cmts`, `dirty_gnon`), drained by `Wit::commit_unit` next to
   the account set; `all_leaves` emits the three kinds for scratch roots, snapshot import rebuilds them from state.
 * W2 depth rule (`wit_depth_ok`) new arms: CreateProposal → `prop:<next_id>`, Commit → `cmt:<hash>`, GovWithdraw by an
@@ -119,9 +128,13 @@ gnon:<account_hex> ':' last_nonce
   port-scratch and real-mirror roots per unit as for the other kinds; `proofs` adds membership / absence for the three kinds.
 * Tests: govedge case 9 (each writer flips exactly one leaf; prune deletes `cmt:`), depth8 arms in `govd8`, rv_witproof
   rolltest cases for `prop:` / `cmt:` / `gnon:` membership + absence, snapshot round trip.
+* Harness specifics: `smt_ref::pilot_leaf` gains `prop` / `cmt` / `gnon`; upstream's `seen_gov_nonces` is a HashMap and
+  `Proposal::voted` a HashSet (iterate sorted); `ParamKey` must print as the port's u8.
 * Cost estimate: ~250 lines guest + ~120 harness + tests; all MNWIT1 roots of governance batches change (round-6+ fixtures
-  and JS-guest expectations are recomputed by the harness, not hand-kept); one full suite. Not started in round 9: the VM
-  window left ~2 h with the round-8 suite still owed.
+  and JS-guest expectations are recomputed by the harness, not hand-kept); one full suite (~3–4 h on the shared VM).
+  **Not implemented in round 9** (judgment call): the change touches the guest's per-unit commitment, snapshot import
+  and every differential check, and the VM window left ~2 h with the round-8 suite still running on it — not enough to
+  validate a commitment-format change to this project's standard.
 
 ## Round-9 results (sandbox + InstaBox VM; logs `guest-engine/results-loop8/`, `results-loop9/`)
 
