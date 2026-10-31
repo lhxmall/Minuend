@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.28s
+govwit
+usage: see header
+    Finished `release` profile [optimized] target(s) in 1m 02s
+    Finished `release` profile [optimized] target(s) in 3m 00s
+default-govwit
+{"govwit":"needs the govwit build","ok":0}
+default-govedge
+{"cases":8,"ok":8,"fail":[]}
+default-govfuzz
+{"seeds":30,"match":30,"units":10056,"why":"","coverage":{"commit:0x11":158,"commit:0x13":366,"commit:ok":737,"delisted":17,"final:0x7":213,"final:0xc":134,"final:ok":77,"gdep:0x7":156,"gdep:ok":589,"
+W2DONE

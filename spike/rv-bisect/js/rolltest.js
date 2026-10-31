@@ -547,13 +547,19 @@ groups.l1edges = async () => { const G0 = T.genesis(); const b1 = T.batch(G0, 1)
 groups.witproof = async () => { const K = require('./witkit.js'); const dir = __dirname + '/testdata/proofs/';
   const Hc = (s, enc) => require('crypto').createHash('sha256').update(s).digest(enc);
   const kidJs = l => { const p = l.split(':'); const f = l.startsWith('pos:') ? 3 : 2; return p.length <= f ? l : p.slice(0, f).join(':'); };
-  const synth = (d, seed) => { const leaf = `acct:${Hc('seed' + seed, 'hex')}:${1000 + seed}:0:0`; const kt = Hc('~K1:' + kidJs(leaf), 'hex');
+  const synth = (d, seed, lf) => { const leaf = lf || `acct:${Hc('seed' + seed, 'hex')}:${1000 + seed}:0:0`; const kt = Hc('~K1:' + kidJs(leaf), 'hex');
     const bits = [...kt].map(c => parseInt(c, 16).toString(2).padStart(4, '0')).join(''); let h = Hc('~L1:' + kt + ':' + leaf, 'base64');
     const sib = [...Array(d).keys()].map(i => Hc('sib' + seed + ':' + i, 'base64')); for (let i = d - 1; i >= 0; i--) h = Hc('~N1:' + (bits[i] === '0' ? h + sib[i] : sib[i] + h), 'base64');
     return { root: h, members: [{ leaf, sib: sib.slice().reverse(), depth: d }] }; };
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
   const sets = files.map(f => ({ name: f, ...JSON.parse(fs.readFileSync(dir + f, 'utf8')) }));
   sets.push({ name: 'synth64', ...synth(64, 64) }); sets.push({ name: 'synth65', ...synth(65, 65) });
+  // loop round 9 (R7-L3, feature govwit): the governance leaf kinds -- the Oscript kid rule must record them under
+  // prop:<id> / cmt:<hash> / gnon:<account> (one ':' in each kid), exactly as wit.rs / smt_ref::kid
+  { const X = s => Hc(s, 'hex');
+    sets.push({ name: 'govwit-prop', ...synth(20, 101, `prop:7:${X('creator')}:1:0:1200:5:20005:600000:66666:0:1:3`) });
+    sets.push({ name: 'govwit-cmt', ...synth(21, 102, `cmt:${X('commit')}:${X('acct14')}:${X('unit')}:0:5:1`) });
+    sets.push({ name: 'govwit-gnon', ...synth(22, 103, `gnon:${X('acct10')}:3`) }); }
   const C = new Chain(); let prev = T.genesis(), prevFinal = 'genesis'; const H = [];
   const addHeight = async (rootB64, status, segs) => { const h = H.length + 1; const b = T.batch(prev, h); const m = K.memWithRoot(rootB64, status, {}, segs === undefined ? h : segs);
     const final = ref.H(b.fpc + ':' + b.fregs + ':' + m.root() + ':' + b.inpRoot + ':' + b.steps);
