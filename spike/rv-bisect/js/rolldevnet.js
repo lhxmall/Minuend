@@ -17,7 +17,7 @@ const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 8
 // max_aa_responses per trigger = number of AAs that respond in its chain (one lower bounces 'max_aa_responses N exceeded'):
 // rollup submit / finalize / reclaim, referee mids / pick / direct open, rv_step: 1 (refunds and payouts go to plain
 // addresses); rollup open: 2 (rollup -> referee); referee resolve: 2 (referee -> rollup callback); fwd test AA: 2 (fwd -> rollup)
-const NOMAXR = !!process.env.NOMAXR;
+const NOMAXR = !!process.env.NOMAXR; const ONLY9 = !!process.env.ONLY9;
 const cmdOf = data => ['submit', 'open', 'finalize', 'reclaim', 'mids', 'pick', 'resolve'].find(k => data && data[k] !== undefined) || (data && data.to ? 'fwd' : 'step');
 const MAXR = { submit: 1, finalize: 1, reclaim: 1, mids: 1, pick: 1, step: 1, open: 2, resolve: 2, fwd: 2 };
 const results = []; const rec = (name, expected, actual, extra) => { const pass = JSON.stringify(expected) === JSON.stringify(actual); results.push({ name, expected, actual, pass, ...(extra || {}) }); console.log(pass ? 'PASS' : 'FAIL', '|', name, '| expected', JSON.stringify(expected), '| actual', JSON.stringify(actual), extra ? JSON.stringify(extra) : ''); };
@@ -67,9 +67,9 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     .with.agent({ seg: path.join(__dirname, '../aa/rv_seg_ref.aa') })
     .with.agent({ roll: path.join(__dirname, '../aa/rv_rollup.aa') }).with.agent({ fwd: path.join(__dirname, '../aa/fwd_test.aa') })
     .with.agent({ wbind: path.join(__dirname, '../aa/rv_witbind.aa') }).with.agent({ wproof: path.join(__dirname, '../aa/rv_witproof.aa') })
-    .with.wallet({ op1: 1e12 }).with.wallet({ op2: 1e10 }).with.wallet({ ch1: 1e10 }).with.wallet({ ch2: 1e10 }).with.wallet({ ch3: 1e10 }).with.wallet({ w: 1e10 }).run();
-  const { op1, op2, ch1, ch2, ch3, w } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd, SEG = net.agent.seg, WBIND = net.agent.wbind, WPROOF = net.agent.wproof; ROLLA = ROLL; GAMEA = GAME;
-  const A = { op1: await op1.getAddress(), op2: await op2.getAddress(), ch1: await ch1.getAddress(), ch2: await ch2.getAddress(), ch3: await ch3.getAddress(), w: await w.getAddress() };
+    .with.wallet({ op1: 1e12 }).with.wallet({ op2: 1e10 }).with.wallet({ ch1: 1e10 }).with.wallet({ ch2: 1e10 }).with.wallet({ ch3: 1e10 }).with.wallet({ w: 1e10 }).with.wallet({ gov: 1e10 }).run();
+  const { op1, op2, ch1, ch2, ch3, w, gov } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd, SEG = net.agent.seg, WBIND = net.agent.wbind, WPROOF = net.agent.wproof; ROLLA = ROLL; GAMEA = GAME;
+  const A = { op1: await op1.getAddress(), op2: await op2.getAddress(), ch1: await ch1.getAddress(), ch2: await ch2.getAddress(), ch3: await ch3.getAddress(), w: await w.getAddress(), gov: await gov.getAddress() };
   console.log('MODE', NOMAXR ? 'no max_aa_responses' : 'max_aa_responses set', JSON.stringify({ STEP, GAME, ROLL }));
   rec('deployed rv_step == address baked into the referee', STEP, M.stepAddr); rec('deployed referee == address baked into rv_rollup', GAME, M.gameAddr); rec('deployed rollup == computed address', ROLL, M.addr);
   rec('loop 3: deployed seg referee == address baked into rv_rollup', SEG, M.segAddr); rec('loop 3: deployed witbind / witproof == computed', [WBIND, WPROOF], [WP.bind.addr, WP.proof.addr]);
@@ -89,6 +89,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     }
     return 'unfinished';
   }
+  if (!ONLY9) { // loop round 10: ONLY9=1 runs only section 9 (R9-T1)
   const G0 = T.genesis(); const b1 = T.batch(G0, 1), x1 = T.batch(G0, 7);
   // 1. race tie: two operators submit h1 before the witness stabilizes either unit
   { const ra = await send(op1, ROLL, sub(b1, 1, 'genesis'), OBOND); const rb = await send(op2, ROLL, sub(x1, 1, 'genesis'), OBOND);
@@ -302,6 +303,71 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(w, WPROOF, { prove: 10, leaf: P.members[0].leaf + '1', sib: P.members[0].sib }, 10000, undefined, 1); rec('8c tampered leaf', 'bounce', r.err ? 'bounce' : 'ok');
     r = await trig(w, WPROOF, { prove: 10, leaf: P.members[0].leaf, sib: P.members[0].sib }, 25000, 'prove', 1); rec('8c R3-W4 prove with 25000 refunds 23000 (real output)', ['ok', 23000], [r.err || 'ok', await paidTo(r.response, A.w)]);
     r = await trig(w, WPROOF, { prove: 9, leaf: P.members[0].leaf, sib: P.members[0].sib }, 10000, undefined, 1); rec('8c proof against unbound h9', 'bounce', r.err ? 'bounce' : 'ok'); }
+  } // !ONLY9
+  // ===== 9. loop round 10 (R9-T1): governance on a real devnet. A second rv_rollup instance whose $GOV is a devnet
+  //          wallet (the main one bakes the fixed test address GOVXXX..., which no wallet controls): upgrade -> import ->
+  //          xbind (both digests, ~9 KB proof triggers) -> finalize, then the R9-H1 brick path and governance cancel.
+  //          Memories are synthetic (rolltest `upgrade`): OUT[0x1FFD6] = kind, OUT[0x1FFD8..8] = digest D.
+  { const XK = 0x03F00000 / 4 + 0x1FFD6, Z32 = Array(32).fill(0).join(',');
+    const aa1 = fs.readFileSync(path.join(__dirname, '../aa/rv_rollup.aa'), 'utf8'); const body2 = aa1.split(M.govAddr).join(A.gov);
+    rec('9 rollup-2 definition = rv_rollup.aa with $GOV = the gov wallet', [1, 0], [body2.split(A.gov).length - 1, body2.split(M.govAddr).length - 1]);
+    const dep = await gov.deployAgent(body2); rec('9 rollup-2 deployed by the gov wallet', 'ok', dep.error ? String(dep.error).slice(0, 120) : 'ok');
+    await net.witnessUntilStable(dep.unit); const R2 = dep.address;
+    const memX = (kind, dw, tag) => { const m = new ref.Mem(); m.set(XK, kind); dw.forEach((x, k) => m.set(XK + 2 + k, x)); m.set(0x100, tag); m.root(); return m; };
+    const xb = (m, sid) => ({ xbind: sid, words: [m.get(XK), ...Array.from({ length: 8 }, (_, k) => m.get(XK + 2 + k))], wsib: [m.proof(XK), ...Array.from({ length: 8 }, (_, k) => m.proof(XK + 2 + k))] });
+    const D = Array.from({ length: 8 }, (_, k) => (0x9e3779b9 * (k + 1)) >>> 0);
+    const tsFor = async h => { const v = await vars(R2); const p = h > 1 ? v['t' + v['h' + (h - 1)]] : undefined;
+      for (;;) { const now = Math.floor((await w.getTime()).time / 1000) - 2; const ts = Math.max(now, p === undefined ? 0 : +p + M.minGap); if (ts <= now) return ts; await sleep(500); } };
+    const subX = async (wal, h, pmem, fm, prevFinal, seed, tag) => { const inp = new ref.Mem(); inp.set(0, seed); inp.root(); const steps = 100 + seed, fpc = 2;
+      const ts = await tsFor(h); const s0 = T.s0Of(ts, pmem, inp.root()); const final = ref.H(fpc + ':' + Z32 + ':' + fm.root() + ':' + inp.root() + ':' + steps);
+      const r = await trig(wal, R2, { submit: h, ts, s0, steps, final, inp: inp.root(), fpc, fregs: Z32, fmem: fm.root(), prev: prevFinal, units: 1 }, OBOND, tag); return { ...r, final, fm }; };
+    const G = T.genesis().root(); const UM = memX(0, Array(8).fill(0), 777).root(), UM2 = memX(0, Array(8).fill(0), 778).root();
+    // 9a upgrade -> import -> xbind -> finalize
+    const e1 = await subX(op1, 1, G, memX(1, D, 1), 'genesis', 1, 'submit'); rec('9a export h1 on rollup-2', 'ok', e1.err || 'ok');
+    let r = await trig(op1, R2, { upgrade: 2, mem: UM }); rec('9a upgrade from a non-governance wallet', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(gov, R2, { upgrade: 3, mem: UM }); rec('9a upgrade above top + 1', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(gov, R2, { upgrade: 2, mem: UM }, 10000, 'upgrade'); let v = await vars(R2);
+    rec('9a governance wallet schedules upgrade at 2 (U2 = image, uh = 2)', ['ok', UM, 2], [r.err || 'ok', v.U2, v.uh]);
+    r = await subX(op1, 2, e1.fm.root(), memX(2, D, 2), e1.final, 2); rec('9a h2 chained on the OLD memory refused', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    const i2 = await subX(op1, 2, UM, memX(2, D, 2), e1.final, 2, 'submit'); rec('9a import h2 from the new image', 'ok', i2.err || 'ok');
+    await net.timetravel({ shift: WIN + 's' });
+    r = await trig(w, R2, { finalize: 1 }); rec('9a finalize export h1', 'ok', r.err || 'ok');
+    r = await trig(w, R2, { finalize: 2 }); rec('9a finalize import h2 before xbind', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    const bx = xb(i2.fm, i2.unit); bx.words = bx.words.map((x, k) => k === 4 ? (x ^ 1) >>> 0 : x);
+    r = await trig(w, R2, bx); rec('9a xbind with a flipped digest word', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(w, R2, xb(i2.fm, i2.unit), 10000, 'xbind'); rec('9a xbind import h2 (real 9-word proof trigger)', ['ok', '2:' + D.join(',')], [r.err || 'ok', (await vars(R2))['x' + i2.unit]]);
+    r = await trig(w, R2, xb(i2.fm, i2.unit)); rec('9a xbind twice', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(w, R2, { finalize: 2 }); rec('9a finalize with only the import bound', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(w, R2, xb(e1.fm, e1.unit), 10000, 'xbind'); rec('9a xbind export h1 (after its finalize)', 'ok', r.err || 'ok');
+    r = await trig(w, R2, { finalize: 2 }); v = await vars(R2); rec('9a finalize import h2 (digests equal)', ['ok', 2], [r.err || 'ok', v.lf]);
+    rec('9a finalize pays OBOND - FEE (real output)', OBOND - FEE, await paidTo(r.response, A.op1));
+    r = await trig(gov, R2, { upgrade: 2, mem: UM }); rec('9a upgrade at or below lf', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    // 9b R9-H1 brick path on a real chain: upgrade at 4 while h3 is a normal (kind 0) run; cancel recovers
+    const n3 = await subX(op1, 3, i2.fm.root(), memX(0, D, 3), i2.final, 3, 'submit'); rec('9b normal h3 chained on the import memory', 'ok', n3.err || 'ok');
+    r = await trig(gov, R2, { upgrade: 4, mem: UM2 }, 10000, 'upgrade'); rec('9b governance schedules upgrade at 4 (h3 is not an export)', 'ok', r.err || 'ok');
+    const i4 = await subX(op2, 4, UM2, memX(2, D, 4), n3.final, 4, 'submit'); rec('9b import h4 by op2', 'ok', i4.err || 'ok');
+    await net.timetravel({ shift: WIN + 's' });
+    r = await trig(w, R2, { finalize: 3 }); rec('9b non-export h3 finalizes', 'ok', r.err || 'ok');
+    r = await trig(w, R2, xb(n3.fm, n3.unit)); rec('9b xbind h3 refused (kind 0)', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    await trig(w, R2, xb(i4.fm, i4.unit));
+    r = await trig(w, R2, { finalize: 4 }); rec('9b PoC: import h4 can never finalize', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(gov, R2, { upgrade: 5, mem: UM2 }); rec('9b PoC: re-schedule above the stuck upgrade refused', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(op1, R2, { cancel: 1 }); rec('9b cancel from a non-governance wallet', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(gov, R2, { cancel: 1 }, 10000, 'cancel'); v = await vars(R2);
+    rec('9b governance cancel: U4 / uh cleared, top = 3', ['ok', false, false, 3], [r.err || 'ok', !!v.U4, !!v.uh, v.top]);
+    r = await trig(gov, R2, { cancel: 1 }); rec('9b cancel without a pending upgrade', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(op2, R2, { reclaim: i4.unit }); rec('9b voided import h4 bond reclaimable (real output OBOND - FEE)', ['ok', OBOND - FEE], [r.err || 'ok', await paidTo(r.response, A.op2)]);
+    r = await subX(op1, 4, UM2, memX(2, D, 41), n3.final, 41); rec('9b h4 from the cancelled image refused', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    const x4 = await subX(op1, 4, n3.fm.root(), memX(1, D, 42), n3.final, 42, 'submit'); rec('9b export h4 chained on m(3)', 'ok', x4.err || 'ok');
+    r = await trig(gov, R2, { upgrade: 5, mem: UM2 }, 10000, 'upgrade'); rec('9b upgrade re-scheduled at 5 (h4 is an export run)', 'ok', r.err || 'ok');
+    const i5 = await subX(op1, 5, UM2, memX(2, D, 5), x4.final, 5, 'submit'); rec('9b import h5', 'ok', i5.err || 'ok');
+    await net.timetravel({ shift: WIN + 's' });
+    r = await trig(w, R2, xb(x4.fm, x4.unit), 10000, 'xbind'); const r5 = await trig(w, R2, xb(i5.fm, i5.unit), 10000, 'xbind');
+    rec('9b xbind h4 + h5', 'ok+ok', (r.err || 'ok') + '+' + (r5.err || 'ok'));
+    r = await trig(w, R2, { finalize: 4 }); const f5 = await trig(w, R2, { finalize: 5 }); v = await vars(R2);
+    rec('9b the re-scheduled upgrade finalizes (lf = 5)', ['ok', 'ok', 5], [r.err || 'ok', f5.err || 'ok', v.lf]);
+    r = await trig(gov, R2, { cancel: 1 }); rec('9b cancel after the upgrade finalized', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    rec('9 rollup-2 holds no outstanding bond (balance >= burned = 0)', true, (await bal(R2)) >= 0 && !v.burned, { balance: await bal(R2) }); }
   // 5. accounting: the rollup holds exactly burned + kept FEEs + GB refunds + bounce fees, no bond is outstanding
   { const v = await vars(ROLL); const b = await bal(ROLL); rec('rollup balance >= burned (all bonds settled)', true, b >= (v.burned || 0), { balance: b, burned: v.burned, lf: v.lf, top: v.top }); }
   const avg = a => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
