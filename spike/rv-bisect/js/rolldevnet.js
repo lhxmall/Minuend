@@ -185,7 +185,11 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     rec('6b challenger paid nothing', 0, await paidTo(cb, A.ch2));
     const v = await vars(ROLL); rec('6b h4 live, not fraud', [4, undefined], [v.top, v['f' + sid]]); H4.sid = sid; }
   // 6c. two games on one honest height at once: finalize waits for BOTH
-  { let r = await trig(op1, ROLL, sub(H5, 5, H4.final), OBOND, 'submit'); rec('6c honest h5 by op1', 'ok', r.err || 'ok'); const sid = r.unit;
+  // loop round 12 (R11-M1): h5 comes 1801 + 3601 s after the 6a fraud void, so the global V = 1 still applies: the honest
+  // h5 posts 2 x OBOND (a different height than the void) and gets it back at finalize
+  { const b5 = await bondAt(5); rec('6c R11-M1: global V = 1 -> h5 (never voided) needs 2 x OBOND', 2 * OBOND, b5);
+    let r = await trig(op1, ROLL, sub(H5, 5, H4.final), OBOND); rec('6c R11-M1: h5 with only OBOND', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    r = await trig(op1, ROLL, sub(H5, 5, H4.final), b5, 'submit'); rec('6c honest h5 by op1', 'ok', r.err || 'ok'); const sid = r.unit;
     await net.timetravel({ shift: (WIN - 1800) + 's' });
     const oA = await trig(ch1, ROLL, { open: sid }, CBOND, 'open'), oB = await trig(ch2, ROLL, { open: sid }, CBOND, 'open');
     rec('6c two griefers open on h5', 'ok+ok', (oA.err || 'ok') + '+' + (oB.err || 'ok')); rec('6c open-games counter = 2', 2, (await vars(ROLL))['n' + sid]);
@@ -197,7 +201,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 with game B still open', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
     win = await play(ROLL + oB.unit, H5.roots, T.at(T.batch(H4.mem, 5, { k: 40, mut: T.MUT.pc }), H5.ts).roots, ch2, H5, op1); rec('6c game B -> d', 'd', win);
     rec('6c B pays the operator CBOND - GF - FEE', CBOND - GF - FEE, await paidTo(play.last, A.op1)); rec('6c open-games counter = 0', 0, (await vars(ROLL))['n' + sid] || 0);
-    r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 after both games', 'ok', r.err || 'ok'); rec('6c finalize pays OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
+    r = await trig(w, ROLL, { finalize: 5 }); rec('6c finalize h5 after both games', 'ok', r.err || 'ok'); rec('6c finalize pays the escalated bond - FEE (2 x OBOND - FEE)', b5 - FEE, await paidTo(r.response, A.op1));
     rec('6c lf = 5', 5, (await vars(ROLL)).lf); }
   // 6d. two challengers on one fraudulent height h6 (h7 on top, with a griefer game on it);
   //     first fraud win voids h6..h7, honest h6 is resubmitted, then the late callbacks arrive on the voided heights

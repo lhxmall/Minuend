@@ -94,5 +94,6 @@ Not changed this round (no C/H; this is the trade-off R11-M1 already named, now 
 |---|---|
 | R10-H1 cap mutation (`loop11-mut.sh`, round-11 step) | **7 / 7 killed** (1–2 cap:markets, 3–5 r10:port_events, 6–7 r10:cap_values) — `guest-engine/results-loop11/l11-mut.log` |
 | rolldevnet ONLY10 on the round-12 AAs (`l11go.sh`) | **19 / 19** incl. the two R11-M1 checks (V = 1 → h2 bounces at OBOND with `bond 400000`; one day later V = 0, OBOND) — `guest-engine/results-loop12/l11-rolldevnet10.log` |
-| full rolldevnet on the round-12 AAs | _pending_ (running) |
+| full rolldevnet on the round-12 AAs, first run (`l11-rolldevnet-v1.log`) | 76 PASS / 38 FAIL, exit 1: section 6c submitted h5 at OBOND 1801 + 3601 s after the 6a fraud void — the global V = 1 still applied (`bond 400000`), and every later step cascaded. A test-timeline error (the round-11 script assumed per-height bonds), i.e. the devnet confirms the new rule: 6c now asserts 2 × OBOND for h5 (never voided), the OBOND bounce, and the 2 × OBOND − FEE refund at finalize |
+| full rolldevnet, rerun with 6c adapted (`l12rd.sh` → `l12-rolldevnet.log`) | _pending_ (running) |
 | govwit default (`l11gw.sh`, starts after SUITEDONE of the round-10 govwit suite) | _pending_ |
