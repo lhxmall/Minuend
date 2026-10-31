@@ -72,7 +72,8 @@ account. Host allocator simulation (heapsim, 64-bit sizes).
 | whole state 256 32 256 64 64 | 8 192 (+ 4 096 isolated) | 8 223 | 41.23 MB |
 | whole state 256 64 256 64 64 | 16 384 (+ 8 192 isolated) | 16 447 | **55.24 MB** (> heap) |
 | whole state 256 128 0 64 64 | 32 768 (+ 16 384 isolated) | 127 | **61.36 MB** (> heap) |
-| whole state at the new caps 256 16 32 64 64 | 4 096 | ≤ 512 | _running_ (l10h.log; ≤ the 256-oracle row above) |
+| whole state at the new caps 256 16 32 64 64 | 4 096 (+ 2 048 isolated) | 527 | **27.23 MB** (size-class high-water; peak live 23.04 MB; 1 052 653 snapshot words) — l10h.log |
+| (comparison) 256 32 32 64 64 | 8 192 (+ 4 096 isolated) | 1 055 | 38.69 MB |
 
 ≈ 700 B per position (BTreeMap entry, `pos:` leaf + its MNWIT1 path) and ≈ 390 B per (market, oracle) pair with
 one ring sample (more with the 8-deep ring).
@@ -120,6 +121,6 @@ cycle). Options, each a rule change for the owner:
 | R10-H1 fix, default host (`l10h.sh`, target-l10h-host): govedge (incl. case 9 `r10:oracles`, `cap:markets` at 16) | 9 / 9 |
 | govcap at the new caps (256 PERP ids, 16 markets, 64 proposals / 19 999 voters, 1 024 commits) | 3.55 MB size-class high-water |
 | govfuzz 100 / xfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) · 100 / 100 (33 406 units) |
-| l10h rest: govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | _running_ (l10h.log, HDONE) |
-| govwit full suite (`loop10-suite.sh g`, l10-*) | _running_ (SUITEDONE in l10-bins.txt) |
-| full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | _running_ (74 PASS / 0 FAIL at 18:56 UTC) |
+| l10h rest: govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | **all green** (HDONE; collected round 12): govwit host govedge 9/9, govfuzz 100/100, xfuzz 100/100, govcap 4.03 MB; leaf-flip ok; capcheck 20/20 (cap fired in 20); snaptest 60/60 ok (480 flips: 316 decode to a new digest, the rest are refused); liqedge ok; govgen 31–33 through the JS guest 3/3 (1 005 units, engine + roots match); prodheight 16/16; mktcap at the caps 27.23 MB (`results-loop10/l10h*.log`) |
+| govwit full suite (`loop10-suite.sh g`, l10-*) | partial (round-12 collection): fuzz 300/300, advfuzz 300/300, witfuzz 300/300, segfuzz 300/300, proofs 300 (0 forged), scen 47/47, selftest ok, heapsim ok; robust-limit / guest-poc / liq-snap-cap still running (SUITEDONE pending) |
+| full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | _running_ (186 PASS / 0 FAIL at 19:3x UTC, round-12 collection) |

@@ -1,0 +1,30 @@
+    Finished `release` profile [optimized] target(s) in 2m 18s
+    Finished `release` profile [optimized] target(s) in 3m 34s
+    Finished `release` profile [optimized] target(s) in 1m 03s
+    Finished `release` profile [optimized] target(s) in 1m 04s
+d15e85466e1556749a5f8784cbd4639b87f7304c  /data/hark/target-l10h-host/release/engine-diff
+44046acc704d3fdfcefbf4157e15e40d050494cc  /data/hark/target-l10h-hostgw/release/engine-diff
+e07026764dadc6dfecb8295599efdebdcac185c3  /data/hark/target-l10h-g/riscv32im-unknown-none-elf/release/rvengine
+ccc9ab6cfb6c70bec2af158a06bb9b50014720c0  /data/hark/target-l10h-gprod/riscv32im-unknown-none-elf/release/rvengine
+BUILT
+== /data/hark/target-l10h-host/release/engine-diff
+{"cases":9,"ok":9,"fail":[]}
+{"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":289,"sizeclass_highwater":3545024,"peak_live":3496064,"sum_class_peaks":3544976,"snapshot_words":391905}
+{"seeds":100,"match":100,"units":33490,"why":"","coverage":{"commit:0x11":549,"commit:0x13":1336,"commit:ok":2318,"delisted":54,"final:0x7":659,"final:0xc":512,"final:ok":295,"gdep:0x7":502,"gdep:ok":1878,"gwd:0x13":2,"gwd:0x6":609,"gwd:0x9":456,"gwd:ok":752,"market:0x13":500,"market:0x7":324,"marke
+{"seeds":100,"match":100,"units":33406,"why":"","coverage":{"commit:0x11":541,"commit:0x13":1369,"commit:ok":2314,"delisted":46,"final:0x7":655,"final:0xc":531,"final:ok":273,"gdep:0x7":488,"gdep:ok":1866,"gwd:0x13":3,"gwd:0x6":619,"gwd:0x9":445,"gwd:ok":753,"liq:0x2":41,"liq:0xb":443,"market:0x13":
+== /data/hark/target-l10h-hostgw/release/engine-diff
+{"cases":9,"ok":9,"fail":[]}
+{"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":1377,"sizeclass_highwater":4026176,"peak_live":3829760,"sum_class_peaks":4026128,"snapshot_words":391905}
+{"seeds":100,"match":100,"units":33490,"why":"","coverage":{"commit:0x11":549,"commit:0x13":1336,"commit:ok":2318,"delisted":54,"final:0x7":659,"final:0xc":512,"final:ok":295,"gdep:0x7":502,"gdep:ok":1878,"gwd:0x13":2,"gwd:0x6":609,"gwd:0x9":456,"gwd:ok":752,"market:0x13":500,"market:0x7":324,"marke
+{"seeds":100,"match":100,"units":33406,"why":"","coverage":{"commit:0x11":541,"commit:0x13":1369,"commit:ok":2314,"delisted":46,"final:0x7":655,"final:0xc":531,"final:ok":273,"gdep:0x7":488,"gdep:ok":1866,"gwd:0x13":3,"gwd:0x6":619,"gwd:0x9":445,"gwd:ok":753,"liq:0x2":41,"liq:0xb":443,"market:0x13":
+govwit
+{"govwit":1,"ok":1,"fail":[]}
+{"batches":20,"ok":20,"cap":8,"cap_fired_batches":20,"why":""}
+{"batches":60,"ok":60,"malformed_ok":60,"flips":480,"flips_decoded_new_digest":316,"max_snapshot_words":12986,"why":""}
+{"ok":true,"cases":{"wd_limit":{"match":true,"intent":true},"wd_min":{"match":true,"intent":true},"wd_prune":{"match":true,"intent":true},"stale_peg":{"match":true,"intent":true},"fresh_peg":{"match":true,"intent":true},"band10":{"match":true,"intent":true},"adl_hole":{"match":true,"intent":true},"w
+{"batch":"gov33.bin","units":325,"engine_match":true,"roots_match":true,"steps":16187693,"halted":true}
+{"batches":3,"match":3,"units":1005,"steps":69001113}
+{"checks":16,"pass":16,"ok":true}
+mktcap 256 16 32 64 64 {"accounts":257,"markets":16,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":2048,"marks":16,"positions":4096,"oracles":33,"oracle_reports":527,"history_samples":527,"rejected_ops":0,"why":"{}","leaves":20770,"sizeclass_highwater":27225216,"peak_live":23035072,"sum_class_peaks":27225056,"snapshot_words":1052653,"guest_heap_limit":50200576}
+mktcap 256 32 32 64 64 {"accounts":257,"markets":32,"orders_per_account":64,"withdrawals_per_account":64,"live_orders":16384,"isolated_entries":4096,"marks":32,"positions":8192,"oracles":33,"oracle_reports":1055,"history_samples":1055,"rejected_ops":0,"why":"{}","leaves":24898,"sizeclass_highwater":38691520,"peak_live":32411392,"sum_class_peaks":38691360,"snapshot_words":1151421,"guest_heap_limit":50200576}
+HDONE

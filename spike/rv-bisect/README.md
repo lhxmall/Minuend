@@ -185,3 +185,14 @@ rolltest `stall10` (worst case: the fraudster's puppet wins first every cycle, h
 cycle unchanged (≈ one slow game), fraudster's net cost per cycle 112 000 / 222 000 / 422 000 / 822 000 (bond/2 + GF + FEE,
 ratio → 2); when an honest challenger wins first the fraudster cannot re-submit and the stall ends after one cycle.
 rolltest 400/400; AA mutants `js/aamut-l11.py` 16/16 killed.
+
+## Loop round 12 (2026-11-01) — R11-M1 fixed: global decaying fraud-void counter (rv_rollup rule change)
+
+`findings/rv-loop-12.md`, design §8 item 3. Owner decision (2026-11-01): a **global** fraud-void counter `V` (+1 per fraud
+void at any height, capped at MAXESC = 10; decays by 1 per 86 400 s since the last fraud void, var `Vt`) enters the
+exponent as **bond_h = OBOND × 2^min(max(v_h, V), 10)**. A fraudster that moves up one height per cycle now pays a
+doubling bond too (rolltest `stall11`: 200 000 / 400 000 / 800 000 / 1 600 000, total 3 000 000 vs 800 000 before);
+honest operators post the escalated bond during an attack and get it back in full (− FEE) at finalize / reclaim.
+Upgrade / cancel voids and late results on voided submissions do not count. `rv_rollup` 86 / 1 699.
+Residual R12-M1 (M, owner): at V = 10 every height locks 204.8 M bytes for its window (capital amplification ≈ 2 × heights
+per day vs the attacker's daily burn). rolltest 444/444; AA mutants `js/aamut-l12.py` 26/26 killed.

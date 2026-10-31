@@ -73,6 +73,7 @@ Totals: **C 0 · H 0 · M 0 new (R7-M2 fixed) · L 10 (incl. R7-L3 / R7-L4, four
 | rolldevnet (round-8 AAs, `l8rd.sh`) | **149 / 149** (RDDONE exit 0) |
 | aacost (round-8 AAs) | rv_rollup 69 / 1 536 … as round 7 |
 | liq / snap / cap 300, ora / hbind 300, gov (govedge, govfuzz 300, xfuzz 300, govcap), statecap, depth8 20 + govd8, JS-guest (liq / ora / gov batches, scen, extra, robust, depth8), snapimg + prodheight on the round-8 images, segbig / segrun, prod segguest (PROD=1), witproof e2e, sail, robust-limit, guest-poc | *running* at the loop-round-9 collection (2026-11-01 01:48 CST; VM auto-suspends ~02:58 CST and keeps the processes) — collect with `ROUNDS=8 work/lcollect.sh` after SUITEDONE in `l8-bins.txt` |
+| **round-12 collection** (2026-11-01 ~03:35 CST, suite still in guest-poc; `results-loop8/`) | liqfuzz 300/300 (332 441 units), snaptest 300/300 (2 400 flips), capcheck 50/50 + 20/20, statecap at/over cap 0/7, liqedge ok · ora 300/300 (349 690 units) · robust-limit 1/1 (16 384 units, guest = host) · guest-poc crowd1800 match (642 M steps); remaining guest-poc batches still running — SUITEDONE not yet written |
 
 ---
 

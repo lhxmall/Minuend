@@ -1,0 +1,17 @@
+{"check":"prod run 1 (height 1): empty batch -> engine height 1","ok":true,"status":0,"ev":[],"height":1,"segs":1}
+{"check":"prod run 2: SetHeight 5 refused, engine height = 2","ok":true,"status":0,"ev":[2],"height":2,"segs":2}
+{"check":"prod run 3: SetHeight 4 (= +1) refused too, height 3","ok":true,"status":0,"ev":[2,2],"height":3,"segs":3}
+{"check":"prod run 4: export (height unchanged, segs 4)","ok":true,"status":0,"ev":[],"height":3,"segs":4}
+{"check":"prod run 5: next batch jumps over the export height -> 5","ok":true,"status":0,"ev":[],"height":5,"segs":5}
+{"check":"prod run 6: refused header (bad magic) still counts as a height","ok":true,"status":1,"ev":[],"height":5,"segs":6}
+{"check":"prod run 7: -> height 7","ok":true,"status":0,"ev":[],"height":7,"segs":7}
+{"check":"prod: MNP1 Liquidate refused (no unit id) -> 2","ok":true,"status":0,"ev":[2],"height":8,"segs":8}
+{"check":"prod: MNP2 Liquidate runs past the gate (target has no account -> NotFound 10)","ok":true,"status":0,"ev":[10],"height":9,"segs":9}
+{"check":"prod: SetSeq refused (2), seq unchanged","ok":true,"status":0,"ev":[2],"height":10,"segs":10}
+{"check":"prod: MNP2 governance ops + extension area","ok":true,"status":0,"ev":[19,19,12,9,2],"height":11,"segs":11}
+{"check":"prod: MNP1 governance op needing an extension -> BadAccount 2","ok":true,"status":0,"ev":[2],"height":12,"segs":12}
+{"check":"prod fresh image: refused header at height 1, genesis at height 2 -> height 2","ok":true,"status":0,"ev":[],"height":2,"segs":2}
+{"check":"test image: SetHeight jumps allowed (fixtures), going back refused","ok":true,"status":0,"ev":[1073741824,1073741824,1073741824,2],"height":9,"segs":1}
+{"check":"test image: no binding (height stays 9 in run 2)","ok":true,"status":0,"ev":[],"height":9,"segs":2}
+{"check":"test image: SetSeq fixture allowed (0x40000001), going back refused","ok":true,"status":0,"ev":[1073741825,2],"height":9,"segs":3}
+{"checks":16,"pass":16,"ok":true}

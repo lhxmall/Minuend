@@ -1,0 +1,3 @@
+expect 2b86b814bf2f13a611a19938ade5b7ab07dc1037c5aa64f1842068a485237cec:3104 ac13d809f9abf7cd32556839e037817e008c3bb75539631b177404411c49aa0e:5483
+    Finished `release` profile [optimized] target(s) in 1m 13s
+    Finished `release` profile [optimized] target(s) in 1m 17s

@@ -1,0 +1,8 @@
+mut 1 [BatchOp::CreateMarket { .. } => true,] govedge {"cases":9,"ok":0,"fail":["cap:markets","cap:not_early"]} -> KILLED by govedge
+mut 2 [BatchOp::CreateMarket { .. } => s.markets.len() <= MAX_STATE_MARKETS,] govedge {"cases":9,"ok":0,"fail":["cap:markets","cap:not_early"]} -> KILLED by govedge
+mut 3 [BatchOp::Stake { .. } => true,] govedge {"cases":9,"ok":0,"fail":["r10:port_events","r10: diff engine: hash false applied 60/61 first_ev Some(59) real Some(19) port Some(2147483648)"]} -> KILLED by govedge
+mut 4 [BatchOp::Stake { .. } => s.oracle_bonds.len() < MAX_STATE_ORACLES,] govedge {"cases":9,"ok":0,"fail":["r10:port_events","r10: diff engine: hash true applied 60/60 first_ev Some(61) real Some(14) port Some(19)"]} -> KILLED by govedge
+mut 5 [BatchOp::Stake { .. } => s.oracle_bonds.contains_key(&author) || s.oracle_bonds.len() <= M] govedge {"cases":9,"ok":0,"fail":["r10:port_events","r10: diff engine: hash false applied 60/61 first_ev Some(59) real Some(19) port Some(2147483648)"]} -> KILLED by govedge
+mut 6 [pub const MAX_STATE_MARKETS: usize = 32;] govedge {"cases":9,"ok":0,"fail":["r10:cap_values"]} -> KILLED by govedge
+mut 7 [pub const MAX_STATE_ORACLES: usize = 64;] govedge {"cases":9,"ok":0,"fail":["r10:cap_values"]} -> KILLED by govedge
+MUTDONE

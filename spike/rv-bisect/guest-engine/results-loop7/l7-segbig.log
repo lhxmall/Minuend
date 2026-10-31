@@ -1,0 +1,2 @@
+{"ops":20228,"words":162052}
+./loop7-suite.sh: line 42: 823426 Killed                  $B segrun $W/poc/big20k.bin 16384

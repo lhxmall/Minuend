@@ -1,14 +1,13 @@
 # rv loop round 11 — R10-M1 fix (escalating bond + winner priority), cap mutation, govwit default, review (2026-11-01)
 
-Branch `spike/rv-bisect`, parent 6831c2d. Status: **DRAFT** (box steps pending at the time of writing; see
-work/rv-rollup-notes.md "Loop round 11" for what ran where).
+Branch `spike/rv-bisect`, parent 6831c2d. Status: **FINAL** for the sandbox work (closed in round 12; govwit-default box run tracked in rv-loop-12.md).
 
 ## Summary
 
 | id | sev | where | what | status |
 |---|---|---|---|---|
 | R10-M1 | M | rv_rollup economics | stall for OBOND per slow game by re-submitting a fraudulent h | **fixed** (owner decision 2026-11-01): escalating bond per height + 1800 s winner priority |
-| R11-M1 | M | rv_rollup economics | the per-height escalation does not cover a fraudster that moves up one height per cycle: throughput ≤ 1 height per slow game for OBOND per cycle (rolltest `stall11`) | **open** (design option below; owner decision) |
+| R11-M1 | M | rv_rollup economics | the per-height escalation does not cover a fraudster that moves up one height per cycle: throughput ≤ 1 height per slow game for OBOND per cycle (rolltest `stall11`) | **fixed in round 12** (global decaying counter adopted, `findings/rv-loop-12.md`) |
 | R11-L1 | L | rv_rollup economics | the bond cap 2^10 × OBOND = 204 800 000 bytes must be posted by whoever re-submits h after 10 fraud voids (the honest party too; returned at finalize) — a liveness requirement on honest capital | accepted (documented) |
 | R11-L2 | L | rv_rollup | the priority window binds h for PRIO even when the winner never submits (puppet case): +1800 s per cycle on top of the game | accepted |
 | R11-I1 | I | port (upstream verbatim) | `apply_slash` removes the target's report / history in the slashed market only; its reports in the other markets stay (filtered by `oracle_bonds` when read, revived if the id re-stakes). Bounded: keys are (market, oracle id), oracle ids need a PERP ledger entry (≤ 256), markets ≤ 16 → already inside the R10-H1 measurement `mktcap 256 16 256` (28.55 MB). No fix in the pilot. | info |
@@ -74,6 +73,6 @@ in the state block, both after it).
 | rolltest (sandbox ocore, all groups incl. `stall10` rewritten, `stall11`) | 415 / 415 |
 | AA mutants `js/aamut-l11.py` (bond formula, cap, priority check / boundary / PRIO, refund, payouts, b / v / p state writes, burned) | 16 / 16 killed |
 | aacost | rv_rollup 82 / 1 663; others unchanged |
-| R10-H1 cap mutants (`loop11-mut.sh`, box) | _pending_ |
+| R10-H1 cap mutants (`loop11-mut.sh`, box, run in round 12) | **7 / 7 killed** (`guest-engine/results-loop11/l11-mut.log`) |
 | govwit default (step 2) | _pending_ (needs l10 suite + l10h green) |
-| collection rounds 7 / 8 / 10 | _pending_ (box suspended) |
+| collection rounds 7 / 8 / 10 | done in round 12 (see rv-loop-12 / notes) |
