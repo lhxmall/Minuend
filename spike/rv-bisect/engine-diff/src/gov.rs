@@ -1000,7 +1000,10 @@ pub fn govedge() -> String {
         g.op(GB::w_gwd(11 + fresh_n + 1, 5, 1)); // loop round 7: a gov withdraw > 0 by a new id at the cap -> 19
         g.op(GB::w_prop(10, 1, 0, 1200));
         let z0 = g.ops.len();
-        let zcap = g.eng.state.proposals[&1].weight_snapshot.len() + mnpilot::MAX_ZERO_VOTERS;
+        // the cap counts the PORT's snapshot: the real engine (no caps) also holds the id whose gov deposit the
+        // port's ledger cap refused (cap:perp), so its snapshot is one entry larger (loop round 7 fix: test bug)
+        let capped = g.ids[(11 + fresh_n) as usize];
+        let zcap = g.eng.state.proposals[&1].weight_snapshot.keys().filter(|a| **a != capped).count() + mnpilot::MAX_ZERO_VOTERS;
         for k in 0..=zcap as u32 {
             g.op(GB::w_vote(300 + k, 1, true));
         }
