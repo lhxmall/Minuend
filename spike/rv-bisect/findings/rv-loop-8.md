@@ -68,7 +68,7 @@ Totals: **C 0 · H 0 · M 0 new (R7-M2 fixed) · L 10 (incl. R7-L3 / R7-L4, four
 | R8-L4 (round 9): `govd8` on the depth8 build; round-7 mutant 6 | 2 / 2; mutant 6 **killed** → R8-L4 closed (rv-loop-9 item 3) |
 | fuzz 300 / advfuzz 300 / witfuzz 300 / segfuzz 300 | 300 / 300 each (witfuzz 112 794 units compared; segfuzz 12 621 segments) |
 | proofs 300 / scen host / selftest + depthsel (64 and 8) | 0 / 829 291 forged (177 087 memberships, 61 540 absences) · 47 / 47 · clean |
-| heapsim (crowd / gen / adv / frag / limit batches) | sizeclass high-water ≤ 5.96 MB (frag, 16 384 units) vs guest heap limit 50.2 MB |
+| heapsim (crowd / gen / adv / frag / limit batches) | sizeclass high-water ≤ 19.2 MB (crowdmax; max over the batches, as round 7) vs guest heap limit 50.2 MB |
 | rolltest on the box ocore (round-8 AAs = round 7, `l9rt.sh`) | 333 / 333 |
 | rolldevnet (round-8 AAs, `l8rd.sh`) | **149 / 149** (RDDONE exit 0) |
 | aacost (round-8 AAs) | rv_rollup 69 / 1 536 … as round 7 |
