@@ -59,7 +59,13 @@ Each height can only start its 24 h window after the previous fraud at that heig
 Precondition: the fraudster wins the top+1 race once per cycle (it races honest operators' submits of the next height;
 MCI order decides). Option (owner decision, not implemented): a **global** fraud-void counter with time decay
 (`V` = voids, −1 per 24 h) entering the exponent as `max(v_h, V)`: the attack becomes geometric across heights; cost:
-during an attack honest operators post the escalated bond too (returned at finalize). Est. +40–60 ops.
+during an attack honest operators post the escalated bond too (returned at finalize). **Prototyped, not adopted:**
+`findings/r11m1-option.patch` (rv_rollup `V` / `Vt`, VDECAY 86 400 s; rolltest `bondFor` honours it under `R11OPT=1`):
+rv_rollup 86 / 1 697; rolltest 410 / 415 with only the five `stall11` PoC assertions failing as intended — the moving-height
+fraudster now posts 200 000 / 400 000 / 800 000 / 1 600 000 (cost 3 000 000 for 4 cycles instead of 800 000)
+(`findings/r11m1-option-rolltest.log`). Pitfall found while prototyping: Oscript locals defined before `$now = timestamp`
+read it as false/0 — the decay term must come after `$now` (the adopted code only uses `$now` in the submit branch and
+in the state block, both after it).
 
 ## Tests this round
 

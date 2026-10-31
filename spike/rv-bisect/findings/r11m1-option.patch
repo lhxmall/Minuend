@@ -1,0 +1,64 @@
+diff --git a/spike/rv-bisect/aa/rv_rollup.oscript b/spike/rv-bisect/aa/rv_rollup.oscript
+index d5158e5..e827b47 100644
+--- a/spike/rv-bisect/aa/rv_rollup.oscript
++++ b/spike/rv-bisect/aa/rv_rollup.oscript
+@@ -46,6 +46,12 @@ $d = exists(trigger.data.xbind) ? {} : trigger.data;
+ $now = timestamp;
+ $top = var['top'] OTHERWISE 0;       // highest live height
+ $lf = var['lf'] OTHERWISE 0;         // last finalized height
++// R11-M1 option (NOT adopted): a global fraud-void counter V, decaying by 1 per VDECAY s since the last void (var Vt),
++// enters the exponent as max(v_h, V): a fraudster moving up one height per cycle also pays a doubling bond.
++$VDECAY = 86400;
++$Vdec = floor(($now - (var['Vt'] OTHERWISE 0)) / $VDECAY);
++$Vraw = var['V'] OTHERWISE 0;
++$Vnow = $Vraw > $Vdec ? $Vraw - $Vdec : 0;
+ $isR = $x => typeof($x) == 'string' AND length($x) == 44 AND substring($x, 43) == '=' AND !contains($x, ':') AND !contains($x, ',');
+ // submission s<sid> = h:operator:final_root:submitted_at:steps:s0:input_root:prev_root ; sid = submit unit
+ // a submission is live while it is the current winner of its height and that height is not voided (h <= top)
+@@ -84,7 +90,9 @@ else if ($d.submit) {
+ 	require($h > $top, 'height taken');
+ 	require($h == $top + 1, 'gap: next height is ' || ($top + 1));
+ 	$paid = trigger.output[[asset=base]];
+-	$bond = $OBOND * 2^min(var['v' || $h] OTHERWISE 0, $MAXESC);   // loop round 11 (R10-M1)
++	$vh = var['v' || $h] OTHERWISE 0;
++	$ex = $vh > $Vnow ? $vh : $Vnow;
++	$bond = $OBOND * 2^min($ex, $MAXESC);   // loop round 11 (R10-M1)
+ 	require($paid >= $bond, 'bond ' || $bond);
+ 	$pw = split(var['p' || $h] OTHERWISE '', ':');
+ 	require(length($pw) != 2 OR $now >= +$pw[1] OR trigger.address == $pw[0], 'priority: ' || $pw[0]);
+diff --git a/spike/rv-bisect/js/mkrollup.js b/spike/rv-bisect/js/mkrollup.js
+index 91b3f3e..fbafd96 100644
+--- a/spike/rv-bisect/js/mkrollup.js
++++ b/spike/rv-bisect/js/mkrollup.js
+@@ -54,7 +54,9 @@ const state=`
+ 		if ($st.first) var['burned'] += $st.bd - $st.bd / 2;
+ 		if ($st.void) {
+ 			var['top'] = $st.h - 1;
+-			var['v' || $st.h] += 1;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
++			var['v' || $st.h] += 1;
++			var['V'] = $Vnow + 1;   // R11-M1 option
++			var['Vt'] = $now;   // loop round 11 (R10-M1): the next submission of h posts twice the bond
+ 			var['p' || $st.h] = $g[1] || ':' || ($now + $PRIO);   // ... and only this winner may submit h for PRIO s
+ 		}
+ 		response['result'] = $d.w;
+diff --git a/spike/rv-bisect/js/rolltest.js b/spike/rv-bisect/js/rolltest.js
+index bbde32d..07ff8ac 100644
+--- a/spike/rv-bisect/js/rolltest.js
++++ b/spike/rv-bisect/js/rolltest.js
+@@ -36,7 +36,7 @@ const cloneDeepSV = sv => { const o = {}; for (const a in sv) { o[a] = {}; for (
+ const subRec = (C, tr, sid) => { const r = String(C.r('s' + sid)).split(':'); return r.length === 8 && r[2] === tr.final && +r[4] === tr.steps && r[5] === tr.s0 ? C.r('s' + sid) : 'different'; };
+ const subData = (tr, h, prev, o = {}) => ({ __tr: tr, __o: o, submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o }); // units: loop round 3 (layer 1)
+ // loop round 11 (R10-M1): the bond the next submission of h must post = OBOND * 2^min(fraud voids at h, MAXESC)
+-const bondFor = (C, h) => OBOND * 2 ** Math.min(+(C.r('v' + h) || 0), MAXESC);
++const bondFor = (C, h) => { const V = Math.max(0, +(C.r('V') || 0) - Math.floor((C.ts - +(C.r('Vt') || 0)) / 86400)); return OBOND * 2 ** Math.min(Math.max(+(C.r('v' + h) || 0), process.env.R11OPT ? V : 0), MAXESC); };
+ async function submit(C, op, h, tr, prev, o) { const r = await S(C, op, ROLL, Number.isInteger(h) && h >= 1 ? bondFor(C, h) : OBOND, subData(tr, h, prev, o)); if (!r.err) { tr.sid = r.unit; tr.h = h; tr.op = op; } return r; }
+ async function open(C, ch, sid) { const r = await S(C, ch, ROLL, CBOND, { open: sid }); return r.err ? r : { ...r, gid: ROLL + r.unit, ref: r.unit, ch }; }
+ const gv = (C, gid) => String(C.v(GAME, 'g_' + gid) || '');
+@@ -182,6 +182,7 @@ groups.fraud = async () => { const C = new Chain(); const G0 = T.genesis(); cons
+   // race restarts at h2
+   const n2a = h2, n2b = T.batch(b1.mem, 12);
+   // loop round 11 (R10-M1): v2 = 1, the winner CH1 holds h2 for PRIO s, the next h2 posts 2 x OBOND
++  if (process.env.DBG) console.log('DBG', C.r('V'), C.r('Vt'), C.ts);
+   rec('fraud', 'R10-M1: v2 = 1, priority p2 = CH1 until now + PRIO', [1, CH1], [+C.r('v2'), String(C.r('p2')).split(':')[0]]);
+   r = await submit(C, OP3, 2, n2b, b1.final); rec('fraud', 'R10-M1: another address inside the priority window', 'bounce', bnc(r, /priority/));
+   r = await S(C, OP3, ROLL, 2 * OBOND - 1, subData(T.batch(b1.mem, 12), 2, b1.final)); rec('fraud', 'R10-M1: bond 2 x OBOND - 1', 'bounce', bnc(r, /bond 400000|priority/));

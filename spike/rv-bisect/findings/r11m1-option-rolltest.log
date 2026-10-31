@@ -1,0 +1,16 @@
+PASS stall moving height (R11-M1) | cycle 0: fraudster wins the race for h1 at the base bond | expected ["accepted",200000] | actual ["accepted",200000] 
+PASS stall moving height (R11-M1) | cycle 0: fraud proven, h1 voided | expected ["c",0] | actual ["c",0] 
+PASS stall moving height (R11-M1) | cycle 0: the winner re-submits the honest h1 | expected "accepted" | actual "accepted" 
+FAIL stall moving height (R11-M1) | cycle 1: fraudster wins the race for h2 at the base bond | expected ["accepted",200000] | actual ["accepted",400000] 
+PASS stall moving height (R11-M1) | cycle 1: fraud proven, h2 voided | expected ["c",1] | actual ["c",1] 
+PASS stall moving height (R11-M1) | cycle 1: the winner re-submits the honest h2 | expected "accepted" | actual "accepted" 
+FAIL stall moving height (R11-M1) | cycle 2: fraudster wins the race for h3 at the base bond | expected ["accepted",200000] | actual ["accepted",800000] 
+PASS stall moving height (R11-M1) | cycle 2: fraud proven, h3 voided | expected ["c",2] | actual ["c",2] 
+PASS stall moving height (R11-M1) | cycle 2: the winner re-submits the honest h3 | expected "accepted" | actual "accepted" 
+FAIL stall moving height (R11-M1) | cycle 3: fraudster wins the race for h4 at the base bond | expected ["accepted",200000] | actual ["accepted",1600000] 
+PASS stall moving height (R11-M1) | cycle 3: fraud proven, h4 voided | expected ["c",3] | actual ["c",3] 
+PASS stall moving height (R11-M1) | cycle 3: the winner re-submits the honest h4 | expected "accepted" | actual "accepted" 
+FAIL stall moving height (R11-M1) | every fraud posted only OBOND (no escalation across heights) | expected true | actual false {"bonds":[200000,400000,800000,1600000]}
+PASS stall moving height (R11-M1) | honest heights enter their 24 h window one game apart (throughput <= 1 height per slow game) | expected true | actual true {"hoursPerHeight":[3.08,3.08,3.08,3.08]}
+FAIL stall moving height (R11-M1) | fraudster cost per cycle = OBOND (no puppet) | expected 800000 | actual 3000000 
+SUMMARY {"total":415,"pass":410,"fail":5}
