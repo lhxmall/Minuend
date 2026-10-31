@@ -731,7 +731,7 @@ impl Engine {
     /// counted net of the escrow they still carry (`margin_left`), so a
     /// placement-time reduce (escrow 0) that later opens is reserved here
     /// and blocks withdrawing the cash it would need.
-    fn resting_open_im(&self, account: AccountId) -> Usd {
+    pub fn resting_open_im(&self, account: AccountId) -> Usd {
         let mut total: Usd = 0;
         for (market, book) in &self.state.books {
             let params = self.state.market_params(*market);

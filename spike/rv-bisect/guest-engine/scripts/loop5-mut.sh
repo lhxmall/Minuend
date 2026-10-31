@@ -1,6 +1,6 @@
 #!/bin/bash
 # Loop round 5 mutation test (= loop4-mut.sh, patterns updated for round 5, + round-5 mutants 59.., + checks orafuzz 20 300,
-# hbind 20 300, snapcap; liqfuzz also runs every batch as MNP2). Original round-4 header:
+# hbind 20 300, snapcap, liqedge; liqfuzz also runs every batch as MNP2). Original round-4 header:
 # Loop round 4 mutation test: loop-4 mutants first (Accounts guard / holders index, liquidate / ADL / keeper /
 # withdraw / report ports, SetHeight prune, session account cap, import lock), then the loop-3 survivors and the
 # loop-3 list (patterns updated for round 4). Checks per mutant: loop3-mut.sh's set plus
@@ -141,7 +141,7 @@ PY
   sk=$($B snapcap 2>/dev/null | tail -1 | sed 's/.*"ok":\([a-z]*\).*/\1/')
   le=$($B liqedge 2>/dev/null | grep -c '"ok":true')
   pk=ok; echo "$pf" | grep -q '"membership_bad":0,.*"absence_bad":0,.*"forged":0,' || pk=BAD
-  k=no; { [ "$fz" != 100 ] || [ "$sc" != 47 ] || [ "$wf" != 30 ] || [ "$af" != 30 ] || [ "$stf" != '{"selftest_fail":[]}' ] || [ "$pk" != ok ] || [ "$d8" != 5 ] || [ "$sf" != 30 ] || [ "$lq" != 30 ] || [ "$sn" != 20 ] || [ "$cc" != 10 ] || [ "$le" != 1 ]; } && k=KILLED
-  echo "mut $i [$f: ${to:0:70}] fuzz $fz/100 scen $sc/47 witfuzz $wf/30 advfuzz $af/30 selftest $stf proofs $pk depth8 $d8/5 segfuzz $sf/30 liqfuzz $lq/30 snaptest $sn/20 capcheck $cc/10 liqedge $le/1 -> $k" >> $LOG
+  k=no; { [ "$fz" != 100 ] || [ "$sc" != 47 ] || [ "$wf" != 30 ] || [ "$af" != 30 ] || [ "$stf" != '{"selftest_fail":[]}' ] || [ "$pk" != ok ] || [ "$d8" != 5 ] || [ "$sf" != 30 ] || [ "$lq" != 30 ] || [ "$sn" != 20 ] || [ "$cc" != 10 ] || [ "$le" != 1 ] || [ "$of" != 20 ] || [ "$hb" != 20 ] || [ "$sk" != true ]; } && k=KILLED
+  echo "mut $i [$f: ${to:0:70}] fuzz $fz/100 scen $sc/47 witfuzz $wf/30 advfuzz $af/30 selftest $stf proofs $pk depth8 $d8/5 segfuzz $sf/30 liqfuzz $lq/30 snaptest $sn/20 capcheck $cc/10 liqedge $le/1 orafuzz $of/20 hbind $hb/20 snapcap $sk -> $k" >> $LOG
 done
 echo DONE >> $LOG

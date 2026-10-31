@@ -422,6 +422,21 @@ pub fn liqedge() -> String {
         g.apply([7 | (4 << 8), 11, 0, 0, 0, 0, 0, 1]);
         vec![(g.ops.len() - 1, EV_APPLIED | 1)]
     });
+    // loop round 5 (round-4 survivor 6): withdraw down to exactly the IM reserved by resting orders
+    // (equity == resting) is accepted; one micro-USD more is refused (Insufficient)
+    case("wd_equity", &|g| {
+        let (m, qs) = (100_000 * DOLLAR, QTY_SCALE);
+        for a in [8u32, 9] {
+            let c = g.next_cseq(a);
+            g.apply([2 | (a << 8), 0, (m / 2) as u32, ((m / 2) >> 32) as u32, qs as u32, (qs >> 32) as u32, c as u32, 1]);
+        }
+        let r = g.eng.resting_open_im(g.ids[9]);
+        let col = g.eng.state.accounts[&g.ids[9]].collateral;
+        g.apply(wd(9, (col - r) as i64, 1));
+        let i = g.ops.len() - 1;
+        g.apply(wd(8, (col - r + 1) as i64, 1));
+        vec![(i, EV_APPLIED), (i + 1, reason_code_of(mnpilot::engine::RejectReason::Insufficient))]
+    });
     format!("{{\"ok\":{},\"cases\":{{{}}}}}", all, res.join(","))
 }
 fn reason_code_of(r: mnpilot::engine::RejectReason) -> u32 {

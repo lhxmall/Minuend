@@ -31,7 +31,100 @@ Severity as in rounds 1–4: **C** = honest party loses / wrong verdict on reach
 guest outcome, or a protocol-reachable state loss / halt; **M** = design/spec gap with a concrete failure mode or a
 defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
 
-FINDINGS_TABLE_5
+Totals: **C 0 · H 0 · M 2 · L 6 · I 6** (round-5 review) — plus the round-4 open items closed or reduced in this round:
+R4-M2 fixed, R4-M4 fixed, R4-L4 fixed, R4-M3 partially ported. No real-engine ↔ port divergence (fuzz / advfuzz /
+witfuzz / scen / segfuzz / liqfuzz incl. MNP2 / orafuzz / hbind all equal after the changes).
+
+| id | sev | area | title | status |
+|---|---|---|---|---|
+| R4-M2 | M | port / liquidation | liquidation order id from unit id 0, taker masked in the event log | **fixed**: MNP2 unit-id table; `liqfuzz` runs every batch as MNP2 too (unmasked real vs port); `prod` refuses an MNP1 Liquidate (`prodheight.js`) |
+| R4-M4 | M | height binding | engine height not bound to the rollup height (operator decides whether a segment carries SetHeight) | **fixed**: guest run counter = rollup height, batch-commit hook at every batch run (prod), SetHeight refused; `rv_witbind` proves OUT segs == h; `hbind` + `prodheight.js` |
+| R4-L4 | L | Accounts guard | derived index fields `pub` | **fixed**: private, read accessors |
+| R4-M3 | M | port coverage | oracle stake / unstake / slash, governance, commit-reveal not ported | **partially fixed**: stake / unstake / slash + PERP ledger + unbonding release ported and differential-tested (`orafuzz`); GovDeposit (PERP comes from a fixture), governance ops and commit-reveal still open |
+| R5-M1 | M | rv_rollup / upgrade | re-scheduling an upgrade at an earlier height left the later `U<h'>` in place: height h' would again start from the old image, whose compiled-in import digest can never equal the new export at h'−1, so h' never finalizes (rollup halt until governance notices and re-schedules h' as well) | **fixed**: at most one pending upgrade (`uh`); re-scheduling at the same or an earlier height clears the old `U<uh>`; a later upgrade is refused while one is pending. rolltest `upgrade` +6 checks (33 / 33) |
+| R5-M2 | M | design / clock | with R4-M4 the engine clock is the rollup height — and the operator still sets the pace: heights can be submitted back to back (each locks OBOND for the 24 h window, nothing enforces spacing), so feeds can be aged past the 32-height staleness in minutes and a 14 400-height funding-peg interval costs 14 400 × OBOND locked for a day | documented (same trust as upstream, where the sequencer's batch cadence is the clock); options: minimum wall-clock spacing per height in rv_rollup, or a timestamp per height bound into the input and checked by the guest |
+| R5-L1 | L | MNP2 | unit ids are operator input, not checked against the unit (the pilot verifies no signatures: the whole op table is operator input until a DA / signature layer exists); a zero or duplicated id only changes the id of an IOC liquidation order, which is never stored | documented |
+| R5-L2 | L | upgrade | upgrades at h and h+1 cannot both finalize (h+1 needs an export at h, which is an import run) | documented; with R5-M1 a second upgrade waits until the first is finalized anyway |
+| R5-L3 | L | heap bound | PERP-only ids (a slash reward to a fresh challenger) are outside the account cap | documented: bounded today (≤ one new id per successful slash, ≤ bonds ever created; no GovDeposit port); production with GovDeposit must count them |
+| R5-L4 | L | height hook | the batch-commit hook ran before the start root but its effects (an unbonding release changes an `acct:` leaf) reached a root only with the next unit: the end root of an empty segment — the `W<h>` rv_witbind binds — showed the pre-release PERP balance | **fixed**: the witness is committed right after the hook; `hbind` checks end root == scratch root for every segment incl. empty ones |
+| R5-L5 | L | height semantics | upstream units of batch N run at height N−1 (hook at commit); the pilot's units of rollup height h run at engine height h (hook at segment start) | documented: a constant offset, identical in port and harness |
+| R5-L6 | L | tests | round-4 mutation survivors (see the round-4 table): equivalent 11, 21, 23, 24; reachable but not killed 35 (liquidatable boundary), 37 (ADL counterparty with negative collateral), 52 (host reference absence check) | 4, 5, 6, 9, 10, 13, 15, 17, 18, 27, 32 now killed (liqedge incl. new `wd_equity`, capcheck fire rule, snaptest trailing word, snapcap, segfuzz segs check); see the round-5 mutation table |
+| R5-I1 | I | run counter | does RUNS stay equal to the rollup height through refused headers, exports, imports, NEED_IMPORT runs and a refused first header? | yes: `prodheight.js` (export jump, refused header counts, fresh image genesis at height 2) and `snapguest` (import = run) |
+| R5-I2 | I | segment chain | does the hook break start(h) = end(h−1)? | no: the start root is taken before the hook; `segfuzz` / `hbind` |
+| R5-I3 | I | MNP2 bounds | can the unit-id table index reach the input trap range? | no: 4 + 8·(MAX_ACCOUNTS + 2·MAX_UNITS) < 2^24 (const assert); a truncated table reads 0 |
+| R5-I4 | I | slash port | does the port match upstream on stake / unstake / slash / release, incl. PERP-only `acct:` leaves? | yes: `orafuzz` (hash, events, per-unit roots, snapshot v2 round trip) |
+| R5-I5 | I | R4-L4 | any writer of the indexes outside the guard? | no: the fields are private now (compiler-enforced) |
+| R5-I6 | I | witbind × import | is an upgrade height still bindable with the counter proof? | yes: the import run sets segs = h (export h−1 + 1) |
+
+---
+
+## R5-M1 (M) — stale upgrade image after re-scheduling (PoC + fix)
+
+PoC (rolltest `upgrade`, old rv_rollup): heights 1..3 live, governance `upgrade 4` (U4 = image A, top = 3), then
+governance `upgrade 3` (U3 = image B, top = 2). U4 is still set. After the import at 3 from B, the honest operator submits
+height 4 chained on m(3): `bad s0` — rv_rollup insists that s0(4) starts from U4 = image A. The only accepted height-4
+submission runs image A, an upgrade image that refuses every batch until it imports, and whose compiled-in digest names
+the export governance chose for the *first* schedule: the export at height 3 can no longer produce it, so height 4 never
+finalizes and every height above it waits. Nothing in the AA tells governance that a stale U4 exists.
+
+Fix: `var uh` = the one pending upgrade height. `upgrade h` requires `uh <= lf` (nothing pending) or `h <= uh`; when it
+replaces a pending one at another height it clears `U<uh>`. Checks: "upgrade height 4 scheduled", "re-scheduled earlier
+at height 3", "the stale U4 is cleared", "height 4 chains on m(3)", "a second upgrade above the pending one refused".
+
+## R5-M2 (M) — the operator sets the clock's pace
+
+R4-M4 removes the operator's *choice* (the engine height is now exactly the rollup height), not its *pace*. rv_rollup
+lets height h+1 be submitted as soon as h is (each submission chains on the previous final root, finalization comes
+later), so an operator — or a coalition of operators racing honestly — can advance the engine clock as fast as it can
+post units, paying only OBOND per height, locked for one window. Effects: external funding prints go stale after 32
+heights, a funding peg interval is 14 400 heights, the withdrawal replay window 2 048 heights, unbonding 256 heights.
+Upstream has the same property (batches are its only clock). Recommendation for a production design: bind a timestamp
+per height (rv_rollup `timestamp` at submit, carried into the input and checked by the guest), or enforce a minimum
+spacing between submissions.
+
+## R5-L4 (L) — hook effects in empty segments
+
+With the oracle port the batch-commit hook can change committed state (an unbonding that ends returns its bond to the
+reporter's PERP balance: its `acct:` leaf). The hook ran before the first unit, the MNWIT1 tree was committed only after
+units, so a height whose batch had no unit ended with end root = start root while the state had changed. Fix: commit
+right after the hook (the start root is still taken before it, so start(h) = end(h−1) holds). `hbind` now inserts empty
+segments and checks every segment's end root against a from-scratch root of the port state.
+
+## R4-M2 — MNP2
+
+```
+MNP2 = MAGIC2 "MNP2" | n_accounts | n_ops | flags | accounts (8 words each) | ops (8 words each) | unit ids (8 words each)
+```
+
+The unit id is read only by `Liquidate` (`liq_order_id(uid)`: the IOC order's id, which appears as the taker id of the
+fill in the event log). The real-engine harness signs every op as a unit in a linear chain; its unit ids are the ones
+`to_v2` writes, and `run_real_eng_h` asserts the table entries equal them. `liqfuzz`: every seed is compared as MNP1
+(masked) and as MNP2 (unmasked), plus state hash MNP1 == MNP2 (the id is not state).
+
+## R4-M4 — engine height = rollup height
+
+```
+guest run (main.rs)      RUNS += 1 (unless dead); a live session's segs := RUNS - 1, the run adds 1
+batch run, bind_height   hook(height := segs, prune withdrawals, release unbondings) before the first unit
+SetHeight (kind 10)      refused when bind_height (always in prod); test images keep fixture jumps
+export run               segs += 1 (the snapshot carries it), height unchanged
+import run               segs := snapshot segs + 1, RUNS := segs (export at h-1, import at h)
+OUT[0x1FFE6]             engine height (low word); OUT[0x1FFE7] = segs
+rv_witbind bind h        + memory proof OUT[0x1FFE7] == h (hsib)
+```
+
+No rv_rollup change is needed for the binding itself: rv_rollup already forces s0(h) to start from the final memory of
+h−1 (or from governance's `U<h>`), so the count in memory can only be the number of heights since genesis (or since the
+upgrade's export, whose count the import restores and the xbind digest check pins).
+
+## R4-M3 (partial) — oracle stake / unstake / slash
+
+Ported verbatim from minuend-state (`apply_stake`, `apply_unstake`, `apply_slash`, `prune_oracle_unbonding`) and
+minuend-exec (`stake_oracle`, `unstake_oracle`, `slash_oracle`, error mapping). The PERP ledger is new port state; every
+write marks the id's MNWIT1 key dirty (`ChainState::set_perp`); an id holding only PERP gets `acct:<id>:0:<perp>:<w>`
+like upstream R8-C3. The W2 depth rule pre-checks the challenger's `acct:` key for a Slash (the reward may create it).
+Not ported: GovDeposit / GovWithdraw (PERP comes from the header fixture bit 27), CreateMarket / proposals / votes,
+Commit / Reveal.
 
 ---
 

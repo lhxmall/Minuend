@@ -83,6 +83,10 @@ pub fn check(w: &[u32], s: u32, bad_at: Option<usize>) -> (SegCheck, Vec<Vec<u32
             &mut sess,
         );
         let injected = bad_at == Some(k) && sw[3] != 0;
+        // loop round 5 (round-4 survivor 27): segs counts every run of the session (= rollup height)
+        if sess.as_ref().map(|x| x.segs as usize) != Some(k + 1) && why.is_empty() {
+            why = format!("segment {}: segs {:?} != run {}", k, sess.as_ref().map(|x| x.segs), k + 1);
+        }
         let seg_ok;
         if injected {
             seg_ok = st.status == mnpilot::ST_BAD_FLAGS && roots.is_empty() && ev.is_empty() && h == [0; 32];
