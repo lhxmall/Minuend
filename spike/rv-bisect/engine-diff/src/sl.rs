@@ -79,7 +79,7 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
         Some(mnpilot::types::AccountId(x))
     };
     let mut n = BTreeSet::new();
-    n.insert(Need::Account(mnpilot::types::INSURANCE_ACCOUNT));
+    n.insert(Need::Light(mnpilot::types::INSURANCE_ACCOUNT));
     let base = 4 + 8 * n_acc as usize;
     for i in 0..n_ops as usize {
         let mut ow = [0u32; 8];
@@ -94,6 +94,9 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 }
                 mnpilot::BatchOp::Cancel { client_seq, market, .. } => {
                     n.insert(Need::Order(mnpilot::types::order_id(a, mnpilot::types::MarketId(market), client_seq)));
+                }
+                mnpilot::BatchOp::Withdraw { .. } => {
+                    n.insert(Need::Wdl(a));
                 }
                 _ => {}
             }
@@ -178,6 +181,52 @@ pub fn ora_batch(seed: u64, ord: u32) -> Vec<u32> {
     w
 }
 
+/// "wd" workload (round 15): a gen batch with Withdraw units spliced into the flow (~1 in 8 units): random trader /
+/// maker, amounts from dust (< MIN_WITHDRAW -> Risk) to more than the collateral (Insufficient), full balance, and
+/// nonces from a small range (DuplicateNonce), so the stateless withdraw path (wdl: records, R2-E-3 resting IM,
+/// pending-count cap) is differentially tested against the session.
+pub fn wd_batch(seed: u64, ord: u32) -> Vec<u32> {
+    let makers = 4 + (seed % 9) as u32;
+    let levels = 1 + (seed % 25) as u32;
+    let per = 1 + (seed % 3) as u32;
+    let mut w = gen(seed, makers, levels, per, ord, seed % 2 == 0).0;
+    let n_acc = w[1];
+    let base = 4 + 8 * n_acc as usize;
+    let n_ops = w[2] as usize;
+    let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ 0x77);
+    let mut ops: Vec<[u32; 8]> = (0..n_ops).map(|i| w[base + 8 * i..base + 8 * i + 8].try_into().unwrap()).collect();
+    let mut out: Vec<[u32; 8]> = Vec::with_capacity(ops.len() * 9 / 8);
+    let mut seq0 = 0u64;
+    for o in ops.drain(..) {
+        out.push(o);
+        if rng.below(8) == 0 {
+            let a = rng.below(n_acc as u64) as u32;
+            let amt: i64 = match rng.below(6) {
+                0 => (USD_SCALE / 2) as i64,                    // dust -> Risk
+                1 => 50_000_000 * USD_SCALE as i64,             // above the collateral -> Insufficient
+                2 => 0,
+                _ => (1 + rng.below(5_000)) as i64 * USD_SCALE as i64,
+            };
+            let mut nonce = rng.below(12);
+            let (a, amt) = if rng.below(2) == 0 {
+                // account 0 with fresh nonces: reaches the 64 pending-records cap (Risk) on long batches
+                seq0 += 1;
+                nonce = 100 + seq0;
+                (0, USD_SCALE as i64)
+            } else {
+                (a, amt)
+            };
+            out.push([6 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, nonce as u32, (nonce >> 32) as u32]);
+        }
+    }
+    w.truncate(base);
+    w[2] = out.len() as u32;
+    for o in &out {
+        w.extend_from_slice(o);
+    }
+    w
+}
+
 pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
     let adv = mode == "adv";
     let (mut ok, mut segs, mut units, mut bad) = (0u64, 0u64, 0u64, 0u64);
@@ -190,6 +239,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
             adv::adv_batch(s, ord)
         } else if mode == "ora" {
             ora_batch(s, ord)
+        } else if mode == "wd" {
+            wd_batch(s, ord)
         } else {
             let makers = 4 + (s % 9) as u32;
             let levels = 1 + (s % 25) as u32;
@@ -379,14 +430,15 @@ pub fn leaf_to_opaque(wit: &[u8], k: usize) -> Option<Vec<u8>> {
     Some(o)
 }
 
-pub fn sladv(n: u64, ord: u32) -> String {
+/// round 15: `sladv <n> <orders> wd` runs the same cases on the withdraw workload (wd_batch)
+pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
     let mut a = Adv { cases: 0, sound: 0, unsound: Vec::new(), counts: Default::default() };
     let mut done_segs = 0u64;
     for s in 1..=n {
         let makers = 4 + (s % 9) as u32;
         let levels = 1 + (s % 25) as u32;
         let per = 1 + (s % 3) as u32;
-        let w = gen(s, makers, levels, per, ord, s % 2 == 0).0;
+        let w = if mode == "wd" { wd_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
         let mut rng = Rng(s.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let size = 8 + rng.below(64) as u32;
         let refs = session_refs(&w, size);
@@ -413,6 +465,8 @@ pub fn sladv(n: u64, ord: u32) -> String {
                     Need::Level(..) => "omit:level",
                     Need::Bmp(..) => "omit:bmp",
                     Need::Path(_) => "omit:path",
+                    Need::Light(_) => "omit:light",
+                    Need::Wdl(_) => "omit:wdl",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
             }
@@ -421,6 +475,7 @@ pub fn sladv(n: u64, ord: u32) -> String {
             for id in r.pre.accounts.keys().take(40) {
                 n3.insert(Need::Account(*id));
                 n3.insert(Need::Aord(*id));
+                n3.insert(Need::Wdl(*id)); // round 15
             }
             n3.insert(Need::Market(1));
             n3.insert(Need::Market(2));
@@ -594,8 +649,9 @@ pub fn sladv(n: u64, ord: u32) -> String {
                 let mut wd = wv.clone();
                 let acc_cnt = lv.tree_end + 16 + 2;
                 let rec_start = acc_cnt + 2;
-                // the account record runs to the aord count (3 trailing u16 zeros after it: aord, bmp, levels, ordx)
-                let rec_end = wv.len() - 8;
+                // the account record runs to the aord count (5 trailing u16 zeros after it: aord, bmp, levels, ordx,
+                // wdl -- round 15)
+                let rec_end = wv.len() - 10;
                 let rec = wv[rec_start..rec_end].to_vec();
                 wd[acc_cnt] = 2;
                 wd.splice(rec_end..rec_end, rec);
@@ -655,6 +711,67 @@ pub fn sladv(n: u64, ord: u32) -> String {
                 let Some(w13) = leaf_to_opaque(&wit, k) else { break };
                 let (ox, evx) = run_sl(&r.seg, &w13);
                 a.rec("tree:leaf-as-opaque", r, &ox, &evx, false);
+            }
+            // round 15 A14 (R14-M2 light record): (a) records of a state where the insurance account holds one more
+            // position (count + digest differ), honest tree -> refused; (b) a light record for a user account -> refused
+            let ins = mnpilot::types::INSURANCE_ACCOUNT;
+            if needs.contains(&Need::Light(ins)) && r.pre.accounts.contains_key(&ins) {
+                let mut pre2 = r.pre.clone();
+                pre2.account_mut(ins).positions.insert(
+                    mnpilot::types::MarketId(4_000_000_001),
+                    mnpilot::account::Position { market: mnpilot::types::MarketId(4_000_000_001), qty: 1, entry_price: MID, isolated: false },
+                );
+                let _ = pre2.take_dirty();
+                let f = WitBuilder::new(&pre2).build(&needs);
+                let lf = layout(&f);
+                let mut wf = wit[..lay.tree_end].to_vec();
+                wf.extend_from_slice(&f[lf.tree_end..]);
+                let (ox, evx) = run_sl(&r.seg, &wf);
+                a.rec("light:forged-digest", r, &ox, &evx, true);
+                let mut pre3 = r.pre.clone();
+                pre3.account_mut(ins).collateral += 1_000_000;
+                let _ = pre3.take_dirty();
+                let f = WitBuilder::new(&pre3).build(&needs);
+                let lf = layout(&f);
+                let mut wf = wit[..lay.tree_end].to_vec();
+                wf.extend_from_slice(&f[lf.tree_end..]);
+                let (ox, evx) = run_sl(&r.seg, &wf);
+                a.rec("light:forged-collateral", r, &ox, &evx, true);
+            }
+            if let Some(x) = needs.iter().find_map(|n| match n {
+                Need::Account(id) if *id != ins && r.pre.accounts.contains_key(id) => Some(*id),
+                _ => None,
+            }) {
+                let mut n2 = needs.clone();
+                n2.remove(&Need::Account(x));
+                n2.insert(Need::Light(x));
+                let (ox, evx) = run_sl(&r.seg, &b.build(&n2));
+                a.rec("light:user-account", r, &ox, &evx, true);
+            }
+            // round 15 A15 (wdl:): drop one record / add a record / claim the set absent, honest tree -> refused
+            let wx: Vec<mnpilot::types::AccountId> = needs.iter().filter_map(|n| if let Need::Wdl(id) = n { Some(*id) } else { None }).collect();
+            if let Some(x) = wx.iter().find(|x| r.pre.withdrawals.range((**x, 0)..=(**x, u64::MAX)).next().is_some()).or(wx.first()).copied() {
+                let mine: Vec<u64> = r.pre.withdrawals.range((x, 0)..=(x, u64::MAX)).map(|((_, n), _)| *n).collect();
+                let mut variants: Vec<(&str, mnpilot::state::ChainState)> = Vec::new();
+                if let Some(n0) = mine.first() {
+                    let mut p2 = r.pre.clone();
+                    p2.withdrawals.remove(&(x, *n0));
+                    variants.push(("wdl:drop-record", p2));
+                    let mut p3 = r.pre.clone();
+                    p3.withdrawals.retain(|(a, _), _| *a != x);
+                    variants.push(("wdl:claim-absent", p3));
+                }
+                let mut p4 = r.pre.clone();
+                p4.withdrawals.insert((x, 999_999), mnpilot::types::Withdrawal { amount: 1, pending: true, height: r.pre.height });
+                variants.push(("wdl:add-record", p4));
+                for (nm, p) in variants {
+                    let f = WitBuilder::new(&p).build(&needs);
+                    let lf = layout(&f);
+                    let mut wf = wit[..lay.tree_end].to_vec();
+                    wf.extend_from_slice(&f[lf.tree_end..]);
+                    let (ox, evx) = run_sl(&r.seg, &wf);
+                    a.rec(nm, r, &ox, &evx, true);
+                }
             }
             prev_pre = Some(r.pre.clone());
             if done_segs >= 400 {
@@ -818,4 +935,277 @@ pub fn slcaps() -> String {
         "{{\"ok\":{},\"status\":{},\"units\":{:?},\"level_orders\":{},\"needs\":{},\"iterations\":{},\"witness_bytes\":{},\"leaves_verified\":{}}}",
         ok, o.status, got, n, needs.len(), it, wit.len(), o.leaves_verified
     )
+}
+
+/// round 15: direct full-state reference for synthetic pre-states (no session image: the stateless image's own
+/// rules -- exposure / level caps, depth rule -- are not exercised by the slpoc15 cases). Same unit loop as
+/// run_stateless (events: EV_APPLIED | fills + 6 words per fill, or the reason code).
+pub fn direct(pre: &mnpilot::state::ChainState, seg: &[u32]) -> (mnpilot::state::ChainState, Vec<u32>) {
+    let mut eng = mnpilot::engine::Engine { state: pre.clone() };
+    let n_acc = seg[1];
+    let n_ops = seg[2];
+    let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+        .map(|a| {
+            let mut id = [0u8; 32];
+            for k in 0..8 {
+                id[k * 4..k * 4 + 4].copy_from_slice(&seg[4 + (a * 8) as usize + k].to_le_bytes());
+            }
+            mnpilot::types::AccountId(id)
+        })
+        .collect();
+    let base = 4 + 8 * n_acc;
+    let uid_base = base + 8 * n_ops;
+    let mut ev = Vec::new();
+    for i in 0..n_ops {
+        let mut ow = [0u32; 8];
+        for (k, x) in ow.iter_mut().enumerate() {
+            *x = seg[(base + i * 8) as usize + k];
+        }
+        let seq = eng.state.seq;
+        let op = mnpilot::decode_op(&ow);
+        let res = mnpilot::dispatch(&mut eng, &op, &accts, mnpilot::Uid { v2: false, at: uid_base + i * 8 }, seq, &mnpilot::Ext::NONE, &mut |j| seg.get(j as usize).copied().unwrap_or(0), false);
+        match res {
+            Ok(fills) => {
+                eng.state.seq += 1;
+                ev.push(EV_APPLIED | fills.len() as u32);
+                for f in &fills {
+                    ev.push(u32::from_le_bytes(f.maker_id.0[..4].try_into().unwrap()));
+                    ev.push(u32::from_le_bytes(f.taker_id.0[..4].try_into().unwrap()));
+                    ev.push(f.price as u32);
+                    ev.push((f.price >> 32) as u32);
+                    ev.push(f.qty as u32);
+                    ev.push((f.qty >> 32) as u32);
+                }
+            }
+            Err(r) => ev.push(mnpilot::reason_code(&r)),
+        }
+    }
+    let _ = eng.state.take_dirty();
+    (eng.state, ev)
+}
+
+fn seg_words(table: &[u32], ops: &[[u32; 8]]) -> Vec<u32> {
+    let mut w = vec![mnpilot::MAGIC, table.len() as u32, ops.len() as u32, 0];
+    for t in table {
+        let x = acct_id(*t);
+        for k in 0..8 {
+            w.push(u32::from_le_bytes(x.0[k * 4..k * 4 + 4].try_into().unwrap()));
+        }
+    }
+    for o in ops {
+        w.extend_from_slice(o);
+    }
+    w
+}
+
+/// slpoc15 (round 15 PoCs / regression):
+///  P1 R15-H1: account A holds SL_MAX_POS positions in markets with 10-digit ids (4 000 000 000 + k). The round-14
+///     `apos:` leaf listed the markets in decimal -> ~780 bytes > the 384-byte leaf buffer: s_root / WitBuilder /
+///     the guest's loader and end root panic (index out of bounds; the riscv guest traps) -> every segment that
+///     touches A halts. Fixed form (digest): A's Place and Withdraw run with status 0, events + end root = direct.
+///  P2 R14-M2: the insurance account holds 100 positions (> SL_MAX_POS, reachable through liquidation / ADL takeovers
+///     once markets are unbounded). Round 14: every Place needs the FULL insurance record (np > 64 -> BADWIT: no
+///     witness exists, the exchange halts). Fixed: the LIGHT record (acct: + apos: digest) -> status 0, fee credited,
+///     end root = direct; a light record for any other account is refused (BADWIT); a light record whose digest /
+///     count does not match is refused.
+///  P3 withdraw: wdl: records -- duplicate nonce, pending cap, dust, insufficient, R2-E-3 resting IM, exact roots.
+type Extra15<'a> = &'a dyn Fn(&mnpilot::state::ChainState, &sl::SlOut, &BTreeSet<Need>) -> bool;
+fn check15(name: &str, s: &mnpilot::state::ChainState, seg: &[u32], extra: Extra15) -> String {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (post, ev_ref) = direct(s, seg);
+        let b = WitBuilder::new(s);
+        let (needs, wit, o, ev, it) = operate(&b, seg)?;
+        let root_ok = o.status == 0 && o.end_root == sl::s_root(&post);
+        let ok = root_ok && ev == ev_ref && extra(&post, &o, &needs);
+        let evs: Vec<String> = ev.iter().map(|e| if e & EV_APPLIED != 0 { format!("applied/{}", e & 0xff) } else { e.to_string() }).take(16).collect();
+        Ok::<String, String>(format!(
+            "{{\"case\":\"{}\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"ev\":{:?},\"needs\":{},\"iterations\":{},\"witness_bytes\":{}}}",
+            name, ok, o.status, root_ok, ev == ev_ref, evs, needs.len(), it, wit.len()
+        ))
+    }));
+    match r {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => format!("{{\"case\":\"{}\",\"ok\":false,\"why\":\"{}\"}}", name, e),
+        Err(_) => format!("{{\"case\":\"{}\",\"ok\":false,\"why\":\"panic\"}}", name),
+    }
+}
+
+pub fn slpoc15() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    let mut res: Vec<String> = Vec::new();
+    let mut all_ok = true;
+    let id = |i: u32| A(acct_id(i).0);
+    let p0 = mnpilot::types::genesis_params();
+    let place = |ai: u32, bid: bool, ioc: bool, price: i64, m: u32, cs: u32| -> [u32; 8] {
+        let q = QTY_SCALE / 100;
+        [2 | (ai << 8), (if bid { 0 } else { 1 }) | (if ioc { 4 } else { 0 }), price as u32, (price >> 32) as u32, q as u32, (q >> 32) as u32, cs, m]
+    };
+    let wd = |ai: u32, amt: i64, nonce: u64| -> [u32; 8] { [6 | (ai << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, nonce as u32, (nonce >> 32) as u32] };
+    // ---- P1 ----
+    {
+        let mut s = mnpilot::state::ChainState::genesis();
+        let mut a = mnpilot::account::Account::new(id(0));
+        a.collateral = 1_000_000_000 * USD_SCALE as i128;
+        for k in 0..sl::SL_MAX_POS as u32 {
+            let m = 4_000_000_000 + k;
+            s.markets.insert(M(m), p0);
+            s.marks.insert(M(m), MID);
+            a.positions.insert(M(m), mnpilot::account::Position { market: M(m), qty: (QTY_SCALE / 100) as i64, entry_price: MID, isolated: false });
+        }
+        s.put_account(id(0), a);
+        let mut bb = mnpilot::account::Account::new(id(1));
+        bb.collateral = 1_000_000_000 * USD_SCALE as i128;
+        s.put_account(id(1), bb);
+        let _ = s.take_dirty();
+        let mut lb = mnpilot::wit::Buf::new();
+        let mk: Vec<u32> = (0..sl::SL_MAX_POS as u32).map(|k| 4_000_000_000 + k).collect();
+        sl::apos_leaf(&mut lb, &id(0), 1, &mk);
+        res.push(format!("{{\"case\":\"P1 apos leaf length (fixed form)\",\"bytes\":{},\"round14_form_bytes\":{}}}", lb.n, 5 + 64 + 3 + mk.iter().map(|m| m.to_string().len() + 1).sum::<usize>() - 1));
+        let m0 = 4_000_000_000u32;
+        let seg = seg_words(&[0, 1], &[place(0, true, false, MID - 10 * DOLLAR, m0, 1), place(1, false, true, MID - 10 * DOLLAR, m0, 1), wd(0, 5 * USD_SCALE as i64, 1)]);
+        let l = check15("P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw", &s, &seg, &|_, _, _| true);
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+    }
+    // ---- P2 ----
+    {
+        let mut s = mnpilot::state::ChainState::genesis();
+        let ins = mnpilot::types::INSURANCE_ACCOUNT;
+        for k in 0..100u32 {
+            let m = 10 + k;
+            s.markets.insert(M(m), p0);
+            s.marks.insert(M(m), MID);
+            s.account_mut(ins).positions.insert(M(m), mnpilot::account::Position { market: M(m), qty: (QTY_SCALE / 100) as i64, entry_price: MID, isolated: false });
+        }
+        for i in [1u32, 2] {
+            let mut a = mnpilot::account::Account::new(id(i));
+            a.collateral = 1_000_000_000 * USD_SCALE as i128;
+            s.put_account(id(i), a);
+        }
+        let _ = s.take_dirty();
+        let coll0 = s.accounts.get(&ins).unwrap().collateral;
+        let seg = seg_words(&[1, 2], &[place(0, true, false, MID, 1, 1), place(1, false, true, MID, 1, 1)]);
+        let l = check15("P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)", &s, &seg, &|post, _, needs| {
+            post.accounts.get(&ins).unwrap().collateral > coll0 && needs.contains(&Need::Light(ins)) && !needs.contains(&Need::Account(ins))
+        });
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+        // the round-14 behaviour: the full insurance record (> SL_MAX_POS positions) cannot be loaded
+        let b = WitBuilder::new(&s);
+        let mut n = guess(&seg);
+        n.insert(Need::Account(ins));
+        let (o, _) = run_sl(&seg, &b.build(&n));
+        res.push(format!("{{\"case\":\"P2 full insurance record (round-14 path)\",\"ok\":{},\"status\":{}}}", o.status == sl::ST_SL_BADWIT, o.status));
+        all_ok &= o.status == sl::ST_SL_BADWIT;
+        // a light record for a non-insurance account (it would hide positions from risk checks) -> BADWIT
+        let mut s2 = s.clone();
+        s2.account_mut(id(1)).positions.insert(M(10), mnpilot::account::Position { market: M(10), qty: (QTY_SCALE / 100) as i64, entry_price: MID, isolated: false });
+        let _ = s2.take_dirty();
+        let b2 = WitBuilder::new(&s2);
+        let mut n2 = guess(&seg);
+        n2.remove(&Need::Account(id(1)));
+        n2.insert(Need::Light(id(1)));
+        for m in [1u32, 10] {
+            n2.insert(Need::Market(m));
+        }
+        let (o2, _) = run_sl(&seg, &b2.build(&n2));
+        res.push(format!("{{\"case\":\"P2 light record of a user account\",\"ok\":{},\"status\":{}}}", o2.status == sl::ST_SL_BADWIT, o2.status));
+        all_ok &= o2.status == sl::ST_SL_BADWIT;
+        // a light insurance record whose count / digest hides positions: records of a state where insurance has 99
+        // positions, honest tree -> BADWIT
+        let mut s3 = s.clone();
+        s3.account_mut(ins).positions.remove(&M(109));
+        let _ = s3.take_dirty();
+        let (needs, wit, _, _, _) = operate(&b, &seg).unwrap();
+        let f = WitBuilder::new(&s3).build(&needs);
+        let (lw, lf) = (layout(&wit), layout(&f));
+        let mut wf = wit[..lw.tree_end].to_vec();
+        wf.extend_from_slice(&f[lf.tree_end..]);
+        let (o3, _) = run_sl(&seg, &wf);
+        res.push(format!("{{\"case\":\"P2 light record with a forged position digest\",\"ok\":{},\"status\":{}}}", o3.status == sl::ST_SL_BADWIT, o3.status));
+        all_ok &= o3.status == sl::ST_SL_BADWIT;
+    }
+    // ---- P3 ----
+    {
+        let mut s = mnpilot::state::ChainState::genesis();
+        for i in [1u32, 2, 3] {
+            let mut a = mnpilot::account::Account::new(id(i));
+            a.collateral = 10_000 * USD_SCALE as i128;
+            s.put_account(id(i), a);
+        }
+        // account 3 already has 63 withdrawal records (one below the pending cap) at this height
+        for n in 0..63u64 {
+            s.withdrawals.insert((id(3), 1000 + n), mnpilot::types::Withdrawal { amount: USD_SCALE as i128, pending: true, height: s.height });
+        }
+        s.withdrawn_total.insert(id(3), 63 * USD_SCALE as i128);
+        let _ = s.take_dirty();
+        let u = USD_SCALE as i64;
+        let seg = seg_words(
+            &[1, 2, 3],
+            &[
+                wd(0, 100 * u, 7),                       // ok
+                wd(0, 100 * u, 7),                       // duplicate nonce
+                wd(0, u / 2, 8),                         // dust -> Risk
+                wd(0, 1_000_000 * u, 9),                 // insufficient
+                place(1, true, false, MID - DOLLAR, 1, 1), // B rests a bid (reserves IM)
+                wd(1, 9_990 * u, 1),                     // B: equity after < resting IM -> Insufficient (R2-E-3)
+                wd(2, 0, 1),                             // zero
+                wd(2, 10_000 * u, 2),                    // full balance
+                wd(0, 1, 10),                            // tiny: amount != collateral -> Risk
+                wd(2, 0, 2),                             // dup nonce after a full withdraw
+                wd(0, u, 1000),                          // dup of an existing record? (account 1 has none: ok)
+                wd(1, u, 2),
+                // account 3: one more fits, then the cap
+                [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 5000, 0],
+                [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 5001, 0],
+                [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 1000, 0],
+            ],
+        );
+        let l = check15("P3 withdraw paths (wdl:)", &s, &seg, &|post, o, _| {
+            post.withdrawals.range((id(3), 0)..=(id(3), u64::MAX)).count() == 64 && o.applied >= 5
+        });
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+    }
+    // ---- P4 lazy expiry of withdrawal records (stateless chain: a wdl: leaf may still list records older than the
+    // replay window; session semantics = pruned) ----
+    {
+        let mut s = mnpilot::state::ChainState::genesis();
+        s.height = 3000;
+        for i in [1u32, 2] {
+            let mut a = mnpilot::account::Account::new(id(i));
+            a.collateral = 10_000 * USD_SCALE as i128;
+            s.put_account(id(i), a);
+            // expired (100 + 2048 <= 3000) and live records
+            s.withdrawals.insert((id(i), 5), mnpilot::types::Withdrawal { amount: USD_SCALE as i128, pending: true, height: 100 });
+            s.withdrawals.insert((id(i), 6), mnpilot::types::Withdrawal { amount: USD_SCALE as i128, pending: true, height: 2900 });
+            s.withdrawn_total.insert(id(i), 2 * USD_SCALE as i128);
+        }
+        let _ = s.take_dirty();
+        let u = USD_SCALE as i64;
+        // account 1 re-uses the expired nonce 5 (session: pruned -> applied) and the live nonce 6 (duplicate)
+        let seg = seg_words(&[1, 2], &[wd(0, 2 * u, 5), wd(0, 2 * u, 6)]);
+        let mut pre_ref = s.clone();
+        pre_ref.withdrawals.remove(&(id(1), 5));
+        let (post, ev_ref) = direct(&pre_ref, &seg);
+        let b = WitBuilder::new(&s);
+        let line = match operate(&b, &seg) {
+            Ok((needs, _, o, ev, _)) => {
+                let ok1 = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_ref && ev.first() == Some(&EV_APPLIED);
+                // account 2's set (with its expired record) loaded as an extra record and untouched: no rewrite
+                let mut n2 = needs.clone();
+                n2.insert(Need::Wdl(id(2)));
+                let (o2, ev2) = run_sl(&seg, &b.build(&n2));
+                let ok2 = o2.status == 0 && o2.end_root == o.end_root && ev2 == ev;
+                all_ok &= ok1 && ok2;
+                format!("{{\"case\":\"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged\",\"ok\":{},\"touched_ok\":{},\"extra_untouched_ok\":{},\"status\":{},\"ev\":{:?}}}", ok1 && ok2, ok1, ok2, o.status, ev)
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"P4\",\"ok\":false,\"why\":\"{}\"}}", e)
+            }
+        };
+        res.push(line);
+    }
+    format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }

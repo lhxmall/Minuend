@@ -96,13 +96,25 @@ pub fn apos_kid(b: &mut Buf, id: &AccountId) {
     hexw(b, &id.0);
     mark(b);
 }
-/// flags: bit0 Account entry, bit1 perp_balances entry, bit2 withdrawn_total entry
-pub fn apos_leaf(b: &mut Buf, id: &AccountId, flags: u8, mkts: &[u32]) {
-    apos_kid(b, id);
-    let _ = write!(b, ":{}:", flags);
-    for (i, m) in mkts.iter().enumerate() {
-        let _ = write!(b, "{}{}", if i > 0 { "," } else { "" }, m);
+/// round 15: digest of an account's position markets (ascending ids, u32 LE each)
+pub fn apos_digest(mkts: &[u32]) -> H {
+    let mut h = Sha256::new();
+    for m in mkts {
+        h.update(m.to_le_bytes());
     }
+    h.finalize().into()
+}
+/// `apos:<id>:<flags>:<npos>:<sha256(markets)>` -- fixed length. flags: bit0 Account entry, bit1 perp_balances
+/// entry, bit2 withdrawn_total entry. Round 15 (R15-H1): the round-14 form listed the markets in decimal and
+/// overflowed the 384-byte leaf buffer (guest panic) for an account with many positions in high market ids; the
+/// digest form also lets a LIGHT record (R14-M2) verify the leaf without the position records.
+pub fn apos_leaf_d(b: &mut Buf, id: &AccountId, flags: u8, npos: u32, dg: &H) {
+    apos_kid(b, id);
+    let _ = write!(b, ":{}:{}:", flags, npos);
+    hexw(b, dg);
+}
+pub fn apos_leaf(b: &mut Buf, id: &AccountId, flags: u8, mkts: &[u32]) {
+    apos_leaf_d(b, id, flags, mkts.len() as u32, &apos_digest(mkts));
 }
 pub fn mkx_kid(b: &mut Buf, m: MarketId) {
     b.n = 0;
@@ -175,6 +187,35 @@ pub fn aord_leaf(b: &mut Buf, id: &AccountId, es: &[AordE]) {
     aord_kid(b, id);
     let _ = write!(b, ":{}:", es.len());
     hexw(b, &aord_digest(es));
+}
+pub fn wdl_kid(b: &mut Buf, id: &AccountId) {
+    b.n = 0;
+    let _ = write!(b, "wdl:");
+    hexw(b, &id.0);
+    mark(b);
+}
+/// round 15: an account's withdrawal records (nonce, amount, pending, height), sorted by nonce (<= 64)
+pub type WdlE = (u64, i128, bool, u64);
+pub fn wdl_digest(es: &[WdlE]) -> H {
+    let mut h = Sha256::new();
+    for (n, a, p, ht) in es {
+        h.update(n.to_le_bytes());
+        h.update(a.to_le_bytes());
+        h.update([*p as u8]);
+        h.update(ht.to_le_bytes());
+    }
+    h.finalize().into()
+}
+/// `wdl:<id>:<n>:<sha256(entries)>` (absent = no withdrawal record). Session state never holds an expired record
+/// (commit_height prunes); the stateless image reads only live records (height + REPLAY_WINDOW > height) and rewrites
+/// the leaf only when the unit changed the live set (lazy pruning on touch; see design §11).
+pub fn wdl_leaf(b: &mut Buf, id: &AccountId, es: &[WdlE]) {
+    wdl_kid(b, id);
+    let _ = write!(b, ":{}:", es.len());
+    hexw(b, &wdl_digest(es));
+}
+fn wdl_of(s: &ChainState, id: &AccountId) -> Vec<WdlE> {
+    s.withdrawals.range((*id, 0)..=(*id, u64::MAX)).map(|((_, n), w)| (*n, w.amount, w.pending, w.height)).collect()
 }
 fn kh(b: &Buf) -> (H, H) {
     wit::key_and_hash(b)
@@ -260,6 +301,11 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
     }
     for (id, n) in &s.seen_client_seq {
         cseq_leaf(&mut b, id, *n);
+        push(&b);
+    }
+    let wids: BTreeSet<AccountId> = s.withdrawals.keys().map(|(a, _)| *a).collect();
+    for id in &wids {
+        wdl_leaf(&mut b, id, &wdl_of(s, id));
         push(&b);
     }
     let mut aord: BTreeMap<AccountId, Vec<AordE>> = BTreeMap::new();
@@ -662,6 +708,9 @@ impl<'a> Rd<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Need {
     Account(AccountId),
+    /// round 15 (R14-M2): the insurance account's LIGHT record (acct: leaf + apos: digest, no positions) -- all a
+    /// Place's fee leg reads; Account(INSURANCE) (the full record) wins when both are needed
+    Light(AccountId),
     Market(u32),
     Aord(AccountId),
     /// the order id: its level (if it exists) or its exclusion proof
@@ -670,6 +719,8 @@ pub enum Need {
     Bmp(u32, u8, u8, u64),
     /// a tree path (insertion / deletion / depth rule) for this MNWIT-S key
     Path(H),
+    /// round 15: an account's withdrawal records (`wdl:`, present or proven absent)
+    Wdl(AccountId),
 }
 
 /// Result of a stateless segment run.
@@ -695,6 +746,9 @@ struct AcctRec {
     present: bool,
     /// markets of the start positions (pos leaves to delete if closed)
     start_pos: Vec<MarketId>,
+    /// round 15 (R14-M2): a light record (insurance only): start flags, position count, position-market digest.
+    /// Its positions are NOT in the partial state; the end root keeps its apos: leaf and touches no pos: / cseq:.
+    light: Option<(u8, u32, H)>,
 }
 #[derive(Clone)]
 struct Bm {
@@ -714,6 +768,8 @@ struct Sl {
     oloc: BTreeMap<OrderId, (u32, u8, Price, AccountId)>,
     /// order ids proven absent at segment start
     ordx: BTreeSet<OrderId>,
+    /// round 15: loaded withdrawal record sets: account -> live records at load (what the ChainState holds)
+    wdl: BTreeMap<AccountId, Vec<WdlE>>,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -793,6 +849,7 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
         aord: BTreeMap::new(),
         oloc: BTreeMap::new(),
         ordx: BTreeSet::new(),
+        wdl: BTreeMap::new(),
         verified: 0,
         leaf_hashes: 0,
     };
@@ -851,12 +908,49 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
         return Err(ST_SL_BADWIT);
     }
     for _ in 0..n {
-        let present = bad!(r.bool());
+        let kind = bad!(r.u8());
         let id = AccountId(bad!(r.h32()));
-        if sl.accts.contains_key(&id) {
+        if sl.accts.contains_key(&id) || kind > 2 {
             return Err(ST_SL_BADWIT);
         }
+        let present = kind != 0;
         let mut start_pos = Vec::new();
+        if kind == 2 {
+            // round 15 (R14-M2) light record: ONLY the insurance account (its positions are read by no supported op;
+            // a light record of any other account would hide positions from risk checks)
+            if id != INSURANCE_ACCOUNT {
+                return Err(ST_SL_BADWIT);
+            }
+            let flags = bad!(r.u8());
+            if flags & !7 != 0 || flags == 0 {
+                return Err(ST_SL_BADWIT);
+            }
+            let coll = bad!(r.i128());
+            let perp = bad!(r.u128());
+            let wd = bad!(r.i128());
+            let npos = bad!(r.u32());
+            let dg = bad!(r.h32());
+            if (flags & 1 == 0 && (npos > 0 || coll != 0)) || (flags & 2 == 0 && perp != 0) || (flags & 4 == 0 && wd != 0) {
+                return Err(ST_SL_BADWIT);
+            }
+            wit::acct_leaf(&mut b, &id, coll, perp, wd);
+            sl.check(&b, true)?;
+            apos_leaf_d(&mut b, &id, flags, npos, &dg);
+            sl.check(&b, true)?;
+            if flags & 1 != 0 {
+                let mut a = Account::new(id);
+                a.collateral = coll;
+                s.put_account(id, a);
+            }
+            if flags & 2 != 0 {
+                s.perp_balances.insert(id, perp);
+            }
+            if flags & 4 != 0 {
+                s.withdrawn_total.insert(id, wd);
+            }
+            sl.accts.insert(id, AcctRec { present: true, start_pos, light: Some((flags, npos, dg)) });
+            continue;
+        }
         if present {
             let flags = bad!(r.u8());
             if flags & !7 != 0 || flags == 0 {
@@ -929,7 +1023,7 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
             cseq_kid(&mut b, &id);
             sl.absent(&b)?;
         }
-        sl.accts.insert(id, AcctRec { present, start_pos });
+        sl.accts.insert(id, AcctRec { present, start_pos, light: None });
     }
     // aord
     let n = bad!(r.u16()) as usize;
@@ -1052,6 +1146,38 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
             return Err(ST_SL_BADWIT);
         }
     }
+    // round 15: withdrawal record sets (n = 0: proven absent)
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let id = AccountId(bad!(r.h32()));
+        let k = bad!(r.u8()) as usize;
+        if k > MAX_PENDING_WITHDRAWALS_PER_ACCOUNT || sl.wdl.contains_key(&id) {
+            return Err(ST_SL_BADWIT);
+        }
+        let mut es: Vec<WdlE> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let e = (bad!(r.u64()), bad!(r.i128()), bad!(r.bool()), bad!(r.u64()));
+            if es.last().is_some_and(|x| x.0 >= e.0) {
+                return Err(ST_SL_BADWIT);
+            }
+            es.push(e);
+        }
+        if k == 0 {
+            wdl_kid(&mut b, &id);
+            sl.absent(&b)?;
+        } else {
+            wdl_leaf(&mut b, &id, &es);
+            sl.check(&b, true)?;
+        }
+        let live: Vec<WdlE> = es.into_iter().filter(|e| e.3.saturating_add(REPLAY_WINDOW) > s.height).collect();
+        for e in &live {
+            s.withdrawals.insert((id, e.0), crate::types::Withdrawal { amount: e.1, pending: e.2, height: e.3 });
+        }
+        sl.wdl.insert(id, live);
+    }
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
@@ -1064,8 +1190,11 @@ fn load(w: &[u8]) -> Result<(Sl, ChainState, H), u32> {
 // guards
 // ------------------------------------------------------------------------------------------------
 fn need_acct(sl: &Sl, s: &ChainState, a: &AccountId) -> Result<(), Need> {
-    if !sl.accts.contains_key(a) {
-        return Err(Need::Account(*a));
+    match sl.accts.get(a) {
+        None => return Err(Need::Account(*a)),
+        // a light record has no positions loaded: a full read needs the full record
+        Some(r) if r.light.is_some() => return Err(Need::Account(*a)),
+        _ => {}
     }
     // markets of its positions (snapshot / risk read their params + marks)
     if let Some(ac) = s.accounts.get(a) {
@@ -1179,7 +1308,10 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
                 Some(true) if s.markets.get(&MarketId(market)).is_some_and(|p| p.funding_rate) => return Err(Err(ST_SL_UNSUPPORTED)),
                 _ => {}
             }
-            need_acct(sl, s, &INSURANCE_ACCOUNT).map_err(Ok)?;
+            // the fee leg reads / writes only the insurance collateral: a light record suffices (R14-M2)
+            if !sl.accts.contains_key(&INSURANCE_ACCOUNT) {
+                return Err(Ok(Need::Light(INSURANCE_ACCOUNT)));
+            }
             need_aord_full(sl, &author).map_err(Ok)?;
             // R14-M1 rule input: the own-side level a GTC limit may join must be known (or absent per the trie), so
             // the level-size rule below never depends on which extra records the witness carries
@@ -1213,6 +1345,23 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Resul
             let oid = order_id(author, MarketId(market), client_seq);
             if !sl.oloc.contains_key(&oid) && !sl.ordx.contains(&oid) {
                 return Err(Ok(Need::Order(oid)));
+            }
+        }
+        Withdraw { .. } => {
+            // round 15: debit + snapshot read the author's positions; resting_open_im walks every book (params) and
+            // the author's live orders; the nonce / pending-count rules read the author's withdrawal records
+            need_acct(sl, s, &author).map_err(Ok)?;
+            if !sl.wdl.contains_key(&author) {
+                return Err(Ok(Need::Wdl(author)));
+            }
+            need_aord_full(sl, &author).map_err(Ok)?;
+            for m in s.books.keys() {
+                if !sl.markets.contains_key(&m.0) {
+                    return Err(Ok(Need::Market(m.0)));
+                }
+            }
+            if s.accounts.get(&author).is_some_and(|a| a.positions.keys().any(|m| s.markets.get(m).is_some_and(|p| p.funding_rate))) {
+                return Err(Err(ST_SL_UNSUPPORTED));
             }
         }
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
@@ -1335,7 +1484,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 ev(crate::WIT_DEPTH_CODE);
                 continue;
             }
-        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Bad) {
+        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::Bad) {
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
         }
@@ -1349,6 +1498,12 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             for (m, b) in &eng.state.books {
                 if let Some((ts, last)) = b.peeks.0.last() {
                     walk_check(&sl, m.0, ts.opposite().as_u8(), *last)?;
+                }
+            }
+            // round 15: a withdrawal record can only appear for a loaded set (the author's, pre); catch-all
+            for (a, _) in eng.state.withdrawals.keys() {
+                if !sl.wdl.contains_key(a) {
+                    return Err(Need::Wdl(*a));
                 }
             }
             let d = eng.state.take_dirty();
@@ -1446,6 +1601,18 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
     for (id, rec) in &sl.accts {
         let a = s.accounts.get(id);
         let flags = a.is_some() as u8 | (s.perp_balances.contains_key(id) as u8) << 1 | (s.withdrawn_total.contains_key(id) as u8) << 2;
+        if let Some((f0, npos, dg)) = rec.light {
+            // light record (R14-M2): only the acct: leaf may change; membership / positions must be as loaded
+            // (the partial state holds none of its positions), else the full record is needed
+            if flags != f0 || a.is_some_and(|a| !a.positions.is_empty() || !a.isolated_margin.is_empty()) {
+                return Err(Need::Account(*id));
+            }
+            wit::acct_leaf(&mut b, id, a.map(|a| a.collateral).unwrap_or(0), s.perp_balances.get(id).copied().unwrap_or(0), s.withdrawn_total.get(id).copied().unwrap_or(0));
+            puts.push(kh(&b));
+            apos_leaf_d(&mut b, id, flags, npos, &dg);
+            puts.push(kh(&b));
+            continue;
+        }
         if flags != 0 {
             wit::acct_leaf(&mut b, id, a.map(|a| a.collateral).unwrap_or(0), s.perp_balances.get(id).copied().unwrap_or(0), s.withdrawn_total.get(id).copied().unwrap_or(0));
             puts.push(kh(&b));
@@ -1542,6 +1709,19 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
             }
         }
     }
+    // withdrawal record sets: rewritten only when the live set changed (lazy pruning on touch, witness-independent)
+    for (id, live0) in &sl.wdl {
+        let now = wdl_of(s, id);
+        if now != *live0 {
+            if now.is_empty() {
+                wdl_kid(&mut b, id);
+                dels.push(kid_key(&b));
+            } else {
+                wdl_leaf(&mut b, id, &now);
+                puts.push(kh(&b));
+            }
+        }
+    }
     glob_leaf(&mut b, s.seq, s.height);
     puts.push(kh(&b));
     sl.leaf_hashes += puts.len() as u64 + dels.len() as u64;
@@ -1612,6 +1792,8 @@ impl<'a> WitBuilder<'a> {
     pub fn build(&self, needs: &BTreeSet<Need>) -> Vec<u8> {
         let s = self.s;
         let mut accts: BTreeSet<AccountId> = BTreeSet::new();
+        let mut lights: BTreeSet<AccountId> = BTreeSet::new();
+        let mut wdls: BTreeSet<AccountId> = BTreeSet::new();
         let mut mkts: BTreeSet<u32> = BTreeSet::new();
         let mut aord: BTreeSet<AccountId> = BTreeSet::new();
         let mut levels: BTreeSet<(u32, u8, Price)> = BTreeSet::new();
@@ -1622,6 +1804,12 @@ impl<'a> WitBuilder<'a> {
             match *n {
                 Need::Account(a) => {
                     accts.insert(a);
+                }
+                Need::Light(a) => {
+                    lights.insert(a);
+                }
+                Need::Wdl(a) => {
+                    wdls.insert(a);
                 }
                 Need::Market(m) => {
                     mkts.insert(m);
@@ -1697,13 +1885,28 @@ impl<'a> WitBuilder<'a> {
             mkx_kid(&mut b, mid);
             keys.insert(kid_key(&b));
         }
-        rec.extend_from_slice(&(accts.len() as u16).to_le_bytes());
-        for id in &accts {
+        let lights: BTreeSet<AccountId> = lights.difference(&accts).copied().collect();
+        let all: BTreeSet<(AccountId, bool)> = accts.iter().map(|a| (*a, false)).chain(lights.iter().map(|a| (*a, true))).collect();
+        rec.extend_from_slice(&(all.len() as u16).to_le_bytes());
+        for (id, light) in &all {
+            let id = &*id;
             let a = s.accounts.get(id);
             let flags = a.is_some() as u8 | (s.perp_balances.contains_key(id) as u8) << 1 | (s.withdrawn_total.contains_key(id) as u8) << 2;
             keys.insert(wit::acct_key(id));
             apos_kid(&mut b, id);
             keys.insert(kid_key(&b));
+            if *light && flags != 0 {
+                rec.push(2);
+                rec.extend_from_slice(&id.0);
+                rec.push(flags);
+                rec.extend_from_slice(&a.map(|a| a.collateral).unwrap_or(0).to_le_bytes());
+                rec.extend_from_slice(&s.perp_balances.get(id).copied().unwrap_or(0).to_le_bytes());
+                rec.extend_from_slice(&s.withdrawn_total.get(id).copied().unwrap_or(0).to_le_bytes());
+                let mk: Vec<u32> = a.map(|a| a.positions.keys().map(|m| m.0).collect()).unwrap_or_default();
+                rec.extend_from_slice(&(mk.len() as u32).to_le_bytes());
+                rec.extend_from_slice(&apos_digest(&mk));
+                continue;
+            }
             cseq_kid(&mut b, id);
             keys.insert(kid_key(&b));
             if flags == 0 {
@@ -1805,6 +2008,20 @@ impl<'a> WitBuilder<'a> {
         for oid in &ordx {
             rec.extend_from_slice(&oid.0);
             keys.insert(wit::ord_key(oid));
+        }
+        rec.extend_from_slice(&(wdls.len() as u16).to_le_bytes());
+        for id in &wdls {
+            let es = wdl_of(s, id);
+            rec.extend_from_slice(&id.0);
+            rec.push(es.len() as u8);
+            for (n, a, p, h) in &es {
+                rec.extend_from_slice(&n.to_le_bytes());
+                rec.extend_from_slice(&a.to_le_bytes());
+                rec.push(*p as u8);
+                rec.extend_from_slice(&h.to_le_bytes());
+            }
+            wdl_kid(&mut b, id);
+            keys.insert(kid_key(&b));
         }
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false);
