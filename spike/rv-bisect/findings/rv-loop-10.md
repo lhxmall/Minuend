@@ -16,8 +16,9 @@ _running_ are filled by the next collection, see work/rv-rollup-notes.md "Loop r
    that export is lost, R4-M5). Cost to an attacker: 255 listings (CREATE_MARKET_FEE_PERP each, burned), bonds and
    collateral it keeps, unit fees. The round-4 `statecap` number missed it twice over: it used two markets, and its
    chain of trades (account i buys q from i−1, sells q to i+1) **nets every middle account's position to zero**, so
-   only the two end accounts held positions at all. Fix: `MAX_STATE_MARKETS` 256 → **RESULT_CAP** (pilot rule, code 19
-   as before), chosen from the whole-state measurement `mktcap 256 m 256 64 64` (below).
+   only the two end accounts held positions at all. Fix (pilot rules, code 19 as
+   the other caps): `MAX_STATE_MARKETS` 256 → **16** and a new `MAX_STATE_ORACLES` = **32** (a Stake by a new oracle
+   at the cap), chosen from the whole-state measurement `mktcap 256 m r 64 64` (below); the harness mirrors both caps.
 2. **R10-M1 (M, open — design)** — stall economics of the fraud-resubmit loop (design §8.3 quantified): a fraudster
    that re-submits a fraudulent h after every void and defends each game as slowly as the move deadlines allow stalls
    finalization for ≈ one game per cycle (rolltest `stall10`: 3.08 h per cycle at 3 bisection rounds; ≈ 8–10 h at
@@ -41,7 +42,7 @@ Totals (draft): **C 0 · H 1 (fixed) · M 1 (open, design) · L 1 · I 6**; R9-T
 
 | id | sev | area | title | status |
 |---|---|---|---|---|
-| R10-H1 | H | guest heap / caps | positions (+ isolated margin) per (account, market) and oracle reports / rings per (market, oracle) were outside the heap bound: 256 × 256 → ≈ 72 MB > 50.2 MB heap → OOM → dead session → rollup halted | **fixed**: MAX_STATE_MARKETS → RESULT_CAP (whole-state measurement below); `mktcap` command; govedge `cap:markets` follows the constant |
+| R10-H1 | H | guest heap / caps | positions (+ isolated margin) per (account, market) and oracle reports / rings per (market, oracle) were outside the heap bound: 256 × 256 → ≈ 72 MB > 50.2 MB heap → OOM → dead session → rollup halted | **fixed**: MAX_STATE_MARKETS 256 → 16, new MAX_STATE_ORACLES = 32 (whole-state measurement below); `mktcap` command; govedge `cap:markets` follows the constant, new case 9 `r10:oracles`; harness mirror in `pilot_gov_refused` |
 | R10-M1 | M | rv_rollup economics | indefinite finalization stall for OBOND per ≈ one slow game (rolltest `stall10`) | open (design options listed) |
 | R10-L1 | L | tests | round-4 `statecap` netted positions to zero (equal-size buy/sell chain) and used 2 markets, so the R4-H1 bound never contained per-market state | fixed in `mktcap` (sizes (i + 1) units: every account keeps a position in every market); R4-H1 numbers superseded by the R10-H1 table |
 | R10-I1 | I | snapshot v3 | import edge cases: duplicate / unsorted keys, counts above SNAP_MAX_ITEMS or the remaining words, v2 → v3, trailing words, kind / mode values, books of unlisted markets, accounts above the cap | all refused or digest-bound (an import is accepted only for the compiled-in export digest, so a non-canonical-but-decodable snapshot can never be imported; the decoder checks are liveness / OOM guards); every ChainState field is encoded (field-by-field comparison with state.rs) |
@@ -66,12 +67,22 @@ account. Host allocator simulation (heapsim, 64-bit sizes).
 | 256 128 0 | 32 768 | 127 | 23.09 MB |
 | 256 256 0 | 65 536 | 255 | **46.05 MB** |
 | 256 256 256 (round-10 v1, positions netted) | 512 | 65 791 | **25.55 MB** |
-WHOLE_ROWS
+| **whole state** 256 0 0 64 64 (orders + withdrawals, BTC only) | 256 | 0 | 21.60 MB |
+| whole state 256 16 256 64 64 | 4 096 (+ 2 048 isolated) | 4 111 | 28.55 MB |
+| whole state 256 32 256 64 64 | 8 192 (+ 4 096 isolated) | 8 223 | 41.23 MB |
+| whole state 256 64 256 64 64 | 16 384 (+ 8 192 isolated) | 16 447 | **55.24 MB** (> heap) |
+| whole state 256 128 0 64 64 | 32 768 (+ 16 384 isolated) | 127 | **61.36 MB** (> heap) |
+| whole state at the new caps 256 16 32 64 64 | 4 096 | ≤ 512 | CAP_ROW |
 
 ≈ 700 B per position (BTreeMap entry, `pos:` leaf + its MNWIT1 path) and ≈ 390 B per (market, oracle) pair with
 one ring sample (more with the 8-deep ring).
 
-Fix: `MAX_STATE_MARKETS` = RESULT_CAP. Bound: FIX_BOUND.
+Fix: `MAX_STATE_MARKETS` = 16 and `MAX_STATE_ORACLES` = 32 (guest-engine/src/lib.rs `state_cap_ok`; CreateMarket at
+16 listed markets and a Stake by a new oracle at 32 bonded → code 19; an already bonded id keeps upstream's
+AlreadyBonded). Bound as R4-H1 (×1.3 cross-time fragmentation, + 4.4 MB per-run transient, + the governance caps
+3.9 MB from `govcap`): (CAP_MB + 3.9) × 1.3 + 4.4 = BOUND_MB < 50.2 MB. At 32 markets the same formula gives ≈ 52 MB
+even with the oracle cap, hence 16. Like the account cap this is a stopgap: production needs the stateless guest
+(R4-H1) — 16 markets is a product limit of the pilot, not a design value.
 
 ## R10-M1 — stall economics (PoC: rolltest `stall10`)
 
