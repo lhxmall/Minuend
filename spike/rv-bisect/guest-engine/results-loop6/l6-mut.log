@@ -1,0 +1,1 @@
+mut 35 [src/account.rs:         let liquidatable = mm > 0 && equity * 10_000 < mm * i128::from] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 0/1 orafuzz 20/20 hbind 20/20 snapcap true govfuzz 20/20 govedge 7/7 -> KILLED

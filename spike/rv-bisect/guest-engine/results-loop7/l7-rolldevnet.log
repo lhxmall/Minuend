@@ -1,0 +1,73 @@
+===== testnet = false
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:781246) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+rundir /data/hark/spike-rv/roll7/devnet-testdata/runid-0001
+[INFO][genesis-node] Child started
+[INFO][obyte-witness-0001] Child started
+[INFO][obyte-witness-0002] Child started
+[INFO][obyte-hub-0001] Child started
+/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/network.js:4546
+	throw err; // crash the process to avoid ending up in an inconsistent state
+	^
+
+Error: listen EADDRINUSE: address already in use :::3005
+    at Server.setupListenHandle [as _listen2] (node:net:1941:16)
+    at listenInCluster (node:net:1998:12)
+    at Server.listen (node:net:2103:7)
+    at startWebserver (/data/hark/wt-all/vendor/aa-testkit/node_modules/obyte-hub/webserver.js:136:10)
+    at EventEmitter.<anonymous> (/data/hark/wt-all/vendor/aa-testkit/node_modules/obyte-hub/start.js:39:3)
+    at Object.onceWrapper (node:events:634:26)
+    at EventEmitter.emit (node:events:519:28)
+    at WebSocketServer.<anonymous> (/data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/network.js:4390:12)
+    at WebSocketServer.emit (node:events:519:28)
+    at WebSocketServer.completeUpgrade (/data/hark/wt-all/vendor/aa-testkit/node_modules/ws/lib/websocket-server.js:450:5)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1977:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 3005
+}
+
+Node.js v22.23.3
+[INFO][obyte-hub-0001] Child exited

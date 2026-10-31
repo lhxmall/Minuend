@@ -1,0 +1,88 @@
+===== testnet = false
+===== devnet
+not using app root conf: Error: Cannot find module '/data/hark/spike-rv/roll5/js/conf.js'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll5/js/oc.js
+- /data/hark/spike-rv/roll5/js/chain.js
+- /data/hark/spike-rv/roll5/js/rolltest.js
+app dir /data/hark/spike-rv/roll5/js
+not using user conf: Error: Cannot find module '/data/home/.config/spikerv/conf.json'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll5/js/oc.js
+- /data/hark/spike-rv/roll5/js/chain.js
+- /data/hark/spike-rv/roll5/js/rolltest.js
+app dir /data/hark/spike-rv/roll5/js
+(node:742553) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:742553) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:742553) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+PASS upgrade | export height 1 submitted | expected "accepted" | actual "accepted" 
+require not met: not governance
+{ bounce_message: 'not governance' }
+PASS upgrade | upgrade from a non-governance address | expected "bounce" | actual "bounce" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade of a height above top + 1 | expected "bounce" | actual "bounce" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade of height 1 | expected "bounce" | actual "bounce" 
+require not met: bad root
+{ bounce_message: 'bad root' }
+PASS upgrade | upgrade with a malformed root | expected "bounce" | actual "bounce" 
+PASS upgrade | upgrade height 2 by governance | expected "accepted" | actual "accepted" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS upgrade | height 2 chained on the OLD memory refused (s0 must start from the new image) | expected "bounce" | actual "bounce" 
+PASS upgrade | import height 2 from the new image accepted | expected "accepted" | actual "accepted" 
+PASS upgrade | finalize export height 1 | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | finalize import height 2 before any xbind | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS upgrade | xbind with a wrong digest word | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS upgrade | xbind claiming kind 1 for an import memory | expected "bounce" | actual "bounce" 
+require not met: kind
+{ bounce_message: 'kind' }
+PASS upgrade | xbind of a memory with kind 0 (no snapshot run) | expected "bounce" | actual "bounce" 
+PASS upgrade | xbind import height 2 | expected "accepted" | actual "accepted" 
+require not met: bound
+{ bounce_message: 'bound' }
+PASS upgrade | xbind twice | expected "bounce" | actual "bounce" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | finalize import height 2 with only the import bound | expected "bounce" | actual "bounce" 
+PASS upgrade | xbind export height 1 | expected "accepted" | actual "accepted" 
+PASS upgrade | finalize import height 2 (export digest == import digest) | expected "accepted" | actual "accepted" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade at or below lf | expected "bounce" | actual "bounce" 
+PASS upgrade | height 3 chains on the import memory again (normal height) | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | import whose digest differs from the export never finalizes | expected "bounce" | actual "bounce" 
+PASS upgrade | governance re-schedules height 2 (voids 2..top) | expected ["accepted",1] | actual ["accepted",1] 
+PASS upgrade | voided import height 2 bond reclaimable (not fraud) | expected "accepted" | actual "accepted" 
+PASS upgrade | voided height 3 bond reclaimable | expected "accepted" | actual "accepted" 
+PASS upgrade | re-submitted matching import finalizes | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | kinds swapped (export run at h, import at h-1) never finalizes | expected "bounce" | actual "bounce" 
+PASS upgrade | R5-M1: upgrade height 4 scheduled | expected ["accepted",3] | actual ["accepted",3] 
+PASS upgrade | R5-M1: re-scheduled earlier at height 3 (voids 3..top) | expected ["accepted",2,"acZ9SRfWwX8F3E73XT7tNRTG3TrhLMpNPPpc6UX8vu4="] | actual ["accepted",2,"acZ9SRfWwX8F3E73XT7tNRTG3TrhLMpNPPpc6UX8vu4="] 
+PASS upgrade | R5-M1: the stale U4 is cleared | expected false | actual false 
+PASS upgrade | R5-M1: import height 3 from the new image | expected "accepted" | actual "accepted" 
+PASS upgrade | R5-M1: height 4 chains on m(3) (no stale image) | expected "accepted" | actual "accepted" 
+require not met: upgrade pending at 3
+{ bounce_message: 'upgrade pending at 3' }
+PASS upgrade | R5-M1: a second upgrade above the pending one refused | expected "bounce" | actual "bounce" 
+PASS invariant | rollup balance >= outstanding bonds + burned after every tx | expected 0 | actual 0 
+SUMMARY {"total":33,"pass":33,"fail":0}

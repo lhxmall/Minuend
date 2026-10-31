@@ -1,0 +1,464 @@
+===== testnet = false
+===== devnet
+not using app root conf: Error: Cannot find module '/data/hark/spike-rv/roll5/js/conf.js'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll5/js/oc.js
+- /data/hark/spike-rv/roll5/js/chain.js
+- /data/hark/spike-rv/roll5/js/rolltest.js
+app dir /data/hark/spike-rv/roll5/js
+not using user conf: Error: Cannot find module '/data/home/.config/spikerv/conf.json'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll5/js/oc.js
+- /data/hark/spike-rv/roll5/js/chain.js
+- /data/hark/spike-rv/roll5/js/rolltest.js
+app dir /data/hark/spike-rv/roll5/js
+(node:743768) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:743768) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:743768) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+PASS witproof | heights submitted (one memory image per proof set, + a status-4 image, + a wrong-counter image) | expected 16 | actual 16 
+require not met: not finalized
+{ bounce_message: 'not finalized' }
+PASS witproof | bind before finalize | expected "bounce" | actual "bounce" 
+PASS witproof | all heights finalized | expected 16 | actual 16 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS witproof | bind with a wrong word | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS witproof | bind with the words of another height | expected "bounce" | actual "bounce" 
+require not met: status
+{ bounce_message: 'status' }
+PASS witproof | bind a status-4 height | expected "bounce" | actual "bounce" 
+require not met: height
+{ bounce_message: 'height' }
+PASS witproof | R4-M4: bind a height whose guest run counter (OUT segs) != h | expected "bounce" | actual "bounce" 
+require not met: height
+{ bounce_message: 'height' }
+PASS witproof | R4-M4: bind without the counter proof | expected "bounce" | actual "bounce" 
+require not met: not finalized
+{ bounce_message: 'not finalized' }
+PASS witproof | bind a height above lf | expected "bounce" | actual "bounce" 
+PASS witproof | bind every finalized height: W<h> = the guest-layout root | expected 14 | actual 14 
+require not met: bound
+{ bounce_message: 'bound' }
+PASS witproof | bind twice | expected "bounce" | actual "bounce" 
+require not met: height not bound
+{ bounce_message: 'height not bound' }
+PASS witproof | prove against an unbound height | expected "bounce" | actual "bounce" 
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: prefix
+{ bounce_message: 'prefix' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: prefix
+{ bounce_message: 'prefix' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: sib
+{ bounce_message: 'sib' }
+PASS witproof | R3-W1: absence under a non-canonical key (upper-case tail, same path bits) refused | expected 0 | actual 0 {"tries":12}
+PASS witproof | R3-W4: a proof costs the caller MK = 2000 (the rest of the trigger is refunded) | expected 2000 | actual 2000 
+PASS witproof | memberships accepted (and recorded L<h>:<kid> = leaf); synthetic depth 65 refused | expected 38 | actual 38 {"maxDepth":65}
+PASS witproof | absences accepted (A<h>:<key> = 1) | expected 12 | actual 12 
+PASS witproof | forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height) | expected 0 | actual 0 {"tries":188}
+PASS witproof | a proof for height h does not verify against h+1 | expected true | actual true 
+PASS invariant | rollup balance >= outstanding bonds + burned after every tx | expected 0 | actual 0 
+SUMMARY {"total":19,"pass":19,"fail":0}

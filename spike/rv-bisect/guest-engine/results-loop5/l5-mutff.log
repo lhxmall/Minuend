@@ -1,0 +1,18 @@
+mut 6 [src/engine.rs: acct.snapshot(&self.state.marks, &self.state.markets).equity <= restin] liqedge 0 -> KILLED by liqedge
+warning: unused variable: `last`
+    --> /data/hark/spike-rv/loop5/mut/guest-engine/src/engine.rs:1626:21
+     |
+1626 |                 let last = pos_deltas.last().map(|(id, _)| *id);
+     |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_last`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `last`
+    --> /data/hark/spike-rv/loop5/mut/guest-engine/src/engine.rs:1626:21
+     |
+1626 |                 let last = pos_deltas.last().map(|(id, _)| *id);
+     |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_last`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+mut 9 [src/engine.rs: adl_haircut_share(hole, *delta, total, false);] liqedge 1 capcheck 10 snapcap true snaptest 20 hbind 20 orafuzz 20 liqfuzz 30 segfuzz 30 fuzz 100 scen 47 witfuzz 30 advfuzz 30 selftest {"selftest_fail":[]} proofs ok depth8 5 -> no

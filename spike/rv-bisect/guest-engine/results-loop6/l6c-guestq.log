@@ -1,0 +1,12 @@
+prodheight
+{"check":"prod: SetSeq refused (2), seq unchanged","ok":true,"status":0,"ev":[2],"height":10,"segs":10}
+{"check":"prod: MNP2 governance ops + extension area","ok":true,"status":0,"ev":[2147483648,6,12,9,2],"height":11,"segs":11}
+{"check":"prod: MNP1 governance op needing an extension -> BadAccount 2","ok":true,"status":0,"ev":[2],"height":12,"segs":12}
+{"check":"prod fresh image: refused header at height 1, genesis at height 2 -> height 2","ok":true,"status":0,"ev":[],"height":2,"segs":2}
+{"check":"test image: SetHeight jumps allowed (fixtures), going back refused","ok":true,"status":0,"ev":[1073741824,1073741824,1073741824,2],"height":9,"segs":1}
+{"check":"test image: no binding (height stays 9 in run 2)","ok":true,"status":0,"ev":[],"height":9,"segs":2}
+{"check":"test image: SetSeq fixture allowed (0x40000001), going back refused","ok":true,"status":0,"ev":[1073741825,2],"height":9,"segs":3}
+{"checks":16,"pass":16,"ok":true}
+govguest
+{"batches":0,"match":0,"units":0,"steps":0}
+GQDONE

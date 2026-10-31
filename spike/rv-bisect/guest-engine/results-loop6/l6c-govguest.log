@@ -1,0 +1,7 @@
+govguest
+{"batch":"gov1.bin","units":228,"engine_match":true,"roots_match":true,"steps":17263373,"halted":true}
+{"batch":"gov2.bin","units":228,"engine_match":true,"roots_match":true,"steps":16636672,"halted":true}
+{"batch":"gov3.bin","units":229,"engine_match":true,"roots_match":true,"steps":15699193,"halted":true}
+{"batch":"gov4.bin","units":229,"engine_match":true,"roots_match":true,"steps":18247460,"halted":true}
+{"batches":4,"match":4,"units":914,"steps":67846698}
+GQDONE

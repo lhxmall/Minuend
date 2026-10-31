@@ -1,0 +1,4 @@
+mut 1 [src/lib.rs: ] govedge 0 -> KILLED by govedge
+mut 2 [src/lib.rs:         BatchOp::GovWithdraw { amount: 0, .. } if s.perp_balances.len(] govedge 0 -> KILLED by govedge
+mut 3 [src/lib.rs: BatchOp::GovDeposit { .. } | BatchOp::Slash { .. } => {] govedge 0 -> KILLED by govedge
+KILLED (baseline govedge was failing: kills by govedge invalid; rerun after fix)

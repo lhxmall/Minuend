@@ -1,0 +1,9 @@
+govedge
+{"cases":7,"ok":7,"fail":[]}
+govcap
+{"perp_ids":256,"markets":256,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":769,"sizeclass_highwater":3890496,"peak_live":3759616,"sum_class_peaks":3890448,"snapshot_words":398145}
+liqedge
+{"ok":true,"cases":{"wd_limit":{"match":true,"intent":true},"wd_min":{"match":true,"intent":true},"wd_prune":{"match":true,"intent":true},"stale_peg":{"match":true,"intent":true},"fresh_peg":{"match":true,"intent":true},"band10":{"match":true,"intent":true},"adl_hole":{"match":true,"intent":true},"wd_equity":{"match":true,"intent":true},"liq_eq":{"match":true,"intent":true},"liq_eq_plus1":{"match":true,"intent":true}}}
+govfuzz
+{"seeds":300,"match":300,"units":100526,"why":"","coverage":{"commit:0x11":2497,"commit:ok":10102,"delisted":197,"final:0x7":1931,"final:0xc":1588,"final:ok":940,"gdep:0x7":1432,"gdep:ok":5699,"gwd:0x6":1824,"gwd:0x9":1339,"gwd:ok":2189,"market:0x7":1193,"market:0x9":705,"market:ok":5276,"markets_created":5471,"param_changed":131,"place:0x7":4639,"place:ok":6365,"prop:0x7":4441,"prop:0x9":217,"prop:0xa":709,"prop:ok":1778,"reveal:0x11":7481,"reveal:0x2":2157,"reveal:0x3":121,"reveal:0x6":13,"reveal:0x7":684,"reveal:0x9":446,"reveal:0xa":29,"reveal:0xc":173,"reveal:0xd":218,"reveal:0xe":103,"reveal:0xf":10,"reveal:ok":1722,"vote:0x7":3624,"vote:0xc":3675,"vote:ok":3678}}
+GDONE
