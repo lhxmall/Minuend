@@ -240,3 +240,31 @@ R = ceil(log16 steps); operator cost = R × 3372 + 11 467 vs payout 108 000.
 | depth2000 | 1000 | 2311 / 12.47 / 21 | 697,316 / 622,891 / 1,401,744 | 334,655 | **362,661** | — | 6 (31,699) | 697,316,275 → 8 (38,443) |
 
 (Source: VM logs `/data/hark/logs/rv/wit-bench-depth{200,800,2000,2000-n1000}.jsonl`, run 2026-10-31 at commit df02e33; the table was left as a placeholder when the previous run was cut off and was filled in loop round 1 from those logs. Every row: `match_real_guest`, `roots_equal`, `scratch_ok` = true.)
+
+## 7. Attack → fix, loop round 1 (2026-10-31)
+
+Full findings with PoCs: project file `findings/rv-loop-1.md` (C 1 · H 2 · M 5 · L 5; no real-engine ↔ port divergence).
+
+**Guest I/O contract (now enforced, shared by host and guest code):**
+- Header `[MAGIC, n_accounts, n_ops, flags]` is checked before any op: `n_accounts ≤ MAX_ACCOUNTS = 4 096`,
+  `n_ops ≤ MAX_UNITS = 16 384`. A rejected header runs no op, returns hash 0 and status 1/2/3. Within the limits every
+  input index is < 2^24 (no wrap, no input-ecall trap). Words past a truncated batch read 0 → kind 0 → BadAccount.
+  An account-table entry equal to `INSURANCE_ACCOUNT` (all zero) cannot author ops (BadAccount): upstream ops are signed
+  and their account is the signer's pubkey hash.
+- Output: OUT[0x1FFF9] status (0 ok, 1 bad magic, 2 too many accounts, 3 too many units, `0xFFFF0077` abort =
+  panic/out of memory, exit code 77), OUT[0x1FFF8] event-log overflow (never 1 within MAX_UNITS: a unit emits ≤ 7
+  words), OUT[0x1FFFA] peak live heap bytes, OUT[12] heap high-water. Per-unit roots (8 words each) fill OUT+0x20000 up
+  to the RAM end exactly at MAX_UNITS. Upstream batches (≤ 200 000 units) must be cut into ≤ 16 384-unit segments by
+  the layer-1 game.
+- Allocator: deterministic power-of-two size classes (16 B .. 32 MiB) with per-class LIFO free lists (was a bump
+  allocator that never freed; the book's undo journal clones a whole price level per touch, so ~1 700 orders at one
+  price exhausted the 48 MiB heap — guest abort on batches the real engine accepts).
+
+**Measured bounds** (`engine-diff heapsim`, host 64-bit sizes = upper bound for rv32): size-class high-water 19.0 MB
+for 16 384 bids at one price (old bump: 4.21 GB), 3.8 MB for the 4 096-account × 16 384-unit limit batch. Steps:
+L ≤ MAX_UNITS live orders, so a unit costs ≤ ≈ 43k + 170·16 384 + 0.45 M ≈ 3.3 M steps and a full segment
+≈ 5.4·10^10 < 2^40 (R ≤ 10).
+
+**New tools:** `engine-diff crowd | advfuzz | advgen | robust | selftest | proofs | heapsim | portout`,
+`smt_ref::{prove, verify_member, verify_absent}` (the §7.3.3 AA rule set), `js/robust.js`, `scripts/loop1-suite.sh`,
+`scripts/loop1-mut.sh`. Results: `work/rv-rollup-notes.md` → "loop round 1".

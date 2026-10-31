@@ -24,7 +24,7 @@ const st = { pc: entry, regs: Array(32).fill(0), step: 0, inp: new FastMem() }; 
 while (st.pc !== stopPc && st.pc !== ref.HALT && st.pc !== ref.TRAP) ref.step(st, mem);
 const jsSteps = st.step, jsMs = Date.now() - t0;
 const OUT = 0x03F00000 / 4; const nev = mem.get(OUT + 8); const units = mem.get(OUT + 0x1FFFF) >>> 0;
-const idx = []; for (let k = 0; k < 13 + nev; k++) idx.push(k); for (let k = 0x1FFFB; k < 0x20000 + 8 * units; k++) idx.push(k);
+const idx = []; for (let k = 0; k < 13 + nev; k++) idx.push(k); for (let k = 0x1FFF8; k < 0x20000 + 8 * units; k++) idx.push(k); // loop1: +status/peak/ev-overflow words
 const jsOut = idx.map(k => mem.get(OUT + k) >>> 0);
 // sail
 const pre = path.join(wd, 'mem'); const t1 = Date.now();
@@ -38,6 +38,6 @@ for (const f of dumps) { const b = fs.readFileSync(path.join(wd, f)); const m = 
 const insn = /(\d+)\s+instructions?/i.exec(log) || /instructions?[^\d]*(\d+)/i.exec(log);
 const hash = jsOut.slice(0, 8).map(v => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, v >>> 24].map(x => x.toString(16).padStart(2, '0')).join('')).join('');
 const finalRoot = units ? jsOut.slice(jsOut.length - 8).map(v => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, v >>> 24].map(x => x.toString(16).padStart(2, '0')).join('')).join('') : null;
-console.log(JSON.stringify({ units, final_root: finalRoot, scratch_ok: jsOut[13 + nev + 3], js_steps_to_stop: jsSteps, sail_insns: insn ? +insn[1] : null, out_words: jsOut.length,
+console.log(JSON.stringify({ units, final_root: finalRoot, scratch_ok: jsOut[13 + nev + 6], status: jsOut[13 + nev + 1], heap_peak_live: jsOut[13 + nev + 2], heap: jsOut[12], js_steps_to_stop: jsSteps, sail_insns: insn ? +insn[1] : null, out_words: jsOut.length,
   out_match: sailOut ? JSON.stringify(sailOut) === JSON.stringify(jsOut) : null, hash, hash_vs_expected: expect ? hash === expect : null,
   dumps, sail_exit: r.status, js_ms: jsMs, sail_ms: sailMs, sail_log_tail: log.split('\n').slice(-8).join(' | ') }));
