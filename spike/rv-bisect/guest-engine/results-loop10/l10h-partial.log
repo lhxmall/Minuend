@@ -11,3 +11,7 @@ BUILT
 {"cases":9,"ok":9,"fail":[]}
 {"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":289,"sizeclass_highwater":3545024,"peak_live":3496064,"sum_class_peaks":3544976,"snapshot_words":391905}
 {"seeds":100,"match":100,"units":33490,"why":"","coverage":{"commit:0x11":549,"commit:0x13":1336,"commit:ok":2318,"delisted":54,"final:0x7":659,"final:0xc":512,"final:ok":295,"gdep:0x7":502,"gdep:ok":1878,"gwd:0x13":2,"gwd:0x6":609,"gwd:0x9":456,"gwd:ok":752,"market:0x13":500,"market:0x7":324,"marke
+{"seeds":100,"match":100,"units":33406,"why":"","coverage":{"commit:0x11":541,"commit:0x13":1369,"commit:ok":2314,"delisted":46,"final:0x7":655,"final:0xc":531,"final:ok":273,"gdep:0x7":488,"gdep:ok":1866,"gwd:0x13":3,"gwd:0x6":619,"gwd:0x9":445,"gwd:ok":753,"liq:0x2":41,"liq:0xb":443,"market:0x13":
+== /data/hark/target-l10h-hostgw/release/engine-diff
+{"cases":9,"ok":9,"fail":[]}
+{"perp_ids":256,"markets":16,"proposals":64,"voted":19999,"commits":1024,"rejected_ops":481,"leaves":1377,"sizeclass_highwater":4026176,"peak_live":3829760,"sum_class_peaks":4026128,"snapshot_words":391905}

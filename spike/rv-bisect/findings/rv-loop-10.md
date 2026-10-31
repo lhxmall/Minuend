@@ -119,7 +119,7 @@ cycle). Options, each a rule change for the owner:
 | opscan (round-8 prod image, govwit image) | only `unimp` outside the modelled set |
 | R10-H1 fix, default host (`l10h.sh`, target-l10h-host): govedge (incl. case 9 `r10:oracles`, `cap:markets` at 16) | 9 / 9 |
 | govcap at the new caps (256 PERP ids, 16 markets, 64 proposals / 19 999 voters, 1 024 commits) | 3.55 MB size-class high-water |
-| govfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) |
-| l10h rest: xfuzz 100, govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | _running_ (l10h.log, HDONE) |
+| govfuzz 100 / xfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) · 100 / 100 (33 406 units) |
+| l10h rest: govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | _running_ (l10h.log, HDONE) |
 | govwit full suite (`loop10-suite.sh g`, l10-*) | _running_ (SUITEDONE in l10-bins.txt) |
 | full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | _running_ (74 PASS / 0 FAIL at 18:56 UTC) |
