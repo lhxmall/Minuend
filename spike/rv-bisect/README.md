@@ -197,6 +197,20 @@ Upgrade / cancel voids and late results on voided submissions do not count. `rv_
 Residual R12-M1 (M, owner): at V = 10 every height locks 204.8 M bytes for its window (capital amplification ≈ 2 × heights
 per day vs the attacker's daily burn). rolltest 444/444; AA mutants `js/aamut-l12.py` 26/26 killed.
 
+## Loop round 14 (2026-11-01) — stateless (witness-fed) guest prototype (R4-H1 production direction)
+
+`docs/rv-stateless-guest.md`, `findings/rv-loop-14.md`. Feature `stateless` (`guest-engine/src/stateless.rs`): a segment's
+guest gets only the touched leaves of **MNWIT-S** (MNWIT1 + `glob cseq apos mkx lvl bmp aord`: the state the session
+kept in memory, incl. the book structure as per-price-level leaves + a 256-ary price trie) with a pruned-SMT multiproof
+against the start root, runs deposit / place / cancel / fills under completeness guards (pre-unit reads, post-unit walk
+check over the trie, dirty-set coverage) and recomputes the end root — no session, no global caps; per-object rules
+instead (≤ 64 markets of exposure per account, ≤ 4 096 orders per level) and per-segment limits. Differential vs the
+session port (`engine-diff slfuzz`): gen 300 / 300 + 100 / 100 (1000 orders), adv 300 / 300, ora 200 / 200 — events and
+MNWIT-S start / end roots equal on every segment. Review: **R14-C1 (C, fixed)** exclusion proofs through a hash-only
+leaf with a forged key (status 0, wrong root) — PoC 15 / 15 before, 273 / 273 refused after; R14-H1 (fixed, exposure
+cap), **R14-H2 (H, open: rv_rollup must bind start root(h) = end root(h-1) before the stateless image is used)**,
+R14-M1 / M3 fixed, R14-M2 open. `sladv` 31 260 adversarial cases, 0 unsound.
+
 ## Loop round 13 (2026-11-01) — R12-M1 fixed: global term capped separately (rv_rollup rule change)
 
 `findings/rv-loop-13.md`, design §8 item 3. Decision (2026-11-01, by the assistant per the owner's brief; owner may
