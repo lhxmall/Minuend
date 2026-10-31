@@ -329,9 +329,67 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 | `js/rolltest.js`（真实 ocore 求值器模拟） | **209 / 209** | 含 'refund' 组 7 个、新的 'overpay' 组 33 个（多付退款、常量、烧毁部分取不出） |
 | `js/rolldevnet.js`（aa-testkit devnet，真实交易、bounce、付款） | **119 / 119**（设 max_aa_responses 和不设各跑一次都全过） | 第 6 节：operator 超时、挑战者超时、同一高度两局、欺诈作废 + 迟到回调 + reclaim；第 7 节（新）：submit / open / resolve / referee 直接 open 多付退款的真实输出 |
 | 官方 riscv-tests（rv32ui 42 + rv32um 8，每一步都用链上 rv_step 复核） | **48 / 50** | 没过的 `ma_data`（非对齐访存）、`fence_i` 是故意不支持，会 TRAP |
+| **和 sail-riscv 0.16 对拍**（`xval/`，2026-10-31） | **0 处真不一致** | riscv-tests 13 731 步 + 随机单步 12 000 例（20 850 个被测步，总共比较 764 850 步），每一步比 pc / 32 个寄存器 / 内存；被测步同时用 rv_step（真实 ocore）复核。见 7.1 |
 | 更早的 rv_game 对抗测试 | 300 / 300 + 300 局随机对手 + devnet 27/27 | 见 `README.md` |
 
 日志在机器 `/data/hark/logs/rv/`：`rolltest-r4.log`、`rolldevnet6.log`（设 max_aa_responses）、`rolldevnet8.log`（不设）（+ `.json`）、`tpscmp6.txt` / `tpscmp8.txt`。
+
+### 7.1 和独立实现 sail-riscv 对拍（2026-10-31）
+
+**为什么要做：** 以前判断 rv_step 对不对，参照只有我们自己写的 JS 参考实现（`js/ref.js`）+ 官方 riscv-tests。如果 JS 和 rv_step 犯了同一个错，就查不出来。所以找一个**别人写的、公认正确**的实现来逐步对比。
+
+**用的是谁：sail-riscv 0.16。** 它是 RISC-V 国际基金会采用的「官方形式化模型」（用 Sail 语言写规范，自动生成 C++ 模拟器）。在机器上**从源码编译**成功（约 13 分钟），所以没用 Spike / rvemu。工具全放在 `/data/hark/spike-rv/xval/` 下，没装任何系统级的东西：
+- Sail 编译器 0.20.3（官方预编译包）、CMake 3.31.6（官方二进制包）；
+- m4 1.4.19（从源码编，GMP 的 configure 需要它，机器上没有）；
+- GMP 6.3.0（sail-riscv 的 CMake 自己下载编译）。
+另外也拿官方发布的 0.16 二进制跑了一遍，结果和自己编的完全一样。
+
+**怎么配置 sail（`xval/mkconfig.py`）：** 从 `sail_riscv_sim --rv32 --print-default-config` 生成两份配置：
+- `rv32im-strict.json`：只开 I + M（再加 Zicsr，机器模式处理 trap 需要）。内存只有 `[0, 64 MiB)`，和 rv_step 的 2^24 个字一样大，别的地址都不映射（CLINT、设备树挪走）。非对齐访存 → 异常。不开 Zifencei。
+- `rv32im-relaxed.json`：同上，但允许非对齐访存、打开 Zifencei。用来展示 rv_step「故意 TRAP」的地方和普通 RV32IM 核的差别。
+
+**怎么比（每一步都比）：**
+1. 同一个 ELF 分别交给 sail 和 JS 参考实现跑。sail 输出逐条指令的轨迹（写了哪个寄存器、写了哪块内存、有没有异常），我们把它「重放」成一份影子状态。
+2. 每执行一步就比：pc、32 个寄存器、两边写过的每个内存字（起点是同一个 ELF 镜像，所以只比写过的就等于比整块内存）。
+3. 同一步再交给**链上 rv_step（真实 ocore 求值器）**，前根、后根必须和 JS 一样。这样 rv_step = JS = sail。
+4. 只有一边 trap 的步要分类：属于 rv_step 文档里写明的选择（`ecall a7=93` 停机、`a7=63` 读输入、FENCE / FENCE.I / CSR / MRET / WFI / EBREAK / 非对齐 → TRAP）记为「规范选择」；其他都算 bug。rv_step 只有一个 TRAP 标记（pc=1，没有 mcause / mepc），所以两边都 trap 时只检查「都 trap 了，寄存器和内存都没被改」。
+
+**测了什么：**
+- `xval/xtests.js`：官方 riscv-tests（rv32ui 42 个 + rv32um 8 个）。
+- `xval/xfuzz.js`：随机单步。每个用例是一个很小的 ELF：先用 62 条 lui/addi 把 31 个寄存器装成随机值或边界值，再放被测指令（pc 随机，也包括内存最后一个字），后面再跟一条随机指令，并在访存地址附近放好数据。覆盖 53 类：rv32im 每一条指令 + fence / fence.i / ecall（a7 = 93 / 63 / 其他）/ ebreak / CSR / mret·wfi·sret / 非法编码 / 完全随机的字。专门加了边界情况：写 x0、有符号溢出、除以 0、INT_MIN / −1、用寄存器移位 ≥ 32、跳到非对齐地址、符号扩展的 load、非对齐的 load / store、内存末尾、越界和回绕的地址。
+
+**结果：**
+
+| 测试 | 规模 | 结果 |
+|---|---|---|
+| riscv-tests，strict 配置，每步也用 rv_step 复核 | 50 个测试，13 731 步 | **0 不一致**。48 个以 ecall 停机结束（规范选择）；`ma_data`（非对齐 load）和 `fence_i` 两边**都** trap |
+| riscv-tests，relaxed 配置 | 13 731 步 | 0 bug；只有预期的 2 处规范差异：sail 允许那次非对齐 load、把 fence.i 当空操作 |
+| 随机单步，strict，种子 1，4 路并行，被测步用 rv_step 复核 | 12 000 例，20 850 个被测步（rv_step 跑了 20 906 次），总共比较 764 850 步 | **0 不一致** |
+| 随机单步，relaxed，种子 2 | 4 000 例，6 943 个被测步 | 0 bug（只有规范差异） |
+| 官方发布的 sail 二进制（核对自己编的） | riscv-tests + 2 000 例 | 0 bug，分类数字一模一样 |
+
+边界情况在 strict 跑里出现的次数：写 x0 1 713、有符号溢出 106、除以 0 264、INT_MIN/−1 129、寄存器移位 ≥32 598、分支目标非对齐 675、跳转目标非对齐 205、符号扩展 load 485、非对齐 load 514 / store 341、内存末尾 274、地址越界 535、地址回绕 168。
+
+**规范差异（都是故意的，不是 bug）：**
+
+| 指令 / 情况 | sail | rv_step |
+|---|---|---|
+| `ecall`，a7 = 93 | 进异常（m-call） | 停机（pc = 2） |
+| `ecall`，a7 = 63 | 进异常 | 读输入树的一个字 |
+| FENCE | 空操作 | TRAP |
+| FENCE.I（开了 Zifencei 时） | 空操作 | TRAP |
+| CSR 指令、MRET、WFI、SRET | 执行 | TRAP |
+| 非对齐 load / store（relaxed 配置） | 允许 | TRAP |
+
+guest 用 `riscv32im-unknown-none-elf` 编译、不用这些指令就不受影响（和以前的结论一样）。
+
+**这个对拍本身靠得住吗（`xval/mutants.sh`）：** 故意在 JS 参考实现的副本里埋 bug，并且关掉 rv_step 复核（`RVSTEP=0`），看**只靠和 sail 比**能不能抓到。埋了 11 个：sltiu 当成有符号比较、lh 不做符号扩展、remu 除以 0 返回 0、div 的 INT_MIN/−1 结果错、sra 当成逻辑右移、寄存器移位用 6 位、jalr 不清最低位、sb 的字节掩码错、bge 当成无符号、mulhsu 两个操作数对调、auipc 不加 pc——**全部抓到**（次数见 `xval/README.md`）。（把移位位数从 `& 31` 改成 `& 63` 在 JS 里其实没区别，因为 JS 的移位运算本来就只看低 5 位，所以不算。）
+
+**结论：没有发现 rv_step 或 JS 参考实现的错误，两者都没改。** rv_step 仍是 ops 1850、地址 `7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA`，所以 rollup 模拟和 devnet 不需要重跑。
+
+**对拍时踩到的一个坑（是 sail 轨迹格式的事，不是 rv_step 的事）：** 取指就出错（比如跳到内存外面）时，sail 不打印这条指令那一行，异常信息会紧跟在上一条指令后面，看起来像上一条指令出错了。改成加 `--trace-step`（每步之间空一行）按块解析就对了。
+
+怎么跑（机器上）：`cd /data/hark/spike-rv/xval/tree/xval && setsid nohup ./run-xval.sh > /data/hark/logs/rv/xval-run.out 2>&1 < /dev/null &`（全套约 20 分钟）。日志：`/data/hark/logs/rv/xval-*.log`、`xval-fuzz-strict-summary.json`、`xval-fuzz-relaxed-summary.json`、`xval-mutants*.log`。
 
 ---
 
@@ -344,7 +402,7 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 5. **单批上限 2^40 步**（MAXSTEPS）。
 6. **operator 和挑战者都不能是 AA**（`is_aa` 禁止）。用多签 AA 当 operator 的方案目前不行。
 7. **挑战者必须在线**：单步阶段由挑战者举证；每步 1 小时内必须走。
-8. **没和 sail-riscv（或其他独立实现）对拍**。参照只有自己的 JS 参考实现 + 官方 riscv-tests + 真实编译出的程序。
+8. ~~没和 sail-riscv 对拍~~ 已做（7.1）：sail-riscv 0.16，0 处真不一致。剩下：对拍只覆盖单步语义；trap 的具体种类（mcause 等）rv_step 不建模，只比「都 trap 了」。
 9. **引擎还没移植到 no_std**：真正的 Minuend 执行引擎还不能编译成 riscv32im guest，所以现在测的是测试程序，不是真实撮合。
 10. tps fee：测试客户端已设 `max_aa_responses`（6.5），只降预付、不降最终费用，并且预付少了交易可能暂时不被选作父单元；主网 tps 参数没核对。
 
@@ -360,6 +418,7 @@ devnet 参数 base 10、multiplier 10、tps_interval 2。一笔 AA 触发：计�
 - `js/rolltest.js` —— 求值器测试；`js/rolldevnet.js` —— devnet 测试
 - `js/tpsdiag.js` —— tps fee 诊断
 - `js/tpscmp.js` —— 按触发类型对比预付 / 结算 tps fee 和响应数
+- `xval/` —— 和 sail-riscv 对拍：`mkconfig.py`（生成 sail 配置）、`rv32im-strict.json` / `rv32im-relaxed.json`、`lib.js`（跑 sail、解析轨迹、写 ELF、逐步比较）、`xtests.js`（riscv-tests）、`xfuzz.js`（随机单步）、`mutants.sh`（埋 bug 自测）、`summarize.js`、`run-xval.sh`（全套）
 
 怎么跑（在机器上）：
 
