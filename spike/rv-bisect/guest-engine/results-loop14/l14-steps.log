@@ -1,0 +1,22 @@
+    Finished `release` profile [optimized] target(s) in 46.88s
+== sldump 3 300 100
+{"segments":4,"dir":"../sl/s3-300-100"}
+{"seg":"seg000.bin","units":100,"session_steps":20144151,"stateless_steps":17372598,"ratio":0.862,"witness_bytes":3172,"leaves_verified":158,"node_hashes":214,"sl_peak_heap":206016,"session_heap":70448,"ok":true}
+{"seg":"seg001.bin","units":100,"session_steps":29719784,"stateless_steps":27617455,"ratio":0.929,"witness_bytes":19891,"leaves_verified":193,"node_hashes":455,"sl_peak_heap":351712,"session_heap":94192,"ok":true}
+{"seg":"seg002.bin","units":100,"session_steps":28387353,"stateless_steps":30620090,"ratio":1.079,"witness_bytes":24178,"leaves_verified":210,"node_hashes":525,"sl_peak_heap":361520,"session_heap":117488,"ok":true}
+{"seg":"seg003.bin","units":31,"session_steps":9274419,"stateless_steps":23322241,"ratio":2.515,"witness_bytes":26877,"leaves_verified":204,"node_hashes":568,"sl_peak_heap":361520,"session_heap":120560,"ok":true}
+{"dir":"../sl/s3-300-100","segments":4,"ok":4,"units":331,"session_steps":87525707,"stateless_steps":98932384,"ratio":1.13,"session_steps_per_unit":264428,"stateless_steps_per_unit":298889}
+== sldump 5 200 50 adv
+{"segments":5,"dir":"../sl/s5-200-50adv"}
+{"seg":"seg000.bin","units":50,"session_steps":3039585,"stateless_steps":4527582,"ratio":1.49,"witness_bytes":1318,"leaves_verified":55,"node_hashes":69,"sl_peak_heap":59712,"session_heap":27232,"ok":true}
+{"seg":"seg001.bin","units":50,"session_steps":2872937,"stateless_steps":7042411,"ratio":2.451,"witness_bytes":5911,"leaves_verified":99,"node_hashes":116,"sl_peak_heap":94576,"session_heap":28336,"ok":true}
+{"seg":"seg002.bin","units":50,"session_steps":2643849,"stateless_steps":6426480,"ratio":2.431,"witness_bytes":5526,"leaves_verified":72,"node_hashes":97,"sl_peak_heap":94576,"session_heap":28336,"ok":true}
+{"seg":"seg003.bin","units":50,"session_steps":2259642,"stateless_steps":5693748,"ratio":2.52,"witness_bytes":4232,"leaves_verified":70,"node_hashes":106,"sl_peak_heap":94576,"session_heap":28336,"ok":true}
+{"seg":"seg004.bin","units":4,"session_steps":102815,"stateless_steps":2480267,"ratio":24.124,"witness_bytes":3715,"leaves_verified":23,"node_hashes":107,"sl_peak_heap":94576,"session_heap":28336,"ok":true}
+{"dir":"../sl/s5-200-50adv","segments":5,"ok":5,"units":204,"session_steps":10918828,"stateless_steps":26170488,"ratio":2.397,"session_steps_per_unit":53524,"stateless_steps_per_unit":128287}
+== sldump 8 300 300
+{"segments":2,"dir":"../sl/s8-300-300"}
+{"seg":"seg000.bin","units":300,"session_steps":68617423,"stateless_steps":47704267,"ratio":0.695,"witness_bytes":4475,"leaves_verified":221,"node_hashes":465,"sl_peak_heap":412608,"session_heap":162944,"ok":true}
+{"seg":"seg001.bin","units":82,"session_steps":25124532,"stateless_steps":40072420,"ratio":1.595,"witness_bytes":42299,"leaves_verified":313,"node_hashes":886,"sl_peak_heap":412608,"session_heap":170672,"ok":true}
+{"dir":"../sl/s8-300-300","segments":2,"ok":2,"units":382,"session_steps":93741955,"stateless_steps":87776687,"ratio":0.936,"session_steps_per_unit":245398,"stateless_steps_per_unit":229782}
+SDONE

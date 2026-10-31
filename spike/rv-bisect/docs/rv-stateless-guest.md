@@ -204,8 +204,19 @@ MNWIT-S root of the session pre-state, end root = MNWIT-S root of the session po
 | adv (edge values) | 300 / 300 | 1 662 | 62 300 | 139 B | 15 KB | 1.7 | 1.6 | 3.4 |
 | ora (oracled pre-state) | 200 / 200 | 1 655 (+201 unsupported first segments) | 75 765 | 627 B | 73 KB | 4.2 | 7.2 | 1.89 |
 
-riscv32im steps per segment (js/slsteps.js, JS reference model): see `results-loop14/l14-steps.log` and
-findings/rv-loop-14.md "Steps".
+Adversarial (`sladv 40 200`, `l14-sladv.log`): 325 segments, 45 908 cases, 0 unsound.
+
+riscv32im steps per segment (`js/slsteps.js`, JS reference model, `results-loop14/l14-steps.log`; session = `prod` image
+carried from height to height, stateless = the bound image with its carried end root):
+
+| config | units | session steps | stateless steps | ratio | steps / unit | peak heap stateless / session |
+|---|---|---|---|---|---|---|
+| gen 3 · 300 orders · 100 units / seg (4 seg) | 331 | 87.5 M | 98.9 M | 1.13 | 264 k → 299 k | 362 KB / 121 KB |
+| adv 5 · 200 · 50 / seg (5 seg) | 204 | 10.9 M | 26.2 M | 2.40 | 54 k → 128 k | 95 KB / 28 KB |
+| gen 8 · 300 · 300 / seg (2 seg) | 382 | 93.7 M | 87.8 M | 0.94 | 245 k → 230 k | 413 KB / 171 KB |
+
+Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); per-unit cost ≤ the session's. Full segments
+0.7 – 1.13 ×; tiny tail segments are dominated by the fixed part. Stateless peak heap does not grow with the exchange.
 
 ## 11. What remains (production)
 

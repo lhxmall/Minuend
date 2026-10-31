@@ -1,0 +1,12 @@
+== slfuzz 300 300 (21:38:44)
+{"batches":300,"ok":300,"bad_segments":0,"segments":2836,"units":112794,"witness_bytes":72016283,"max_witness":72659,"leaves_verified":550557,"tree_nodes":892561,"sl_hashes":2847584,"session_hashes":1679553,"operator_iterations":107365,"first_bad":""}
+exit 0 (21:40:05)
+== slfuzz 100 1000 (21:40:05)
+{"batches":100,"ok":100,"bad_segments":0,"segments":2079,"units":107581,"witness_bytes":90000836,"max_witness":97458,"leaves_verified":641014,"tree_nodes":969867,"sl_hashes":3284303,"session_hashes":1845273,"operator_iterations":84628,"first_bad":""}
+exit 0 (21:41:22)
+== slfuzz 300 200 adv (21:41:22)
+
+thread 'main' (839424) panicked at /data/hark/spike-rv/loop14/guest-engine/src/state.rs:729:21:
+no entry found for key
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit 101 (21:41:22)

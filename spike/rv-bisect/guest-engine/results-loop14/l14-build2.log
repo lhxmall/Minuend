@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 2m 08s
+    Finished `release` profile [optimized] target(s) in 1m 07s
+6f188080d488e91a6b6273c01799b66d2d637928  /data/hark/target-l14-host/release/engine-diff
+591d29f0eba48b67d32a0e42f4762b783d7387b0  /data/hark/target-l14-gsl2/riscv32im-unknown-none-elf/release/rvengine
+BUILDDONE

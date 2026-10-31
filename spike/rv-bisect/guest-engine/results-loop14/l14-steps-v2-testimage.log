@@ -1,0 +1,9 @@
+== sldump 3 300 100
+{"segments":4,"dir":"../sl/s3-300-100"}
+{"seg":"seg000.bin","units":100,"session_steps":23363794,"stateless_steps":17206046,"ratio":0.736,"witness_bytes":3172,"leaves_verified":158,"node_hashes":214,"sl_peak_heap":206016,"session_heap":89712,"ok":true}
+{"seg":"seg001.bin","units":100,"session_steps":33736624,"stateless_steps":27355496,"ratio":0.811,"witness_bytes":19891,"leaves_verified":193,"node_hashes":455,"sl_peak_heap":351712,"session_heap":121168,"ok":true}
+{"seg":"seg002.bin","units":100,"session_steps":33288913,"stateless_steps":30311658,"ratio":0.911,"witness_bytes":24178,"leaves_verified":210,"node_hashes":525,"sl_peak_heap":361520,"session_heap":162032,"ok":true}
+{"seg":"seg003.bin","units":31,"session_steps":14648489,"stateless_steps":23208063,"ratio":1.584,"witness_bytes":26877,"leaves_verified":204,"node_hashes":568,"sl_peak_heap":301296,"session_heap":166128,"ok":true}
+{"dir":"../sl/s3-300-100","segments":4,"ok":4,"units":331,"session_steps":105037820,"stateless_steps":98081263,"ratio":0.934,"session_steps_per_unit":317335,"stateless_steps_per_unit":296318}
+== sldump 5 200 50 adv
+{"segments":5,"dir":"../sl/s5-200-50adv"}

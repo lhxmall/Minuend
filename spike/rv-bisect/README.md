@@ -215,7 +215,7 @@ session port (`engine-diff slfuzz`): gen 300 / 300 + 100 / 100 (1000 orders), ad
 MNWIT-S start / end roots equal on every segment. Review: **R14-C1 (C, fixed)** exclusion proofs through a hash-only
 leaf with a forged key (status 0, wrong root) — PoC 15 / 15 before, 273 / 273 refused after; R14-H1 (fixed, exposure
 cap), R14-H2 (H, fixed in the guest: the image keeps its last good end root in the carried memory and refuses a witness for another start root),
-R14-M1 / M3 fixed, R14-M2 open. `sladv` 31 260 adversarial cases, 0 unsound.
+R14-M1 / M3 fixed, R14-M2 open. `sladv` 45 908 adversarial cases, 0 unsound; riscv32im steps 0.94 – 1.13 × the session on full segments (fixed ≈ 2.4 M per segment), peak heap ≤ 0.4 MB.
 
 ## Loop round 13 (2026-11-01) — R12-M1 fixed: global term capped separately (rv_rollup rule change)
 

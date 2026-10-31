@@ -1,0 +1,12 @@
+== slfuzz 300 300 (22:21:04)
+{"mode":"gen","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":2836,"units":112794,"witness_bytes":77213226,"max_witness":73248,"leaves_verified":551541,"tree_nodes":893994,"sl_hashes":2851219,"session_hashes":1679553,"operator_iterations":110041,"first_bad":""}
+exit 0 (22:24:32)
+== slfuzz 100 1000 (22:24:32)
+{"mode":"gen","batches":100,"ok":100,"bad_segments":0,"unsupported_segments":0,"segments":2079,"units":107581,"witness_bytes":93690833,"max_witness":99143,"leaves_verified":641419,"tree_nodes":970124,"sl_hashes":3285633,"session_hashes":1845273,"operator_iterations":86384,"first_bad":""}
+exit 0 (22:27:32)
+== slfuzz 300 200 adv (22:27:32)
+{"mode":"adv","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":1662,"units":62300,"witness_bytes":8760592,"max_witness":15100,"leaves_verified":110438,"tree_nodes":99017,"sl_hashes":361774,"session_hashes":105062,"operator_iterations":30767,"first_bad":""}
+exit 0 (22:27:44)
+== slfuzz 200 300 ora (22:27:44)
+{"mode":"ora","batches":200,"ok":200,"bad_segments":0,"unsupported_segments":201,"segments":1655,"units":75765,"witness_bytes":47568691,"max_witness":72853,"leaves_verified":322446,"tree_nodes":543650,"sl_hashes":1689359,"session_hashes":894238,"operator_iterations":55496,"first_bad":""}
+exit 0 (22:29:13)

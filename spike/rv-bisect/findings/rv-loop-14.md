@@ -1,5 +1,7 @@
 # rv loop round 14 — stateless (witness-fed) guest: design, prototype, adversarial review (2026-11-01)
 
+Status: **FINAL** (round-15 collection: all box rows filled; R14-M2 is followed up in `findings/rv-loop-15.md`).
+
 Branch `spike/rv-bisect`, parent 422e127. Design: `docs/rv-stateless-guest.md`. Prototype: `guest-engine/src/stateless.rs`
 (feature `stateless`), harness `engine-diff/src/sl.rs`, `js/slsteps.js`, mutants `guest-engine/scripts/loop14-mut.py`.
 Box logs: `guest-engine/results-loop14/`. Notes: work/rv-rollup-notes.md "Loop round 14".
@@ -16,7 +18,7 @@ Box logs: `guest-engine/results-loop14/`. Notes: work/rv-rollup-notes.md "Loop r
 | R14-M3 | M | cost bound | the first limits allowed 2^20 tree nodes and 4 096 × 4 096 orders per segment: a witness whose verification alone costs > 10^10 steps (an operator-chosen DoS on challengers / step bound) | **fixed** (b1a4f3f): tree nodes 2^18, orders 2^16 in total, witness 16 MiB; worst case ≈ 2^18 × 2 + 2^16 × ~4 compressions ≈ 0.8 M compressions ≈ 3 × 10^9 steps; honest segments use ~8 nodes per unit (§ measurements) |
 | R14-L1 | L | prototype | PTree deletion returned "unchanged" for a child node that stayed the same node while a deeper deletion changed its hash → stale cached hash → wrong end root (first `slfuzz` run: 12 / 20 batches) | **fixed** in e10edba before the first commit of results (deletion reports `changed`) |
 | R14-L2 | L | determinism | extra (valid) witness records can turn status 0 into MISSING (e.g. a level of a market whose params were not supplied), never change a status-0 result | accepted: a status-0 result is unique (`extra:valid` 325 / 325 identical); an operator who posts a MISSING run only invalidates its own height |
-| R14-I1 | I | exclusion | can a key be proven absent while present? | no (after R14-C1): an exclusion path must end in E or a verified leaf with another key; `omit:*` / `flip:*` / `forge:*` never produce a wrong status-0 result (sladv 31 260 / 31 260 sound) |
+| R14-I1 | I | exclusion | can a key be proven absent while present? | no (after R14-C1): an exclusion path must end in E or a verified leaf with another key; `omit:*` / `flip:*` / `forge:*` never produce a wrong status-0 result (sladv 45 908 / 45 908 sound) |
 | R14-I2 | I | order book | omitting the best level, hiding a level by claiming its trie node absent, dropping or reordering orders in a level | all refused (MISSING / BADWIT): `book:omit-best-level` 478 / 478, `book:hide-level-in-trie` 274 / 274, `book:drop-order-in-level` 274 / 274, `book:reorder-fifo` 173 / 173 |
 | R14-I3 | I | duplicates / limits | the same account twice; counts above the limits | refused: `duplicate:account` 325 / 325, `limit:accounts` 325 / 325; duplicates of every record kind and an order in two levels / in a level and in `ordx` are refused by the loader |
 | R14-I4 | I | oracle facts | the fill path's mark rule reads `last_index` and the bonded-reporter predicate, which MNWIT1 does not commit | committed in `mkx:`; `slfuzz ora` 200 / 200 (pre-states with bonded reports) |
@@ -26,7 +28,8 @@ Box logs: `guest-engine/results-loop14/`. Notes: work/rv-rollup-notes.md "Loop r
 * `slfuzz 300 300` 300 / 300 (2 836 segments, 112 794 units), `slfuzz 100 1000` 100 / 100 (107 581 units),
   `slfuzz 300 200 adv` 300 / 300, `slfuzz 200 300 ora` 200 / 200 — every segment status 0, events equal to the session
   port, start / end roots = MNWIT-S roots of the session pre / post state (`results-loop14/l14-slfuzz.log`).
-* `sladv 40 200`: 325 segments, 31 260 adversarial cases, 0 unsound (`results-loop14/l14-sladv.log`; case table there).
+* `sladv 40 200`: 325 segments, **45 908** adversarial cases (incl. the round-14 additions A13 `tree:leaf-as-opaque`, `wrong-root:bound`, `forge:self-consistent:bound`), 0 unsound (`results-loop14/l14-sladv.log`; case table there). First full run before A13 / R14-H2: 31 260 / 31 260 (`l14-sladv-c27b289.log`).
+* govwit default rebuild (`l14-gw.log`): stateless slfuzz 40 / 40, sladv 2 273 / 2 273 sound.
 * `slcaps`: ok (units 19 / applied / 19 / applied / applied+1 fill; level of 4 096 orders loaded, 739 KB witness).
 * Guard mutants (`loop14-mut.py`, `results-loop14/l14-mut.log`): see "Mutants".
 * riscv32im: session vs stateless steps per segment (`results-loop14/l14-steps.log`): see "Steps".
@@ -52,7 +55,19 @@ Every non-redundant guard is killed; the two single-layer survivors are defence 
 ## Steps (riscv32im, JS reference model; session = `prod` image carried from height to height, stateless = the bound image
 with its carried end root; `js/slsteps.js`, `results-loop14/l14-steps.log`)
 
-_see below (filled when l14s.sh finished)_
+| config (`sldump seeds orders seg-units [mode]`) | segments | units | session steps | stateless steps | ratio | steps / unit session → stateless | witness / segment | stateless peak heap vs session heap |
+|---|---|---|---|---|---|---|---|---|
+| gen 3 · 300 orders · 100 units / seg | 4 / 4 ok | 331 | 87.5 M | 98.9 M | **1.13** | 264 k → 299 k | 3.2 – 26.9 KB | 206 – 362 KB vs 70 – 121 KB |
+| adv 5 · 200 · 50 / seg | 5 / 5 ok | 204 | 10.9 M | 26.2 M | **2.40** | 54 k → 128 k | 1.3 – 5.9 KB | 60 – 95 KB vs 27 – 28 KB |
+| gen 8 · 300 · 300 / seg | 2 / 2 ok | 382 | 93.7 M | 87.8 M | **0.94** | 245 k → 230 k | 4.5 – 42.3 KB | 413 KB vs 163 – 171 KB |
+
+Reading: per segment the stateless image pays a fixed ≈ 2.3 – 2.5 M steps (witness decode + start root + end root,
+~200–570 node hashes) plus per-unit work that is **at or below** the session's (the session's incremental MNWIT1 update
+grows with the state; the stateless image hashes only the touched paths). Full segments (100–300 units) cost 0.7 – 1.13 ×
+the session; tiny tail segments are dominated by the fixed part (seg004 of adv: 4 units, 2.48 M vs 0.10 M). Edge-value
+(adv) units are cheap in the session (mostly rejections) so the fixed part shows (2.4 ×). Peak heap 0.4 MB, independent of
+the exchange's size (the session's grows with the state, 50.2 MB cap). All 11 segments: stateless OUT = session roots
+(`ok`). JS reference model (`js/slsteps.js`), small configs only (≈ 350 k steps / s on the loaded box).
 
 
 
