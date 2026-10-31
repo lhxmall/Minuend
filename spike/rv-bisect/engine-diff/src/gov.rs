@@ -147,6 +147,29 @@ impl GB {
         self.ev.push(e);
         e
     }
+    /// loop round 9 (R8-L4): append an op WITHOUT stepping the real engine (a unit the pilot refuses but upstream
+    /// would apply, e.g. by the MNWIT1 depth rule); the unit id is the one the signed unit would have, `ev` the
+    /// event the port must emit
+    pub fn port_only(&mut self, w: [u32; 8], ev: u32) {
+        let i = self.ops.len();
+        self.ops.push(w);
+        let d = mnpilot::decode_op(&w);
+        let op = real_op(&w, &self.ids, &self.rx(), i).expect("port_only op has an upstream form");
+        let parents = match d {
+            B::Reveal { ext, .. } => {
+                let e = (self.rx())(ext, mnpilot::EXT_REVEAL_LEN).unwrap();
+                let mut ps: Vec<minuend_types::UnitId> =
+                    [&e[24..32], &e[32..40]].iter().map(|x| minuend_types::UnitId(words_id(x))).filter(|p| p.0 != [0u8; 32]).collect();
+                ps.sort();
+                ps.dedup();
+                ps
+            }
+            _ => vec![self.parent],
+        };
+        let u = sign_unit(parents, op, &secret(d.signer().unwrap()));
+        self.uids.push(unit_id(&u).0);
+        self.ev.push(ev);
+    }
     pub fn applied(&mut self, w: [u32; 8]) -> bool {
         self.op(w) & EV_APPLIED != 0
     }
@@ -1130,6 +1153,103 @@ pub fn govedge() -> String {
     }
     let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
     format!("{{\"cases\":{},\"ok\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, fj.join(","))
+}
+
+/// loop round 9 (R8-L4): the MNWIT1 depth rule (W2) on a Reveal's INNER op. Depth8 build only (a 2^8 prefix grind
+/// over the account table is cheap; at MAX_WIT_DEPTH 64 it is not feasible). Since the commit bond a committer already
+/// has an `acct:` leaf, so the reachable too-deep inner-op key is the `pos:` (or `ord:`) key of an inner Place: pick a
+/// table id G whose `acct:` / first `ord:` keys are shallow but whose `pos:<G>:1` key shares >= 8 bits with an existing
+/// key; G deposits, gov-deposits the bond, commits Place(G, market 1), then reveals it -> the port must emit 18
+/// (WIT_DEPTH_CODE) for the Reveal (upstream would apply the order; the unit is appended port-only). A direct Place by
+/// G -> 18 as well (same rule). Control: a shallow author's identical flow applies and real == port (check_batch).
+/// Kills round-7 mutant 6 (inner-op depth check dropped), which survived every round-7/8 check.
+pub fn govd8() -> String {
+    let dmax = mnpilot::wit::MAX_WIT_DEPTH;
+    if dmax != 8 {
+        return format!("{{\"govd8\":\"needs the depth8 build\",\"max_wit_depth\":{},\"ok\":0}}", dmax);
+    }
+    let flags = mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG;
+    let n_acc = 1024u32;
+    let mut fails: Vec<String> = Vec::new();
+    let (mut cases, mut tried, mut ground) = (0u32, 0u32, None);
+    let ctl = 10u32;
+    let setup = |g: &mut GB, a: u32| {
+        g.op(GB::w_dep(a, 50_000 * USD_SCALE as i64));
+        g.op(GB::w_gdep(a, 1_500));
+    };
+    let base = || {
+        let mut g = GB::new(n_acc, flags);
+        setup(&mut g, ctl);
+        let w = g.w_place(ctl, true, false, MID - 7 * DOLLAR, QTY_SCALE / 1000, 1);
+        g.op(w);
+        g
+    };
+    let depth = |keys: &[[u8; 32]], k: &[u8; 32]| keys.iter().map(|x| l2::cpl(x, k) + 1).max().unwrap_or(0);
+    let g0 = base();
+    let keys0: Vec<[u8; 32]> = real_pilot_leaves(&g0.eng).iter().map(|l| smt_ref::key(l)).collect();
+    for i in 16..n_acc {
+        let id = mnpilot::types::AccountId(g0.ids[i as usize].0);
+        let ak = mnpilot::wit::acct_key(&id);
+        let mut k1 = keys0.clone();
+        k1.push(ak);
+        let pk = mnpilot::wit::pos_key(&id, mnpilot::types::BTC_USD);
+        let ok_ = mnpilot::wit::ord_key(&mnpilot::types::order_id(id, mnpilot::types::BTC_USD, 1));
+        if depth(&keys0, &ak) <= dmax && depth(&k1, &ok_) <= dmax && depth(&k1, &pk) > dmax {
+            tried += 1;
+            // verify on the real leaf set after G's setup (acct: leaf as the pilot sees it)
+            let mut g = base();
+            setup(&mut g, i);
+            let keys: Vec<[u8; 32]> = real_pilot_leaves(&g.eng).iter().map(|l| smt_ref::key(l)).collect();
+            if depth(&keys, &pk) > dmax && depth(&keys, &ok_) <= dmax && !keys.contains(&pk) {
+                ground = Some((i, g));
+                break;
+            }
+        }
+    }
+    let Some((gi, mut g)) = ground else {
+        return format!("{{\"govd8\":\"no ground id\",\"tried\":{},\"ok\":0}}", tried);
+    };
+    // 1. Reveal(Place) by the ground author -> 18; a direct Place -> 18
+    {
+        cases += 1;
+        let salt = [9u8; 32];
+        let inner = g.w_place(gi, true, false, MID - 3 * DOLLAR, QTY_SCALE / 1000, 1);
+        let h = g.commit_hash(&inner, &salt);
+        let w = g.w_commit(gi, &h, 5);
+        expect("d8:commit_ground", g.op(w) == OK, &mut fails);
+        let cu = *g.uids.last().unwrap();
+        let p1 = g.last();
+        let w = g.w_reveal(gi, &h, &salt, &inner, p1, cu);
+        g.port_only(w, mnpilot::WIT_DEPTH_CODE);
+        let w = g.w_place(gi, true, false, MID - 3 * DOLLAR, QTY_SCALE / 1000, 1);
+        g.port_only(w, mnpilot::WIT_DEPTH_CODE);
+        // the depth rule needs the incremental MNWIT1 tree (run_port runs WitMode::Off): per-unit event slices
+        let (per, _, _) = l2::port_units(&g.words());
+        let n = g.ev.len();
+        let flat: Vec<u32> = per.iter().take(n - 2).flatten().copied().collect();
+        expect("d8:prefix_equal", per.len() == n && flat[..] == g.ev[..n - 2], &mut fails);
+        expect("d8:reveal_inner_deep", per.get(n - 2) == Some(&vec![mnpilot::WIT_DEPTH_CODE]), &mut fails);
+        expect("d8:place_deep", per.get(n - 1) == Some(&vec![mnpilot::WIT_DEPTH_CODE]), &mut fails);
+    }
+    // 2. control: the shallow author's commit + reveal of a Place applies, real == port
+    {
+        cases += 1;
+        let mut g = base();
+        let salt = [9u8; 32];
+        let inner = g.w_place(ctl, true, false, MID - 3 * DOLLAR, QTY_SCALE / 1000, 1);
+        let h = g.commit_hash(&inner, &salt);
+        let w = g.w_commit(ctl, &h, 5);
+        expect("d8:commit_ctl", g.op(w) == OK, &mut fails);
+        let cu = *g.uids.last().unwrap();
+        let p1 = g.last();
+        let w = g.w_reveal(ctl, &h, &salt, &inner, p1, cu);
+        expect("d8:reveal_ctl_applied", g.op(w) & EV_APPLIED != 0, &mut fails);
+        if let Err(e) = check_batch(&g.words()) {
+            fails.push(format!("d8ctl: diff {}", e).replace('"', "'"));
+        }
+    }
+    let fj: Vec<String> = fails.iter().map(|f| format!("\"{}\"", f)).collect();
+    format!("{{\"cases\":{},\"ok\":{},\"ground_id\":{},\"tried\":{},\"fail\":[{}]}}", cases, fails.is_empty() as u32 * cases, gi, tried, fj.join(","))
 }
 
 /// Heap of the governance / commit-reveal state at its caps (host allocator simulation, 64-bit

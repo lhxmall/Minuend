@@ -82,7 +82,7 @@ pub fn frag(per: u64, max_units: u32) -> Vec<u32> {
     batch_words(&ids_real, &g.ops, 0)
 }
 
-fn cpl(a: &[u8; 32], b: &[u8; 32]) -> usize {
+pub(crate) fn cpl(a: &[u8; 32], b: &[u8; 32]) -> usize {
     let mut c = 0;
     for i in 0..32 {
         let x = a[i] ^ b[i];
@@ -207,7 +207,7 @@ pub fn grind(seed: u64, log2: u32, any: bool) -> (Vec<u32>, String) {
 }
 
 /// Port run with the per-unit event slices (for the depth rule checks).
-fn port_units(w: &[u32]) -> (Vec<Vec<u32>>, [u8; 32], Vec<Vec<String>>) {
+pub(crate) fn port_units(w: &[u32]) -> (Vec<Vec<u32>>, [u8; 32], Vec<Vec<String>>) {
     let evs: RefCell<Vec<u32>> = RefCell::new(Vec::new());
     let mut per: Vec<Vec<u32>> = Vec::new();
     let mut pre: Vec<Vec<String>> = Vec::new();
