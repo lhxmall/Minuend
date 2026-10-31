@@ -1,0 +1,23 @@
+mut 4 [src/engine.rs:         if pending > MAX_PENDING_WITHDRAWALS_PER_ACCOUNT {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 0/1 -> KILLED
+mut 5 [src/engine.rs:         if amount > 0 && amount <= MIN_WITHDRAW_AMOUNT && amount != ac] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 0/1 -> KILLED
+mut 6 [src/engine.rs: acct.snapshot(&self.state.marks, &self.state.markets).equity <= restin] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 1/1 -> no
+warning: unused variable: `last`
+    --> /data/hark/spike-rv/loop4/mut/guest-engine/src/engine.rs:1612:21
+     |
+1612 |                 let last = pos_deltas.last().map(|(id, _)| *id);
+     |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_last`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `last`
+    --> /data/hark/spike-rv/loop4/mut/guest-engine/src/engine.rs:1612:21
+     |
+1612 |                 let last = pos_deltas.last().map(|(id, _)| *id);
+     |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_last`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+mut 9 [src/engine.rs: adl_haircut_share(hole, *delta, total, false);] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 1/1 -> no
+mut 10 [src/state.rs:             .find(|s| s.height + FUNDING_EXTERNAL_MAX_STALENESS >= sel] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 0/1 -> KILLED
+mut 11 [src/state.rs:         if q.len() + 1 < FUNDING_TWAP_MIN_SAMPLES {] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 1/1 -> no
+mut 13 [src/lib.rs:             eng.state.withdrawals.retain(|_, w| w.height + REPLAY_WIND] fuzz 100/100 scen 47/47 witfuzz 30/30 advfuzz 30/30 selftest {"selftest_fail":[]} proofs ok depth8 5/5 segfuzz 30/30 liqfuzz 30/30 snaptest 20/20 capcheck 10/10 liqedge 0/1 -> KILLED

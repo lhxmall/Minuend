@@ -339,6 +339,12 @@ pub fn gov_batch(seed: u64, n_ops: u32) -> Vec<u32> {
     gov_build(seed, n_ops).words()
 }
 pub fn gov_build(seed: u64, n_ops: u32) -> GB {
+    gov_build_x(seed, n_ops, false)
+}
+/// Loop round 7 review (cross-module coverage): `x` adds liquidations, slashes, collateral withdrawals and leveraged
+/// IOC trades to the governance mix (proposals change im / mm / fees of the traded market, oracle reports move the
+/// mark), so gov x liq x oracle sequences are compared real vs port. x = false draws exactly the govfuzz sequence.
+pub fn gov_build_x(seed: u64, n_ops: u32, x: bool) -> GB {
     let mut rng = Rng(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
     let n_acc = 12 + rng.below(6) as u32;
     let flags = mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG;
@@ -489,6 +495,31 @@ pub fn gov_build(seed: u64, n_ops: u32) -> GB {
                 height += if rng.below(5) == 0 { 10 + rng.below(20) } else { 1 };
                 g.op(GB::w_height(height));
             }
+            95..=99 if x => match rng.below(6) {
+                0 | 1 => {
+                    let t = 1 + rng.below((n_acc - 1) as u64) as u32;
+                    let m = if rng.below(4) == 0 { 1 + rng.below(nm as u64 - 1) as u32 } else { 1 };
+                    g.op([7 | (a << 8), t, 0, 0, 0, 0, 0, m]);
+                }
+                2 => {
+                    let t = 1 + rng.below(3) as u32;
+                    g.op([13 | (holder << 8), t, 0, 0, 0, 0, 0, 1]);
+                }
+                3 => {
+                    let amt = rng.below(25_000) as i64 * USD_SCALE as i64;
+                    g.op([6 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, rng.below(30) as u32, 0]);
+                }
+                _ => {
+                    // a leveraged position on market 1: a resting maker, then an IOC taker of 1-15 x 0.1 BTC
+                    let px = mid + (rng.below(5) as i64 - 2) * DOLLAR * 100;
+                    let q = QTY_SCALE / 10 * (1 + rng.below(15));
+                    let mk = 10 + rng.below((n_acc - 10) as u64) as u32;
+                    let w1 = g.w_place(mk, true, false, px, q, 1);
+                    g.op(w1);
+                    let w2 = g.w_place(a, false, true, px, q, 1);
+                    g.op(w2);
+                }
+            },
             _ => {
                 let o = 1 + rng.below(3) as u32;
                 let px = mid + (rng.below(21) as i64 - 10) * mid / 10_000;
@@ -611,11 +642,14 @@ pub fn check_segments(w: &[u32], cuts: &[usize], snap_at: Option<usize>) -> Resu
 }
 
 pub fn govfuzz(n: u64, ops: u32) -> String {
+    govfuzz_x(n, ops, false)
+}
+pub fn govfuzz_x(n: u64, ops: u32, x: bool) -> String {
     let (mut ok, mut units) = (0u64, 0u64);
     let mut cov: std::collections::BTreeMap<String, u64> = Default::default();
     let mut why = String::new();
     for s in 1..=n {
-        let g = gov_build(s, ops);
+        let g = gov_build_x(s, ops, x);
         let w = g.words();
         let mut res = check_batch(&w);
         if res.is_ok() {
@@ -646,6 +680,9 @@ pub fn govfuzz(n: u64, ops: u32) -> String {
                 19 => "final",
                 20 => "commit",
                 21 => "reveal",
+                6 => "wd",
+                7 => "liq",
+                13 => "slash",
                 2 if i > 0 => "place",
                 _ => continue,
             };

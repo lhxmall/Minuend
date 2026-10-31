@@ -1,0 +1,6 @@
+{"ok":true,"segments":1,"units":16004,"why":""}
+
+thread 'main' (717500) panicked at src/main.rs:82:24:
+write batch: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+{"ok":true,"segments":17,"units":16004,"why":""}

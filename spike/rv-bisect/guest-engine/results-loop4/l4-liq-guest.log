@@ -1,0 +1,7 @@
+{"batch":"liq1.bin","units":1352,"engine_match":true,"roots_match":true,"steps":256393969,"halted":true}
+{"batch":"liq2.bin","units":1214,"engine_match":true,"roots_match":true,"steps":313840195,"halted":true}
+{"batch":"liq3.bin","units":823,"engine_match":true,"roots_match":true,"steps":272245482,"halted":true}
+{"batch":"liq4.bin","units":1166,"engine_match":true,"roots_match":true,"steps":286020644,"halted":true}
+{"batch":"liq5.bin","units":1036,"engine_match":true,"roots_match":true,"steps":270839067,"halted":true}
+{"batch":"liq6.bin","units":1228,"engine_match":true,"roots_match":true,"steps":339732479,"halted":true}
+{"batches":6,"match":6,"units":6819,"steps":1739071836}

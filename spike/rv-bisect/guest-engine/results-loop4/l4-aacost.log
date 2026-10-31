@@ -1,0 +1,81 @@
+===== testnet = false
+===== devnet
+not using app root conf: Error: Cannot find module '/data/hark/spike-rv/roll4/js/conf.js'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll4/js/oc.js
+- /data/hark/spike-rv/roll4/js/aacost.js
+app dir /data/hark/spike-rv/roll4/js
+not using user conf: Error: Cannot find module '/data/home/.config/spikerv/conf.json'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll4/js/oc.js
+- /data/hark/spike-rv/roll4/js/aacost.js
+app dir /data/hark/spike-rv/roll4/js
+(node:762572) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:762572) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:762572) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 1, count_args: 2, count_ops: 178 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+func { complexity: 0, count_args: 1, count_ops: 6 }
+AA validated, complexity = 10, ops = 1850
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 21 }
+func { complexity: 0, count_args: 1, count_ops: 21 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+AA validated, complexity = 10, ops = 848
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 8 }
+func { complexity: 1, count_args: 7, count_ops: 10 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 8 }
+func { complexity: 0, count_args: 1, count_ops: 21 }
+func { complexity: 0, count_args: 1, count_ops: 21 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+func { complexity: 1, count_args: 7, count_ops: 10 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+func { complexity: 0, count_args: 1, count_ops: 16 }
+AA validated, complexity = 18, ops = 1443
+func { complexity: 1, count_args: 2, count_ops: 11 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+func { complexity: 1, count_args: 2, count_ops: 11 }
+func { complexity: 1, count_args: 2, count_ops: 11 }
+func { complexity: 1, count_args: 2, count_ops: 11 }
+func { complexity: 0, count_args: 1, count_ops: 19 }
+AA validated, complexity = 63, ops = 1449
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+func { complexity: 0, count_args: 1, count_ops: 15 }
+AA validated, complexity = 15, ops = 1406
+func { complexity: 0, count_args: 1, count_ops: 48 }
+func { complexity: 0, count_args: 2, count_ops: 7 }
+func { complexity: 0, count_args: 2, count_ops: 7 }
+func { complexity: 0, count_args: 1, count_ops: 48 }
+AA validated, complexity = 69, ops = 1604
+AACOST {"rv_step":{"complexity":10,"ops":1850},"rv_game_ref":{"complexity":10,"ops":848},"rv_seg_ref":{"complexity":18,"ops":1443},"rv_rollup":{"complexity":63,"ops":1449},"rv_witbind":{"complexity":15,"ops":1406},"rv_witproof":{"complexity":69,"ops":1604}}

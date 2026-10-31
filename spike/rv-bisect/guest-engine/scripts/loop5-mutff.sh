@@ -1,0 +1,148 @@
+#!/bin/bash
+# FAIL-FAST variant (loop round 7, generated from loop5-mut.sh by mkff): same mutants and checks, targeted checks first,
+# stops at the first killing check (the box ran 4 mutation jobs + 3 suites at load ~25: ~20 min per full mutant).
+# Loop round 5 mutation test (= loop4-mut.sh, patterns updated for round 5, + round-5 mutants 59.., + checks orafuzz 20 300,
+# hbind 20 300, snapcap, liqedge; liqfuzz also runs every batch as MNP2). Original round-4 header:
+# Loop round 4 mutation test: loop-4 mutants first (Accounts guard / holders index, liquidate / ADL / keeper /
+# withdraw / report ports, SetHeight prune, session account cap, import lock), then the loop-3 survivors and the
+# loop-3 list (patterns updated for round 4). Checks per mutant: loop3-mut.sh's set plus
+#   liqfuzz 30 300 (port vs real engine on liquidate / ADL / withdraw / reports / ext prices / heights),
+#   snaptest 20 200 (export / import / import lock / digest), capcheck 10 100 8 (account cap rule).
+# MUTS="1 5 7" runs only those mutant numbers. liqedge (deterministic boundary batches) added after the first
+# full run; the first run's survivors were re-run with it (LOG=l4-mut2.log).
+. /data/hark/spike-rv/env.sh
+P=${P:-/data/hark/spike-rv/loop5}; M=$P/mut; LOG=${LOG:-/data/hark/logs/rv/l5-mut.log}; [ -n "$KEEP" ] || : > $LOG
+muts=(
+ # loop round 4: OI read path (R3-O1 survivor "OI = 0") and the guarded account map
+ "src/engine.rs@        let mut oi: u128 = self.state.accounts.oi_long_of(market);@        let mut oi: u128 = 0;"
+ "src/state.rs@        if after != self.before {@        if false {"
+ "src/state.rs@            h.remove(&id);\n            if h.is_empty() {@            if h.is_empty() {"
+ # loop round 4: withdraw
+ "src/engine.rs@        if pending >= MAX_PENDING_WITHDRAWALS_PER_ACCOUNT {@        if pending > MAX_PENDING_WITHDRAWALS_PER_ACCOUNT {"
+ "src/engine.rs@        if amount > 0 && amount < MIN_WITHDRAW_AMOUNT && amount != acct.collateral {@        if amount > 0 && amount <= MIN_WITHDRAW_AMOUNT && amount != acct.collateral {"
+ "src/engine.rs@acct.snapshot(&self.state.marks, &self.state.markets).equity < resting {@acct.snapshot(&self.state.marks, &self.state.markets).equity <= resting {"
+ # loop round 4: liquidate / keeper / ADL haircut
+ "src/engine.rs@        if caller == target {\n            return Err(RejectReason::BadAccount);@        if false {\n            return Err(RejectReason::BadAccount);"
+ "src/engine.rs@            let pay = keeper_paid.min(bal.max(0));@            let pay = keeper_paid.min(bal.max(0)) / 2;"
+ "src/engine.rs@adl_haircut_share(hole, *delta, total, Some(*id) == last);@adl_haircut_share(hole, *delta, total, false);"
+ # loop round 4: funding / reports
+ "src/state.rs@            .find(|s| s.height + FUNDING_EXTERNAL_MAX_STALENESS > self.height && s.price != 0)@            .find(|s| s.height + FUNDING_EXTERNAL_MAX_STALENESS >= self.height && s.price != 0)"
+ "src/state.rs@        if q.len() < FUNDING_TWAP_MIN_SAMPLES {@        if q.len() + 1 < FUNDING_TWAP_MIN_SAMPLES {"
+ "src/state.rs@            Some(last) if height < last + minuend_types::FUNDING_PEG_INTERVAL_HEIGHTS => {@            Some(last) if height <= last + minuend_types::FUNDING_PEG_INTERVAL_HEIGHTS => {"
+ # loop round 4: SetHeight batch-commit hook (withdrawal prune), session account cap, import lock
+ "src/lib.rs@    s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);@    s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW >= height);"
+ "src/lib.rs@s.accounts.contains_key(&author) || s.accounts.len() < cap,@s.accounts.contains_key(&author) || s.accounts.len() <= cap,"
+ "src/lib.rs@        BatchOp::Deposit { .. } | BatchOp::Liquidate { .. } =>@        BatchOp::Deposit { .. } =>"
+ "src/lib.rs@    if d != *digest {@    if false {"
+ "src/lib.rs@        Ok(mut s) if r.i == *words => {@        Ok(mut s) => {"
+ "src/snapshot.rs@    if s.accounts.len() > crate::MAX_STATE_ACCOUNTS {@    if false {"
+
+ # loop round 3 list (survivors of round 3 included)
+ # loop round 3: S1b arrival-ordered level + arr index
+ "src/book.rs@                        l.remove(&a);\n                        true@                        true"
+ "src/book.rs@                Self::lvl_put(&mut dq, &mut self.arr, a, id);@                Self::lvl_put(&mut dq, &mut self.arr, a + 1_000_000, id);"
+ "src/book.rs@        if let Some(n) = j.next_arr0 {\n            self.next_arr = n;\n        }@"
+ "src/book.rs@        let (a, id) = self.lvl_mut(side, price)?.pop_first()?;@        let (a, id) = self.lvl_mut(side, price)?.pop_last()?;"
+ # loop round 3: running long OI
+ "src/state.rs@                    self.put_account(id, a); // PILOT (S1b)@                    self.accounts.insert(id, a);"
+ "src/state.rs@            self.put_account(fill.taker, taker); // PILOT (S1b)\n            self.put_account(fill.maker, maker);@            self.put_account(fill.taker, taker); // PILOT (S1b)\n            self.accounts.insert(fill.maker, maker);"
+ # loop round 3: segments
+ "src/lib.rs@    } else if rd(3) != 0 && (resumed || cfg!(feature = \"prod\")) {@    } else if rd(3) != 0 && cfg!(feature = \"prod\") {"
+ "src/lib.rs@        wo.start_root = wo.root;\n@\n"
+ "src/lib.rs@        s.segs = opt.run_no.unwrap_or(s.segs + 1);@        s.segs = opt.run_no.unwrap_or(s.segs);"
+ "src/types.rs@pub const TAKER_FEE_BPS: u64 = 5;@pub const TAKER_FEE_BPS: u64 = 4;"
+ "src/book.rs@OrderType::Limit => maker_price <= order.price,@OrderType::Limit => maker_price < order.price,"
+ "src/account.rs@    (num / den) as Price@    ((num + den / 2) / den) as Price"
+ "src/engine.rs@                    bid_im.max(ask_im)@                    bid_im.saturating_add(ask_im)"
+ "src/state.rs@                        if dev <= (old as i128).abs() / 10 {@                        if dev < (old as i128).abs() / 10 {"
+ "src/engine.rs@        if live_count >= MAX_LIVE_ORDERS_PER_ACCOUNT {@        if live_count > MAX_LIVE_ORDERS_PER_ACCOUNT {"
+ "src/book.rs@(u128::from(margin_left) * u128::from(fill_qty) / u128::from(remaining_before)) as u64@(u128::from(margin_left) * u128::from(fill_qty) / u128::from(remaining_before) + 1) as u64"
+ "src/account.rs@        let liquidatable = mm > 0 && equity * 10_000 <= mm * i128::from(LIQ_RATIO_BPS);@        let liquidatable = mm > 0 && equity * 10_000 < mm * i128::from(LIQ_RATIO_BPS);"
+ "src/engine.rs@if snap.equity - i128::from(margin) < snap.im + resting {@if snap.equity - i128::from(margin) <= snap.im + resting {"
+ "src/state.rs@(-p.collateral).min(cp.collateral.max(0))@(-p.collateral).min(cp.collateral)"
+ "src/account.rs@let release = *bucket * i128::from(close) / i128::from(old_abs);@let release = (*bucket * i128::from(close) + i128::from(old_abs) - 1) / i128::from(old_abs);"
+ "src/engine.rs@if snap.equity < snap.im + resting + extra_im {@if snap.equity < snap.im + extra_im {"
+ "src/engine.rs@!((pre >= 0 && post < 0) || (pre_eq >= 0 && pre_eq < fee))@!(pre >= 0 && post < 0)"
+ # MNWIT1 mutants (witness only: engine hash/events unchanged, roots must disagree)
+ "src/engine.rs@        self.state.note_journal(&journal); // PILOT (MNWIT1)@"
+ "src/state.rs@        dirty.insert(*id);\n        let before = pos_of(a);@        let before = pos_of(a);"
+ "src/engine.rs@        self.state.wit_dirty.orders.insert((market, order_id)); // PILOT (MNWIT1)@"
+ "src/wit.rs@if o.isolated { 1 } else { 0 }, o.margin_left);@if o.isolated { 1 } else { 0 }, o.margin_left / 2);"
+ "src/wit.rs@                    [R::L(x), R::E] | [R::E, R::L(x)] => {@                    [R::L(x), R::E] => {"
+ "src/wit.rs@                        self.smt.remove(&key_of(&b.b[..b.kid]));\n                    }\n                    if !cur.is_empty() {@                    }\n                    if !cur.is_empty() {"
+ # loop round 1 guards (shared host/guest code: only explicit expectations can see them)
+ "src/lib.rs@    } else if rd(2) > MAX_UNITS {@    } else if rd(2) > MAX_UNITS + 1 {"
+ "src/lib.rs@    } else if rd(1) > MAX_ACCOUNTS {@    } else if rd(1) > MAX_ACCOUNTS + 1 {"
+ "src/lib.rs@accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);@accts.get(a as usize).copied();"
+ # proof verifier (host reference = the AA rule set)
+ "ed:src/smt_ref.rs@            if k2 == *k || (0..sib.len())@            if (0..sib.len())"
+ "ed:src/smt_ref.rs@        Term::Empty => [0u8; 32],@        Term::Empty => return true,"
+ "ed:src/smt_ref.rs@            if k2 == *k || (0..sib.len()).any(|d| bit(&k2, d) != bit(k, d)) {@            if k2 == *k {"
+ # loop round 2: per-account order index (S1), journal deque-op undo (W4), depth rule (W2)
+ "src/book.rs@        self.idx_del(o.account, *id);\n        Some(o)@        Some(o)"
+ "src/book.rs@        self.by_acct.entry(a).or_default().insert(id);@"
+ "src/book.rs@            for (a, id) in popped.into_iter().rev() {@            for (a, id) in popped.into_iter() {"
+ "src/book.rs@            for _ in 0..pushed {@            for _ in 0..0 {"
+ "src/book.rs@                    let x = self.lvl_pop_front(Side::Ask, price);\n                    if let Some(x) = x {\n                        self.jlevel(j, Side::Ask, price).popped.push(x);\n                    }\n                    self.drop_empty_level(Side::Ask, price);@                    let x = self.lvl_pop_front(Side::Ask, price);\n                    if let Some(x) = x {\n                        let _ = x;\n                    }\n                    self.drop_empty_level(Side::Ask, price);"
+ "src/lib.rs@.map(|d| d <= wit::MAX_WIT_DEPTH)@.map(|d| d < wit::MAX_WIT_DEPTH)"
+ "src/lib.rs@                && (has_pos || ok(&wit::pos_key(&author, m)))@"
+ "src/lib.rs@        BatchOp::Deposit { .. } => !new_acct || ok(&wit::acct_key(&author)),@        BatchOp::Deposit { .. } => true,"
+ "src/wit.rs@                    return Some(c + 1);@                    return Some(c);"
+ # loop round 5 (59..): MNP2 unit ids (R4-M2), height binding (R4-M4), import run count, oracle stake / unstake / slash
+ # port (R4-M3), PERP acct: leaves, hook commit (R5-L4)
+ "src/lib.rs@                    ev(if (f.kind == 2 || f.kind == 3) && !v2 {@                    ev(if f.kind == 2 || f.kind == 3 {"
+ "src/lib.rs@rd(uid_base + i * 8 + k as u32)@rd(uid_base + k as u32)"
+ "src/lib.rs@    if bind_height && (*segs as Height) > eng.state.height {@    if false {"
+ "src/lib.rs@                let ok_h = !bind_height && !cfg!(feature = \"prod\") && height >= eng.state.height;@                let ok_h = !cfg!(feature = \"prod\") && height >= eng.state.height;"
+ "src/lib.rs@        s.segs = opt.run_no.unwrap_or(s.segs + 1);@        s.segs += 1;"
+ "src/lib.rs@        s.segs = opt.run_no.unwrap_or(1);@        s.segs = 1;"
+ "src/lib.rs@            s.segs += 1;\n            s.bind_height@            s.bind_height"
+ "src/lib.rs@    s.prune_oracle_unbonding(height);@"
+ "src/state.rs@        if bal < crate::types::ORACLE_BOND_PERP {@        if bal <= crate::types::ORACLE_BOND_PERP {"
+ "src/state.rs@            if dev < deviation_bps {@            if dev <= deviation_bps {"
+ "src/state.rs@                if sample.height != prev.height + 1 {@                if false {"
+ "src/state.rs@        let burn = bond * (crate::types::SLASH_REWARD_BPS as u128) / 10_000;@        let burn = bond / 3;"
+ "src/state.rs@            if *unlock <= current_height {@            if *unlock < current_height {"
+ "src/state.rs@        self.perp_balances.insert(id, v);\n        self.accounts.mark_dirty(id);@        self.perp_balances.insert(id, v);"
+ "src/wit.rs@                None if s.perp_balances.contains_key(id) || s.withdrawn_total.contains_key(id) => {@                None if false => {"
+ "src/lib.rs@            wo.root = w.commit(&mut eng.state);@            let _ = &w;"
+ "src/state.rs@        if self.height.saturating_sub(latest_height) > 256 {@        if self.height.saturating_sub(latest_height) > 257 {"
+ "src/state.rs@        self.oracle_unbonding.remove(&target);\n        self.oracle_reports.remove(&(market, target));@        self.oracle_reports.remove(&(market, target));"
+
+)
+i=0
+for m in "${muts[@]}"; do
+  [[ "$m" == \#* ]] && continue
+  i=$((i+1)); IFS='@' read -r f from to <<< "$m"
+  [ -n "$MUTS" ] && ! [[ " $MUTS " == *" $i "* ]] && continue
+  rm -rf $M; mkdir -p $M; cp -r $P/guest-engine $P/engine-diff $M/; ln -s $P/engine-src $M/engine-src
+  case "$f" in ed:*) fp="$M/engine-diff/${f#ed:}";; *) fp="$M/guest-engine/$f";; esac
+  python3 - "$fp" "$from" "$to" <<'PY'
+import sys
+p,a,b=sys.argv[1:]; a=a.replace('\\n','\n'); b=b.replace('\\n','\n'); s=open(p).read()
+assert s.count(a)>=1, "pattern not found: "+a
+open(p,'w').write(s.replace(a,b,1))
+PY
+  [ $? -ne 0 ] && { echo "mut $i: PATTERN MISSING" >> $LOG; continue; }
+  (cd $M/engine-diff && CARGO_TARGET_DIR=/data/hark/target-l5-mut cargo build --release -q 2>>$LOG) || { echo "mut $i build fail" >> $LOG; continue; }
+  B=/data/hark/target-l5-mut/release/engine-diff
+  # fail-fast (loop round 7): targeted checks first, stop at the first mismatch; a survivor runs every check
+  res=""; k=no
+  if [ "$k" = no ]; then v=$($B liqedge 2>/dev/null | grep -c '"ok":true'); res="$res liqedge $v"; [ "$v" != '1' ] && k="KILLED by liqedge"; fi
+  if [ "$k" = no ]; then v=$($B capcheck 10 100 8 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/'); res="$res capcheck $v"; [ "$v" != '10' ] && k="KILLED by capcheck"; fi
+  if [ "$k" = no ]; then v=$($B snapcap 2>/dev/null | tail -1 | sed 's/.*"ok":\([a-z]*\).*/\1/'); res="$res snapcap $v"; [ "$v" != 'true' ] && k="KILLED by snapcap"; fi
+  if [ "$k" = no ]; then v=$($B snaptest 20 200 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/'); res="$res snaptest $v"; [ "$v" != '20' ] && k="KILLED by snaptest"; fi
+  if [ "$k" = no ]; then v=$($B hbind 20 300 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/'); res="$res hbind $v"; [ "$v" != '20' ] && k="KILLED by hbind"; fi
+  if [ "$k" = no ]; then v=$($B orafuzz 20 300 2>/dev/null | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res orafuzz $v"; [ "$v" != '20' ] && k="KILLED by orafuzz"; fi
+  if [ "$k" = no ]; then v=$($B liqfuzz 30 300 2>/dev/null | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res liqfuzz $v"; [ "$v" != '30' ] && k="KILLED by liqfuzz"; fi
+  if [ "$k" = no ]; then v=$($B segfuzz 30 300 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/'); res="$res segfuzz $v"; [ "$v" != '30' ] && k="KILLED by segfuzz"; fi
+  if [ "$k" = no ]; then v=$($B fuzz 100 300 | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res fuzz $v"; [ "$v" != '100' ] && k="KILLED by fuzz"; fi
+  if [ "$k" = no ]; then v=$($B scen $P/engine-diff/scenarios/upstream.scn | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res scen $v"; [ "$v" != '47' ] && k="KILLED by scen"; fi
+  if [ "$k" = no ]; then v=$($B witfuzz 30 300 20 | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res witfuzz $v"; [ "$v" != '30' ] && k="KILLED by witfuzz"; fi
+  if [ "$k" = no ]; then v=$($B advfuzz 30 300 | tail -1 | sed 's/.*"match":\([0-9]*\).*/\1/'); res="$res advfuzz $v"; [ "$v" != '30' ] && k="KILLED by advfuzz"; fi
+  if [ "$k" = no ]; then v=$($B selftest ${ROBUST:-/data/hark/spike-rv/loop3/poc/robust} | tail -1); res="$res selftest $v"; [ "$v" != '{"selftest_fail":[]}' ] && k="KILLED by selftest"; fi
+  if [ "$k" = no ]; then v=$($B proofs 10 25 | tail -1 | grep -q '"membership_bad":0,.*"absence_bad":0,.*"forged":0,' && echo ok || echo BAD); res="$res proofs $v"; [ "$v" != 'ok' ] && k="KILLED by proofs"; fi
+  if [ "$k" = no ]; then v=$( (cd $M/engine-diff && CARGO_TARGET_DIR=/data/hark/target-l5-mut-d8 cargo build --release -q --features depth8 2>>$LOG) && /data/hark/target-l5-mut-d8/release/engine-diff depth8 5 2>/dev/null | tail -1 | sed 's/.*"ok":\([0-9]*\).*/\1/'); res="$res depth8 $v"; [ "$v" != '5' ] && k="KILLED by depth8"; fi
+  echo "mut $i [$f: ${to:0:70}]$res -> $k" >> $LOG
+done
+echo DONE >> $LOG

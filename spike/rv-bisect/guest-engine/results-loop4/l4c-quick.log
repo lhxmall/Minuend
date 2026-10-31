@@ -1,0 +1,8 @@
+{"seeds":100,"match":100,"ev_words":100509,"fills":10488,"rejected":5304,"codes":{"0x7":3363,"0xa":772,"0x107":1169,"0x80000000":21789,"0x80000001":10488}}
+{"seeds":50,"match":50,"units_compared":18765,"history_independent":50,"max_leaves":253,"smt_rounds_ok":50,"smt_rounds_bad":0,"smt_ops":5460}
+{"seeds":50,"match":50,"units":15378,"applied":3674,"fills":559,"codes":{"0x3":2910,"0x7":6207,"0x9":290,"0xa":1689,"0x102":425,"0x103":141,"0x106":3,"0x107":39,"0x80000000":3115,"0x80000001":559}}
+{"batches":50,"ok":50,"segments":2047,"units":18765}
+{"scenarios":47,"match":47,"units":355,"fills":59,"rejected":27}
+{"seeds":100,"match":100,"units":111514,"funding_clock_armed_batches":100,"coverage":{"deposit:ok0":3910,"extprice:0x2":215,"extprice:0xa":433,"extprice:ok0":1294,"height:0x2":27,"height:set":1162,"liquidate1:0x2":371,"liquidate1:0xb":3048,"liquidate1:ok1":100,"liquidate2:0x2":26,"liquidate2:0xb":250,"liquidate2:ok1":3,"liquidate3:0x2":196,"liquidate3:0xb":1642,"liquidate3:ok1":10,"liquidate:adl":18,"liquidate:book":95,"place1:0x107":13556,"place1:0x7":22256,"place1:ok0":25821,"place1:ok1":9092,"place2:0x107":495,"place2:0x7":1251,"place2:ok0":1233,"place2:ok1":809,"place3:0x107":2551,"place3:0x7":5236,"place3:ok0":5459,"place3:ok1":2282,"report:0x2":201,"report:ok0":5876,"withdraw:0x6":5,"withdraw:0x7":489,"withdraw:0x9":1255,"withdraw:ok0":960}}
+{"batches":100,"ok":100,"malformed_ok":100,"flips":800,"flips_decoded_new_digest":472,"max_snapshot_words":12968,"why":""}
+QUICKDONE

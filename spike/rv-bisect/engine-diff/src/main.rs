@@ -1218,6 +1218,7 @@ fn main() {
         Some("liqfuzz") => println!("{}", liq::liqfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
         Some("liqedge") => println!("{}", liq::liqedge()),
         Some("govfuzz") => println!("{}", gov::govfuzz(a[2].parse().unwrap(), a[3].parse().unwrap())),
+        Some("xfuzz") => println!("{}", gov::govfuzz_x(a[2].parse().unwrap(), a[3].parse().unwrap(), true)), // loop round 7
         Some("govedge") => println!("{}", gov::govedge()),
         Some("govcap") => println!("{}", gov::govcap()),
         Some("govgen") => {

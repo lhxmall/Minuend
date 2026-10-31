@@ -1,0 +1,10 @@
+aamut 1 [$d.ts <= $now AND -> $d.ts <= $now + 1 AND] {"total": 333, "pass": 320, "fail": 13} -> KILLED ['ts = now + 1 (future)', ...]
+aamut 2 [$d.ts >= $now - $TSLACK -> $d.ts > $now - $TSLACK] {"total": 366, "pass": 73, "fail": 293} -> KILLED ['submit h1 honest', ...]
+aamut 3 [+ $MINGAP, 'ts gap' -> + $MINGAP - 1, 'ts gap'] {"total": 333, "pass": 330, "fail": 3} -> KILLED ['h2 at ts(h1) + MINGAP - 1', 'h2 at ts(h1) (equal)', 'h2 at ts(h1) + MINGAP']
+aamut 4 [require($h == 1 OR $d.ts >= -> require(true OR $d.ts >=] {"total": 333, "pass": 328, "fail": 5} -> KILLED ['h2 at ts(h1) + MINGAP - 1', ...]
+aamut 5 [$Z10 || ',' || $d.ts || ',' || $Z21 -> $Z10 || ',0,' || $Z21] {"total": 366, "pass": 72, "fail": 294} -> KILLED ['submit h1 honest', ...]
+aamut 6 [$d.ts < 4294967296 -> $d.ts < 1e15] {"total": 333, "pass": 333, "fail": 0} -> no [] (EQUIVALENT until 2106: ts <= timestamp < 2^32)
+aamut 7 [require(is_integer($d.ts) AND -> require(] {"total": 333, "pass": 331, "fail": 2} -> KILLED ['ts missing', 'ts fractional']
+aamut 8 [var['t' || $st.sid] = $d.ts; -> var['t' || $st.sid] = $d.ts - 60;] {"total": 333, "pass": 326, "fail": 7} -> KILLED ['t<sid> stored', ...]
+aamut 9 [$TSLACK = 600; -> $TSLACK = 6000;] {"total": 333, "pass": 322, "fail": 11} -> KILLED ['ts = now - TSLACK - 1 (too old)', ...]
+summary: 8/9 killed, 1 equivalent (sandbox, vendored ocore 0.4.8, 2026-10-31 22:45 CST)

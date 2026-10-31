@@ -1,0 +1,2526 @@
+===== testnet = false
+===== devnet
+not using app root conf: Error: Cannot find module '/data/hark/spike-rv/roll4/js/conf.js'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll4/js/oc.js
+- /data/hark/spike-rv/roll4/js/chain.js
+- /data/hark/spike-rv/roll4/js/rolltest.js
+app dir /data/hark/spike-rv/roll4/js
+not using user conf: Error: Cannot find module '/data/home/.config/spikerv/conf.json'
+Require stack:
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/conf.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/evaluation.js
+- /data/hark/wt-all/vendor/aa-testkit/node_modules/ocore/formula/index.js
+- /data/hark/spike-rv/roll4/js/oc.js
+- /data/hark/spike-rv/roll4/js/chain.js
+- /data/hark/spike-rv/roll4/js/rolltest.js
+app dir /data/hark/spike-rv/roll4/js
+(node:762484) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:762484) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:762484) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+require not met: prev must be genesis
+{ bounce_message: 'prev must be genesis' }
+PASS flow | submit h1 (prev omitted -> must be "genesis") | expected "bounce" | actual "bounce" 
+PASS flow | submit h1 honest | expected "ok" | actual "ok" 
+require not met: window open
+{ bounce_message: 'window open' }
+PASS flow | finalize 1 s before 24 h | expected "bounce" | actual "bounce" 
+PASS flow | finalize at exactly 24 h (anyone may call) | expected "ok" | actual "ok" 
+PASS flow | finalize returns OBOND - FEE to the operator | expected 198000 | actual 198000 
+PASS flow | lf = 1 | expected 1 | actual 1 
+require not met: finalize 2 first
+{ bounce_message: 'finalize 2 first' }
+PASS flow | finalize 1 twice | expected "bounce" | actual "bounce" 
+require not met: voided
+{ bounce_message: 'voided' }
+PASS flow | finalize unsubmitted 2 | expected "bounce" | actual "bounce" 
+PASS flow | h2 by another operator chained on finalized h1 | expected "ok" | actual "ok" 
+require not met: window closed
+{ bounce_message: 'window closed' }
+PASS flow | open a game on finalized h1 | expected "bounce" | actual "bounce" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS fake s0 / bad submit | s0 built from genesis memory (not from h1 final memory) | expected "bounce" | actual "bounce" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS fake s0 / bad submit | s0 = random root | expected "bounce" | actual "bounce" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS fake s0 / bad submit | s0 = h1 final root (raw prev root) | expected "bounce" | actual "bounce" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS fake s0 / bad submit | input root of another batch (s0 mismatch) | expected "bounce" | actual "bounce" 
+require not met: bad final root
+{ bounce_message: 'bad final root' }
+PASS fake s0 / bad submit | final root not the hash of fpc/fregs/fmem | expected "bounce" | actual "bounce" 
+require not met: bad final root
+{ bounce_message: 'bad final root' }
+PASS fake s0 / bad submit | fmem swapped (memory of another state) | expected "bounce" | actual "bounce" 
+require not met: bad final state
+{ bounce_message: 'bad final state' }
+PASS fake s0 / bad submit | fregs with ":" (record injection) | expected "bounce" | actual "bounce" 
+require not met: bad final state
+{ bounce_message: 'bad final state' }
+PASS fake s0 / bad submit | fpc = 0 (not halted / trapped) | expected "bounce" | actual "bounce" 
+PASS fake s0 / bad submit | fpc = "2" string (must be bounce, or accepted with the honest record) | expected true | actual true {"outcome":"ok"}
+require not met: bad root
+{ bounce_message: 'bad root' }
+PASS fake s0 / bad submit | fmem = 44 digits (no "=") | expected "bounce" | actual "bounce" 
+require not met: bad root
+{ bounce_message: 'bad root' }
+PASS fake s0 / bad submit | inp containing ":" | expected "bounce" | actual "bounce" 
+require not met: bad steps
+{ bounce_message: 'bad steps' }
+PASS fake s0 / bad submit | steps 0 | expected "bounce" | actual "bounce" 
+require not met: bad steps
+{ bounce_message: 'bad steps' }
+PASS fake s0 / bad submit | steps 1.5 | expected "bounce" | actual "bounce" 
+PASS fake s0 / bad submit | steps "62" string (must be bounce, or accepted with the honest record) | expected true | actual true {"outcome":"ok"}
+require not met: bad final root
+{ bounce_message: 'bad final root' }
+PASS fake s0 / bad submit | steps one fewer than the trace (final root of other step count) | expected "bounce" | actual "bounce" 
+require not met: prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM=
+{
+  bounce_message: 'prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM='
+}
+PASS fake s0 / bad submit | prev = genesis at h2 | expected "bounce" | actual "bounce" 
+require not met: prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM=
+{
+  bounce_message: 'prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM='
+}
+PASS fake s0 / bad submit | prev = random root | expected "bounce" | actual "bounce" 
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+PASS fake s0 / bad submit | height 3 while top = 1 (gap) | expected "bounce" | actual "bounce" 
+require not met: height taken
+{ bounce_message: 'height taken' }
+PASS fake s0 / bad submit | height 1 again (taken) | expected "bounce" | actual "bounce" 
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+PASS fake s0 / bad submit | height 0 | expected "bounce" | actual "bounce" 
+PASS fake s0 / bad submit | height "2" string (must be bounce, or accepted with the honest record) | expected true | actual true {"outcome":"ok"}
+require not met: bond
+{ bounce_message: 'bond' }
+PASS fake s0 / bad submit | bond OBOND-1 | expected "bounce" | actual "bounce" 
+PASS fake s0 / bad submit | the honest h2 after all that | expected "ok" | actual "ok" 
+PASS fake s0 / bad submit | top = 2 | expected 2 | actual 2 
+PASS race | OP1 h1 (first stable) | expected "ok" | actual "ok" 
+require not met: height taken
+{ bounce_message: 'height taken' }
+PASS race | OP2 h1 same timestamp (tie, later in MCI order) | expected "bounce" | actual "bounce" 
+PASS race | loser only pays the bounce fee | expected 10000 | actual 10000 
+require not met: height taken
+{ bounce_message: 'height taken' }
+PASS race | OP2 copies OP1 batch for h1 | expected "bounce" | actual "bounce" 
+require not met: prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM=
+{
+  bounce_message: 'prev must be FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM='
+}
+PASS race | h2 chained on the LOSER root | expected "bounce" | actual "bounce" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS race | h2 prev = winner root but s0 from loser memory | expected "bounce" | actual "bounce" 
+PASS race | h2 chained on winner root (other operator) | expected "ok" | actual "ok" 
+require not met: height taken
+{ bounce_message: 'height taken' }
+PASS race | h3 two operators same ts: first wins | expected "ok" | actual "ok" 
+PASS race | h3 second bounces | expected "bounce" | actual "bounce" 
+PASS race | h3 winner recorded | expected "PvvEj5VCyvyZu3N7p2bl0EDehUApIw31atl+7yJ3DYM=" | actual "PvvEj5VCyvyZu3N7p2bl0EDehUApIw31atl+7yJ3DYM=" 
+PASS race | record of h3 lists OP1 as operator | expected "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" | actual "CU7CPP2FKESCCL543TNJMZSPU3B46DLT" 
+PASS window | open at 24h - 1 s | expected "ok" | actual "ok" 
+require not met: window closed
+{ bounce_message: 'window closed' }
+PASS window | open at exactly 24 h | expected "bounce" | actual "bounce" 
+require not met: games open
+{ bounce_message: 'games open' }
+PASS window | finalize at 24 h with a game open | expected "bounce" | actual "bounce" 
+require not met: games open
+{ bounce_message: 'games open' }
+PASS window | finalize mid-game | expected "bounce" | actual "bounce" 
+PASS window | griefer (register lie) vs honest operator | expected "d" | actual "d" 
+PASS window | finalize after the game resolved | expected "ok" | actual "ok" 
+require not met: self
+{ bounce_message: 'self' }
+PASS window | self-challenge by the operator address | expected "bounce" | actual "bounce" 
+require not met: bond
+{ bounce_message: 'bond' }
+PASS window | open with CBOND - 1 | expected "bounce" | actual "bounce" 
+require not met: not live
+{ bounce_message: 'not live' }
+PASS window | open unknown sid | expected "bounce" | actual "bounce" 
+require not met: not live
+{ bounce_message: 'not live' }
+PASS window | open sid = object (type confusion) | expected "bounce" | actual "bounce" 
+PASS window | finalize "1" string: bounce, or same as finalize 1 (lf stored as number) | expected true | actual true {"outcome":"ok","lf":1}
+PASS window | chain continues after that | expected "ok" | actual "ok" 
+PASS window | finalize 2 after string finalize | expected "ok" | actual "ok" 
+PASS fraud | OP2 submits fraudulent h2 (consistent lie: hidden memory write) | expected "ok" | actual "ok" 
+PASS fraud | OP1 h3 chained on the bad h2 (executes honestly from it) | expected "ok" | actual "ok" 
+PASS fraud | OP3 h4 chained | expected "ok" | actual "ok" 
+PASS fraud | griefer opens a game on h3 too | expected "ok" | actual "ok" 
+PASS fraud | honest challenger opens on h2 | expected "ok" | actual "ok" 
+PASS fraud | h2 game: challenger wins | expected "c" | actual "c" 
+PASS fraud | h3 griefer game still running | expected true | actual true 
+PASS fraud | challenger paid CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS fraud | burned counter += OBOND/2 | expected 100000 | actual 100000 
+PASS fraud | top reset to 1 (h2..h4 voided) | expected 1 | actual 1 
+require not met: not live
+{ bounce_message: 'not live' }
+PASS fraud | open a game on voided h4 | expected "bounce" | actual "bounce" 
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+PASS fraud | extend the voided chain (h5 on old h4) | expected "bounce" | actual "bounce" 
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+PASS fraud | h3 on the voided h2 | expected "bounce" | actual "bounce" 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS fraud | fraudster reclaims its h2 bond | expected "bounce" | actual "bounce" 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS fraud | reclaim voided h3 while its game is still open | expected "bounce" | actual "bounce" 
+PASS fraud | reclaim voided h4 (no games) | expected "ok" | actual "ok" 
+PASS fraud | h4 bond back OBOND - FEE | expected 198000 | actual 198000 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS fraud | reclaim h4 twice | expected "bounce" | actual "bounce" 
+require not met: height taken
+{ bounce_message: 'height taken' }
+PASS fraud | race restarts at h2: first resubmission wins | expected "ok" | actual "ok" 
+PASS fraud | second resubmission at h2 | expected "bounce" | actual "bounce" 
+require not met: prev must be S5sRKIiYHOS5OEi5KmH91fvoj6SNFyQdcMGFFQkA318=
+{
+  bounce_message: 'prev must be S5sRKIiYHOS5OEi5KmH91fvoj6SNFyQdcMGFFQkA318='
+}
+PASS fraud | new h3 still referencing the voided h2 root | expected "bounce" | actual "bounce" 
+PASS fraud | new h3 on the new h2 | expected "ok" | actual "ok" 
+PASS fraud | old h3 game (griefer) still resolves | expected "d" | actual "d" 
+PASS fraud | operator of voided h3 gets the griefer bond | expected 108000 | actual 108000 
+PASS fraud | late result on voided h3 leaves the new chain alone | expected 3 | actual 3 
+PASS fraud | reclaim voided h3 after its game | expected "ok" | actual "ok" 
+PASS fraud | h3 bond back | expected 198000 | actual 198000 
+PASS fraud | h1 still finalizes | expected "ok" | actual "ok" 
+require not met: finalize 2 first
+{ bounce_message: 'finalize 2 first' }
+PASS fraud | finalize h3 before h2 (out of order) | expected "bounce" | actual "bounce" 
+PASS fraud | new h2 finalizes | expected "ok" | actual "ok" 
+PASS fraud | new h3 finalizes | expected "ok" | actual "ok" 
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+PASS fraud | reclaim a finalized submission | expected "bounce" | actual "bounce" 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS fraud | reclaim the old fraudulent h2 later | expected "bounce" | actual "bounce" 
+PASS voided finalize | fraud at h2 | expected "c" | actual "c" 
+require not met: voided
+{ bounce_message: 'voided' }
+PASS voided finalize | finalize voided h2 (next in order, window over, no games) | expected "bounce" | actual "bounce" 
+require not met: finalize 2 first
+{ bounce_message: 'finalize 2 first' }
+PASS voided finalize | finalize voided h3 | expected "bounce" | actual "bounce" 
+require not met: not live
+{ bounce_message: 'not live' }
+PASS voided finalize | open on voided h3 | expected "bounce" | actual "bounce" 
+PASS voided finalize | lf stays 1 | expected 1 | actual 1 
+require not met: window open
+{ bounce_message: 'window open' }
+PASS voided finalize | replacement h2 before its own 24 h | expected "bounce" | actual "bounce" 
+PASS voided finalize | replacement h2 after 24 h | expected "ok" | actual "ok" 
+PASS late fraud | h2 fraud proven first | expected "c" | actual "c" 
+PASS late fraud | top = 1 | expected 1 | actual 1 
+PASS late fraud | old h3 fraud proven later | expected "c" | actual "c" 
+PASS late fraud | top unchanged (replacement h2,h3 stay live) | expected 3 | actual 3 
+PASS late fraud | h3 challenger still gets its share | expected 208000 | actual 208000 
+PASS late fraud | burned = 2 x OBOND/2 | expected 200000 | actual 200000 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS late fraud | OP3 cannot reclaim | expected "bounce" | actual "bounce" 
+PASS multi | puppet game | expected "c" | actual "c" 
+PASS multi | honest challenger 1 | expected "c" | actual "c" 
+PASS multi | honest challenger 2 | expected "c" | actual "c" 
+PASS multi | challenger 3 with a wrong belief still wins (the operator lied later anyway) or loses | expected true | actual true {"winner":"d"}
+PASS multi | later winners get their bond back (CBOND-GF-FEE) | expected 108000 | actual 108000 
+PASS multi | fraudster + puppet net loss >= OBOND/2 (not counting bonds of challengers who disputed an honest step) | expected true | actual true {"loss":4000,"fromOthers":108000}
+PASS multi | open games counter back to 0 | expected 0 | actual 0 
+PASS multi | top = 1 | expected 1 | actual 1 
+PASS delay | 40 puppets opened games inside the window | expected 40 | actual 40 
+require not met: window closed
+{ bounce_message: 'window closed' }
+PASS delay | puppet opens after the window | expected "bounce" | actual "bounce" 
+require not met: games open
+{ bounce_message: 'games open' }
+PASS delay | finalize while puppet games are still running | expected "bounce" | actual "bounce" 
+PASS delay | every puppet game resolved for the operator | expected 40 | actual 40 {"others":[]}
+PASS delay | finalize after the last puppet game | expected "ok" | actual "ok" 
+PASS delay | extra delay beyond the window is bounded by one game (<= 2*rounds+1 moves x 1 h) | expected true | actual true {"delayHours":3.45,"steps":4062,"maxMovesInAGame":8}
+PASS delay | operator earns every puppet bond (K x (CBOND-GF-FEE)) + its own bond back | expected 4518000 | actual 4518000 
+PASS delay | rollup surplus = FEE per payout + GB per result (no drain, nothing stuck) | expected 132000 | actual 132000 {"burned":0}
+PASS grief | 12 griefers lose | expected 12 | actual 12 
+PASS grief | operator gets 12 x (CBOND - GF - FEE) | expected 1296000 | actual 1296000 
+PASS grief | referee AA keeps GF - GB per game for its fees | expected 108000 | actual 108000 
+PASS grief | top stays 2 | expected 2 | actual 2 
+PASS grief | finalize 1 | expected "ok" | actual "ok" 
+PASS grief | finalize 2 | expected "ok" | actual "ok" 
+PASS grief | rollup ends holding only kept FEEs + referee refunds (no drain) | expected 40000 | actual 40000 
+PASS forge | attacker opens its own referee game with the rollup game ref | expected "ok" | actual "ok" 
+require not met: undecided
+{ bounce_message: 'undecided' }
+PASS forge | attacker game: resolve before deadline without memo | expected "bounce" | actual "bounce" 
+require not met: undecided
+{ bounce_message: 'undecided' }
+PASS forge | attacker game (n=1, no memo) resolves at its deadline -> result goes to the attacker address | expected true | actual true {"outcome":"bounce: \"undecided\""}
+PASS forge | rollup game untouched by the attacker game | expected "open" | actual "open" 
+PASS forge | h1 not voided | expected 1 | actual 1 
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+PASS forge | user sends a fake result {res, w:c} to the rollup | expected "bounce" | actual "bounce" 
+require not met: not your move
+{ bounce_message: 'not your move' }
+PASS forge | challenger posts mids in the rollup game | expected "bounce" | actual "bounce" 
+PASS forge | rollup game then plays out normally | expected "d" | actual "d" 
+require not met: no game
+{ bounce_message: 'no game' }
+PASS forge | resolve a finished game again (double callback) | expected "bounce" | actual "bounce" 
+PASS forge | rollup game marked d | expected "d" | actual "d" 
+require not met: undecided
+{ bounce_message: 'undecided' }
+PASS forge | resolve the rollup game before any deadline | expected "bounce" | actual "bounce" 
+require not met: fee
+{ bounce_message: 'fee' }
+PASS forge | referee open without the fee | expected "bounce" | actual "bounce" 
+require not met: bad open
+{ bounce_message: 'bad open' }
+PASS forge | referee open with ":" in ref | expected "bounce" | actual "bounce" 
+require not met: bad players
+{ bounce_message: 'bad players' }
+PASS forge | referee open with a bad player address | expected "bounce" | actual "bounce" 
+PASS forge | second direct open with the same ref by the same opener | expected "ok" | actual "ok" 
+require not met: game exists
+{ bounce_message: 'game exists' }
+PASS forge | third direct open, same opener + ref (slot taken) | expected "bounce" | actual "bounce" 
+PASS edges | lie only in the final registers (last step) | expected "c" | actual "c" 
+PASS edges | voided | expected 0 | actual 0 
+PASS edges | lie at the first step | expected "c" | actual "c" 
+PASS edges | challenger never posts the one-step memo -> loses (burden of proof) | expected "d" | actual "d" 
+PASS edges | not voided | expected 1 | actual 1 
+PASS edges | operator silent -> fraud | expected "c" | actual "c" 
+PASS edges | voided | expected 0 | actual 0 
+PASS edges | steps beyond HALT (absorbing no-op steps), griefer picks the tail | expected "d" | actual "d" 
+require not met: bad final root
+{ bounce_message: 'bad final root' }
+PASS edges | submit with the input tree swapped mid-batch | expected "bounce" | actual "bounce" 
+require not met: bad final root
+{ bounce_message: 'bad final root' }
+PASS edges | submit with a skipped step counter | expected "bounce" | actual "bounce" 
+PASS edges | operator posts inp-lie mids under an honest final root | expected "c" | actual "c" 
+PASS edges | operator posts step-lie mids under an honest final root | expected "c" | actual "c" 
+PASS edges | operator posts pc-lie mids under an honest final root | expected "c" | actual "c" 
+PASS edges | operator posts mem-lie mids under an honest final root | expected "c" | actual "c" 
+require not met: an AA cannot be an operator
+{ bounce_message: 'an AA cannot be an operator' }
+PASS AA player | an AA that refuses payments submits h1 | expected "bounce" | actual "bounce" 
+require not met: an AA cannot be a challenger
+{ bounce_message: 'an AA cannot be a challenger' }
+PASS AA player | an AA that refuses payments opens a game | expected "bounce" | actual "bounce" 
+require not met: bad steps
+{ bounce_message: 'bad steps' }
+PASS AA player | steps 2^40 + 1 with a matching final root (a batch no challenger can recompute) | expected "bounce" | actual "bounce" 
+PASS AA player | steps = 2^40 exactly (halted early, absorbing tail) accepted | expected "ok" | actual "ok" 
+PASS refund | operator mids with a 10000-byte trigger | expected "ok" | actual "ok" 
+PASS refund | operator pays only MK for the move | expected -2000 | actual -2000 
+PASS refund | referee keeps MK | expected 2000 | actual 2000 
+PASS refund | challenger pick with 10000 pays only MK | expected -2000 | actual -2000 
+require not met: need 3 roots
+{ bounce_message: 'need 3 roots' }
+PASS refund | a move below MK gets no refund (and a bad move still bounces) | expected "bounce" | actual "bounce" 
+PASS refund | game still plays out: honest operator wins | expected "d" | actual "d" 
+require not met: no game
+{ bounce_message: 'no game' }
+PASS refund | resolve of a finished game bounces | expected "bounce" | actual "bounce" 
+PASS overpay | rv_rollup constants: CBOND 120000, OBOND 200000, MAXSTEPS 2^40 | expected [120000,200000,1099511627776] | actual [120000,200000,1099511627776] 
+PASS overpay | test constants match the AA | expected [120000,200000,10000,2000] | actual [120000,200000,10000,2000] 
+PASS overpay | submit with OBOND + 50000 | expected "ok" | actual "ok" 
+PASS overpay | operator net cost OBOND + FEE (refund 50000 - FEE) | expected 202000 | actual 202000 
+PASS overpay | rollup keeps OBOND + FEE | expected 202000 | actual 202000 
+PASS overpay | submit with OBOND + FEE: accepted, no refund (<= FEE kept) | expected ["ok",202000] | actual ["ok",202000] 
+PASS overpay | submit with OBOND + FEE + 1: refund 1 | expected ["ok",202000] | actual ["ok",202000] 
+PASS overpay | submit with exactly OBOND: no refund | expected ["ok",200000] | actual ["ok",200000] 
+require not met: gap: next height is 5
+{ bounce_message: 'gap: next height is 5' }
+PASS overpay | overpaid submit that bounces (gap) costs only the bounce fee | expected ["bounce",10000] | actual ["bounce",10000] 
+PASS overpay | open with exactly CBOND | expected "ok" | actual "ok" 
+PASS overpay | challenger pays CBOND | expected 120000 | actual 120000 
+PASS overpay | open with CBOND + 30000 | expected "ok" | actual "ok" 
+PASS overpay | challenger net cost CBOND (refund 30000 in full) | expected 120000 | actual 120000 
+PASS overpay | referee got exactly GF per open (no refund to the rollup) | expected 20000 | actual 20000 
+PASS overpay | rollup keeps CBOND - GF from the overpaid open | expected 110000 | actual 110000 
+require not met: bond
+{ bounce_message: 'bond' }
+PASS overpay | open with CBOND - 1 still bounces | expected "bounce" | actual "bounce" 
+PASS overpay | both griefer games (one overpaid) -> d | expected ["d","d"] | actual ["d","d"] 
+PASS overpay | operator gets 2 x (CBOND - GF - FEE) = 2 x 108000 | expected 216000 | actual 216000 
+PASS overpay | h1..h4 finalize after the games | expected 4 | actual 4 
+PASS overpay | rollup ends with 3 kept submit FEEs + 6 payout FEEs + 2 GB + 2 bounce fees (no bond left, nothing over-refunded) | expected 40000 | actual 40000 
+PASS overpay | overpaid open on a fraud: challenger wins | expected "c" | actual "c" 
+PASS overpay | challenger net gain OBOND/2 - GF - FEE (= 88000; payout 208000) | expected 88000 | actual 88000 
+PASS overpay | burned = OBOND/2 (stays locked: no command pays it out) | expected 100000 | actual 100000 
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+PASS overpay | nobody can take the burned half: {"withdraw":1} | expected "bounce" | actual "bounce" 
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+PASS overpay | nobody can take the burned half: {"burn":1} | expected "bounce" | actual "bounce" 
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+PASS overpay | nobody can take the burned half: {"reclaim":"qZHwzd0k+p5Wag8w1I | expected "bounce" | actual "bounce" 
+require not met: voided
+{ bounce_message: 'voided' }
+PASS overpay | nobody can take the burned half: {"finalize":1} | expected "bounce" | actual "bounce" 
+PASS overpay | direct referee open with GF + 5000: refund 5000 | expected ["ok",10000,10000] | actual ["ok",10000,10000] 
+PASS overpay | resolve with RK + 25000 | expected "ok" | actual "ok" 
+PASS overpay | resolver pays only RK (refund 25000) | expected 10000 | actual 10000 
+PASS overpay | referee nets RK - GB from that resolve | expected 9000 | actual 9000 
+PASS overpay | callback still pays the winner CBOND - GF - FEE + OBOND/2 | expected 208000 | actual 208000 
+PASS overpay | resolve with exactly RK: no refund | expected ["ok",10000] | actual ["ok",10000] 
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: gap: next height is 3
+{ bounce_message: 'gap: next height is 3' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window open
+{ bounce_message: 'window open' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window open
+{ bounce_message: 'window open' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: bad root
+{ bounce_message: 'bad root' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: gap: next height is 6
+{ bounce_message: 'gap: next height is 6' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: finalize 6 first
+{ bounce_message: 'finalize 6 first' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: gap: next height is 1
+{ bounce_message: 'gap: next height is 1' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: gap: next height is 2
+{ bounce_message: 'gap: next height is 2' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: finalize 2 first
+{ bounce_message: 'finalize 2 first' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: gap: next height is 7
+{ bounce_message: 'gap: next height is 7' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: gap: next height is 4
+{ bounce_message: 'gap: next height is 4' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: gap: next height is 4
+{ bounce_message: 'gap: next height is 4' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: gap: next height is 5
+{ bounce_message: 'gap: next height is 5' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: finalize 1 first
+{ bounce_message: 'finalize 1 first' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: finalize 4 first
+{ bounce_message: 'finalize 4 first' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad root
+{ bounce_message: 'bad root' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: voided
+{ bounce_message: 'voided' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: gap: next height is 4
+{ bounce_message: 'gap: next height is 4' }
+require not met: window open
+{ bounce_message: 'window open' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: not live
+{ bounce_message: 'not live' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: bond
+{ bounce_message: 'bond' }
+require not met: bond
+{ bounce_message: 'bond' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: bad height
+{ bounce_message: 'bad height' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+bounce called:  unknown command
+{ bounce_message: 'unknown command' }
+require not met: window open
+{ bounce_message: 'window open' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: window closed
+{ bounce_message: 'window closed' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+require not met: cannot reclaim
+{ bounce_message: 'cannot reclaim' }
+require not met: live or unknown
+{ bounce_message: 'live or unknown' }
+PASS fuzz | no fraudulent (or fraud-chained) height ever finalized | expected 0 | actual 0 {"runs":6,"steps":60,"fraudsSubmitted":44,"fraudsCaught":44,"games":77,"voids":44}
+PASS fuzz | no game stuck | expected 0 | actual 0 
+PASS fuzz | every fraudulent submission caught by the watcher | expected 44 | actual 44 
+PASS fuzz | garbage never accepted | expected 0 | actual 0 
+PASS fuzz | after the drain every bond is paid out (no liabilities left) | expected 0 | actual 0 
+PASS fuzz | every non-fraud submission finalized or reclaimed | expected 0 | actual 0 
+PASS layer1 flow | units stored with the submission | expected 8 | actual 8 
+require not met: bond
+{ bounce_message: 'bond' }
+PASS layer1 flow | uopen with CBOND only (needs CBOND + GF) | expected "bounce" | actual "bounce" 
+PASS layer1 flow | uopen with CBOND + GF | expected "ok" | actual "ok" 
+PASS layer1 flow | seg game opened: u units, n steps, defender to move | expected ["0","8","0","62","lWhu9nEKzP4Tf5JZGHf/7cov1gysw9h/45mhwYtIPNQ=","FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM=","d"] | actual ["0","8","0","62","lWhu9nEKzP4Tf5JZGHf/7cov1gysw9h/45mhwYtIPNQ=","FMooNkuVx5agPVg9EWDHwCQP4rN7Ox6O2Nsto56CvIM=","d"] 
+PASS layer1 flow | rollup counts the game (n = 1) | expected 1 | actual 1 
+PASS layer1 flow | griefer (register lie) vs honest operator via layer 1 | expected "d" | actual "d" {"l1moves":2,"l2moves":4,"unit":[3,4,23,31]}
+PASS layer1 flow | operator paid CBOND - GF - FEE | expected 108000 | actual 108000 
+PASS layer1 flow | seg referee keeps GF of its 2 GF (GF to layer 2; GB in from rv_game_ref, GB out to the rollup) | expected 10000 | actual 10000 
+PASS layer1 flow | game counter back to 0 | expected 0 | actual 0 
+PASS layer1 flow | finalize after the layer-1 game | expected "ok" | actual "ok" 
+PASS layer1 flow | fraudulent h2 (hidden memory write) vs honest challenger via layer 1 | expected "c" | actual "c" {"l1moves":2,"l2moves":4,"unit":[3,4,23,31]}
+PASS layer1 flow | challenger paid CBOND - GF - FEE + OBOND/2 (it paid CBOND + GF) | expected 78000 | actual 78000 
+PASS layer1 flow | h2 voided (top = 1), fraud flag, burned OBOND/2 | expected [1,1,100000] | actual [1,1,100000] 
+PASS layer1 flow | uopen overpay 5000 refunded | expected 130000 | actual 130000 
+PASS layer1 deep | griefer (lie at step 2000) vs honest operator, 300 units | expected "d" | actual "d" {"steps":4062,"units":300,"l1moves":4,"l2moves":4,"unit":[147,148,1990,2003]}
+PASS layer1 deep | griefer (lie at step 2000) vs honest operator, 300 units: layer-1 moves <= 2 x ceil(log16 300) = 6 | expected true | actual true {"l1moves":4}
+PASS layer1 deep | fraudulent operator (lie at step 3001) vs honest challenger, 300 units | expected "c" | actual "c" {"steps":4062,"units":300,"l1moves":4,"l2moves":4,"unit":[221,222,2992,3005]}
+PASS layer1 deep | fraudulent operator (lie at step 3001) vs honest challenger, 300 units: layer-1 moves <= 2 x ceil(log16 300) = 6 | expected true | actual true {"l1moves":4}
+PASS layer1 deep | fraud voids h1 | expected 0 | actual 0 
+PASS layer1 deep | same griefer via the whole-run instruction game | expected "d" | actual "d" {"moves":8}
+PASS layer1 boundaries | honest operator with arbitrary increasing boundaries #0 | expected "d" | actual "d" {"unit":[20,21,292,313]}
+PASS layer1 boundaries | fraudster with arbitrary increasing boundaries #1 | expected "c" | actual "c" {"unit":[11,12,143,170]}
+PASS layer1 boundaries | honest operator with arbitrary increasing boundaries #2 | expected "d" | actual "d" {"unit":[23,24,292,308]}
+PASS layer1 boundaries | fraudster with arbitrary increasing boundaries #3 | expected "c" | actual "c" {"unit":[24,25,320,341]}
+require not met: bad units
+{ bounce_message: 'bad units' }
+PASS layer1 edges | submit units 0 | expected "bounce" | actual "bounce" 
+require not met: bad units
+{ bounce_message: 'bad units' }
+PASS layer1 edges | submit units > steps | expected "bounce" | actual "bounce" 
+require not met: bad units
+{ bounce_message: 'bad units' }
+PASS layer1 edges | submit units 1.5 | expected "bounce" | actual "bounce" 
+PASS layer1 edges | submit units "4" string (bounce, or stored as the number 4) | expected true | actual true {"outcome":"ok"}
+require not met: bad units
+{ bounce_message: 'bad units' }
+PASS layer1 edges | submit units missing | expected "bounce" | actual "bounce" 
+require not met: bad units
+{ bounce_message: 'bad units' }
+PASS layer1 edges | submit units 16385 | expected "bounce" | actual "bounce" 
+PASS layer1 edges | U = 1: turn x right after uopen | expected "x" | actual "x" 
+require not met: layer 2 running
+{ bounce_message: 'layer 2 running' }
+PASS layer1 edges | resolve while layer 2 runs | expected "bounce" | actual "bounce" 
+PASS layer1 edges | U = 1 griefer loses | expected "d" | actual "d" 
+require not met: not your move
+{ bounce_message: 'not your move' }
+PASS layer1 edges | mids by the challenger | expected "bounce" | actual "bounce" 
+require not met: need 7 points
+{ bounce_message: 'need 7 points' }
+PASS layer1 edges | mids with one point too few | expected "bounce" | actual "bounce" 
+require not met: steps must increase
+{ bounce_message: 'steps must increase' }
+PASS layer1 edges | mids with equal steps | expected "bounce" | actual "bounce" 
+require not met: steps must increase
+{ bounce_message: 'steps must increase' }
+PASS layer1 edges | mids with a step = 0 (= slo) | expected "bounce" | actual "bounce" 
+require not met: steps must increase
+{ bounce_message: 'steps must increase' }
+PASS layer1 edges | mids with last step = shi | expected "bounce" | actual "bounce" 
+require not met: steps must increase
+{ bounce_message: 'steps must increase' }
+PASS layer1 edges | mids with a fractional step | expected "bounce" | actual "bounce" 
+require not met: bad root
+{ bounce_message: 'bad root' }
+PASS layer1 edges | mids with a root containing ":" | expected "bounce" | actual "bounce" 
+require not met: undecided
+{ bounce_message: 'undecided' }
+PASS layer1 edges | resolve before the deadline | expected "bounce" | actual "bounce" 
+PASS layer1 edges | honest mids | expected "ok" | actual "ok" 
+require not met: not your move
+{ bounce_message: 'not your move' }
+PASS layer1 edges | pick by the defender | expected "bounce" | actual "bounce" 
+require not met: bad j
+{ bounce_message: 'bad j' }
+PASS layer1 edges | pick j = cnt + 1 | expected "bounce" | actual "bounce" 
+require not met: no game
+{ bounce_message: 'no game' }
+PASS layer1 edges | a stranger sends a fake result {res, w} to the seg referee | expected "bounce" | actual "bounce" 
+PASS layer1 edges | stranger opens a seg game with the rollup game ref | expected "ok" | actual "ok" 
+PASS layer1 edges | honest pick down to one unit -> layer 2 opened despite the front-run game | expected "ok" | actual "ok" 
+PASS layer1 edges | layer-2 game exists under SEG || sha256(gid) | expected true | actual true 
+PASS layer1 edges | operator silent at layer 1 -> challenger wins (as 6a) | expected "c" | actual "c" 
+PASS layer1 edges | its payout includes OBOND/2 | expected 208000 | actual 208000 
+PASS layer1 edges | challenger silent at layer 1 -> operator wins | expected "d" | actual "d" 
+PASS layer1 edges | challenger agrees with every point (no fraud): it loses at the single step | expected "d" | actual "d" 
+PASS witproof | heights submitted (one memory image per proof set, + a status-4 image) | expected 15 | actual 15 
+require not met: not finalized
+{ bounce_message: 'not finalized' }
+PASS witproof | bind before finalize | expected "bounce" | actual "bounce" 
+PASS witproof | all heights finalized | expected 15 | actual 15 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS witproof | bind with a wrong word | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS witproof | bind with the words of another height | expected "bounce" | actual "bounce" 
+require not met: status
+{ bounce_message: 'status' }
+PASS witproof | bind a status-4 height | expected "bounce" | actual "bounce" 
+require not met: not finalized
+{ bounce_message: 'not finalized' }
+PASS witproof | bind a height above lf | expected "bounce" | actual "bounce" 
+PASS witproof | bind every finalized height: W<h> = the guest-layout root | expected 14 | actual 14 
+require not met: bound
+{ bounce_message: 'bound' }
+PASS witproof | bind twice | expected "bounce" | actual "bounce" 
+require not met: height not bound
+{ bounce_message: 'height not bound' }
+PASS witproof | prove against an unbound height | expected "bounce" | actual "bounce" 
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: prefix
+{ bounce_message: 'prefix' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: prefix
+{ bounce_message: 'prefix' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: key
+{ bounce_message: 'key' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: own leaf
+{ bounce_message: 'own leaf' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: root
+{ bounce_message: 'root' }
+require not met: sib
+{ bounce_message: 'sib' }
+require not met: sib
+{ bounce_message: 'sib' }
+PASS witproof | R3-W1: absence under a non-canonical key (upper-case tail, same path bits) refused | expected 0 | actual 0 {"tries":12}
+PASS witproof | R3-W4: a proof costs the caller MK = 2000 (the rest of the trigger is refunded) | expected 2000 | actual 2000 
+PASS witproof | memberships accepted (and recorded L<h>:<kid> = leaf); synthetic depth 65 refused | expected 38 | actual 38 {"maxDepth":65}
+PASS witproof | absences accepted (A<h>:<key> = 1) | expected 12 | actual 12 
+PASS witproof | forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height) | expected 0 | actual 0 {"tries":188}
+PASS witproof | a proof for height h does not verify against h+1 | expected true | actual true 
+PASS upgrade | export height 1 submitted | expected "accepted" | actual "accepted" 
+require not met: not governance
+{ bounce_message: 'not governance' }
+PASS upgrade | upgrade from a non-governance address | expected "bounce" | actual "bounce" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade of a height above top + 1 | expected "bounce" | actual "bounce" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade of height 1 | expected "bounce" | actual "bounce" 
+require not met: bad root
+{ bounce_message: 'bad root' }
+PASS upgrade | upgrade with a malformed root | expected "bounce" | actual "bounce" 
+PASS upgrade | upgrade height 2 by governance | expected "accepted" | actual "accepted" 
+require not met: bad s0
+{ bounce_message: 'bad s0' }
+PASS upgrade | height 2 chained on the OLD memory refused (s0 must start from the new image) | expected "bounce" | actual "bounce" 
+PASS upgrade | import height 2 from the new image accepted | expected "accepted" | actual "accepted" 
+PASS upgrade | finalize export height 1 | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | finalize import height 2 before any xbind | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS upgrade | xbind with a wrong digest word | expected "bounce" | actual "bounce" 
+require not met: word proof
+{ bounce_message: 'word proof' }
+PASS upgrade | xbind claiming kind 1 for an import memory | expected "bounce" | actual "bounce" 
+require not met: kind
+{ bounce_message: 'kind' }
+PASS upgrade | xbind of a memory with kind 0 (no snapshot run) | expected "bounce" | actual "bounce" 
+PASS upgrade | xbind import height 2 | expected "accepted" | actual "accepted" 
+require not met: bound
+{ bounce_message: 'bound' }
+PASS upgrade | xbind twice | expected "bounce" | actual "bounce" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | finalize import height 2 with only the import bound | expected "bounce" | actual "bounce" 
+PASS upgrade | xbind export height 1 | expected "accepted" | actual "accepted" 
+PASS upgrade | finalize import height 2 (export digest == import digest) | expected "accepted" | actual "accepted" 
+require not met: bad upgrade height
+{ bounce_message: 'bad upgrade height' }
+PASS upgrade | upgrade at or below lf | expected "bounce" | actual "bounce" 
+PASS upgrade | height 3 chains on the import memory again (normal height) | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | import whose digest differs from the export never finalizes | expected "bounce" | actual "bounce" 
+PASS upgrade | governance re-schedules height 2 (voids 2..top) | expected ["accepted",1] | actual ["accepted",1] 
+PASS upgrade | voided import height 2 bond reclaimable (not fraud) | expected "accepted" | actual "accepted" 
+PASS upgrade | voided height 3 bond reclaimable | expected "accepted" | actual "accepted" 
+PASS upgrade | re-submitted matching import finalizes | expected "accepted" | actual "accepted" 
+require not met: import digest
+{ bounce_message: 'import digest' }
+PASS upgrade | kinds swapped (export run at h, import at h-1) never finalizes | expected "bounce" | actual "bounce" 
+PASS invariant | rollup balance >= outstanding bonds + burned after every tx | expected 0 | actual 0 
+SUMMARY {"total":303,"pass":303,"fail":0}

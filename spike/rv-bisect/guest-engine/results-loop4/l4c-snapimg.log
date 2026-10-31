@@ -1,0 +1,6 @@
+expect 372f76d8b2e27c0e661426a23d489b9777af54e35593f6dc81eb8cc6a7b6065d:3086 62ee978c868242c8c5b0fa702900ec4b0abb261a7c61fbfd34a567418dd1202b:5465
+    Finished `release` profile [optimized] target(s) in 0.01s
+    Finished `release` profile [optimized] target(s) in 0.01s
+{"dir":"/data/hark/spike-rv/loop4/snap-liq7","checks":9,"pass":9,"ok":true,"steps":123451875}
+{"dir":"/data/hark/spike-rv/loop4/snap-gen","checks":9,"pass":9,"ok":true,"steps":293187128}
+SNAPIMGDONE

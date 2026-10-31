@@ -1,0 +1,7 @@
+{"check":"prod: SetHeight 1 as unit 0 ok; a second SetHeight (unit 1) refused","ok":true,"status":0,"ev":[1073741824,2]}
+{"check":"prod: jump 1 -> 3 refused; +1 as unit 1 refused","ok":true,"status":0,"ev":[2,2]}
+{"check":"prod: 1 -> 2 as unit 0 ok","ok":true,"status":0,"ev":[1073741824]}
+{"check":"prod: same height again refused","ok":true,"status":0,"ev":[2]}
+{"check":"prod: going back refused","ok":true,"status":0,"ev":[2]}
+{"check":"test image: jumps allowed (fixtures), going back refused","ok":true,"status":0,"ev":[1073741824,1073741824,1073741824,2]}
+{"checks":6,"pass":6,"ok":true}
