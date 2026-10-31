@@ -1,0 +1,83 @@
+===== testnet = false
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserType' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'server' of module exports inside circular dependency
+(node:833725) Warning: Accessing non-existent property 'BrowserLauncher' of module exports inside circular dependency
+rundir /data/hark/spike-rv/loop13/devnet-testdata/runid-0001
+[INFO][genesis-node] Child started
+[INFO][obyte-witness-0002] Child started
+[INFO][obyte-witness-0001] Child started
+[INFO][obyte-hub-0001] Child started
+[INFO][headless-wallet-0004] Child started
+[INFO][headless-wallet-0008] Child started
+[INFO][headless-wallet-0002] Child started
+[INFO][headless-wallet-0006] Child started
+[INFO][headless-wallet-0003] Child started
+[INFO][headless-wallet-0005] Child started
+[INFO][headless-wallet-0001] Child started
+[INFO][headless-wallet-0007] Child started
+MODE max_aa_responses set {"STEP":"7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA","GAME":"W7OQFFFU6446637YBHIA7B74L6X4ZO5B","ROLL":"VVVKLS6GVZVLB2GHTJIQJAJBVI3OKXPT"}
+PASS | deployed rv_step == address baked into the referee | expected "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" | actual "7USF3LMWZF53XJGAM2SS2QIQSTHD3YNA" 
+PASS | deployed referee == address baked into rv_rollup | expected "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" | actual "W7OQFFFU6446637YBHIA7B74L6X4ZO5B" 
+PASS | deployed rollup == computed address | expected "VVVKLS6GVZVLB2GHTJIQJAJBVI3OKXPT" | actual "VVVKLS6GVZVLB2GHTJIQJAJBVI3OKXPT" 
+PASS | loop 3: deployed seg referee == address baked into rv_rollup | expected "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" | actual "47TZJK4EPJDR3MPYLGTKFPWJRLPX6ISY" 
+PASS | loop 3: deployed witbind / witproof == computed | expected ["AHRSWZC63RY57OYPMAF3DPAKPUBWQFJ5","DXFYPIL6UV4PAXRL3OM6GD4WT4H6XG5G"] | actual ["AHRSWZC63RY57OYPMAF3DPAKPUBWQFJ5","DXFYPIL6UV4PAXRL3OM6GD4WT4H6XG5G"] 
+PASS | 11 rollup-4 deployed | expected "ok" | actual "ok" 
+PASS | 11a cycle 0: bond for the fraud at h1 = OBOND x 2^0 | expected 200000 | actual 200000 
+PASS | 11a cycle 0: fraudulent h1 accepted | expected "ok" | actual "ok" 
+PASS | 11a cycle 0: fraud proven; V = 1, v1 = 1, top = 0; ch1 paid CBOND - GF - FEE + bond/2 (real output) | expected ["c",1,1,0,208000] | actual ["c",1,1,0,208000] 
+PASS | 11a cycle 0: ch1 re-submits the honest h1 at max(v_h, min(V, 6)) = OBOND x 2^1 (b<sid> stored) | expected ["ok",400000] | actual ["ok",400000] 
+PASS | 11a cycle 1: bond for the fraud at h2 = OBOND x 2^1 | expected 400000 | actual 400000 
+PASS | 11a cycle 1: fraudulent h2 accepted | expected "ok" | actual "ok" 
+PASS | 11a cycle 1: fraud proven; V = 2, v2 = 1, top = 1; ch1 paid CBOND - GF - FEE + bond/2 (real output) | expected ["c",2,1,1,308000] | actual ["c",2,1,1,308000] 
+PASS | 11a cycle 1: ch1 re-submits the honest h2 at max(v_h, min(V, 6)) = OBOND x 2^2 (b<sid> stored) | expected ["ok",800000] | actual ["ok",800000] 
+PASS | 11a cycle 2: bond for the fraud at h3 = OBOND x 2^2 | expected 800000 | actual 800000 
+PASS | 11a cycle 2: fraudulent h3 accepted | expected "ok" | actual "ok" 
+PASS | 11a cycle 2: fraud proven; V = 3, v3 = 1, top = 2; ch1 paid CBOND - GF - FEE + bond/2 (real output) | expected ["c",3,1,2,508000] | actual ["c",3,1,2,508000] 
+PASS | 11a cycle 2: ch1 re-submits the honest h3 at max(v_h, min(V, 6)) = OBOND x 2^3 (b<sid> stored) | expected ["ok",1600000] | actual ["ok",1600000] 
+PASS | 11a cycle 3: bond for the fraud at h4 = OBOND x 2^3 | expected 1600000 | actual 1600000 
+PASS | 11a cycle 3: fraudulent h4 accepted | expected "ok" | actual "ok" 
+FAIL | 11a cycle 3: fraud proven; V = 4, v4 = 1, top = 3; ch1 paid CBOND - GF - FEE + bond/2 (real output) | expected ["c",4,1,3,908000] | actual ["d",3,null,4,0] 
+FAIL | 11a cycle 3: ch1 re-submits the honest h4 at max(v_h, min(V, 6)) = OBOND x 2^4 (b<sid> stored) | expected ["ok",3200000] | actual ["{\"message\":\"height taken\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":99,\"formula\":\"require($h > $top, 'height taken');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"X2IDEIKBQMTWXZU7GSBDMTJZSXPF76WC\",\"xpath\":\"/",null] 
+FAIL | 11a cycle 4: bond for the fraud at h5 = OBOND x 2^4 | expected 3200000 | actual 1600000 
+PASS | 11a cycle 4: fraudulent h5 accepted | expected "ok" | actual "ok" 
+FAIL | 11a cycle 4: fraud proven; V = 5, v5 = 1, top = 4; ch1 paid CBOND - GF - FEE + bond/2 (real output) | expected ["c",5,1,4,908000] | actual ["d",3,null,5,0] 
+FAIL | 11a cycle 4: ch1 re-submits the honest h5 at max(v_h, min(V, 6)) = OBOND x 2^5 (b<sid> stored) | expected ["ok",6400000] | actual ["{\"message\":\"height taken\",\"formattedContext\":\"\",\"codeLines\":[{\"lineNumber\":99,\"formula\":\"require($h > $top, 'height taken');\"}],\"trace\":[{\"type\":\"aa\",\"aa\":\"X2IDEIKBQMTWXZU7GSBDMTJZSXPF76WC\",\"xpath\":\"/",null] 
+FAIL | 11a cycle 5: bond for the fraud at h6 = OBOND x 2^5 | expected 6400000 | actual 1600000 
+PASS | 11a cycle 5: fraudulent h6 accepted | expected "ok" | actual "ok" 

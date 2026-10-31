@@ -85,5 +85,6 @@ transaction) holds across all 475 rolltest assertions.
 
 | run | result |
 |---|---|
-| rolldevnet ONLY11 on the round-13 AAs (`l13rd.sh`, /data/hark/spike-rv/loop13) | _pending_ |
+| rolldevnet ONLY11 on the round-13 AAs, first run (`l13-rolldevnet11-v1.log`) | 20 PASS then FAIL cascade from cycle 3: a test bug — the fraud traces used mutation step k = 63..66 but a height runs 62 steps, so h4..h7 were not fraudulent and the defender won (`d`). Stopped (ours), k changed to 3 + c / 20 / 21 / 30 |
+| rolldevnet ONLY11 rerun (`l13rd.sh`, /data/hark/spike-rv/loop13) | **57 / 57** (RDDONE exit 0) — `guest-engine/results-loop13/l13-rolldevnet11.log`: 7 cycles bonds 0.2 → 12.8 M, V 1 → 6 and stays 6, each first winner paid `CBOND − GF − FEE + bond/2` as a real output; 11b layer-1 → layer-2 → rv_step fraud proof at h8 (unit [1,2], steps [12,24]) pays 6 508 000, op1 bounces inside ch2's priority window; 11c defender-silent seg game → c after T (V stays 6, v9 = 1); 11d griefer-silent → d, operator paid 108 000; 11e nine finalize payouts = stored bond − FEE (398 000 … 12 798 000), burned 25 500 000 = Σ fraud bonds / 2, balance − burned = 155 499 (kept FEEs / bounce fees), decay V 5 → 0, h10 at OBOND |
 | full rolldevnet on the round-13 AAs | _pending_ |
