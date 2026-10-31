@@ -1,0 +1,1 @@
+AACOST {"rv_step":{"complexity":10,"ops":1850},"rv_game_ref":{"complexity":10,"ops":848},"rv_seg_ref":{"complexity":18,"ops":1443},"rv_rollup":{"complexity":44,"ops":829},"rv_witbind":{"complexity":15,"ops":1391},"rv_witproof":{"complexity":69,"ops":1588}}

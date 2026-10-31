@@ -559,7 +559,7 @@ groups.witproof = async () => { const K = require('./witkit.js'); const dir = __
   rec('witproof', 'bind every finalized height: W<h> = the guest-layout root', sets.length, bound);
   rec('witproof', 'bind twice', 'bounce', bnc(await S(C, W, BIND, 0, K.bindData(sets[0].H.m, 1)), /bound/));
   rec('witproof', 'prove against an unbound height', 'bounce', bnc(await S(C, W, PROOF, 0, { prove: bad.h, leaf: sets[0].members[0].leaf, sib: sets[0].members[0].sib }), /not bound/));
-  let mok = 0, mn = 0, aok = 0, an = 0, forged = 0, tries = 0, maxd = 0;
+  let mok = 0, mn = 0, aok = 0, an = 0, forged = 0, tries = 0, maxd = 0, ncTries = 0, ncAccepted = 0;
   for (const st of sets) { const h = st.H.h;
     for (const m of st.members) { mn++; maxd = Math.max(maxd, m.depth); const r = await S(C, W, PROOF, 0, { prove: h, leaf: m.leaf, sib: m.sib });
       const want = st.name === 'synth65' ? false : true;
@@ -572,7 +572,10 @@ groups.witproof = async () => { const K = require('./witkit.js'); const dir = __
       if (!r.err && C.v(PROOF, 'A' + h + ':' + a.key) === 1) aok++; else console.log('absent', st.name, r.err);
       tries++; if (!(await S(C, W, PROOF, 0, { prove: h, leaf: a.term === '' ? st.members[0].leaf : '', sib: a.sib, key: a.key })).err) forged++;
       tries++; if (!(await S(C, W, PROOF, 0, { prove: h, leaf: a.term, sib: a.sib, key: a.key.toUpperCase() })).err) forged++;
-      tries++; if (!(await S(C, W, PROOF, 0, { prove: h + 1, leaf: a.term, sib: a.sib, key: a.key })).err) forged++; } }
+      tries++; if (!(await S(C, W, PROOF, 0, { prove: h + 1, leaf: a.term, sib: a.sib, key: a.key })).err) forged++;
+      // R3-W1: canonical path bits but an upper-case tail -> must not be recorded under a non-canonical name
+      const nc = a.key.slice(0, 16) + a.key.slice(16).toUpperCase(); if (nc !== a.key) { ncTries++; const q = await S(C, W, PROOF, 0, { prove: h, leaf: a.term, sib: a.sib, key: nc }); if (!q.err) ncAccepted++; } } }
+  rec('witproof', 'R3-W1: absence under a non-canonical key (upper-case tail, same path bits) refused', 0, ncAccepted, { tries: ncTries });
   rec('witproof', 'memberships accepted (and recorded L<h>:<kid> = leaf); synthetic depth 65 refused', mn, mok, { maxDepth: maxd });
   rec('witproof', 'absences accepted (A<h>:<key> = 1)', an, aok);
   rec('witproof', 'forgeries rejected (tampered leaf, dropped / swapped sibling, absence of a present key, EMPTY/leaf terminal swap, uppercase key, other height)', 0, forged, { tries });

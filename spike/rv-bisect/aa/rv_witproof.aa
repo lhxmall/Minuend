@@ -36,7 +36,9 @@ if (exists(trigger.data.prove)) {
 	$abs = exists(trigger.data.key);
 	if ($abs) {
 		$k = trigger.data.key;
-		require(typeof($k) == 'string' AND length($k) == 64, 'key');   // lowercase hex: checked through $bits below
+		// R3-W1: the whole key must be canonical (64 lowercase hex chars), else an absence could be recorded under a
+		// non-canonical name (e.g. an upper-case tail) that a consumer normalizing its input would read as the real key
+		require(typeof($k) == 'string' AND length($k) == 64 AND replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace($k, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), '5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') == '', 'key');
 		if ($t != '') {
 			require($kt != $k, 'own leaf');
 			require(substring($kt, 0, floor($n / 4)) == substring($k, 0, floor($n / 4)), 'prefix');

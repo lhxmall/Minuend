@@ -14,7 +14,8 @@
 //! allocator) persists in memory: the rollup's s0 for height h carries the final memory of h-1, the
 //! guest restarts at pc 0 and resumes from `SESS` (a .data pointer). `.bss` is zeroed in `_start`
 //! (round 2 A4); every value that must survive a run lives in `.data`. A run that aborts (panic /
-//! OOM, status 0xFFFF0077) marks the session dead: later runs execute nothing (status ST_DEAD = 5).
+//! OOM, status 0xFFFF0077) or traps (status stays 0xFFFF0001 = running, segment roots stay 0) marks the session
+//! dead: later runs execute nothing (status ST_DEAD = 5). Loop round 3 review R3-G1/G2.
 #![cfg_attr(target_os = "none", no_std, no_main)]
 
 #[cfg(not(target_os = "none"))]
@@ -69,6 +70,12 @@ mod rt {
     /// 1 after an aborted run (panic / OOM)
     #[link_section = ".data.sess"]
     static mut DEAD: u32 = 0;
+    /// loop round 3 review (R3-G1): 1 while a run is in progress. A run that ends WITHOUT reaching the clean exit --
+    /// panic, OOM, or a trap (illegal instruction, misaligned access: the machine stops at pc = TRAP and the rollup
+    /// still carries its memory into the next height) -- leaves it at 1; the session may then be torn mid-unit (or
+    /// moved out of its box: SESS points at freed memory), so every later run refuses to execute (ST_DEAD).
+    #[link_section = ".data.sess"]
+    static mut IN_RUN: u32 = 0;
     extern "C" { static _heap_start: u8; }
     const HEAP_END: usize = 0x0300_0000; // below the embed input region; stack has 15 MiB above
     #[inline]
@@ -128,6 +135,8 @@ mod rt {
     const ROOTS: usize = 0x20000;
     /// OUT[0x1FFF9]: batch status (mnpilot::ST_*), ST_ABORT on panic / out of memory.
     const ST_ABORT: u32 = 0xFFFF_0077;
+    /// OUT[0x1FFF9] while a run is in progress (left there if the run traps)
+    const ST_RUNNING: u32 = 0xFFFF_0001;
     #[panic_handler]
     fn panic(_: &core::panic::PanicInfo) -> ! {
         unsafe {
@@ -152,10 +161,18 @@ mod rt {
             OUT.add(ROOTS - 1).write_volatile(0);
             OUT.add(ROOTS - 8).write_volatile(0);
             OUT.add(8).write_volatile(0);
-            if DEAD != 0 {
+            // R3-G2: until the clean exit rewrites them, the status word says "running" and the segment roots are
+            // zero -- a run that traps must not leave the previous height's status 0 / end root behind (rv_witbind
+            // would bind the previous root for the trapped height)
+            OUT.add(ROOTS - 7).write_volatile(ST_RUNNING);
+            put_root(SEG_START, &[0; 32]);
+            put_root(SEG_END, &[0; 32]);
+            if DEAD != 0 || IN_RUN != 0 {
+                DEAD = 1;
                 OUT.add(ROOTS - 7).write_volatile(mnpilot::ST_DEAD);
                 return 0;
             }
+            IN_RUN = 1;
         }
         let mut sess: Option<mnpilot::Session> = unsafe {
             if SESS == 0 { None } else { Some(*alloc::boxed::Box::from_raw(SESS as *mut mnpilot::Session)) }
@@ -217,6 +234,7 @@ mod rt {
             OUT.add(ROOTS - 6).write_volatile(PEAK as u32); // peak live bytes (class sizes)
             OUT.add(ROOTS - 7).write_volatile(st.status);
             OUT.add(ROOTS - 8).write_volatile((n_ev > mnpilot::EV_CAP) as u32);
+            IN_RUN = 0; // clean exit
         }
         u32::from_le_bytes([h[0], h[1], h[2], h[3]])
     }

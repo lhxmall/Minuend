@@ -10,7 +10,8 @@ process.env.NODE_PATH = [path.join(AATK, 'node_modules'), process.env.NODE_PATH]
 process.env.OCORE = process.env.OCORE || path.join(AATK, 'node_modules', 'ocore');
 const { Testkit } = require(path.join(AATK, 'main.js'));
 const { Network } = Testkit({ TESTDATA_DIR: process.env.TESTDATA || path.join(__dirname, '..', 'devnet-testdata-roll'), NETWORK_PORT: +(process.env.PORT || 16641) });
-const ref = require('./ref.js'); const T = require('./rolltrace.js'); const M = require('./mkrollup.js'); // (re)generates rv_game_ref.aa / rv_rollup.aa
+const ref = require('./ref.js'); const T = require('./rolltrace.js'); const M = require('./mkrollup.js'); // (re)generates rv_game_ref.aa / rv_seg_ref.aa / rv_rollup.aa
+const WP = require('./mkwitproof.js'); const K = require('./witkit.js'); // loop round 3: rv_witbind.aa / rv_witproof.aa
 const OBOND = 200000, CBOND = 120000, GF = 10000, GB = 1000, FEE = 2000, WIN = 86400, RK = 10000;
 // max_aa_responses per trigger = number of AAs that respond in its chain (one lower bounces 'max_aa_responses N exceeded'):
 // rollup submit / finalize / reclaim, referee mids / pick / direct open, rv_step: 1 (refunds and payouts go to plain
@@ -24,15 +25,15 @@ const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() =
 async function unitFee(u) { const info = await net.wallet.op1.getUnitInfo({ unit: u }); const o = info.unitObj || {}; unitFee.extra = (o.tps_fee || 0) + (o.oversize_fee || 0); return (o.headers_commission || 0) + (o.payload_commission || 0); }
 // one AA trigger (payment + data), with max_aa_responses unless NOMAXR
 let objectHash;
-async function send(wallet, to, data, amount) {
+async function send(wallet, to, data, amount, maxr) {
   objectHash = objectHash || require(path.join(process.env.OCORE, 'object_hash.js'));
   let cmd = cmdOf(data); if (cmd === 'open' && to === GAMEA) cmd = 'ropen';
   const opts = { to_address: to, amount, messages: [{ app: 'data', payload_location: 'inline', payload_hash: objectHash.getBase64Hash(data), payload: data }] };
-  if (!NOMAXR) opts.max_aa_responses = cmd === 'ropen' ? 1 : MAXR[cmd];
+  if (!NOMAXR) opts.max_aa_responses = maxr || (cmd === 'ropen' ? 1 : MAXR[cmd]);
   const r = await wallet.sendMulti(opts); if (r.unit) (units[cmd] = units[cmd] || []).push(r.unit); return r;
 }
-async function trig(wallet, to, data, amount = 10000, tag) {
-  const r = await send(wallet, to, data, amount);
+async function trig(wallet, to, data, amount = 10000, tag, maxr) {
+  const r = await send(wallet, to, data, amount, maxr);
   if (r.error) return { err: 'compose: ' + String(r.error).slice(0, 120) };
   await net.witnessUntilStable(r.unit);
   if (tag) { (fees[tag] = fees[tag] || []).push(await unitFee(r.unit)); (fees[tag + '+tps'] = fees[tag + '+tps'] || []).push(unitFee.extra); }
@@ -52,15 +53,18 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     {app: 'data', payload: "{trigger.data.d}"}]}]`;
   fs.writeFileSync(path.join(__dirname, '../aa/fwd_test.aa'), fwd);
   net = await Network.create().with.agent({ step: path.join(__dirname, '../aa/rv_step.aa') }).with.agent({ game: path.join(__dirname, '../aa/rv_game_ref.aa') })
+    .with.agent({ seg: path.join(__dirname, '../aa/rv_seg_ref.aa') })
     .with.agent({ roll: path.join(__dirname, '../aa/rv_rollup.aa') }).with.agent({ fwd: path.join(__dirname, '../aa/fwd_test.aa') })
+    .with.agent({ wbind: path.join(__dirname, '../aa/rv_witbind.aa') }).with.agent({ wproof: path.join(__dirname, '../aa/rv_witproof.aa') })
     .with.wallet({ op1: 1e12 }).with.wallet({ op2: 1e10 }).with.wallet({ ch1: 1e10 }).with.wallet({ ch2: 1e10 }).with.wallet({ ch3: 1e10 }).with.wallet({ w: 1e10 }).run();
-  const { op1, op2, ch1, ch2, ch3, w } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd; ROLLA = ROLL; GAMEA = GAME;
+  const { op1, op2, ch1, ch2, ch3, w } = net.wallet; const STEP = net.agent.step, GAME = net.agent.game, ROLL = net.agent.roll, FWD = net.agent.fwd, SEG = net.agent.seg, WBIND = net.agent.wbind, WPROOF = net.agent.wproof; ROLLA = ROLL; GAMEA = GAME;
   const A = { op1: await op1.getAddress(), op2: await op2.getAddress(), ch1: await ch1.getAddress(), ch2: await ch2.getAddress(), ch3: await ch3.getAddress(), w: await w.getAddress() };
   console.log('MODE', NOMAXR ? 'no max_aa_responses' : 'max_aa_responses set', JSON.stringify({ STEP, GAME, ROLL }));
   rec('deployed rv_step == address baked into the referee', STEP, M.stepAddr); rec('deployed referee == address baked into rv_rollup', GAME, M.gameAddr); rec('deployed rollup == computed address', ROLL, M.addr);
+  rec('loop 3: deployed seg referee == address baked into rv_rollup', SEG, M.segAddr); rec('loop 3: deployed witbind / witproof == computed', [WBIND, WPROOF], [WP.bind.addr, WP.proof.addr]);
   const vars = async aa => { const v = await op1.readAAStateVars(aa); return v.vars || v; };
   const pts = (lo, hi) => { const cnt = Math.min(16, hi - lo) - 1; return { cnt, pt: j => j == 0 ? lo : j == cnt + 1 ? hi : lo + Math.floor(j * (hi - lo) / (cnt + 1)) }; };
-  const sub = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, ...o });
+  const sub = (tr, h, prev, o = {}) => ({ submit: h, s0: tr.s0, steps: tr.steps, final: tr.final, inp: tr.inpRoot, fpc: tr.fpc, fregs: tr.fregs, fmem: tr.fmem, prev, units: tr.units || Math.min(8, tr.steps), ...o });
   // play a rollup game on chain; returns the winner and the rollup's secondary response to the result
   async function play(gid, def, chv, chw, honest, opw, stopAt) {
     for (let it = 0; it < 40; it++) {
@@ -199,6 +203,7 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     await net.timetravel({ shift: WIN + 's' }); r = await trig(w, ROLL, { finalize: 6 }); rec('6d new h6 finalizes', 'ok', r.err || 'ok'); rec('6d lf = 6', 6, (await vars(ROLL)).lf); }
   // ===== 7. overpayment refunds (2026-10-31) on the real chain
   { const H6 = T.batch(H5.mem, 6), H7 = T.batch(H6.mem, 7), H8 = T.batch(H7.mem, 8); // new h6 (finalized in 6d) == honest batch 6
+    globalThis.__H8 = H8; // section 8 continues on h8
     let r = await trig(op1, ROLL, sub(H7, 7, H6.final), OBOND + 50000, 'submit'); rec('7 submit h7 with OBOND + 50000', 'ok', r.err || 'ok'); const s7 = r.unit;
     rec('7 submit refund = 50000 - FEE (real output)', 50000 - FEE, await paidTo(r.response, A.op1));
     await net.timetravel({ shift: (WIN - 1800) + 's' });
@@ -214,6 +219,76 @@ const bal = async a => { const b = await net.wallet.op1.getBalanceOf(a); return 
     r = await trig(w, ROLL, { finalize: 7 }); rec('7 finalize h7', 'ok', r.err || 'ok'); rec('7 finalize pays OBOND - FEE', OBOND - FEE, await paidTo(r.response, A.op1));
     r = await trig(op2, ROLL, sub(H8, 8, H7.final), OBOND + FEE, 'submit'); rec('7 submit h8 with OBOND + FEE (kept, no refund unit)', ['ok', 0], [r.err || 'ok', await paidTo(r.response, A.op2)]);
     r = await trig(ch2, GAME, { open: ref.H('direct' + Date.now()), s0: H8.s0, sN: H8.final, n: 1, d: A.op2, c: A.ch2 }, GF + 5000); rec('7 direct referee open with GF + 5000 refunds 5000', ['ok', 5000], [r.err || 'ok', await paidTo(r.response, A.ch2)]); }
+
+  // ===== 8. loop round 3: layer-1 game (rv_seg_ref) and witness proofs (rv_witbind / rv_witproof) on the real chain
+  // max_aa_responses: uopen 2 (rollup -> seg); seg mids / pick 1, pick that hands off 2 (seg -> game); layer-2 resolve
+  // 3 (game -> seg -> rollup); seg resolve on a timeout 2 (seg -> rollup); bind / prove 1
+  const H64 = x => require('crypto').createHash('sha256').update(x).digest('base64');
+  async function playSeg(sgid, defT, chT, honest, opw, chw) {
+    const bnd = k => Math.floor(k * defT.steps / defT.units);
+    for (let it = 0; it < 20; it++) {
+      const g = String((await vars(SEG))['g_' + sgid] || '').split(':'); if (g[0] === 'done') return { w: g[1] };
+      const lo = +g[3], hi = +g[4], slo = +g[5], shi = +g[6], turn = g[9]; const { cnt, pt } = pts(lo, hi);
+      if (turn === 'd') { const st = Array.from({ length: cnt }, (_, i) => bnd(pt(i + 1))); const r = await trig(opw, SEG, { mids: sgid, steps: st, roots: st.map(x => defT.roots[x]) }, 10000, 'smids', 1); if (r.err) return { w: 'smids ' + r.err }; }
+      else if (turn === 'c') { const v = await vars(SEG); const m = String(v['m_' + sgid]).split(','), n = String(v['n_' + sgid]).split(',').map(Number);
+        const rootAt = i => i == 0 ? g[7] : i == cnt + 1 ? g[8] : m[i - 1], stepAt = i => i == 0 ? slo : i == cnt + 1 ? shi : n[i - 1];
+        let j = 0; while (j < cnt && rootAt(j + 1) === chT.roots[stepAt(j + 1)]) j++;
+        const one = pt(j + 1) - pt(j) === 1; const r = await trig(chw, SEG, { pick: sgid, j }, 10000, one ? 'spick-handoff' : 'spick', one ? 2 : 1); if (r.err) return { w: 'spick ' + r.err }; }
+      else { // layer 2 on [slo, shi]
+        const gid2 = SEG + H64(sgid); const sl = a => a.slice(slo, shi + 1);
+        for (let k = 0; k < 40; k++) { const q = String((await vars(GAME))['g_' + gid2] || '').split(':'); if (q[0] === 'done') break;
+          const lo2 = +q[3], hi2 = +q[4], t2 = q[7]; const p2 = pts(lo2, hi2);
+          if (t2 === 'd') { const r = await trig(opw, GAME, { mids: gid2, roots: Array.from({ length: p2.cnt }, (_, i) => sl(defT.roots)[p2.pt(i + 1)]) }, 10000, 'mids'); if (r.err) return { w: 'l2 mids ' + r.err }; }
+          else if (t2 === 'c') { const m = String((await vars(GAME))['m_' + gid2]).split(','); const at = i => i == 0 ? q[5] : i == p2.cnt + 1 ? q[6] : m[i - 1];
+            let j = 0; while (j < p2.cnt && at(j + 1) === sl(chT.roots)[p2.pt(j + 1)]) j++; const r = await trig(chw, GAME, { pick: gid2, j }, 10000, 'pick'); if (r.err) return { w: 'l2 pick ' + r.err }; }
+          else { const a = slo + lo2; if (honest.roots[a] === q[5] && !(await vars(STEP))['s_' + q[5]]) { const s = await trig(w, STEP, honest.wits[a], 10000, 'step'); if (s.err) return { w: 'step ' + s.err }; }
+            const r = await trig(w, GAME, { resolve: gid2 }, 10000, 'resolve3', 3); if (r.err) return { w: 'l2 resolve ' + r.err };
+            const segResp = await secondary(r.response, SEG); const rollResp = await secondary(segResp, ROLL); return { w: (String((await vars(SEG))['g_' + sgid]).split(':')[1]), roll: rollResp, unit: [lo, hi, slo, shi] }; } }
+        return { w: 'l2 unfinished' }; }
+    }
+    return { w: 'unfinished' };
+  }
+  { const v0 = await vars(ROLL); rec('8 state before: lf = 7, top = 8', [7, 8], [v0.lf, v0.top]);
+    const H8 = globalThis.__H8;
+    const H9 = Object.assign(T.batch(H8.mem, 9, { extra: 300 }), { units: 24 });
+    let r = await trig(op1, ROLL, sub(H9, 9, H8.final), OBOND, 'submit'); rec('8a honest h9 with units = 24', 'ok', r.err || 'ok'); const s9 = r.unit;
+    rec('8a units stored', 24, (await vars(ROLL))['u' + s9]);
+    await net.timetravel({ shift: (WIN - 1800) + 's' });
+    r = await trig(ch3, ROLL, { uopen: s9 }, CBOND, 'uopen', 2); rec('8a uopen with CBOND only', 'bounce', r.err ? 'bounce' : 'ok');
+    const o = await trig(ch3, ROLL, { uopen: s9 }, CBOND + GF, 'uopen', 2); rec('8a griefer uopen h9 (CBOND + GF)', 'ok', o.err || 'ok');
+    rec('8a the rollup response paid 2 GF to the seg referee', 2 * GF, await paidTo(o.response, SEG));
+    await net.timetravel({ shift: '1900s' });
+    const sgid = ROLL + o.unit; const op0 = await bal(A.op1);
+    const g = await playSeg(sgid, H9, Object.assign(T.batch(H8.mem, 9, { extra: 300, k: 150, mut: T.MUT.reg }), { units: 24 }), H9, op1, ch3);
+    rec('8a griefer vs honest operator via layer 1 + layer 2 (real chain)', 'd', g.w, { unit: g.unit });
+    rec('8a operator paid CBOND - GF - FEE (rollup response to the seg callback)', CBOND - GF - FEE, await paidTo(g.roll, A.op1));
+    rec('8a no game open on h9', 0, (await vars(ROLL))['n' + s9] || 0);
+    r = await trig(w, ROLL, { finalize: 8 }); rec('8a finalize h8', 'ok', r.err || 'ok');
+    r = await trig(w, ROLL, { finalize: 9 }); rec('8a finalize h9 after its layer-1 game', 'ok', r.err || 'ok');
+    // 8b fraud at h10 caught through layer 1
+    const L10 = Object.assign(T.batch(H9.mem, 10, { k: 25, mut: T.MUT.mem }), { units: 5 }), X10 = T.batch(H9.mem, 10);
+    r = await trig(op2, ROLL, sub(L10, 10, H9.final), OBOND, 'submit'); rec('8b fraudulent h10 (units 5)', 'ok', r.err || 'ok'); const s10 = r.unit;
+    const o2 = await trig(ch1, ROLL, { uopen: s10 }, CBOND + GF, 'uopen', 2); rec('8b honest challenger uopen h10', 'ok', o2.err || 'ok');
+    const g2 = await playSeg(ROLL + o2.unit, L10, X10, X10, op2, ch1);
+    rec('8b fraud proven through layer 1', 'c', g2.w, { unit: g2.unit });
+    rec('8b challenger paid CBOND - GF - FEE + OBOND/2', CBOND - GF - FEE + OBOND / 2, await paidTo(g2.roll, A.ch1));
+    rec('8b h10 voided (top = 9), fraud flag', [9, 1], [(await vars(ROLL)).top, (await vars(ROLL))['f' + s10]]);
+    { const sb = await bal(SEG); rec('8 seg referee solvent: per game it keeps GF, plus MK - refund-unit fee per mids / pick (as rv_game_ref), minus its response-unit fees (2 games, 4 moves)', true, sb > 0 && sb <= 2 * GF + 4 * 2000, { balance: sb }); }
+    // 8c witness proofs: h10 whose final memory holds a real MNWIT1 root (engine-diff proofdump of adv5) at the guest's OUT slots
+    const P = JSON.parse(fs.readFileSync(path.join(__dirname, 'testdata/proofs/adv5.json'), 'utf8')); const mem = K.memWithRoot(P.root);
+    const N10 = T.batch(H9.mem, 10); const final = ref.H(N10.fpc + ':' + N10.fregs + ':' + mem.root() + ':' + N10.inpRoot + ':' + N10.steps);
+    r = await trig(op1, ROLL, sub(N10, 10, H9.final, { fmem: mem.root(), final }), OBOND, 'submit'); rec('8c h10 with the witness memory image', 'ok', r.err || 'ok');
+    r = await trig(w, WBIND, K.bindData(mem, 10), 10000, 'bind', 1); rec('8c bind before finalize', 'bounce', r.err ? 'bounce' : 'ok', { err: r.err });
+    await net.timetravel({ shift: WIN + 's' }); r = await trig(w, ROLL, { finalize: 10 }); rec('8c finalize h10', 'ok', r.err || 'ok');
+    const bad = K.bindData(mem, 10); bad.words = bad.words.map((x, k) => k === 0 ? (x ^ 1) >>> 0 : x);
+    r = await trig(w, WBIND, bad, 10000, undefined, 1); rec('8c bind with a flipped word bit', 'bounce', r.err ? 'bounce' : 'ok');
+    r = await trig(w, WBIND, K.bindData(mem, 10), 10000, 'bind', 1); rec('8c bind h10', 'ok', r.err || 'ok'); rec('8c W10 = the root', P.root, (await vars(WBIND)).W10);
+    const kidJs = l => { const p = l.split(':'); const f = l.startsWith('pos:') ? 3 : 2; return p.length <= f ? l : p.slice(0, f).join(':'); };
+    let okm = 0; for (const m of P.members) { const q = await trig(w, WPROOF, { prove: 10, leaf: m.leaf, sib: m.sib }, 10000, 'prove', 1); if (!q.err && (await vars(WPROOF))['L10:' + kidJs(m.leaf)] === m.leaf) okm++; else console.log('prove fail', q.err); }
+    rec('8c memberships proven against finalized h10', P.members.length, okm);
+    r = await trig(w, WPROOF, { prove: 10, leaf: P.absent.term, sib: P.absent.sib, key: P.absent.key }, 10000, 'prove', 1); rec('8c absence proven', ['ok', 1], [r.err || 'ok', (await vars(WPROOF))['A10:' + P.absent.key]]);
+    r = await trig(w, WPROOF, { prove: 10, leaf: P.members[0].leaf + '1', sib: P.members[0].sib }, 10000, undefined, 1); rec('8c tampered leaf', 'bounce', r.err ? 'bounce' : 'ok');
+    r = await trig(w, WPROOF, { prove: 9, leaf: P.members[0].leaf, sib: P.members[0].sib }, 10000, undefined, 1); rec('8c proof against unbound h9', 'bounce', r.err ? 'bounce' : 'ok'); }
   // 5. accounting: the rollup holds exactly burned + kept FEEs + GB refunds + bounce fees, no bond is outstanding
   { const v = await vars(ROLL); const b = await bal(ROLL); rec('rollup balance >= burned (all bonds settled)', true, b >= (v.burned || 0), { balance: b, burned: v.burned, lf: v.lf, top: v.top }); }
   const avg = a => a && a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
