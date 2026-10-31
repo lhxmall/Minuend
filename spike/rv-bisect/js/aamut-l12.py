@@ -27,8 +27,9 @@ muts = [
  ('o', "$VDECAY = 86400;", "$VDECAY = 43200;"),
  ('o', "$VDECAY = 86400;", "$VDECAY = 172800;"),
  ('o', "$Vnow = $Vraw > $Vdec ? $Vraw - $Vdec : 0;", "$Vnow = $Vraw;"),
- ('m', "\t\t\tvar['V'] = $Vnow + 1;", "\t\t\tvar['V'] = $Vraw + 1;"),
- ('m', "\t\t\tvar['V'] = $Vnow + 1;", ""),
+ ('m', "var['V'] = min($Vnow + 1, $MAXESC);", "var['V'] = min($Vraw + 1, $MAXESC);"),
+ ('m', "\t\t\tvar['V'] = min($Vnow + 1, $MAXESC);", ""),
+ ('m', "var['V'] = min($Vnow + 1, $MAXESC);", "var['V'] = $Vnow + 1;"),
  ('m', "\t\t\tvar['Vt'] = $now;", ""),
 ]
 orig = {k: open(v).read() for k, v in F.items()}

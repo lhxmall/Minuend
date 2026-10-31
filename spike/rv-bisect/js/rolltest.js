@@ -364,6 +364,42 @@ groups.stall11 = async () => { const g = 'stall moving height (R11-M1)'; const X
     rec(g, 'after decay: the new fraud void sets V = decayed value + 1 = 1 (not ' + (CYC + 1) + ')', ['c', 1, 2 * OBOND], [gm.winner, +C.r('V'), bondFor(C, h)]); }
   rec(g, 'throughput unchanged per cycle (still one slow game per height; the attack is now geometric in cost)', true, hours.every(x => x >= 2.5), { hoursPerHeight: hours }); };
 
+// ---------- loop round 12 review: the global counter V (R11-M1 fix) -- cap, capital amplification, multi-challenger,
+//            upgrade / cancel interactions
+groups.r12 = async () => { const g = 'r12 global counter'; const G0 = T.genesis(); const D = require(OCP + '/../decimal.js'); const OPX = A('FRAUDSTER');
+  const fraudVoid = async (C, h, prevMem, prevFinal, k, chs) => { const L = T.batch(prevMem, h, { k, mut: T.MUT.mem }), H = T.batch(prevMem, h);
+    const r = await submit(C, OPX, h, L, prevFinal); const os = []; for (const ch of chs) os.push(await open(C, ch, L.sid));
+    const gs = os.map((o, i) => game(o, L, H, H, { chDelay: 10 + 50 * i })); await playAll(C, gs); return { r, L, H, gs }; };
+  // (a) R12-L1: V is capped at MAXESC -- a void at V = 10 leaves V = 10 (uncapped it became 11: one more day at the cap
+  //     for every honest operator, at no extra cost to the attacker, who pays the capped bond either way)
+  { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(10) }, Vt: { value: new D(C.ts) } };
+    rec(g, '(a) at V = 10 a submission posts OBOND x 2^10', OBOND * 1024, bondFor(C, 1));
+    const f = await fraudVoid(C, 1, G0, 'genesis', 41, [CH1]);
+    rec(g, '(a) R12-L1: a fraud void at the cap leaves V = MAXESC (not 11), Vt = now', ['accepted', 'c', 10, C.ts], [bnc(f.r), f.gs[0].winner, +C.r('V'), +C.r('Vt')]); }
+  // (b) R12-M1 (PoC, accepted/owner): capital amplification. At V = 10 EVERY height posts OBOND x 2^10 for its 24 h window.
+  //     Attacker: one fraud void per day keeps V at the cap (net bond / 2 + GF + FEE = 102.412 M with a puppet first winner).
+  //     Honest: N heights per day lock N x 204.8 M (returned at finalize). Ratio honest-locked / attacker-burn = 2N.
+  { const C = new Chain(); C.sv[ROLL] = { V: { value: new D(10) }, Vt: { value: new D(C.ts) } }; let prev = { mem: G0, final: 'genesis' }; const N = 3, sids = [], o0 = C.b(OP1);
+    for (let h = 1; h <= N; h++) { const H = T.batch(prev.mem, h);
+      if (h === 1) rec(g, '(b) honest h1 with OBOND x 2^9 bounces', 'bounce', bnc(await S(C, OP1, ROLL, OBOND * 512, subData(T.batch(G0, 1), 1, 'genesis')), /bond 204800000/));
+      rec(g, '(b) honest h' + h + ' posts OBOND x 2^10', 'accepted', bnc(await submit(C, OP1, h, H, prev.final))); sids.push(H.sid); prev = H; C.ts += 61; }
+    const locked = o0 - C.b(OP1) - 10000;
+    rec(g, '(b) honest capital locked for 24 h: N x 204.8 M', N * OBOND * 1024, locked, { N, locked, attackerBurnPerDay: OBOND * 512 + GF + FEE, ratio: +(locked / (OBOND * 512)).toFixed(1) });
+    C.ts += WIN; const b0 = C.b(OP1); for (let h = 1; h <= N; h++) await S(C, W, ROLL, 0, { finalize: h });
+    rec(g, '(b) all refunded at finalize (bond - FEE each)', N * (OBOND * 1024 - FEE), C.b(OP1) - b0); }
+  // (c) multi-challenger: two challengers win on the same fraudulent submission -> one void, V and v_h + 1 once; only
+  //     the first winner gets bond / 2
+  { const C = new Chain(); const f = await fraudVoid(C, 1, G0, 'genesis', 42, [CH1, CH2]);
+    rec(g, '(c) both challengers win; V = 1, v1 = 1 (the second result is on a voided submission)', ['c', 'c', 1, 1, OBOND / 2], [f.gs[0].winner, f.gs[1].winner, +C.r('V'), +C.r('v1'), +C.r('burned')]);
+    // (d) upgrade / cancel voids are not fraud: V unchanged; the voided escalated submission is reclaimed at its own bond
+    rec(g, '(d) the winner re-submits h1 at 2 x OBOND', 'accepted', bnc(await submit(C, CH1, 1, f.H, 'genesis')));
+    C.ts += 61; const h2 = T.batch(f.H.mem, 2); rec(g, '(d) h2 by OP1 at 2 x OBOND (global V = 1)', ['accepted', 2 * OBOND], [bnc(await submit(C, OP1, 2, h2, f.H.final)), +C.r('b' + h2.sid)]);
+    rec(g, '(d) governance upgrade at 2 voids h2', 'accepted', bnc(await S(C, M.govAddr, ROLL, 0, { upgrade: 2, mem: ref.H('l12-image') })));
+    rec(g, '(d) the upgrade void is not fraud: V = 1, top = 1, v2 = 0', [1, 1, 1], [+C.r('V'), +C.r('top'), +(C.r('v2') || 0) + 1]);
+    rec(g, '(d) governance cancel: V unchanged', ['accepted', 1], [bnc(await S(C, M.govAddr, ROLL, 0, { cancel: 1 })), +C.r('V')]);
+    const c0 = C.b(OP1); rec(g, '(d) reclaim of the voided h2 pays its escalated bond back', ['accepted', 2 * OBOND - FEE], [bnc(await S(C, OP1, ROLL, 0, { reclaim: h2.sid })), C.b(OP1) - c0]); }
+};
+
 groups.grief = async () => { const C = new Chain(); const G0 = T.genesis(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const b2 = T.batch(b1.mem, 2); await submit(C, OP1, 2, b2, b1.final);
   const games = []; for (let i = 0; i < 12; i++) { const P = A('GRIEF' + i); const sid = i % 2 ? b2.sid : b1.sid; const tr = i % 2 ? b2 : b1;
