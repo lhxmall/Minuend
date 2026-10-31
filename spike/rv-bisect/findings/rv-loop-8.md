@@ -24,7 +24,7 @@ Severity as in rounds 1–7: **C** = honest party loses / wrong verdict on reach
 undefined guest outcome, or a protocol-reachable state loss / halt; **M** = design/spec gap with a concrete failure
 mode or a defense-in-depth hole; **L** = minor / documentation; **I** = checked, no defect.
 
-Totals: **C 0 · H 0 · M 0 new (R7-M2 fixed) · L 4 · I 6**.
+Totals: **C 0 · H 0 · M 0 new (R7-M2 fixed) · L 8 (incl. R7-L3 / R7-L4 and three test defects) · I 6**.
 
 | id | sev | area | title | status |
 |---|---|---|---|---|
@@ -32,6 +32,8 @@ Totals: **C 0 · H 0 · M 0 new (R7-M2 fixed) · L 4 · I 6**.
 | R7-L3 | L | witness | proposals, commits and gov nonces are not MNWIT1 leaves (as upstream `wit_leaves` @ 20326c0) | documented, deferred (design below); no consumer needs them yet |
 | R7-L4 | L | caps | `MAX_STATE_MARKETS` counts delisted markets | accepted: upstream never removes a market (params, marks, book indexes stay), so the heap they hold is real; filling the cap burns 2.55 M PERP; recovery = an upgrade image with a larger cap (`rv_rollup upgrade`) |
 | R8-T1 | L | tests | govedge `cap:votes` / `r7:commit` expectations wrong (item 1); round-7 mutation run invalid | fixed (885f3d2, dfc1ee5); govedge 8/8; mutation re-run |
+| R8-T2 | L | tests | `prodheight.js` still expected a GovWithdraw(0) by a PERP-less id to apply (then DuplicateNonce) — wrong since R7-M1 (now 19, 19); the round-7 prod image would have failed it 15 / 16 | fixed (42d0a1b): 16 / 16 on the round-8 prod image; the fixed script is also what the round-7 suite runs |
+| R8-T3 | L | tests | round-4 mutant 9 (ADL last share, `is_last` → false) was listed as "killed in round 5"; the round-5 fail-fast run shows it **survived** every check | corrected: **equivalent** under one fill per liquidation (R7-I3): `pos_deltas` holds ≤ 1 entry, so `total = delta` and `hole · delta / total = hole` = the last-share value |
 | R8-L1 | L | commit-reveal | commit-reveal (MEV protection) now needs PERP: an account holding only USD collateral cannot commit (upstream: anyone may) | documented pilot trade-off; a collateral-denominated bond would touch every margin / withdraw check |
 | R8-L2 | L | griefing (residual) | the bond is locked, not burned: one id with 1.024 M PERP can keep the cap full (a reveal frees the per-account pending slot, the revealed entry keeps its bond), at an opportunity cost only | documented; production: a burned per-commit fee, a larger bond, or a stateless guest (R4-H1) |
 | R8-L3 | L | steps | `live` is an O(commits) scan (≤ 1 024) for every Commit / GovWithdraw / CreateMarket / Stake unit: ≤ 1.7 · 10^7 entry visits per height | documented: same order as upstream's own per-Commit pending scan; evaluated lazily (other kinds never scan) |

@@ -138,13 +138,13 @@ Commits on `spike/rv-bisect`: 1d60b0c, a0bdb3e (step 1), 8d2140a (rv_rollup upgr
 | segrun small / big3k, segbig-adv (16 384 / 5 000 / 1 000) | ok · ok · 1 / 4 / 17 segments ok (the 5 000 run without an out dir panicked: harness misuse, fixed in loop 5/6 suites) |
 | segbig 20 000 units (segrun) | OOM-killed (R3-T1, harness only; segbig-adv covers the guest path) |
 | segguest small default / big3k | 7 / 7 · 5 / 5 |
-| segguest small PROD image | suite ran it without `PROD=1` → false 1 / 7 (R7-L5); re-run with `PROD=1`: SGPROD4 |
+| segguest small PROD image | suite ran it without `PROD=1` → false 1 / 7 (R7-L5); re-run with `PROD=1` (`l4-segguest-small-prod2.log`): **7 / 7 match** (seg002 status 4 as in the manifest) |
 | extra-guest / robust / robust-limit / guest-poc | 9 / 9 · 15 / 15 · 1 / 1 · 3 / 3 |
 | witproof e2e (prod guest memory → rv_witbind / rv_witproof) | 8 / 8 |
 | sail-riscv spot check (6 batches incl. adv21, crowdc256) | 6 / 6 out_match |
 | rolltest (round-4 AAs, real ocore) | 303 / 303 |
 | AA static cost (rv_rollup) | complexity 63, ops 1 449 |
-| rolldevnet (devnet) | suite run: 92 PASS / 0 FAIL, then killed by its 2 400 s timeout at section 6d (load ~25); re-run with 9 000 s: RD4 |
+| rolldevnet (devnet) | suite run: 92 PASS / 0 FAIL, then killed by its 2 400 s timeout at section 6d (load ~25); re-run with 9 000 s (`l4-rolldevnet2.log`): **149 / 149 PASS**, 0 FAIL |
 
 ### Round-4 mutation test (`scripts/loop4-mut.sh`, `results-loop4/l4-mut.log`; survivors re-run with liqedge: `l4-mut2.log`)
 
@@ -155,7 +155,7 @@ Commits on `spike/rv-bisect`: 1d60b0c, a0bdb3e (step 1), 8d2140a (rv_rollup upgr
 |---|---|---|
 | 4, 5, 10, 13 | pending `>`, min-withdraw `<=`, staleness `>=`, prune `>=` | killed by liqedge (mut2) |
 | 6 | withdraw equity `<=` | killed in round 5 by liqedge `wd_equity` |
-| 9 | ADL last share | killed in round 5 (R5-L6) |
+| 9 | ADL last share | **equivalent** (round 8, R8-T3): survived every round-5 check (`l5-mutff.log`; the round-5 "killed" entry was wrong); with one fill per liquidation `pos_deltas` has ≤ 1 entry, so `hole · delta / total = hole` |
 | 11 | TWAP min samples | equivalent: `external_twap` unreachable (funding source BondedMedianTwap, governance switch unported in round 4) |
 | 15, 17, 18 | capcheck fire rule, import trailing word, snapshot decoder cap | killed in round 5 (capcheck all-new-authors rule, snaptest trailing word, snapcap) |
 | 21, 23, 24 | journal / book index / put_account variants | equivalent (round 5 analysis, R5-L6) |
