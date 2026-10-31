@@ -749,6 +749,16 @@ fn main() {
             println!("{{\"scratch_equal\":{},\"scratch_ok\":{},\"leaves\":{},\"leaf_updates\":{},\"node_hashes\":{},\"roots\":[{}]}}",
                 inc == scr, wo.scratch_ok, wo.leaves, wo.leaf_updates, wo.node_hashes, r.join(","));
         }
+        Some("genesis") => {
+            // MNWIT1 root of the real genesis state (ChainState::new() + allow_all): every
+            // upstream leaf except the `~:end` sentinel, and the pilot-tag subset (identical here).
+            let mut eng = Engine::new();
+            eng.state.markets.insert(BTC_USD, minuend_types::genesis_params());
+            let all: Vec<String> = minuend_state::wit_leaves(&eng.state).into_iter().filter(|l| l != minuend_state::WIT_MAX_SENTINEL).collect();
+            let r = smt_ref::root(&all);
+            println!("{{\"leaves\":{:?},\"root_hex\":\"{}\",\"root_b64\":\"{}\",\"pilot_root_hex\":\"{}\",\"legacy_wit_root\":\"{}\"}}",
+                all, smt_ref::hex(&r), smt_ref::b64(&r), smt_ref::hex(&smt_ref::root(&real_pilot_leaves(&eng))), minuend_state::wit_root(&eng.state));
+        }
         Some("scen") => println!("{}", scen(&a[2], a.get(3).map(|x| x.as_str()))),
         Some("witfuzz") => {
             let p = |i: usize, d: u64| a.get(i).map(|x| x.parse().unwrap()).unwrap_or(d);
