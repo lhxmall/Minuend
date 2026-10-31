@@ -28,7 +28,8 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 |---|---|---|
 | `glob:0` | `:<seq>:<height>` | engine cursors |
 | `cseq:<acct>` | `:<last client_seq>` (absent = 0) | client_seq gate |
-| `apos:<acct>` | `:<flags>:<m>,<m>,…` flags bit0 Account entry, bit1 PERP entry, bit2 W entry | map membership + the markets with a position (which `pos:` leaves exist) |
+| `apos:<acct>` | `:<flags>:<npos>:<sha256(markets, u32 LE ascending)>` flags bit0 Account entry, bit1 PERP entry, bit2 W entry | map membership + the markets with a position (which `pos:` leaves exist). Round 15: digest form (the round-14 decimal list overflowed the 384-byte leaf buffer, R15-H1; the digest also lets the insurance account be loaded light, R14-M2) |
+| `wdl:<acct>` | `:<n>:<sha256(records sorted by nonce: nonce u64, amount i128, pending u8, height u64)>` (absent = none; n ≤ 64) | round 15: the account's withdrawal records (Withdraw's nonce and pending-count rules); lazy expiry (§9) |
 | `mkx:<m>` | `:<spot>:<funding>:<symbol hex>:<last_index>:<oracled>` | MarketParams fields MNWIT1 omits; `last_index[m] != 0` and "a bonded reporter for m exists" (the fill path's mark rule, state.rs `apply_fill_pair`) |
 | `lvl:<m>:<side>:<price>` | `:<n>:<sha256(live ids, FIFO)>` | one price level, its queue order |
 | `bmp:<m>:<side>:<d>:<prefix>` | `:<256-bit map hex>` | price-level trie: fanout 256, depth 8 over `u = price ^ 2^63` (order-preserving); bit c of node (d, prefix) = some level has top d bytes = prefix and byte d = c. A node exists iff its map ≠ 0 |
@@ -53,13 +54,18 @@ tree tags: 0 E | 1 O(hash32) unexpanded subtree | 2 L(key32, leafhash32) hash-on
            | 3 N(left, right) | 4 L verified: kid u16+bytes, rest u16+bytes (key = key_of(kid), hash recomputed)
 records:   glob: seq u64, height u64
            markets  u16 × { present u8, id u32, [MarketParams, mark i64, last_index i64, oracled u8] }
-           accounts u16 × { present u8, id 32, [flags u8, collateral i128, perp u128, w i128, cseq u64,
-                                              npos u8 × {m u32, qty i64, entry i64, iso u8, bucket i128}] }
+           accounts u16 × { kind u8 (0 absent, 1 full, 2 light), id 32,
+                            full:  [flags u8, collateral i128, perp u128, w i128, cseq u64,
+                                    npos u8 × {m u32, qty i64, entry i64, iso u8, bucket i128}]
+                            light: [flags u8, collateral i128, perp u128, w i128, npos u32, markets digest 32]
+                                   (round 15, R14-M2: INSURANCE_ACCOUNT only; acct: + apos: verified, no positions) }
            aord     u16 × { acct 32, n u16 × {order id 32, m u32, side u8, price i64} }   (n = 0: proven absent)
            bmp      u16 × { m u32, side u8, d u8, prefix u64, present u8, [map 32] }
            levels   u16 × { m u32, side u8, price i64, n u16 × {id, account, typ, tif, qty, remaining, seq, iso, margin_left} }
            ordx     u16 × { order id 32 }   (proven absent)
+           wdl      u16 × { acct 32, n u8 × {nonce u64, amount i128, pending u8, height u64} }   (n = 0: proven absent; round 15)
 ```
+Migration run (round 15): `[0] SL_MIG_MAGIC "MNSM"`, then the session snapshot words (snapshot.rs encoding).
 A record is never trusted: the guest re-formats the leaf strings from it, hashes them, and checks each against the
 tree (inclusion: the leaf at the key's path has that hash; exclusion: the path ends in E or in a *verified* leaf with
 another key). Absent markets / accounts prove all of their keys absent (`band/meta/mkx`, `acct/apos/cseq`). A level
@@ -97,6 +103,13 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   proven empty by the trie (input of the level-size rule, §5). A funding-rate market → `ST_SL_UNSUPPORTED` (its OI
   cap reads a global aggregate).
 * Cancel: author record, its `aord`, and the target order id: its level, or an `ordx` exclusion proof.
+* Place (round 15): the insurance account as a **light** record suffices (the fee leg reads / writes only its
+  collateral); a full record is also accepted (same result). `need_acct` refuses a light record wherever an account's
+  positions are read; the end root requires the light account's membership flags unchanged and no positions.
+* Withdraw (round 15): author record + its position markets; its `wdl` set (present or proven absent); its `aord` and
+  every order in it through its complete level; the params of every book in the partial state (`resting_open_im`, the
+  R2-E-3 input); a funding-rate position → unsupported. Post-unit catch-all: a withdrawal record of an account whose set
+  is not loaded → MISSING.
 
 **Post-unit (on the outcome, applied or rolled back — a rejection can depend on what the walk saw):**
 * *Walk check* (§6): every non-empty level at or better than the last head the matching walk examined is known.
@@ -105,8 +118,8 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
 * *Resting*: a new resting order's level is known or proven absent by the trie (then it becomes known, empty).
 * *aord*: every account whose live-order set changed has its `aord` loaded (delta update).
 
-Unsupported ops (withdraw, liquidate, oracle, governance, commit-reveal, fixtures, the height hook) →
-`ST_SL_UNSUPPORTED = 14`.
+Unsupported ops (liquidate, oracle, governance, commit-reveal, CreateMarket, fixtures) → `ST_SL_UNSUPPORTED = 14`.
+Withdraw is supported since round 15; the height hook runs lazily (§9).
 
 **Determinism / soundness property** (what the tests check): if a run returns status 0, its events and end root
 equal the session's for the same start state and batch, whatever *extra valid* records the witness carries. Extra
@@ -191,6 +204,24 @@ memory whose OUT words say status 0, start root S and end root E.
   only), like a rejected header in the session image. No new AA rule is needed.
 * Data availability: the challenger needs the witness (input tree of the height) to replay — the same DA assumption
   as the batch itself; the witness is part of the height's input.
+* **Height hook (round 15, lazy).** The image carries its run count `SL_RUNS` (every run is a rollup height, also a
+  refused one — like the session's RUNS); a `prod` run passes it as the height and the engine height moves to it before
+  the units when greater (the session's `bind_height` + `commit_height`). Pruning is lazy: withdrawal records are read
+  only if `height + REPLAY_WINDOW > height` and a `wdl:` set is rewritten only when the unit changed its live set (so an
+  untouched extra record never changes the root). The stateless chain's root is therefore the root of the *lazily
+  committed* state, not of the session's eagerly pruned one; behaviour is identical (`slmig … 900`, lazy reference
+  model). Commits / oracle unbonding are not pruned: no op of the stateless image reads them (they need the same lazy
+  rule once supported).
+* **MNWIT-S genesis by migration (round 15).** Instead of (not in addition to — R15-L1) a compiled
+  `MNPILOT_SL_GENESIS`, a fresh stateless image accepts one migration run `[SL_MIG_MAGIC, snapshot words]` whose digest /
+  length equal the compiled-in `MNPILOT_IMPORT_DIGEST` (the export digest of the session image, chosen by governance —
+  the R4-S1 binding). It decodes the snapshot, refuses a state that violates a per-object bound (a level with > 4 096
+  orders, an account with > 64 markets of exposure: `ST_SL_MIG_BOUNDS` = 16, R15-M1), computes the MNWIT-S root over the
+  whole state and publishes it as SEG_START = SEG_END (SNAP_KIND 3); `SL_ROOT` / `SL_RUNS` (= export run + 1) start the
+  lineage. Rollup integration (R15-I1): the export run's SEG_END is an MNWIT1 root, so for SNAP_KIND 3 the rollup binds the
+  digest, not the root chain; the migration root is a disputable output like any other. State outside the MNWIT-S leaf
+  set (oracle rings / TWAPs / unbonding, proposal voter sets / weight snapshots, perp supply, funding clocks) is not
+  carried (R15-I2).
 
 ## 10. Measurements (box, loop round 14; logs guest-engine/results-loop14/)
 
@@ -220,15 +251,17 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops: withdraw (pending-withdrawal leaves `wd:` + the per-account pending count), liquidation / ADL (holders per
+1. Ops (withdraw done in round 15: `wdl:`), liquidation / ADL (holders per
    market and OI are global aggregates → per-market `oi:` leaves maintained by delta; ADL candidate selection needs
    an ordered index like the price trie), oracle report / stake / slash (report history / TWAP leaves per (market,
    oracle); `oracled` maintenance when bonds change), funding (OI cap + peg), governance and commit-reveal (`govwit`
    leaves exist; `weight_snapshot` is O(holders) — needs a different snapshot design), CreateMarket.
-2. The height hook (`commit_height`: withdrawals / unbonding / commits pruning) is O(state) → expiry-queue leaves
-   keyed by height, or lazy pruning on touch.
-3. Rollup integration: the MNWIT-S genesis root (`MNPILOT_SL_GENESIS`) from a one-off migration run over a session snapshot; DA of the witness.
-4. Linked-FIFO levels (§6) to drop whole-level loading and the level cap; a light insurance record (R14-M2).
+2. The height hook: done lazily in round 15 for withdrawals (§9); commits / oracle unbonding need the same lazy rule
+   when their ops are supported.
+3. Rollup integration: the migration run exists (round 15, §9); rv_rollup must accept SNAP_KIND 3 with the digest
+   binding instead of the root chain (R15-I1); leaves for the state a migration drops (R15-I2); DA of the witness.
+4. Linked-FIFO levels (§6) to drop whole-level loading, the level cap and the migration bound R15-M1. (The light
+   insurance record, R14-M2, is done in round 15.)
 5. Operator: direct touched-set tracking instead of Need iteration; witness compression (shared path prefixes).
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
 7. Upstream: the leaf kinds and the guards must be mirrored by the real engine's witness code (consensus).

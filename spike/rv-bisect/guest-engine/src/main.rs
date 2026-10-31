@@ -226,7 +226,8 @@ mod rt {
     #[cfg(feature = "stateless")]
     fn sl_migrate() -> u32 {
         let expect = IMPORT_DIGEST.and_then(mnpilot::parse_expect);
-        let o = mnpilot::stateless::migrate(&mut |i| read_word(i), expect.as_ref(), unsafe { SL_INIT == 0 });
+        // R15-L1: one genesis source per image -- a compiled-in MNPILOT_SL_GENESIS excludes migration
+        let o = mnpilot::stateless::migrate(&mut |i| read_word(i), expect.as_ref(), unsafe { SL_INIT == 0 } && SL_GENESIS.is_none());
         unsafe {
             if o.status == mnpilot::ST_OK {
                 put_root(SEG_START, &o.root);

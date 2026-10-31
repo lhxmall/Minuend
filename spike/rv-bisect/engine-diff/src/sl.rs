@@ -1166,11 +1166,53 @@ pub fn slpoc15() -> String {
                 [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 5000, 0],
                 [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 5001, 0],
                 [6 | (2 << 8), u as u32, (u >> 32) as u32, 0, 0, 0, 1000, 0],
+                // dust withdraw re-using an EXISTING record's nonce: DuplicateNonce comes first (reads the record set)
+                [6 | (2 << 8), (u / 2) as u32, 0, 0, 0, 0, 1001, 0],
             ],
         );
         let l = check15("P3 withdraw paths (wdl:)", &s, &seg, &|post, o, _| {
             post.withdrawals.range((id(3), 0)..=(id(3), u64::MAX)).count() == 64 && o.applied >= 5
         });
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+        // P6: every single omission from the P3 witness -> refused or the identical result (never status 0 + wrong)
+        let (post, ev_ref) = direct(&s, &seg);
+        let want = sl::s_root(&post);
+        let b = WitBuilder::new(&s);
+        let (needs, _, _, _, _) = operate(&b, &seg).unwrap();
+        let (mut runs, mut refused, mut wrong) = (0, 0, 0);
+        for nd in &needs {
+            let mut n2 = needs.clone();
+            n2.remove(nd);
+            let (o, ev) = run_sl(&seg, &b.build(&n2));
+            runs += 1;
+            if o.status != 0 {
+                refused += 1;
+            } else if o.end_root != want || ev != ev_ref {
+                wrong += 1;
+            }
+        }
+        all_ok &= wrong == 0;
+        res.push(format!("{{\"case\":\"P6 single omissions from the P3 witness\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{}}}", wrong == 0, runs, refused, wrong));
+    }
+    // ---- P7 R2-E-3 in stateless withdraw: the author's resting orders exist BEFORE the segment; a withdraw that
+    // would leave equity below their resting IM is refused (Insufficient) -- needs the author's order set + levels ----
+    {
+        let mut s = mnpilot::state::ChainState::genesis();
+        let mut a = mnpilot::account::Account::new(id(1));
+        a.collateral = 100_000 * USD_SCALE as i128;
+        s.put_account(id(1), a);
+        // a resting bid of 1 BTC at MID - 10 $ (IM ~ 10 % of ~100 k$)
+        s.book_mut(M(1)).sl_restore(mnpilot::Order {
+            id: mnpilot::types::order_id(id(1), M(1), 1), account: id(1), market: M(1), side: mnpilot::types::Side::Bid,
+            typ: mnpilot::types::OrderType::Limit, tif: mnpilot::types::TimeInForce::Gtc, price: MID - 10 * DOLLAR, qty: QTY_SCALE,
+            remaining: QTY_SCALE, seq: 0, isolated: false, margin_left: 0,
+        });
+        s.seen_client_seq.insert(id(1), 1);
+        let _ = s.take_dirty();
+        let u = USD_SCALE as i64;
+        let seg = seg_words(&[1], &[wd(0, 95_000 * u, 1), wd(0, 50_000 * u, 2)]);
+        let l = check15("P7 R2-E-3: withdraw against pre-existing resting IM", &s, &seg, &|_, o, _| o.applied == 1);
         all_ok &= l.contains("\"ok\":true");
         res.push(l);
     }
@@ -1425,4 +1467,94 @@ pub fn slmig(n: u64, ord: u32, hstep: u64) -> String {
         "{{\"batches\":{},\"ok\":{},\"migrations\":{},\"migration_negatives_ok\":{},\"stateless_segments\":{},\"units\":{},\"sets_with_expired_records_seen\":{},\"first_bad\":\"{}\"}}",
         n, ok, migs, neg_ok, segs_run, units, expired_seen, first_bad
     )
+}
+
+/// slmigdump <seed> <orders> <S> <dir>: guest-level migration + height-hook fixture for js/slmig.js. A `wd` batch
+/// cut into segments of S units: the session (bind_height) runs the first half; mig.bin = [SL_MIG_MAGIC, export
+/// snapshot words], digest.txt = "<export digest hex>:<words>" (the stateless image is built with
+/// MNPILOT_IMPORT_DIGEST = that); then sl%03d.bin for the second half at heights segs + 1, segs + 2, ... (what a prod
+/// stateless image's SL_RUNS gives after the migration run) with the session reference at the same run numbers.
+pub fn slmigdump(seed: u64, ord: u32, size: u32, dir: &str) -> String {
+    fs::create_dir_all(dir).unwrap();
+    let w = wd_batch(seed, ord);
+    let n_acc = w[1];
+    let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+        .map(|a| {
+            let mut id = [0u8; 32];
+            for k in 0..8 {
+                id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + (a * 8) as usize + k].to_le_bytes());
+            }
+            mnpilot::types::AccountId(id)
+        })
+        .collect();
+    let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
+    sess.as_mut().unwrap().bind_height = true;
+    let parts = seg::split(&w, size);
+    let cut = (parts.len() / 2).max(1).min(parts.len().saturating_sub(1));
+    let mut man = Vec::new();
+    let mut root = [0u8; 32];
+    let mut committed: WdlSets = Default::default();
+    let mut h: u64 = 0;
+    let mut mig = String::new();
+    for (i, mut sw) in parts.into_iter().enumerate() {
+        sw[3] = 0;
+        h += 1;
+        if i == cut {
+            let (dg, nw, words) = mnpilot::snapshot::export(sess.as_ref().unwrap(), true);
+            let mut inp = vec![sl::SL_MIG_MAGIC];
+            inp.extend_from_slice(&words.unwrap());
+            let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+            assert_eq!(mo.status, 0);
+            write_words(&format!("{}/mig.bin", dir), &inp);
+            fs::write(format!("{}/digest.txt", dir), format!("{}:{}", hx(&dg), nw)).unwrap();
+            root = mo.root;
+            committed = wdl_sets(&sess.as_ref().unwrap().eng.state);
+            h = mo.segs as u64 + 1;
+            mig = format!("{{\"mig\":\"mig.bin\",\"words\":{},\"root\":\"{}\",\"segs\":{}}}", nw, hx(&mo.root), mo.segs);
+        }
+        let pre = sess.as_ref().unwrap().eng.state.clone();
+        let mut ev = Vec::new();
+        let (_, st, _) = mnpilot::run_segment_n(&mut |j| sw.get(j as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(h as u32), bind: true });
+        assert_eq!(st.status, 0);
+        if i < cut {
+            continue;
+        }
+        let post = &sess.as_ref().unwrap().eng.state;
+        let full = lazy_state(&pre, &committed);
+        let b = WitBuilder::new(&full);
+        assert_eq!(b.root, root);
+        let (_, wit, o, evs, _) = operate_h(&b, &sw, Some(h)).expect("operator");
+        let post_sets = wdl_sets(post);
+        let mut keys: BTreeSet<mnpilot::types::AccountId> = committed.keys().copied().collect();
+        keys.extend(post_sets.keys().copied());
+        for a in keys {
+            let c = committed.get(&a).cloned().unwrap_or_default();
+            let lv: Vec<_> = c.iter().copied().filter(|e| e.3.saturating_add(mnpilot::types::REPLAY_WINDOW) > h.max(pre.height)).collect();
+            let p = post_sets.get(&a).cloned().unwrap_or_default();
+            if p != lv {
+                if p.is_empty() {
+                    committed.remove(&a);
+                } else {
+                    committed.insert(a, p);
+                }
+            }
+        }
+        let want = sl::s_root(&lazy_state(post, &committed));
+        assert!(o.status == 0 && o.end_root == want && evs == ev, "segment {} differs", i);
+        let mut x = vec![sl::SL_MAGIC, sw.len() as u32, wit.len() as u32];
+        x.extend_from_slice(&sw);
+        for c in wit.chunks(4) {
+            let mut q = [0u8; 4];
+            q[..c.len()].copy_from_slice(c);
+            x.push(u32::from_le_bytes(q));
+        }
+        write_words(&format!("{}/sl{:03}.bin", dir, i), &x);
+        man.push(format!(
+            "{{\"sl\":\"sl{:03}.bin\",\"height\":{},\"units\":{},\"s_start\":\"{}\",\"s_end\":\"{}\",\"witness_bytes\":{},\"ev\":[{}]}}",
+            i, h, sw[2], hx(&root), hx(&want), wit.len(), ev.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        ));
+        root = want;
+    }
+    fs::write(format!("{}/manifest.json", dir), format!("{{\"migration\":{},\"segments\":[{}]}}", mig, man.join(",\n"))).unwrap();
+    format!("{{\"segments\":{},\"dir\":\"{}\",\"migration\":{}}}", man.len(), dir, mig)
 }
