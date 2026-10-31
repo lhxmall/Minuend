@@ -685,6 +685,25 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
     rec('upgrade R9-H1', 'cancel at uh = 2 with top = 1 keeps top 1', ['accepted', 1], [bnc(await S(C, GOV, ROLL, 0, { cancel: 1 })), +C.r('top')]); }
 };
 
+// ---------- loop round 9 (R9-H1): the permissionless brick path -- a fraud void below a pending upgrade lets ANY
+//            submitter re-submit uh - 1 as a normal (non-export) run; once it finalizes, nothing >= uh ever finalizes.
+//            cancel recovers, and keeps top when a void already lowered it below uh - 1.
+groups.cancel9 = async () => { const G0 = T.genesis(); const g = 'cancel (R9-H1)'; const GOV = M.govAddr; const UM = ref.H('r9-image');
+  const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
+  const h2 = T.batch(b1.mem, 2), L2 = T.batch(b1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C, OP2, 2, L2, b1.final);
+  rec(g, 'upgrade scheduled at 3 while the (fraudulent) h2 is live', ['accepted', 2], [bnc(await S(C, GOV, ROLL, 0, { upgrade: 3, mem: UM })), +C.r('top')]);
+  const o = await open(C, CH1, L2.sid); const gm = game(o, L2, h2, h2); await playAll(C, [gm]);
+  rec(g, 'fraud at h2 proven: top = 1 < uh - 1 = 2', ['c', 1, 3], [gm.winner, +C.r('top'), +C.r('uh')]);
+  const r2 = await submit(C, OP1, 2, h2, b1.final); rec(g, 'PoC: anyone re-submits h2 as a normal run (U3 still pending)', 'accepted', bnc(r2));
+  rec(g, 'cancel keeps top (min(top, uh - 1) = 2 here: h2 is live again only because it was re-submitted)', ['accepted', 2, false], [bnc(await S(C, GOV, ROLL, 0, { cancel: 1 })), +C.r('top'), !!C.r('U3')]);
+  // second chain: cancel right after the void, before any re-submission -> top stays 1 (the voided h2 stays voided)
+  const C2 = new Chain(); const c1 = T.batch(G0, 1); await submit(C2, OP1, 1, c1, 'genesis');
+  const k2 = T.batch(c1.mem, 2), M2 = T.batch(c1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C2, OP2, 2, M2, c1.final);
+  await S(C2, GOV, ROLL, 0, { upgrade: 3, mem: UM }); const o2 = await open(C2, CH1, M2.sid); await playAll(C2, [game(o2, M2, k2, k2)]);
+  rec(g, 'cancel after a void below uh - 1 keeps top = 1', ['accepted', 1], [bnc(await S(C2, GOV, ROLL, 0, { cancel: 1 })), +C2.r('top')]);
+  C2.ts += WIN; rec(g, 'h1 finalizes; the voided fraudulent h2 cannot', ['accepted', 'bounce'], [bnc(await S(C2, W, ROLL, 0, { finalize: 1 })), bnc(await S(C2, W, ROLL, 0, { finalize: 2 }), /voided/)]);
+  rec(g, 'h2 re-submitted from m(1) after the cancel', 'accepted', bnc(await submit(C2, OP1, 2, k2, c1.final))); };
+
 // ---------- loop round 7 (R6-M2): per-height timestamp bound into s0 (register x10 = ts)
 groups.ts = async () => { const G0 = T.genesis(); const g = 'ts (R6-M2)';
   { const C = new Chain(); const b1 = T.batch(G0, 1); const now = C.ts;

@@ -1,0 +1,11 @@
+aamut 1 [else if ($d.cancel) {
+	require(trigger.address == $GOV, 'not governance'); -> else if ($d.cancel) {
+	require(true, 'not governance');] {"total": 357, "pass": 353, "fail": 4} -> KILLED ['cancel from a non-governance address', 'cancel by governance: U2 / uh cleared, live heights >= 2 voided (top =', 'voided import height 2 bond reclaimable']
+aamut 2 [require($p > $lf, 'no pending upgrade'); -> require($p >= $lf, 'no pending upgrade');] {"total": 357, "pass": 356, "fail": 1} -> KILLED ['cancel after the upgrade finalized']
+aamut 3 [ctop: min($top, $p - 1)} -> ctop: $p - 1}] {"total": 357, "pass": 354, "fail": 3} -> KILLED ['cancel after a void below uh - 1 keeps top = 1', 'h1 finalizes; the voided fraudulent h2 cannot', 'h2 re-submitted from m(1) after the cancel']
+aamut 4 [		var['U' || $st.cx] = false;   // loop round 9 (R9-H1): cancel the pending upgrade
+ -> ] {"total": 357, "pass": 350, "fail": 7} -> KILLED ['cancel by governance: U2 / uh cleared, live heights >= 2 voided (top =', 'height 2 from the new image now refused (no upgrade)', 'height 2 chained on m(1) (an export run) accepted']
+aamut 5 [		var['uh'] = false;
+		var['top'] = $st.ctop; -> 		var['top'] = $st.ctop;] {"total": 357, "pass": 355, "fail": 2} -> KILLED ['cancel by governance: U2 / uh cleared, live heights >= 2 voided (top =', 'cancel without a pending upgrade']
+aamut 6 [		var['top'] = $st.ctop;
+ -> ] {"total": 357, "pass": 350, "fail": 7} -> KILLED ['cancel by governance: U2 / uh cleared, live heights >= 2 voided (top =', 'voided import height 2 bond reclaimable', 'voided height 3 bond reclaimable']
