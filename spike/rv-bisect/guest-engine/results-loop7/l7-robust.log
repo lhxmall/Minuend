@@ -1,0 +1,6 @@
+{"batch":"acc_at_limit.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":321385685,"units":66,"applied":0,"rejected":66,"steps":674262,"heap":140848,"heap_peak_live":139072,"ms":5297}
+{"batch":"acc_over_limit.bin","match":true,"status":2,"host_status":2,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":506,"heap":0,"heap_peak_live":0,"ms":5}
+{"batch":"acc_u32max.bin","match":true,"status":2,"host_status":2,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":506,"heap":0,"heap_peak_live":0,"ms":9}
+{"batch":"acc_zero_ops_shift.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":321385685,"units":66,"applied":0,"rejected":66,"steps":278431,"heap":9776,"heap_peak_live":8000,"ms":3258}
+{"batch":"acc_zero_ops_zero.bin","match":true,"status":0,"host_status":0,"halted":true,"trapped":false,"a0":321385685,"units":0,"applied":0,"rejected":0,"steps":227159,"heap":9776,"heap_peak_live":8000,"ms":2443}
+{"batch":"bad_magic.bin","match":true,"status":1,"host_status":1,"halted":true,"trapped":false,"a0":0,"units":0,"applied":0,"rejected":0,"steps":506,"heap":0,"heap_peak_live":0,"ms":30}

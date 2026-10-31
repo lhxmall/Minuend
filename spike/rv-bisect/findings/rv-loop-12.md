@@ -93,5 +93,6 @@ Not changed this round (no C/H; this is the trade-off R11-M1 already named, now 
 | run | result |
 |---|---|
 | R10-H1 cap mutation (`loop11-mut.sh`, round-11 step) | **7 / 7 killed** (1–2 cap:markets, 3–5 r10:port_events, 6–7 r10:cap_values) — `guest-engine/results-loop11/l11-mut.log` |
-| rolldevnet ONLY10 + full on the round-12 AAs (`l11go.sh`, after the round-10 devnet) | _pending_ |
+| rolldevnet ONLY10 on the round-12 AAs (`l11go.sh`) | **19 / 19** incl. the two R11-M1 checks (V = 1 → h2 bounces at OBOND with `bond 400000`; one day later V = 0, OBOND) — `guest-engine/results-loop12/l11-rolldevnet10.log` |
+| full rolldevnet on the round-12 AAs | _pending_ (running) |
 | govwit default (`l11gw.sh`, starts after SUITEDONE of the round-10 govwit suite) | _pending_ |

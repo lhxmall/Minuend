@@ -14,3 +14,8 @@
 {"check":"B_upgrade_import_then_continue","ok":true}
 {"check":"G_genesis_image_import_locked","ok":true}
 {"image":"C","trapped_after":2000000,"dead_status":5,"import_status":5}
+{"check":"C_dead_image_import_refused","ok":true}
+{"check":"D_truncated_import_refused","ok":true}
+{"check":"E_batch_before_import_refused","ok":true}
+{"check":"F_other_snapshot_refused","ok":true}
+{"dir":"/data/hark/spike-rv/loop7/snap-liq7","checks":9,"pass":9,"ok":true,"steps":123794725}

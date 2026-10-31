@@ -30,7 +30,7 @@ _running_ are filled by the next collection, see work/rv-rollup-notes.md "Loop r
    whose `$GOV` is the `gov` wallet): upgrade → import → xbind (real 9-word proof triggers, ~10.5 KB fee) → finalize,
    then the R9-H1 brick path (upgrade above a non-export height) and its governance `cancel` recovery, reclaim of the
    voided bond, re-scheduled upgrade finalizing. **43 / 43** (`results-loop10/l10-rolldevnet9.log`). Full rolldevnet
-   with section 9: _running_.
+   with section 9: **186 / 186** (collected round 12).
 4. **R7-L3 / govwit** — full suite on the govwit build: _running_ (`l10-*`). Fixture check: the MNWIT1 roots of every
    committed proof fixture (adv5–7, g1000) and of liquidation batches are **identical** under govwit; governance batches
    (govgen 21–23) change, as designed. New fixture `js/testdata/proofs/gov21.json` (a real `prop:` membership from the
@@ -123,4 +123,4 @@ cycle). Options, each a rule change for the owner:
 | govfuzz 100 / xfuzz 100 (default host, caps mirrored) | 100 / 100 (33 490 units; CreateMarket refused by the cap 500 times, matched) · 100 / 100 (33 406 units) |
 | l10h rest: govwit host govedge / govfuzz / xfuzz / leaf-flip, capcheck, snaptest 60, liqedge, govgen 31–33 through the JS guest, prodheight, `mktcap 256 16 32 64 64` | **all green** (HDONE; collected round 12): govwit host govedge 9/9, govfuzz 100/100, xfuzz 100/100, govcap 4.03 MB; leaf-flip ok; capcheck 20/20 (cap fired in 20); snaptest 60/60 ok (480 flips: 316 decode to a new digest, the rest are refused); liqedge ok; govgen 31–33 through the JS guest 3/3 (1 005 units, engine + roots match); prodheight 16/16; mktcap at the caps 27.23 MB (`results-loop10/l10h*.log`) |
 | govwit full suite (`loop10-suite.sh g`, l10-*) | partial (round-12 collection): fuzz 300/300, advfuzz 300/300, witfuzz 300/300, segfuzz 300/300, proofs 300 (0 forged), scen 47/47, selftest ok, heapsim ok; robust-limit / guest-poc / liq-snap-cap still running (SUITEDONE pending) |
-| full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | _running_ (186 PASS / 0 FAIL at 19:3x UTC, round-12 collection) |
+| full rolldevnet with section 9 (`l10rd.sh`, l10-rolldevnet.log) | **186 / 186** (RDDONE exit 0; `results-loop10/l10-rolldevnet.log`) |
