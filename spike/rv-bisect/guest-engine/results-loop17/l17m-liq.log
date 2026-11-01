@@ -1,0 +1,10 @@
+== slpoc17 10 300 (01:24:01)
+{"ok":true,"batches":10,"segments_reaching_adl":4,"honest_unsupported":4,"extra_holders_refused":4,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (01:24:04)
+== slfuzz 20 300 liq (01:24:04)
+{"mode":"liq","batches":20,"ok":17,"bad_segments":3,"unsupported_segments":194,"segments":653,"units":36913,"witness_bytes":59901953,"max_witness":187790,"leaves_verified":318682,"tree_nodes":564360,"sl_hashes":1698137,"session_hashes":117548,"operator_iterations":114233,"liq_units_proven":590,"first_bad":"seed 8 seg 24 (size 58): events differ at Some(21) (len 70 vs 70)"}
+exit 0 (01:33:47)
+== sladv 6 200 liq (01:33:47)
+{"segments":189,"cases":59716,"sound":59709,"unsound":7,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[91,91,0],"book:hide-level-in-trie":[91,91,0],"book:omit-best-level":[99,65,34],"book:omit-head":[189,187,2],"book:reorder-fifo":[43,43,0],"duplicate:account":[189,189,0],"extra:valid":[189,55,134],"flip:records":[567,554,13],"flip:tree":[567,564,3],"forge:absent-via-leaf-key":[182,182,0],"forge:account":[183,183,0],"forge:self-consistent":[183,183,0],"forge:self-consistent:bound":[183,183,0],"honest":[189,55,134],"light:forged-collateral":[189,189,0],"light:forged-digest":[189,189,0],"light:user-account":[183,183,0],"limit:accounts":[189,189,0],"omit:account":[1923,1923,0],"omit:aord":[1919,1785,134],"omit:bmp":[1639,1030,609],"omit:level":[183,118,65],"omit:light":[189,189,0],"omit:market":[230,69,161],"omit:order":[40000,39662,338],"omit:path":[362,115,247],"trailing":[189,189,0],"tree:leaf-as-opaque":[8832,8015,817],"truncate":[189,189,0],"wrong-root":[183,117,59],"wrong-root:bound":[183,176,7]},"unsound_first":["wrong-root accepted with the right start root", "wrong-root accepted with the right start root", "wrong-root accepted with the right start root", "wrong-root accepted with the right start root", "wrong-root accepted with the right start root", "wrong-root accepted with the right start root", "wrong-root accepted with the right start root"]}
+exit 0 (01:41:51)
+TDONE

@@ -1,0 +1,5 @@
+2
+    Finished `release` profile [optimized] target(s) in 3m 59s
+== slpoc17 10 300 (mutant R17-H1-both-off)
+{"ok":false,"batches":10,"segments_reaching_adl":4,"honest_unsupported":2,"extra_holders_refused":2,"wrong_status0":4,"operator_errors":0,"first_wrong":"seed 5 seg 10: honest status 0 with a different result"}
+MUTDONE

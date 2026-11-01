@@ -1,0 +1,4 @@
+== slfuzz 20 300 liq (01:00:32)
+{"mode":"liq","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":0,"segments":704,"units":39062,"witness_bytes":90861777,"max_witness":167196,"leaves_verified":492299,"tree_nodes":827183,"sl_hashes":2590154,"session_hashes":197662,"operator_iterations":200294,"liq_units_proven":1390,"first_bad":""}
+exit 0 (01:15:42)
+== sldbg 6 300 liq (01:15:42)

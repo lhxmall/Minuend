@@ -1,0 +1,4 @@
+== slpoc17 10 300 (01:19:18)
+{"ok":false,"batches":10,"segments_reaching_adl":0,"honest_unsupported":0,"extra_holders_refused":0,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (01:19:23)
+== slfuzz 20 300 liq (01:19:23)

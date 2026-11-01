@@ -1,0 +1,22 @@
+== slpoc15 (00:50:13)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27973},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":18,"iterations":13,"witness_bytes":8572},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6", "6"],"needs":20,"iterations":10,"witness_bytes":4200},
+{"case":"P6 single omissions from the P3 witness","ok":true,"runs":20,"refused":20,"wrong":0},
+{"case":"P7 R2-E-3: withdraw against pre-existing resting IM","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["9", "applied/0"],"needs":5,"iterations":2,"witness_bytes":2568},
+{"case":"P8a dup-nonce dust single omissions","ok":true,"honest":true,"runs":4,"wrong":0,"ev":[6]},
+{"case":"P8b resting IM single omissions","ok":true,"honest":true,"runs":5,"wrong":0,"ev":[9]},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]},
+{"case":"P5 R15-M1 lifted (round 16): levels of 4097 and 4096 orders both migrate","ok":true,"status_over":0,"status_at":0,"root_at_ok":true}]}
+exit 0 (00:50:14)
+== slmig 40 300 0 (00:50:14)
+{"batches":40,"ok":40,"migrations":40,"migration_negatives_ok":40,"stateless_segments":184,"units":8442,"sets_with_expired_records_seen":0,"first_bad":""}
+exit 0 (00:50:43)
+== slmig 40 300 900 (00:50:43)
+{"batches":40,"ok":40,"migrations":40,"migration_negatives_ok":40,"stateless_segments":184,"units":8442,"sets_with_expired_records_seen":429,"first_bad":""}
+exit 0 (00:51:11)
+TDONE

@@ -1,0 +1,9 @@
+== sldiff 8 300 liq (01:44:06)
+seed 8 seg 24 unit 19/58: op Liquidate { acct: 0, target: 13, market: 1 }
+  stateless Some([2147483649, 3745750053, 1819168205, 546331136, 2334, 28000000, 0])
+  session   Some([2147483649, 3745750053, 1279873313, 546331136, 2334, 28000000, 0])
+  prev units equal: true
+  replay fill: taker [cd, 4d, 6e, 6c, 41, 5e] maker [25, 9c, 43, df, 4f, ca] kind 3 taker_acct [ef, d4, ad, 38] maker_acct [b3, a9, 2d, 84]
+  liq id(0) [cd, 4d, 6e, 6c, 41, 5e]
+exit 0 (01:44:33)
+TDONE

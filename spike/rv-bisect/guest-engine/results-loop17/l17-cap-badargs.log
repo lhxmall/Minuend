@@ -1,0 +1,171 @@
+== slmigcap 64 (00:50:13)
+
+thread 'main' (869720) panicked at src/main.rs:1350:93:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+cat: /data/hark/spike-rv/loop17/sl/cap-64----/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 1m 09s
+cp: cannot create regular file '/data/hark/spike-rv/loop17/sl/cap-64----/rvengine-emb': No such file or directory
+sha1sum: /data/hark/spike-rv/loop17/sl/cap-64----/rvengine-emb: No such file or directory
+== migsail 64 (00:51:23)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop17/sl/cap-64----/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop17/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop17/sl/cap-64----/mig.bin'
+}
+
+Node.js v22.23.3
+== done 64 (00:51:23)
+== slmigcap 16 (00:51:23)
+
+thread 'main' (869781) panicked at src/main.rs:1350:93:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+cat: /data/hark/spike-rv/loop17/sl/cap-16----/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 0.07s
+cp: cannot create regular file '/data/hark/spike-rv/loop17/sl/cap-16----/rvengine-emb': No such file or directory
+sha1sum: /data/hark/spike-rv/loop17/sl/cap-16----/rvengine-emb: No such file or directory
+== migsail 16 (00:51:23)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop17/sl/cap-16----/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop17/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop17/sl/cap-16----/mig.bin'
+}
+
+Node.js v22.23.3
+== done 16 (00:51:23)
+== slmigcap 8 (00:51:23)
+
+thread 'main' (869807) panicked at src/main.rs:1350:93:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+cat: /data/hark/spike-rv/loop17/sl/cap-8----/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 0.07s
+cp: cannot create regular file '/data/hark/spike-rv/loop17/sl/cap-8----/rvengine-emb': No such file or directory
+sha1sum: /data/hark/spike-rv/loop17/sl/cap-8----/rvengine-emb: No such file or directory
+== migsail 8 (00:51:23)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop17/sl/cap-8----/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop17/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop17/sl/cap-8----/mig.bin'
+}
+
+Node.js v22.23.3
+== done 8 (00:51:23)
+== slmigcap 64 (00:51:23)
+
+thread 'main' (869833) panicked at src/main.rs:1350:93:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+cat: /data/hark/spike-rv/loop17/sl/cap-64----/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 0.07s
+cp: cannot create regular file '/data/hark/spike-rv/loop17/sl/cap-64----/rvengine-emb': No such file or directory
+sha1sum: /data/hark/spike-rv/loop17/sl/cap-64----/rvengine-emb: No such file or directory
+== migsail 64 (00:51:23)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop17/sl/cap-64----/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop17/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop17/sl/cap-64----/mig.bin'
+}
+
+Node.js v22.23.3
+== done 64 (00:51:23)
+== slmigcap 8 (00:51:23)
+
+thread 'main' (869859) panicked at src/main.rs:1350:93:
+called `Result::unwrap()` on an `Err` value: ParseIntError { kind: InvalidDigit }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+cat: /data/hark/spike-rv/loop17/sl/cap-8----/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 0.07s
+cp: cannot create regular file '/data/hark/spike-rv/loop17/sl/cap-8----/rvengine-emb': No such file or directory
+sha1sum: /data/hark/spike-rv/loop17/sl/cap-8----/rvengine-emb: No such file or directory
+== migsail 8 (00:51:23)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop17/sl/cap-8----/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop17/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop17/sl/cap-8----/mig.bin'
+}
+
+Node.js v22.23.3
+== done 8 (00:51:23)
+CAPDONE

@@ -1,0 +1,13 @@
+== sldiff 8 300 liq (01:50:14)
+no differing segment
+exit 0 (01:51:07)
+== slpoc17 40 300 (01:51:07)
+{"ok":true,"batches":40,"segments_reaching_adl":10,"honest_unsupported":10,"extra_holders_refused":10,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (01:51:23)
+== slfuzz 20 300 liq (01:51:23)
+{"mode":"liq","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":205,"segments":695,"units":39219,"witness_bytes":64477024,"max_witness":187790,"leaves_verified":346090,"tree_nodes":606688,"sl_hashes":1834303,"session_hashes":127065,"operator_iterations":124648,"liq_units_proven":655,"first_bad":""}
+exit 0 (02:01:14)
+== sladv 6 200 liq (02:01:14)
+{"segments":189,"cases":59716,"sound":59716,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[91,91,0],"book:hide-level-in-trie":[91,91,0],"book:omit-best-level":[99,65,34],"book:omit-head":[189,187,2],"book:reorder-fifo":[43,43,0],"duplicate:account":[189,189,0],"extra:valid":[189,55,134],"flip:records":[567,554,13],"flip:tree":[567,564,3],"forge:absent-via-leaf-key":[182,182,0],"forge:account":[183,183,0],"forge:self-consistent":[183,183,0],"forge:self-consistent:bound":[183,183,0],"honest":[189,55,134],"light:forged-collateral":[189,189,0],"light:forged-digest":[189,189,0],"light:user-account":[183,183,0],"limit:accounts":[189,189,0],"omit:account":[1923,1923,0],"omit:aord":[1919,1785,134],"omit:bmp":[1639,1030,609],"omit:level":[183,118,65],"omit:light":[189,189,0],"omit:market":[230,69,161],"omit:order":[40000,39662,338],"omit:path":[362,115,247],"trailing":[189,189,0],"tree:leaf-as-opaque":[8832,8015,817],"truncate":[189,189,0],"wrong-root":[183,117,66],"wrong-root:bound":[183,176,7]},"unsound_first":[]}
+exit 0 (02:10:31)
+TDONE

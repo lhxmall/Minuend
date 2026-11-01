@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 1m 12s
+24334b8ee85f1a3f9cb78a3faf393217d784f30b  /data/hark/target-l17m-host/release/engine-diff
+eaves_verified":76160,"tree_nodes":103920,"sl_hashes":334476,"session_hashes":155587,"operator_iterations":23802,"liq_units_proven":0,"first_bad":""}
+exit 0 (01:22:10)
+== slfuzz 100 200 adv (01:22:10)
+{"mode":"adv","batches":100,"ok":100,"bad_segments":0,"unsupported_segments":0,"segments":441,"units":20744,"witness_bytes":2795692,"max_witness":16837,"leaves_verified":35463,"tree_nodes":28799,"sl_hashes":114380,"session_hashes":35937,"operator_iterations":9415,"liq_units_proven":0,"first_bad":""}
+exit 0 (01:22:15)
+== slfuzz 60 300 wd (01:22:15)
+BUILDDONE
+{"mode":"wd","batches":60,"ok":60,"bad_segments":0,"unsupported_segments":0,"segments":613,"units":25171,"witness_bytes":23907807,"max_witness":106325,"leaves_verified":152005,"tree_nodes":253165,"sl_hashes":785239,"session_hashes":348643,"operator_iterations":34249,"liq_units_proven":0,"first_bad":""}
+exit 0 (01:23:14)
+== sladv 20 200 (01:23:14)
+{"segments":157,"cases":25085,"sound":25085,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[132,132,0],"book:hide-level-in-trie":[132,132,0],"book:omit-best-level":[185,103,82],"book:omit-head":[157,133,24],"book:reorder-fifo":[81,81,0],"duplicate:account":[157,157,0],"extra:valid":[157,0,157],"flip:records":[471,456,15],"flip:tree":[471,467,4],"forge:absent-via-leaf-key":[132,132,0],"forge:account":[137,137,0],"forge:self-consistent":[137,137,0],"forge:self-consistent:bound":[137,137,0],"honest":[157,0,157],"light:forged-collateral":[157,157,0],"light:forged-digest":[157,157,0],"light:user-account":[137,137,0],"limit:accounts":[157,157,0],"omit:account":[2616,2616,0],"omit:aord":[2616,2298,318],"omit:bmp":[3815,2280,1535],"omit:level":[430,208,222],"omit:light":[157,154,3],"omit:market":[154,20,134],"omit:order":[4565,3915,650],"omit:path":[191,58,133],"trailing":[157,157,0],"tree:leaf-as-opaque":[6702,5847,855],"truncate":[157,157,0],"wrong-root":[137,109,28],"wrong-root:bound":[137,137,0]},"unsound_first":[]}
+exit 0 (01:23:54)
+TDONE
