@@ -6,7 +6,7 @@ Branch `spike/rv-bisect`, parent 960e87b (round-20 head). Design: `docs/rv-state
 `engine.rs`; harness `engine-diff/src/sl.rs` (`slpoc21`, `adl_segments`, `slpoc17` round-21 semantics). Box logs:
 `guest-engine/results-loop21/`. Notes: work/rv-rollup-notes.md "Loop round 21". Pushes: Radicle first, then GitHub.
 
-Status: **DRAFT**
+Status: **FINAL** (closed in round 22: mutant passes, kills of the non-equivalent survivors, CI)
 
 ## What was done
 
@@ -63,10 +63,28 @@ final guest code = 77501a7d's).
 | cost (slfuzz, sl_hashes now count the exception / rank sub-tree node hashes and the rank leaf hashes) | guest hashes vs round 20: gen 805 365 (+17 %), perp 300 658 (+34 %), wd 387 076 (+16 %), ora 343 591 (+17 %), liq 1 731 176 (+5 %); witness bytes +1.6 – 4 % (gen 21.08 MB vs 20.46, perp 6.32 vs 6.07, liq 58.9 vs 58.0) | l21-regF.log, ../results-loop20/l20-reg.log |
 | riscv32 stateless guest build | clean (release, `stateless`, riscv32im) on 3756542 / 5c8bcfa / final sources | l21-b1.log, l21-b4.log, l21-b6.log |
 | round-20 survivors vs slpoc20 P9 | pre-slash-omk-off **KILLED**, pre-slash-hist-off **KILLED** (slpoc20 P9), report-orep-both-off survives (equivalent: the loader's ohist-needs-its-report-set rule) | l21-mut20.log |
-| ADL guard mutants (loop21-mut.py, 17, final tests) | MUT21_RESULT | l21-mut.log |
-| Radicle native CI | 3756542 FAILURE (R21-L1), 5c8bcfa SUCCESS, CI_REST | /data/hark/radicle-ci/logs/cib.log |
+| ADL guard mutants (loop21-mut.py, 17) | pass 1 (tests up to P3): **7 / 17 killed** (pick-tree-need-off, pick-top-acct-off, adl-check-off, maint-off, load-root-check-off, load-leaf-check-off, cur-init-off); pass 2 (the 10 survivors vs P3c + round-22 `t_adrop` 5): **load-absent-check-off KILLED** (`t_adrop` 5: the tree claimed absent beside its `adlr:` leaf); round-22 re-tests: **end-del-off KILLED** (slpoc22 P0: both rank sub-trees emptied in a segment, the `adlr:` leaves must go), **leftmost-skip-stub: see round-22** (`t_adrop` 6: the leftmost leaf sent as an opaque stub of its own hash next to the second leaf's expanded path, P2 / P3b / P3c). Equivalent / defence in depth (below) | l21-mut.log, l21-mut2.log, ../results-loop22/l22-mut*.log |
+| Radicle native CI | 3756542 FAILURE (R21-L1), 5c8bcfa / 1be84a5 / a4f80ad / 642ddf8 SUCCESS | /data/hark/radicle-ci/logs/cib.log, state/*/log.html |
 | sail 64-account migration (round-19 item) | stopped at 05:31 UTC after 2 h 31 m without output (own process groups 885730 / 885731 only); no data point | l19-cap-dec.log, l19-cap-base.log |
 
+
+Surviving mutants (equivalent or defence in depth; none can turn a forged witness into status 0 with a wrong result):
+- `pick-cur-check-off` (the loaded top holder's current entry vs the leaf key): at unit start the rank tree and the
+  account records are pure functions of the same session state (both bound by MNWIT-S), and `cur` / the tree are
+  maintained together after every unit, so the entry always equals the key — defence in depth.
+- `leftmost-unverified-ok` (accept an unverified leftmost leaf): such a leaf carries no id, `ids.get(key)` fails ->
+  BADWIT instead of `AdlTop`: still a refusal; the honest builder sends every rank leaf verified (R21-L1).
+- `fill-maker-check-off` (an ADL fill whose maker is not the pick): the engine ranks the loaded holders, and the pick
+  check guarantees the true top is loaded and ranks first among them; the check is a guard on that argument.
+- `maint-present-check-off` / `maint-absent-check-off`: a removal key that is not present / an insertion key that is
+  present is unreachable with consistent records (the tree is derived from the loaded positions); the absent case
+  only covers an R21-I2 id-prefix collision. Defence in depth.
+- `removed-count-off` (AdlTop(k) without the removals): liveness only — after removals the honest operator may send
+  too short a leftmost path and loop (an honest segment refused), never an accepted wrong pick (the pick still
+  requires a verified leftmost leaf).
+- `insurance-in-tree` (maintenance without the insurance skip): the insurance record is loaded light (no positions in
+  the partial state) on every supported path, and its start entries are never in `cur`; reachable only with a full
+  insurance record whose position changes, which no supported op produces (round-22 pass 2 re-test: l22-mut2.log).
 
 ## What remains
 

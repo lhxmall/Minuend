@@ -2492,6 +2492,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
     let mut whale_hits = 0u32;
     let mut acc_n = (0usize, 0usize);
     let (mut p3_runs, mut p3_ok) = (0u32, 0u32);
+    let (mut p3d_runs, mut p3d_ref, mut p3d_honest) = (0u32, 0u32, 0u32);
     let mut p3_first = String::new();
     for (s, k, r, (m, sd, ui)) in &segs {
         // ---- P3: the ADL unit ALONE (state replayed to just before it): no opposite holder is loaded for any other
@@ -2565,6 +2566,60 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                 Err(e) => {
                     if p3_first.is_empty() {
                         p3_first = format!("seed {} seg {} unit {}: operator {}", s, k, ui, e);
+                    }
+                }
+            }
+        }
+        // ---- P3d (round 22, kills leftmost-skip-stub): the ADL unit alone on its pre-state + a WHALE W (the largest
+        // |qty|) and a TIE PAIR (the next |qty|, both above every other holder): W's leaf and the pair lie on the two
+        // sides of one node, so removing the pair's winner does not lift W's stub. An adversarial operator that sends W's
+        // leaf as an opaque stub (t_adrop 6) / hides its path (2) and never supplies W's record or key must be refused:
+        // a pick that skips the stub would ADL the tie winner (status 0, wrong root)
+        {
+            let n_acc = r.seg[1] as usize;
+            let base = 4 + 8 * n_acc;
+            let mut pw = vec![r.seg[0], r.seg[1], *ui, r.seg[3]];
+            pw.extend_from_slice(&r.seg[4..4 + 8 * n_acc]);
+            pw.extend_from_slice(&r.seg[base..base + 8 * *ui as usize]);
+            let (mut st_d, _) = direct(&r.pre, &pw);
+            let mut w1 = vec![r.seg[0], r.seg[1], 1, r.seg[3]];
+            w1.extend_from_slice(&r.seg[4..4 + 8 * n_acc]);
+            w1.extend_from_slice(&r.seg[base + 8 * *ui as usize..base + 8 * (*ui as usize + 1)]);
+            let topq = st_d.accounts.iter().filter(|(id, _)| **id != mnpilot::types::INSURANCE_ACCOUNT).filter_map(|(_, a)| a.positions.get(&M(*m)).map(|p| p.qty)).filter(|q| *q != 0 && sl::adl::sgn(*q) == *sd).map(|q| q.unsigned_abs()).max().unwrap_or(0);
+            let mut put = |i: u32, q: u64| -> A {
+                let id = A(acct_id(910_000 + i).0);
+                let mut a = mnpilot::account::Account { id, collateral: 1_000_000_000 * USD_SCALE as i128, realized_pnl: 0, positions: Default::default(), isolated_margin: Default::default() };
+                let qty = if *sd == 0 { q as i64 } else { -(q as i64) };
+                a.positions.insert(M(*m), mnpilot::account::Position { market: M(*m), qty, entry_price: MID, isolated: false });
+                st_d.accounts.insert(id, a);
+                id
+            };
+            let wq = topq + 2 * QTY_SCALE;
+            let whale = put(0, wq);
+            let _ = (put(1, topq + QTY_SCALE), put(2, topq + QTY_SCALE));
+            let _ = st_d.take_dirty();
+            let rs = sl::adl::sets(&st_d);
+            let (post_d, ev_d) = direct(&st_d, &w1);
+            let bd = WitBuilder::new(&st_d);
+            if let (Some(v), Ok((_, _, o, ev, _))) = (rs.get(&(*m, *sd)), operate(&bd, &w1)) {
+                if v[0].2 == whale && o.status == 0 && o.end_root == sl::s_root(&post_d) && ev.len() == ev_d.len() {
+                    p3d_honest += 1;
+                    let wk = v[0].0;
+                    for t in [2u8, 6] {
+                        bd.t_adrop.set(t);
+                        let (of, evf) = operate_deny(&bd, &w1, &|n: &Need| matches!(n, Need::Account(a) if *a == whale) || matches!(n, Need::AdlKey(_, _, k) if *k == wk));
+                        bd.t_adrop.set(0);
+                        p3d_runs += 1;
+                        p2_runs += 1;
+                        if of.status != 0 {
+                            p2_ref += 1;
+                            p3d_ref += 1;
+                        } else if of.end_root != sl::s_root(&post_d) || evf.len() != ev_d.len() {
+                            p2_wrong += 1;
+                            if p2_first.is_empty() {
+                                p2_first = format!("seed {} seg {} unit {}: P3d whale stub t_adrop {}", s, k, ui, t);
+                            }
+                        }
                     }
                 }
             }
@@ -2670,10 +2725,10 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
             }
         }
     }
-    let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && whale_hits > 0 && p3_runs > 0 && p3_ok == p3_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len();
+    let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && whale_hits > 0 && p3_runs > 0 && p3_ok == p3_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len() && p3d_honest > 0;
     format!(
-        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"P1_whale_picked\":{},\"max_account_records_plain_inflated\":{:?},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\",\"P3_single_unit_runs\":{},\"P3_ok\":{},\"P3_first_bad\":\"{}\"}}",
-        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, whale_hits, acc_n, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first, p3_runs, p3_ok, p3_first
+        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"P1_whale_picked\":{},\"max_account_records_plain_inflated\":{:?},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\",\"P3_single_unit_runs\":{},\"P3_ok\":{},\"P3_first_bad\":\"{}\",\"P3d_honest_proven\":{},\"P3d_forged_runs\":{},\"P3d_refused\":{}}}",
+        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, whale_hits, acc_n, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first, p3_runs, p3_ok, p3_first, p3d_honest, p3d_runs, p3d_ref
     )
 }
 
