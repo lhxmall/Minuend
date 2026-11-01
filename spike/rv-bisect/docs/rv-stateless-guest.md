@@ -380,6 +380,30 @@ and the expiry happens at a height with no op touching it.
   oracle are ignored by the median (no report removal). The governance design (§12.3) avoided the problem only because
   Finalize is a unit that can load what it invalidates.
 
+* **Round-19 review** (resolution of R18-I2 and the funding leg, rv-loop-19 R19-I1 / R19-I2):
+  * Unbonding expiry is **eager and bounded** without a lazy rule: one guest run = one segment = one rollup height
+    (lib.rs), the engine height is the run number (+1 per run in `prod`), and `apply_unstake` sets unlock = height +
+    ORACLE_UNBOND_HEIGHTS (256). So the oracles expiring at run h are exactly those that unstaked in the single run
+    h − 256: at most its Unstake units (≤ MAX_UNITS). A queue leaf `oexp:<unlock height>` = `:<n>:<sha256(accounts)>`
+    (a pure function of `oracle_unbonding`) makes the set provable: the run at height h loads `oexp:<h>` (present or
+    proven absent), and for each listed oracle its `ostk:`, `orm:` and every `orep:<m>` / `ohist:<m>:<acct>` of its
+    `orm:` list (≤ SL_MAX_ORACLE_MKTS each), applies `prune_oracle_unbonding` on the partial state, and deletes
+    `oexp:<h>`. The reference stays the session state, so §12.1's lazy entries (epoch / unlock copies) are not needed.
+    Worst case per run: (Unstake units of run h − 256) × SL_MAX_ORACLE_MKTS records; a consensus bound on Unstake units
+    per segment (session and stateless alike) would cap it. Non-`prod` height jumps load every `oexp:` in (glob, h].
+  * The **funding transfer** (`transfer_funding`, every report tick with ≥ 2 reporters, once per market and height) is
+    O(holders of the market): Phase 1 collects every holder's payment in id order, Phase 2a debits payers clamped at
+    collateral into a budget, Phase 2b credits receivers in id order until the budget is spent -- the result for one
+    account depends on every lower id's collateral. No partial evaluation is exact; a stateless Report that pays
+    funding must load every holder of the market with a completeness proof (a per-market holder-set leaf
+    `hset:<m>` = `:<n>:<sha256(ids)>`, maintained on every position open / close -- the same maintenance cost as
+    §12.2's rank index) and is bounded by SL_MAX_ACCOUNTS: a market with more holders cannot take a funding tick
+    statelessly. Alternatives: an upstream change to index-based (cumulative, settled on touch) funding, or a
+    per-market holder cap enforced by both images.
+  * Implementation order: (1) `ostk:` / `orep:` / `ohist:` / TWAP ring leaves + migration, Stake / Unstake / Report on
+    markets where no funding tick is due (refuse the tick: UNSUPPORTED), `oexp:` expiry hook; (2) `hset:` + funding;
+    (3) Slash (reads the market TWAP + the target's history; removes one report).
+
 ### 12.2 Liquidation / ADL: holder index by mark-independent rank
 
 Session facts (engine.rs `liquidate_book_path`): liquidation reads the target's positions, the market, its book (§6

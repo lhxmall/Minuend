@@ -637,13 +637,18 @@ impl PTree {
     /// depth > 256, > SL_MAX_TREE_NODES nodes, a leaf whose key is not on its path, non-canonical
     /// nodes N(E,E) / N(E,L) / N(L,E). O(EMPTY) is read as E.
     pub fn decode(r: &mut Rd) -> Option<PTree> {
+        Self::decode_lim(r, SL_MAX_TREE_NODES)
+    }
+    /// round 19 (R19-L1): decode with a node budget -- the proposals' exception sub-trees share SL_MAX_TREE_NODES
+    /// with the MNWIT-S tree (one heap bound for every tree of a witness)
+    pub fn decode_lim(r: &mut Rd, lim: usize) -> Option<PTree> {
         let mut t = PTree { nodes: Vec::new(), root: P::E, node_hashes: 0 };
         let mut path = [0u8; 32];
-        t.root = t.dec(r, 0, &mut path)?;
+        t.root = t.dec(r, 0, &mut path, lim)?;
         Some(t)
     }
-    fn dec(&mut self, r: &mut Rd, d: usize, path: &mut [u8; 32]) -> Option<P> {
-        if self.nodes.len() > SL_MAX_TREE_NODES {
+    fn dec(&mut self, r: &mut Rd, d: usize, path: &mut [u8; 32], lim: usize) -> Option<P> {
+        if self.nodes.len() > lim {
             return None;
         }
         match r.u8()? {
@@ -696,9 +701,9 @@ impl PTree {
                 self.nodes.push(PN { ch: [P::E, P::E], h: None });
                 let m = 1u8 << (7 - (d & 7));
                 path[d >> 3] &= !m;
-                let a = self.dec(r, d + 1, path)?;
+                let a = self.dec(r, d + 1, path, lim)?;
                 path[d >> 3] |= m;
-                let b = self.dec(r, d + 1, path)?;
+                let b = self.dec(r, d + 1, path, lim)?;
                 path[d >> 3] &= !m;
                 match (a, b) {
                     (P::E, P::E) | (P::E, P::L(..)) | (P::L(..), P::E) => return None,
@@ -1690,9 +1695,10 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     // round 19 (R18-M1 fix): every live proposal's exception sub-tree, pruned to the loaded accounts' paths; each loaded
     // list must match it exactly: a listed entry is a member (leaf hash recomputed), an unlisted pair proven absent
     if let Some((_, xr)) = &sl.pglob {
-        let mut seen = 0usize;
+        // R19-L1: one node budget for the MNWIT-S tree and every sub-tree
+        let mut seen = sl.t.nodes.len();
         for (pid, x) in xr {
-            let mut st = bad!(PTree::decode(&mut r));
+            let mut st = bad!(PTree::decode_lim(&mut r, SL_MAX_TREE_NODES.saturating_sub(seen)));
             seen += st.nodes.len();
             if seen > SL_MAX_TREE_NODES || st.root_hash() != *x {
                 return Err(ST_SL_BADWIT);
