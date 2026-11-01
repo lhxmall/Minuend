@@ -2,6 +2,9 @@
 
 # MINUEND — 乐观 DAG 侧链永续 DEX，结算到 Obyte
 
+> **主仓库在 [Radicle](https://app.radicle.xyz/nodes/iris.radicle.network/rad:zAs3weuZxWLfezSjKYcdsyXuEGKY)：** `rad:zAs3weuZxWLfezSjKYcdsyXuEGKY` —— issue、patch 和 CI 都在那里，GitHub 只是镜像。
+> 克隆：`rad clone rad:zAs3weuZxWLfezSjKYcdsyXuEGKY`
+
 MINUEND 是一个**永续合约交易所**的研究/MVP 实现：交易在高吞吐的乐观 DAG
 侧链上执行，周期性把状态根结算到 [Obyte](https://obyte.org) 账本（通过
 autonomous agent 金库）。金库提款受 **Merkle 证明门控**——必须出示针对
