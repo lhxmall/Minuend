@@ -66,13 +66,12 @@ becc3ad4 (R17-L1 fix, 4a62fd5).
 | R17-L1 diagnosis | sldiff 8 300 liq: unit 19 Liquidate, stateless taker word liq_order_id(0) vs session LIQ_TAKER_EV | l17m-diff.log |
 | after the fix (becc3ad4) | sldiff 8 liq: no differing segment; slpoc17 40/40; slfuzz 20x300 liq **20/20** (655 liq units proven, 205 ADL segments unsupported); sladv 6x200 liq 59 716 cases **0 unsound**; slpoc15 / slcaps ok; slfuzz gen 100/100, perp 60/60, wd 60/60; sladv 6x200 gen 5 247 cases 0 unsound | l17m-c2liq.log, l17m-c2reg.log |
 | guest build (stateless, riscv32) | clean (l17m-gsl / l17m-b) | l17m-gsl.log |
-| guest migration under sail, 64 accounts (decode mode, loop17) vs round-16 baseline (l16c2, loop16c) | **still running at the time of writing** (sail-riscv started 00:54 UTC / 00:17 UTC; no partial counts are printed) -- see "What remains" | l17-cap.log, l16-cap2.log |
+| guest migration under sail, 64 accounts (decode mode, loop17) vs round-16 baseline (l16c2, loop16c) | **no result in round 17**: both sail runs were killed by the user stop at 02:41 UTC (decode mode after 1 h 47 m, baseline after 2 h 24 m, no partial count is printed); rerun in round 19 (l19-cap-dec / l19-cap-base, see rv-loop-19). The queued 256-account config is **not a valid session state**: 256 traders + creator + oracles exceed MAX_STATE_ACCOUNTS (256), so the host migration returns BAD_SNAP (status 7, the decoder's import cap) -- a fixture error, not a finding; stopped in round 19 | l17-cap.log, l16-cap2.log, l17-cap256.log |
 
 ## What remains
 
-- Sail measurement of the decode mode: the 64-account run (l17c.sh, then l17c256.sh for 256 accounts) and the
-  round-16 baseline (l16c2.sh, 64 then 256) are still running on the box; compare `sail_insns` when they finish
-  (rows to add above). Host-side the decode mode is green (slmig, slpoc15) and `migrate_host_s` 0.103 s -> 0.093 s.
+- Sail measurement of the decode mode: rerun in round 19 (64 accounts, both images; rv-loop-19). Host-side the decode
+  mode is green (slmig, slpoc15) and `migrate_host_s` 0.103 s -> 0.093 s.
 - ADL remainder (design §12.2), oracle / funding (§12.1): unsupported. Governance: round 18.
 
 Status: **FINAL** (round-17 code and findings closed; the sail measurement is a pending data point, not a finding).

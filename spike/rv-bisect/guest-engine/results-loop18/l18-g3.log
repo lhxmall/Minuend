@@ -1,0 +1,16 @@
+== slmiggov 30 300 (02:20:46)
+{"batches":30,"ok":30,"migrations":115,"with_live_proposals":115,"with_exception_lists":107,"first_bad":""}
+exit 0 (02:20:54)
+== slmiggov 10 1000 (02:20:54)
+{"batches":10,"ok":10,"migrations":40,"with_live_proposals":40,"with_exception_lists":39,"first_bad":""}
+exit 0 (02:21:05)
+== slfuzz 100 300 gov (02:21:05)
+{"mode":"gov","batches":100,"ok":100,"bad_segments":0,"unsupported_segments":0,"segments":666,"units":33040,"witness_bytes":7425477,"max_witness":23338,"leaves_verified":68636,"tree_nodes":78024,"sl_hashes":273011,"session_hashes":164973,"operator_iterations":15164,"liq_units_proven":0,"gov_units_proven":[1178, 1747, 1575, 7443, 703, 2651],"first_bad":""}
+exit 0 (02:21:41)
+== sladv 20 300 gov (02:21:41)
+{"segments":189,"cases":25303,"sound":25303,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[115,115,0],"book:hide-level-in-trie":[115,115,0],"book:omit-best-level":[141,113,28],"book:omit-head":[189,118,71],"book:reorder-fifo":[38,38,0],"duplicate:account":[189,189,0],"extra:valid":[189,0,189],"flip:records":[567,542,25],"flip:tree":[567,562,5],"forge16:acmt-add":[458,458,0],"forge16:gnon":[484,484,0],"forge16:next-market":[187,187,0],"forge16:perp-supply":[187,187,0],"forge:absent-via-leaf-key":[159,159,0],"forge:account":[169,169,0],"forge:self-consistent":[169,169,0],"forge:self-consistent:bound":[169,169,0],"honest":[189,0,189],"light:forged-collateral":[189,189,0],"light:forged-digest":[189,189,0],"light:user-account":[14,14,0],"limit:accounts":[189,189,0],"omit:account":[2016,575,1441],"omit:acmt":[484,484,0],"omit:aord":[2020,913,1107],"omit:bmp":[3200,1772,1428],"omit:gnon":[484,484,0],"omit:level":[213,166,47],"omit:light":[189,177,12],"omit:market":[303,159,144],"omit:order":[301,280,21],"omit:path":[25,12,13],"omit:perp":[187,187,0],"omit:pexc":[1198,874,324],"omit:pexc-of":[459,76,383],"omit:pglob":[174,174,0],"trailing":[189,189,0],"tree:leaf-as-opaque":[8472,7366,1106],"truncate":[189,189,0],"wrong-root":[169,92,77],"wrong-root:bound":[169,169,0]},"unsound_first":[]}
+exit 0 (02:22:08)
+== slfuzz 30 1000 gov (02:22:08)
+{"mode":"gov","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":0,"segments":610,"units":32230,"witness_bytes":10434192,"max_witness":31221,"leaves_verified":77251,"tree_nodes":107141,"sl_hashes":341851,"session_hashes":162479,"operator_iterations":14165,"liq_units_proven":0,"gov_units_proven":[1088, 1898, 779, 8285, 759, 2586],"first_bad":""}
+exit 0 (02:22:57)
+TDONE

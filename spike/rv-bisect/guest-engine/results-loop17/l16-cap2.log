@@ -1,0 +1,6 @@
+== slmigcap 64 16 8 64 8 (00:16:12)
+{"ok":true,"status":0,"accounts":64,"markets":16,"oracles":8,"live_orders":4096,"positions":1024,"max_level_orders":1,"rejected_setup_ops":0,"snapshot_words":214461,"mnwits_leaves":23494,"root":"6b0c9fd6f04baba28362e997b1f96c235d18c6eaf132ecc06f755e21d74fddef","root_eq_host":true,"export_s":0.002,"migrate_host_s":0.103,"migrate_heap_peak_live":9023104,"migrate_heap_top":11708992}
+digest b98ba00d55777bb324bca9b57b8d702370b379863b52d1191dd92bde7f57173a:214461
+    Finished `release` profile [optimized] target(s) in 1m 18s
+e3e5db11782d2daa62e8041ae7cad92e17944593  /data/hark/spike-rv/loop16c/sl/cap-64-16-8-64-8/rvengine-emb
+== migsail 64 16 8 64 8 (00:17:31)

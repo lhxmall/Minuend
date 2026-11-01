@@ -1,0 +1,9 @@
+== slpoc18 4000 (02:31:13)
+{"ok":true,"cases":[{"case":"P1 vote after a balance change: snapshot weight 2000 (balance 500)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":4,"iterations":1,"witness_bytes":2178},
+{"case":"P2 finalize, 10 exception holders (passes: taker fee -> 5)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":5,"iterations":2,"witness_bytes":6514},
+{"case":"P2 finalize witness missing one exception holder","ok":true,"status":13,"need":"Some(PexcOf(1))"},
+{"case":"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes","ok":true,"status":0,"ev":[19, 2147483648]},
+{"case":"P3 R18-M1 finalize with 4000 voters","ok":true,"status":0,"needs":5,"witness_bytes":1528754},
+{"case":"P3 R18-M1 finalize with 4097 voters","ok":true,"status":12,"needs":4,"witness_bytes":1566060}]}
+exit 0 (02:31:15)
+TDONE

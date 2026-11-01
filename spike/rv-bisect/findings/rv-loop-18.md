@@ -5,7 +5,7 @@ governance + gov workload), fa479d1 (slpoc18, gov counters), + this round's clos
 Design: `docs/rv-stateless-guest.md` §2 (leaf table), §4 (governance guards), §11, §12.1 (R18-I2 note), §12.3
 (implemented form). Box logs: `guest-engine/results-loop18/`. Notes: work/rv-rollup-notes.md "Loop round 18".
 
-Status: DRAFT (see "What remains").
+Status: **FINAL** (2026-11-01, closed in round 19 after the user stop / resume: R18-M1 fixed in round 19, d1be889).
 
 ## What was done
 
@@ -38,7 +38,7 @@ Status: DRAFT (see "What remains").
 
 | id | sev | where | what | status |
 |---|---|---|---|---|
-| R18-M1 | M | stateless Finalize | a proposal's removal drops its entry from every exception list, so Finalize must load every exception holder (voters + accounts whose balance changed since creation). Above SL_MAX_ACCOUNTS (4096) records the witness is refused (BADWIT): such a proposal can never be finalized statelessly, stays live, and keeps one of the 64 proposal slots; 64 of them block CreateProposal for good. Reachable by legitimate use (a popular vote with > 4096 voters) or by an attacker with > 4096 funded PERP ids (the stateless image has no global account cap, R16-I3). PoC `slpoc18` P3: 4000 voters -> finalize status 0 (witness 1.5 MB), 4097 -> BADWIT | **open** (design decision). Options: (a) lazy dead entries (ignored when read, pruned on touch) with the stateless lineage as its own reference (as R18-I2 (a)); (b) a chunked Finalize (consensus change: a finalize unit plus cleanup units, each bounded); (c) raise the per-segment account bound for Finalize only (witness size ~380 B / holder); **(d, recommended)** move each proposal's exceptions into a per-proposal sub-SMT whose root is a field of its `prop:` leaf: Finalize deletes the leaf and the whole sub-tree with it (O(1)), a Vote updates one sub-tree path, a balance change one path in each live proposal's sub-tree (<= 64) -- the reference stays a pure function of the session state |
+| R18-M1 | M | stateless Finalize | a proposal's removal drops its entry from every exception list, so Finalize must load every exception holder (voters + accounts whose balance changed since creation). Above SL_MAX_ACCOUNTS (4096) records the witness is refused (BADWIT): such a proposal can never be finalized statelessly, stays live, and keeps one of the 64 proposal slots; 64 of them block CreateProposal for good. Reachable by legitimate use (a popular vote with > 4096 voters) or by an attacker with > 4096 funded PERP ids (the stateless image has no global account cap, R16-I3). PoC `slpoc18` P3: 4000 voters -> finalize status 0 (witness 1.5 MB), 4097 -> BADWIT | **fixed in round 19** (d1be889) with option (d): exception sub-trees per proposal, root in `pglob:0`; slpoc18 P3 now finalizes 4000 / 4097 / 20 000 voters with a 10–12 KB witness; see rv-loop-19. Options considered: (a) lazy dead entries (ignored when read, pruned on touch) with the stateless lineage as its own reference (as R18-I2 (a)); (b) a chunked Finalize (consensus change: a finalize unit plus cleanup units, each bounded); (c) raise the per-segment account bound for Finalize only (witness size ~380 B / holder); **(d, recommended)** move each proposal's exceptions into a per-proposal sub-SMT whose root is a field of its `prop:` leaf: Finalize deletes the leaf and the whole sub-tree with it (O(1)), a Vote updates one sub-tree path, a balance change one path in each live proposal's sub-tree (<= 64) -- the reference stays a pure function of the session state |
 | R18-I1 | I | MNWIT-S format | `pglob:0` is always present: every MNWIT-S root changes (also of states without governance), the migration root included | consensus-format change of the spike, documented (§2) |
 | R18-I2 | I | design §12.1 (oracle) | lazy unbonding (an `orep:` entry carries its oracle's bond epoch / unlock height and stops counting by itself) cannot match a reference root computed from the session state: the session's `prune_oracle_unbonding` removes the oracle's reports from every market at the expiry height, the stateless leaf keeps them until touched | documented in §12.1 with options (stateless lineage as its own reference / eager expiry queue / upstream change: expiry removes only the bond) |
 | R18-I3 | I | cost | every PERP balance change (GovDeposit / GovWithdraw / CreateMarket fee) now loads `pglob:` with every live `prop:` (≤ 64 records, ~150 B each) and the account's `pexc:` | accepted; gov workload max witness 31 KB |
@@ -52,8 +52,23 @@ cannot change balance or vote, so they have no entry); the R6-H2 rule (inputs: a
 from `prop:` + deltas); a Finalize of a proposal created in the same segment (n_exc at load 0, every later holder is
 loaded); extra valid records (more `pexc:` / `pglob:` change nothing: sladv `extra:valid` all correct).
 
-Totals: **C 0 · H 0 · M 1 (open) · L 0 · I 4**.
+Totals: **C 0 · H 0 · M 1 (fixed in round 19) · L 0 · I 4**.
 
 ## Tests
 
-(filled below)
+Logs: `guest-engine/results-loop18/` (box /data/hark/logs/rv). Binaries: target-l18-host 68937b6d (first gov build) /
+2e937813 (+ slpoc18, counters, P4).
+
+| what | result | log |
+|---|---|---|
+| first gov runs (68937b6d) | slfuzz 5x200 gov 5/5; sldiff 1 gov no differing segment; sladv 2x150 gov 1 480 cases, 8 "unsound" = `light:` user-account harness artifact (fixed in 2b3d815) | l18-g1.log |
+| gov suite | slpoc18 4000 ok (P1, P2, P2-missing-holder MISSING, P3 4000 ok 1.5 MB / 4097 BADWIT, P4 later); slfuzz gov 40x300 40/40, 20x1000 20/20, 100x300 100/100, 30x1000 30/30 (gov_units_proven e.g. [1178, 1747, 1575, 7443, 703, 2651] = create ok / rej, vote ok / rej, finalize ok / rej); sladv gov 10x300 12 474 + 20x300 25 303 cases **0 unsound** | l18-g2.log, l18-g3.log |
+| migration of gov states | slmiggov 30x300 30/30 (115 migrations, 107 with exception lists), 10x1000 10/10 | l18-g3.log |
+| P4 (R6-H2 evaluated statelessly) | ok: fresh zero-weight voter beyond \|snapshot\| + 64 refused (19), the holder votes | l18-p4.log |
+| regression | slpoc15 / slcaps ok; slpoc17 20/20 (6 ADL segments refused, also with extra holders); slmig 20/20; slfuzz gen 60/60, perp 40/40, liq 10/10 (107 ADL segments unsupported), wd 30/30; sladv perp 6 351 cases 0 unsound | l18-reg.log |
+| guard mutants (loop18-mut.py, started before P4 existed) | **6 / 10 killed**: finalize-count-off, balance-guard-off, populate-voted-off, populate-weight-zero, new-prop-snap-count+1, vote-count-delta-off. Survived: vote-pexc-off (equivalent: the run loop's R6-H2 input check also needs the voter's list; vote-pexc-both-off added in 52e5bd9, its run (l18-mut2) was killed by the stop), r6h2-off (P4 was added after the run had started), pexc-without-pglob and create-pglob-off (defence in depth: every use of a list / a created proposal is guarded by `pglob:` again in pre / post). Re-run on the round-19 code: rv-loop-19 | l18-mut.log |
+
+## What remains
+
+- Stateless oracle report / stake / slash / funding (§12.1; R18-I2 obstacle) and the ADL rank index (§12.2): round 19+.
+- Production items (DA, stateless export path, global caps in the stateless image: R16-I3).
