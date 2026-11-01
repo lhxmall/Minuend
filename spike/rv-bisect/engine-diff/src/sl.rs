@@ -226,6 +226,104 @@ pub fn perp_batch(seed: u64, n_ops: u32) -> Vec<u32> {
     g.words()
 }
 
+/// round 18: the 'gov' workload (MNP2 on the REAL engine, gov::GB): PERP gov deposits / withdrawals by the fixture
+/// holders (accounts 4..=9: 100 000 PERP) and others, proposals (valid / risky params, unknown market, delist, by
+/// holders and by ids below PROPOSAL_MIN_STAKE), votes (holders, zero-weight ids, repeats, unknown ids, after a balance
+/// change: the snapshot weight differs from the balance), SetSeq jumps past the 20 000-seq deadline (and a refused
+/// backwards one), finalize (early, late, unknown / finalized id), some trading and deposits.
+pub fn gov_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+    use crate::gov::GB;
+    let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+    let n_acc = 10 + rng.below(6) as u32;
+    let mut g = GB::new(n_acc, mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG);
+    let mid = 100_000 * PRICE_SCALE as i64;
+    let dollar = PRICE_SCALE as i64;
+    for a in 1..n_acc {
+        g.op(GB::w_dep(a, 20_000 * USD_SCALE as i64));
+    }
+    let mut nonce: Vec<u64> = vec![0; n_acc as usize];
+    let mut n_done = 0u32;
+    while n_done < n_ops {
+        n_done += 1;
+        let a = 1 + rng.below((n_acc - 1) as u64) as u32;
+        let holder = 4 + rng.below(6) as u32;
+        let next = g.eng.state.next_proposal_id;
+        let pid = if next > 1 && rng.below(8) != 0 { 1 + rng.below(next - 1) } else { next + rng.below(2) };
+        match rng.below(100) {
+            0..=11 => {
+                let amt = match rng.below(4) {
+                    0 => 1_000 + rng.below(1_000),
+                    1 => 0,
+                    _ => rng.below(5_000),
+                };
+                g.op(GB::w_gdep(if rng.below(3) == 0 { holder } else { a }, amt));
+            }
+            12..=21 => {
+                let who = if rng.below(2) == 0 { holder } else { a };
+                let bal = g.eng.state.perp_balances.get(&g.ids[who as usize]).copied().unwrap_or(0) as u64;
+                let n = nonce[who as usize];
+                let nn = if rng.below(8) == 0 { n } else { n + 1 };
+                let amt = match rng.below(5) {
+                    0 => bal,
+                    1 => bal / 2,
+                    2 => 0,
+                    _ => rng.below(3_000),
+                };
+                if g.applied(GB::w_gwd(who, amt, nn)) {
+                    nonce[who as usize] = nn;
+                }
+            }
+            22..=31 => {
+                let who = if rng.below(4) == 0 { a } else { holder };
+                let m = match rng.below(8) {
+                    0 => 99,
+                    1 => 2,
+                    _ => 1,
+                };
+                let (key, value) = match rng.below(6) {
+                    0 => (0u8, 500 + rng.below(2_000)),
+                    1 => (1u8, 100 + rng.below(800)),
+                    2 => (2u8, rng.below(40)),
+                    3 => (3u8, rng.below(60)),
+                    4 => (4u8, rng.below(2)),
+                    _ => (2u8, 100_000),
+                };
+                g.op(GB::w_prop(who, m, key, value));
+            }
+            32..=61 => {
+                let voter = match rng.below(5) {
+                    0 => rng.below(n_acc as u64) as u32,
+                    1 => a,
+                    _ => holder,
+                };
+                g.op(GB::w_vote(voter, pid, rng.below(3) != 0));
+            }
+            62..=66 => {
+                let sq = g.eng.state.seq;
+                let to = if rng.below(10) == 0 { sq.saturating_sub(1) } else { sq + minuend_types::PROPOSAL_DURATION_SEQS / 2 + rng.below(minuend_types::PROPOSAL_DURATION_SEQS) };
+                g.op(GB::w_seq(to));
+            }
+            67..=77 => {
+                g.op(GB::w_fin(a, pid));
+            }
+            78..=89 => {
+                let px = mid + (rng.below(11) as i64 - 5) * dollar * 100;
+                let mk = 1 + rng.below((n_acc - 1) as u64) as u32;
+                let w1 = g.w_place(mk, rng.below(2) == 0, false, px, QTY_SCALE / 1000, 1);
+                g.op(w1);
+                if rng.below(2) == 0 {
+                    let w2 = g.w_place(a, rng.below(2) == 0, rng.below(2) == 0, px, QTY_SCALE / 1000, 1);
+                    g.op(w2);
+                }
+            }
+            _ => {
+                g.op(GB::w_dep(a, USD_SCALE as i64));
+            }
+        }
+    }
+    g.words()
+}
+
 /// session reference: segments (flags zeroed) with pre-states, post MNWIT-S roots and events
 pub fn session_refs(w: &[u32], s: u32) -> Vec<SegRef> {
     let n_acc = w[1];
@@ -318,6 +416,18 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 }
                 mnpilot::BatchOp::Commit { .. } => {
                     n.insert(Need::Acmt(a));
+                }
+                // round 18
+                mnpilot::BatchOp::CreateProposal { market, .. } => {
+                    n.insert(Need::Pglob);
+                    n.insert(Need::Perp);
+                    n.insert(Need::Market(market));
+                }
+                mnpilot::BatchOp::Vote { .. } => {
+                    n.insert(Need::Pexc(a));
+                }
+                mnpilot::BatchOp::Finalize { id, .. } => {
+                    n.insert(Need::PexcOf(id));
                 }
                 _ => {}
             }
@@ -589,6 +699,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
             perp_batch(s, ord)
         } else if mode == "liq" {
             liq_sl_batch(s, ord)
+        } else if mode == "gov" {
+            gov_batch(s, ord)
         } else {
             let makers = 4 + (s % 9) as u32;
             let levels = 1 + (s % 25) as u32;
@@ -597,7 +709,7 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
         };
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(200) as u32;
-        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
+        let refs = if mode == "perp" || mode == "gov" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         let mut batch_ok = true;
         for (k, r) in refs.iter().enumerate() {
             segs += 1;
@@ -788,10 +900,10 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
         let makers = 4 + (s % 9) as u32;
         let levels = 1 + (s % 25) as u32;
         let per = 1 + (s % 3) as u32;
-        let w = if mode == "wd" { wd_batch(s, ord) } else if mode == "perp" { perp_batch(s, ord) } else if mode == "liq" { liq_sl_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
+        let w = if mode == "wd" { wd_batch(s, ord) } else if mode == "perp" { perp_batch(s, ord) } else if mode == "liq" { liq_sl_batch(s, ord) } else if mode == "gov" { gov_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
         let mut rng = Rng(s.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let size = 8 + rng.below(64) as u32;
-        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
+        let refs = if mode == "perp" || mode == "gov" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         // previous segment's pre-state (wrong-root attack)
         let mut prev_pre: Option<mnpilot::state::ChainState> = None;
         for r in refs.iter() {
@@ -806,7 +918,11 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
             for nd in needs.iter() {
                 let mut n2 = needs.clone();
                 n2.remove(nd);
-                let (o2, ev2) = run_sl(&r.seg, &b.build(&n2));
+                // round 18: an exception list brings pglob: in the builder; the omission test drops it for real
+                b.t_omit_pglob.set(*nd == Need::Pglob);
+                let w2 = b.build(&n2);
+                b.t_omit_pglob.set(false);
+                let (o2, ev2) = run_sl(&r.seg, &w2);
                 let kind = match nd {
                     Need::Account(_) => "omit:account",
                     Need::Market(_) => "omit:market",
@@ -822,6 +938,9 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Xsrc(_) => "omit:xsrc",
                     Need::Acmt(_) => "omit:acmt",
                     Need::Cmt(_) => "omit:cmt",
+                    Need::Pglob => "omit:pglob",
+                    Need::Pexc(_) => "omit:pexc",
+                    Need::PexcOf(_) => "omit:pexc-of",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
             }
@@ -831,6 +950,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                 n3.insert(Need::Account(*id));
                 n3.insert(Need::Aord(*id));
                 n3.insert(Need::Wdl(*id)); // round 15
+                n3.insert(Need::Pexc(*id)); // round 18 (brings pglob: + every live proposal)
             }
             n3.insert(Need::Market(1));
             n3.insert(Need::Market(2));
@@ -1180,7 +1300,8 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                 a.rec("light:forged-collateral", r, &ox, &evx, true);
             }
             if let Some(x) = needs.iter().find_map(|n| match n {
-                Need::Account(id) if *id != ins && r.pre.accounts.contains_key(id) => Some(*id),
+                // round 18: an account whose exception list is sent comes with its full record (builder): not this case
+                Need::Account(id) if *id != ins && r.pre.accounts.contains_key(id) && !needs.contains(&Need::Pexc(*id)) && !needs.iter().any(|n| matches!(n, Need::PexcOf(_))) => Some(*id),
                 _ => None,
             }) {
                 let mut n2 = needs.clone();
@@ -2113,11 +2234,12 @@ pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
             "perp" => perp_batch(s, ord),
             "wd" => wd_batch(s, ord),
             "liq" => liq_sl_batch(s, ord),
+            "gov" => gov_batch(s, ord),
             _ => gen(s, 4 + (s % 9) as u32, 1 + (s % 25) as u32, 1 + (s % 3) as u32, ord, s % 2 == 0).0,
         };
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(200) as u32;
-        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
+        let refs = if mode == "perp" || mode == "gov" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         for (k, r) in refs.iter().enumerate() {
             let b = WitBuilder::new(&r.pre);
             let res = operate(&b, &r.seg);
@@ -2265,11 +2387,12 @@ pub fn sldiff(seed: u64, ord: u32, mode: &str) -> String {
         "liq" => liq_sl_batch(seed, ord),
         "perp" => perp_batch(seed, ord),
         "wd" => wd_batch(seed, ord),
+        "gov" => gov_batch(seed, ord),
         _ => gen(seed, 4 + (seed % 9) as u32, 1 + (seed % 25) as u32, 1 + (seed % 3) as u32, ord, seed % 2 == 0).0,
     };
     let mut rng = Rng(seed.wrapping_mul(0x51_7CC1_B727_220A) | 1);
     let size = 1 + rng.below(200) as u32;
-    let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
+    let refs = if mode == "perp" || mode == "gov" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
     // split an event stream into units
     let units = |ev: &[u32]| -> Vec<Vec<u32>> {
         let mut out = Vec::new();

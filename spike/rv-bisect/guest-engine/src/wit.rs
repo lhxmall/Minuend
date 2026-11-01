@@ -167,6 +167,11 @@ pub fn prop_kid(b: &mut Buf, id: u64) {
     b.mark_kid();
 }
 pub fn prop_leaf(b: &mut Buf, id: u64, p: &crate::state::Proposal) {
+    prop_leaf_n(b, id, p, p.voted.len(), p.weight_snapshot.len());
+}
+/// loop round 18 (stateless governance): the same leaf with the voter / snapshot counts given explicitly (the stateless
+/// image holds a proposal's voter set and weight snapshot only for the loaded accounts)
+pub fn prop_leaf_n(b: &mut Buf, id: u64, p: &crate::state::Proposal, n_voted: usize, n_snapshot: usize) {
     prop_kid(b, id);
     b.raw(b":");
     b.hex(&p.creator.0);
@@ -181,8 +186,8 @@ pub fn prop_leaf(b: &mut Buf, id: u64, p: &crate::state::Proposal) {
         p.supply_at_create,
         p.yes,
         p.no,
-        p.voted.len(),
-        p.weight_snapshot.len()
+        n_voted,
+        n_snapshot
     );
 }
 pub fn cmt_kid(b: &mut Buf, h: &[u8; 32]) {

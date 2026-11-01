@@ -306,6 +306,99 @@ pub fn acmt_leaf(b: &mut Buf, id: &AccountId, es: &[AcmtE]) {
 pub fn acmt_of(s: &ChainState, id: &AccountId) -> Vec<AcmtE> {
     s.commits.iter().filter(|(_, e)| e.account == *id).map(|(h, e)| (*h, e.ttl_height)).collect()
 }
+// ---- loop round 18: governance (design §12.3, round-18 form) ----
+/// one exception entry of an account: (proposal id, snapshot weight, voted)
+pub type PexcE = (u64, u128, bool);
+pub fn pexc_kid(b: &mut Buf, id: &AccountId) {
+    b.n = 0;
+    let _ = write!(b, "pexc:");
+    hexw(b, &id.0);
+    mark(b);
+}
+pub fn pexc_digest(es: &[PexcE]) -> H {
+    let mut h = Sha256::new();
+    for (p, w, v) in es {
+        h.update(p.to_le_bytes());
+        h.update(w.to_le_bytes());
+        h.update([*v as u8]);
+    }
+    h.finalize().into()
+}
+/// `pexc:<id>:<n>:<sha256(entries by proposal id)>` (absent = none): the live proposals for which the account's
+/// snapshot weight differs from its current PERP balance or which it voted on. Every other (account, live proposal)
+/// pair has weight = current balance and no vote, so a Vote / balance change reads one record per account and a
+/// proposal is created without copying the PERP ledger (the session's weight_snapshot). <= 64 entries (live cap).
+pub fn pexc_leaf(b: &mut Buf, id: &AccountId, es: &[PexcE]) {
+    pexc_kid(b, id);
+    let _ = write!(b, ":{}:", es.len());
+    hexw(b, &pexc_digest(es));
+}
+/// the exception list of `a` over the proposals of `s` (reference AND guest: in the stateless image the proposals map
+/// is complete -- every live proposal is loaded with `pglob:` -- and their snapshot / voter sets hold `a` iff the
+/// session's do, for every account whose `pexc:` record is loaded)
+pub fn pexc_of(s: &ChainState, a: &AccountId) -> Vec<PexcE> {
+    let bal = s.perp_balances.get(a).copied().unwrap_or(0);
+    let mut v = Vec::new();
+    for (id, p) in &s.proposals {
+        let w = p.weight_snapshot.get(a).copied().unwrap_or(0);
+        let voted = p.voted.contains(a);
+        if voted || w != bal {
+            v.push((*id, w, voted));
+        }
+    }
+    v
+}
+/// every account's exception list (reference): candidates = voters, snapshot members, non-zero PERP holders
+pub fn pexc_all(s: &ChainState) -> BTreeMap<AccountId, Vec<PexcE>> {
+    let mut out = BTreeMap::new();
+    if s.proposals.is_empty() {
+        return out;
+    }
+    let mut cand: BTreeSet<AccountId> = s.perp_balances.iter().filter(|(_, b)| **b != 0).map(|(a, _)| *a).collect();
+    for p in s.proposals.values() {
+        cand.extend(p.voted.iter().copied());
+        cand.extend(p.weight_snapshot.keys().copied());
+    }
+    for a in cand {
+        let v = pexc_of(s, &a);
+        if !v.is_empty() {
+            out.insert(a, v);
+        }
+    }
+    out
+}
+pub fn pglob_kid(b: &mut Buf) {
+    b.n = 0;
+    let _ = write!(b, "pglob:0");
+    mark(b);
+}
+/// `pglob:0:<next proposal id>:<non-zero PERP holders>:<n live>:<sha256((id u64, n_exc u32) by id)>` (always present):
+/// the proposal cursor, the live-proposal set (cap 64) with each proposal's exception count (the accounts holding a
+/// `pexc:` entry for it: a Finalize loads all of them), and the snapshot size a new proposal records
+pub fn pglob_leaf(b: &mut Buf, next: u64, holders: u64, es: &[(u64, u32)]) {
+    pglob_kid(b);
+    let mut h = Sha256::new();
+    for (id, n) in es {
+        h.update(id.to_le_bytes());
+        h.update(n.to_le_bytes());
+    }
+    let d: H = h.finalize().into();
+    let _ = write!(b, ":{}:{}:{}:", next, holders, es.len());
+    hexw(b, &d);
+}
+pub fn perp_holders(s: &ChainState) -> u64 {
+    s.perp_balances.values().filter(|b| **b != 0).count() as u64
+}
+/// (id, exception count) of every live proposal (reference)
+pub fn pglob_entries(s: &ChainState, all: &BTreeMap<AccountId, Vec<PexcE>>) -> Vec<(u64, u32)> {
+    let mut n: BTreeMap<u64, u32> = s.proposals.keys().map(|k| (*k, 0)).collect();
+    for es in all.values() {
+        for e in es {
+            *n.get_mut(&e.0).unwrap() += 1;
+        }
+    }
+    n.into_iter().collect()
+}
 fn kh(b: &Buf) -> (H, H) {
     wit::key_and_hash(b)
 }
@@ -454,6 +547,14 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         }
         for (id, p) in &s.proposals {
             wit::prop_leaf(&mut b, *id, p);
+            push(&b);
+        }
+        // round 18
+        let all = pexc_all(s);
+        pglob_leaf(&mut b, s.next_proposal_id, perp_holders(s), &pglob_entries(s, &all));
+        push(&b);
+        for (a, es) in &all {
+            pexc_leaf(&mut b, a, es);
             push(&b);
         }
         for (h, e) in &s.commits {
@@ -853,6 +954,12 @@ pub enum Need {
     Acmt(AccountId),
     /// round 16: one commit hash's `cmt:` record (present or proven absent)
     Cmt(H),
+    /// round 18: `pglob:0` with every live proposal's `prop:` record
+    Pglob,
+    /// round 18: an account's exception list `pexc:` (present or proven absent) -- with its account record
+    Pexc(AccountId),
+    /// round 18: the `pexc:` records of every account holding an entry for this proposal (a Finalize deletes them)
+    PexcOf(u64),
 }
 
 /// Result of a stateless segment run.
@@ -914,6 +1021,15 @@ struct Sl {
     cmts: BTreeSet<H>,
     /// round 16: commit hashes in the partial state at load (live)
     cmt0: BTreeSet<H>,
+    /// round 18: `pglob:0` loaded: (non-zero PERP holders at load, live proposal -> exception count at load)
+    pglob: Option<(u64, BTreeMap<u64, u32>)>,
+    /// round 18: loaded exception lists (as loaded)
+    pexc: BTreeMap<AccountId, Vec<PexcE>>,
+    /// round 18: proposal -> (voters at load, snapshot size, voters in the partial state at load); a proposal created in
+    /// the segment gets (0, holders at creation, 0)
+    pcnt: BTreeMap<u64, (usize, usize, usize)>,
+    /// round 18: PERP balance at load of every loaded account
+    bal0: BTreeMap<AccountId, u128>,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -1000,6 +1116,10 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         acmt: BTreeMap::new(),
         cmts: BTreeSet::new(),
         cmt0: BTreeSet::new(),
+        pglob: None,
+        pexc: BTreeMap::new(),
+        pcnt: BTreeMap::new(),
+        bal0: BTreeMap::new(),
         verified: 0,
         leaf_hashes: 0,
     };
@@ -1481,6 +1601,121 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             sl.absent(&b)?;
         }
     }
+    // round 18: governance -- pglob:0 + every live proposal; exception lists
+    if bad!(r.bool()) {
+        let next = bad!(r.u64());
+        let holders = bad!(r.u64());
+        let n = bad!(r.u8()) as usize;
+        if n > 64 {
+            return Err(ST_SL_BADWIT);
+        }
+        let mut es: Vec<(u64, u32)> = Vec::with_capacity(n);
+        let mut cnt: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
+        for _ in 0..n {
+            let id = bad!(r.u64());
+            let nx = bad!(r.u32());
+            if es.last().is_some_and(|x| x.0 >= id) {
+                return Err(ST_SL_BADWIT);
+            }
+            es.push((id, nx));
+            let creator = AccountId(bad!(r.h32()));
+            let market = MarketId(bad!(r.u32()));
+            let key = bad!(ParamKey::from_u8(bad!(r.u8())));
+            let value = bad!(r.u64());
+            let created_seq = bad!(r.u64());
+            let deadline_seq = bad!(r.u64());
+            let supply_at_create = bad!(r.u128());
+            let yes = bad!(r.u128());
+            let no = bad!(r.u128());
+            let vn = bad!(r.u32()) as usize;
+            let sn = bad!(r.u32()) as usize;
+            let p = crate::state::Proposal {
+                creator,
+                market,
+                key,
+                value,
+                created_seq,
+                deadline_seq,
+                supply_at_create,
+                yes,
+                no,
+                voted: BTreeSet::new(),
+                weight_snapshot: BTreeMap::new(),
+            };
+            wit::prop_leaf_n(&mut b, id, &p, vn, sn);
+            sl.check(&b, true)?;
+            s.proposals.insert(id, p);
+            cnt.insert(id, (vn, sn));
+        }
+        pglob_leaf(&mut b, next, holders, &es);
+        sl.check(&b, true)?;
+        s.next_proposal_id = next;
+        sl.pglob = Some((holders, es.iter().copied().collect()));
+        for (id, (vn, sn)) in cnt {
+            sl.pcnt.insert(id, (vn, sn, 0));
+        }
+    }
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let id = AccountId(bad!(r.h32()));
+        let k = bad!(r.u8()) as usize;
+        // the account's balance is an input of every entry-less pair: its record must be loaded
+        if k > 64 || sl.pexc.contains_key(&id) || !sl.accts.contains_key(&id) {
+            return Err(ST_SL_BADWIT);
+        }
+        let mut es: Vec<PexcE> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let pid = bad!(r.u64());
+            let wt = bad!(r.u128());
+            let v = bad!(r.bool());
+            if es.last().is_some_and(|x| x.0 >= pid) || !s.proposals.contains_key(&pid) {
+                return Err(ST_SL_BADWIT);
+            }
+            es.push((pid, wt, v));
+        }
+        if k == 0 {
+            pexc_kid(&mut b, &id);
+            sl.absent(&b)?;
+        } else {
+            pexc_leaf(&mut b, &id, &es);
+            sl.check(&b, true)?;
+        }
+        sl.pexc.insert(id, es);
+    }
+    // a loaded exception list needs the complete proposal set (an entry-less pair means "weight = balance, no vote"
+    // only against the live set)
+    if !sl.pexc.is_empty() && sl.pglob.is_none() {
+        return Err(ST_SL_BADWIT);
+    }
+    // the partial proposals hold, for every account with a loaded exception list, exactly the session's snapshot
+    // weight (non-zero only, like the session's copy) and vote membership
+    for (a, es) in &sl.pexc {
+        let bal = s.perp_balances.get(a).copied().unwrap_or(0);
+        for (id, p) in s.proposals.iter_mut() {
+            let (wt, v) = es.iter().find(|e| e.0 == *id).map(|e| (e.1, e.2)).unwrap_or((bal, false));
+            if wt != 0 {
+                p.weight_snapshot.insert(*a, wt);
+            }
+            if v {
+                p.voted.insert(*a);
+            }
+        }
+    }
+    for (id, p) in &s.proposals {
+        if let Some(c) = sl.pcnt.get_mut(id) {
+            c.2 = p.voted.len();
+            // a forged count below the loaded voters is not a session state
+            if c.0 < c.2 {
+                return Err(ST_SL_BADWIT);
+            }
+        }
+    }
+    for a in sl.accts.keys() {
+        sl.bal0.insert(*a, s.perp_balances.get(a).copied().unwrap_or(0));
+    }
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
@@ -1760,9 +1995,66 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
         }
         // round 17: book-path liquidation; the target's reads are checked by liq_pre (needs the batch's account table)
         Liquidate { .. } => need_acct(sl, s, &author).map_err(Ok)?,
+        // ---- round 18: governance ----
+        // create: the live count (cap 64) and the next id (pglob: + every live proposal), the market (present or
+        // absent), the creator's PERP balance (its record), the supply (perp:0); the snapshot size comes from pglob:
+        CreateProposal { market, .. } => {
+            need_acct(sl, s, &author).map_err(Ok)?;
+            need_gov(sl, None)?;
+            if !sl.perp {
+                return Err(Ok(Need::Perp));
+            }
+            if !sl.markets.contains_key(&market) {
+                return Err(Ok(Need::Market(market)));
+            }
+        }
+        // vote: the proposal (or its absence: every live one is loaded), the voter's snapshot weight / vote (pexc:
+        // + the record's balance); the R6-H2 zero-voter rule reads the proposal's counts (run loop)
+        Vote { .. } => {
+            need_acct(sl, s, &author).map_err(Ok)?;
+            need_gov(sl, Some(&author))?;
+        }
+        // finalize: the proposal, its market (params rewritten when it passes), and every exception list holding an
+        // entry for it (the proposal's removal drops those entries)
+        Finalize { id, .. } => {
+            need_gov(sl, None)?;
+            if let Some(p) = s.proposals.get(&id) {
+                if !sl.markets.contains_key(&p.market.0) {
+                    return Err(Ok(Need::Market(p.market.0)));
+                }
+                let nx = sl.pglob.as_ref().and_then(|g| g.1.get(&id).copied()).unwrap_or(0) as usize;
+                let have = sl.pexc.values().filter(|es| es.iter().any(|e| e.0 == id)).count();
+                if have != nx {
+                    return Err(Ok(Need::PexcOf(id)));
+                }
+            }
+        }
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
     }
     Ok(())
+}
+
+/// round 18: `pglob:` (+ every live proposal) loaded, and the exception list of `a`
+fn need_gov(sl: &Sl, a: Option<&AccountId>) -> Result<(), Result<Need, u32>> {
+    if sl.pglob.is_none() {
+        return Err(Ok(Need::Pglob));
+    }
+    if let Some(a) = a {
+        if !sl.pexc.contains_key(a) {
+            return Err(Ok(Need::Pexc(*a)));
+        }
+    }
+    Ok(())
+}
+/// round 18: non-zero PERP holders now (pglob count at load + the loaded accounts' transitions)
+fn holders_now(sl: &Sl, s: &ChainState) -> u64 {
+    let h0 = sl.pglob.as_ref().map(|g| g.0).unwrap_or(0) as i64;
+    let mut d = 0i64;
+    for (a, b0) in &sl.bal0 {
+        let b1 = s.perp_balances.get(a).copied().unwrap_or(0);
+        d += (b1 != 0) as i64 - (*b0 != 0) as i64;
+    }
+    (h0 + d) as u64
 }
 
 /// round 17 (stateless liquidation, book path): the reads of `liquidate_inner` / `liquidate_book_path` for target `t`
@@ -1896,6 +2188,18 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
         let op = crate::decode_op(&ow);
         let author = op.signer().and_then(acct_of);
+        // round 18: the SetSeq test fixture (proposal deadlines are 20 000 applied units away) -- glob: only; refused in
+        // prod exactly like the session (run_segment: BadAccount; neither applied nor seq-advancing when it succeeds)
+        if let crate::BatchOp::SetSeq { seq: x } = op {
+            if !cfg!(feature = "prod") && x >= eng.state.seq {
+                eng.state.seq = x;
+                ev(crate::EV_SEQ);
+            } else {
+                out.rejected += 1;
+                ev(crate::reason_code(&RejectReason::BadAccount));
+            }
+            continue;
+        }
         // round 16: the commit hash of a Commit / commit_ref + inner op of a Reveal (ext area; unreadable -> the
         // engine refuses the unit, nothing to load)
         let id32 = |e: &[u32]| -> H {
@@ -1979,6 +2283,13 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                         need_acct(&sl, &eng.state, &a).map_err(Ok)?;
                         need_acmt(&sl, &a)?;
                     }
+                    // round 18: the session's R6-H2 zero-voter rule (state_cap_ok) runs on a Reveal's inner Vote too,
+                    // whether or not the inner op runs: its inputs (the proposal, the author's weight / vote) are loaded
+                    let vote = |o: &crate::BatchOp| matches!(o, crate::BatchOp::Vote { .. });
+                    if vote(&op) || inner.is_some_and(|io| vote(&io)) {
+                        need_acct(&sl, &eng.state, &a).map_err(Ok)?;
+                        need_gov(&sl, Some(&a))?;
+                    }
                     Ok(())
                 });
             // round 17: the liquidation target's reads (the target index is resolved like dispatch does)
@@ -2016,6 +2327,15 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     match *o {
                         crate::BatchOp::GovWithdraw { amount: 0, .. } => st.perp_balances.contains_key(&a),
                         crate::BatchOp::Commit { .. } => live < SL_MAX_ACMT,
+                        // round 18: R6-H2 (session state_cap_ok) on the proposal's counts
+                        crate::BatchOp::Vote { id, .. } => match st.proposals.get(&id) {
+                            Some(p) => {
+                                let (vn0, sn, pv0) = sl.pcnt.get(&id).copied().unwrap_or((0, 0, 0));
+                                let vn = vn0 + p.voted.len() - pv0;
+                                p.weight_snapshot.contains_key(&a) || p.voted.contains(&a) || vn < sn + crate::MAX_ZERO_VOTERS
+                            }
+                            None => true,
+                        },
                         _ => true,
                     }
                 };
@@ -2083,7 +2403,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 ev(crate::WIT_DEPTH_CODE);
                 continue;
             }
-        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::Liquidate { .. } | crate::BatchOp::Bad) {
+        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::Liquidate { .. } | crate::BatchOp::CreateProposal { .. } | crate::BatchOp::Vote { .. } | crate::BatchOp::Finalize { .. } | crate::BatchOp::Bad) {
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
         }
@@ -2121,6 +2441,28 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 }
                 if let Some((ts, last)) = b.peeks.0.last() {
                     walk_check(&sl, b, m.0, ts.opposite().as_u8(), *last)?;
+                }
+            }
+            // round 18: a PERP balance moves only with pglob: (holder count) and the account's exception list loaded; a
+            // proposal created by the unit records the snapshot size (non-zero holders now)
+            for (a, b0) in &sl.bal0 {
+                if eng.state.perp_balances.get(a).copied().unwrap_or(0) != *b0 {
+                    if sl.pglob.is_none() {
+                        return Err(Need::Pglob);
+                    }
+                    if !sl.pexc.contains_key(a) {
+                        return Err(Need::Pexc(*a));
+                    }
+                }
+            }
+            let fresh: Vec<u64> = eng.state.proposals.keys().filter(|id| !sl.pcnt.contains_key(id)).copied().collect();
+            if !fresh.is_empty() {
+                if sl.pglob.is_none() {
+                    return Err(Need::Pglob);
+                }
+                let h = holders_now(&sl, &eng.state) as usize;
+                for id in fresh {
+                    sl.pcnt.insert(id, (0, h, 0));
                 }
             }
             // round 15: a withdrawal record can only appear for a loaded set (the author's, pre); catch-all
@@ -2481,6 +2823,51 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
             }
         }
     }
+    // round 18: governance -- exception lists recomputed on the (complete) proposal set, exception counts by delta,
+    // prop: leaves with their counts, pglob:0
+    if let Some((_, nx0)) = &sl.pglob {
+        let mut nx: BTreeMap<u64, i64> = s.proposals.keys().map(|id| (*id, nx0.get(id).copied().unwrap_or(0) as i64)).collect();
+        for (a, l0) in &sl.pexc {
+            let now = pexc_of(s, a);
+            for e in l0 {
+                if let Some(c) = nx.get_mut(&e.0) {
+                    *c -= 1;
+                }
+            }
+            for e in &now {
+                *nx.get_mut(&e.0).unwrap() += 1;
+            }
+            if now != *l0 {
+                if now.is_empty() {
+                    pexc_kid(&mut b, a);
+                    dels.push(kid_key(&b));
+                } else {
+                    pexc_leaf(&mut b, a, &now);
+                    puts.push(kh(&b));
+                }
+            }
+        }
+        let mut es: Vec<(u64, u32)> = Vec::with_capacity(nx.len());
+        for (id, c) in nx {
+            if c < 0 {
+                return Err(Need::PexcOf(id));
+            }
+            es.push((id, c as u32));
+        }
+        for (id, p) in &s.proposals {
+            let (vn0, sn, pv0) = sl.pcnt[id];
+            wit::prop_leaf_n(&mut b, *id, p, vn0 + p.voted.len() - pv0, sn);
+            puts.push(kh(&b));
+        }
+        for id in sl.pcnt.keys() {
+            if !s.proposals.contains_key(id) {
+                wit::prop_kid(&mut b, *id);
+                dels.push(kid_key(&b));
+            }
+        }
+        pglob_leaf(&mut b, s.next_proposal_id, holders_now(sl, s), &es);
+        puts.push(kh(&b));
+    }
     glob_leaf(&mut b, s.seq, s.height);
     puts.push(kh(&b));
     sl.leaf_hashes += puts.len() as u64 + dels.len() as u64;
@@ -2595,6 +2982,8 @@ pub struct WitBuilder<'a> {
     pub live_h: core::cell::Cell<u64>,
     /// round 16 (adversarial tests only): send level records WITHOUT their head order (unless needed by id)
     pub t_omit_head: core::cell::Cell<bool>,
+    /// round 18 (adversarial tests only): do not add `pglob:` for an exception list
+    pub t_omit_pglob: core::cell::Cell<bool>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -2625,7 +3014,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -2654,6 +3043,10 @@ impl<'a> WitBuilder<'a> {
         let mut xsrcs: BTreeSet<AccountId> = BTreeSet::new();
         let mut acmts: BTreeSet<AccountId> = BTreeSet::new();
         let mut cmts: BTreeSet<H> = BTreeSet::new();
+        // round 18
+        let mut pglob = false;
+        let mut pexcs: BTreeSet<AccountId> = BTreeSet::new();
+        let gov_all = if needs.iter().any(|n| matches!(n, Need::Pexc(_) | Need::PexcOf(_))) { pexc_all(s) } else { BTreeMap::new() };
         for n in needs {
             match *n {
                 Need::Account(a) => {
@@ -2703,7 +3096,24 @@ impl<'a> WitBuilder<'a> {
                 Need::Cmt(h) => {
                     cmts.insert(h);
                 }
+                Need::Pglob => pglob = true,
+                Need::Pexc(a) => {
+                    pexcs.insert(a);
+                    accts.insert(a);
+                }
+                Need::PexcOf(id) => {
+                    for (a, es) in &gov_all {
+                        if es.iter().any(|e| e.0 == id) {
+                            pexcs.insert(*a);
+                            accts.insert(*a);
+                        }
+                    }
+                }
             }
+        }
+        // an exception list is read against the complete proposal set
+        if !pexcs.is_empty() && !self.t_omit_pglob.get() {
+            pglob = true;
         }
         // a level brings its full trie path (bitmap updates) -- only for levels that exist
         let mut lv2 = BTreeSet::new();
@@ -2969,6 +3379,49 @@ impl<'a> WitBuilder<'a> {
                 None => rec.push(0),
             }
             wit::cmt_kid(&mut b, h);
+            keys.insert(kid_key(&b));
+        }
+        // ---- round 18 sections ----
+        if pglob {
+            rec.push(1);
+            rec.extend_from_slice(&s.next_proposal_id.to_le_bytes());
+            rec.extend_from_slice(&perp_holders(s).to_le_bytes());
+            rec.push(s.proposals.len() as u8);
+            let all = if gov_all.is_empty() { pexc_all(s) } else { gov_all.clone() };
+            let ent: BTreeMap<u64, u32> = pglob_entries(s, &all).into_iter().collect();
+            for (id, p) in &s.proposals {
+                rec.extend_from_slice(&id.to_le_bytes());
+                rec.extend_from_slice(&ent[id].to_le_bytes());
+                rec.extend_from_slice(&p.creator.0);
+                rec.extend_from_slice(&p.market.0.to_le_bytes());
+                rec.push(p.key.as_u8());
+                rec.extend_from_slice(&p.value.to_le_bytes());
+                rec.extend_from_slice(&p.created_seq.to_le_bytes());
+                rec.extend_from_slice(&p.deadline_seq.to_le_bytes());
+                rec.extend_from_slice(&p.supply_at_create.to_le_bytes());
+                rec.extend_from_slice(&p.yes.to_le_bytes());
+                rec.extend_from_slice(&p.no.to_le_bytes());
+                rec.extend_from_slice(&(p.voted.len() as u32).to_le_bytes());
+                rec.extend_from_slice(&(p.weight_snapshot.len() as u32).to_le_bytes());
+                wit::prop_kid(&mut b, *id);
+                keys.insert(kid_key(&b));
+            }
+            pglob_kid(&mut b);
+            keys.insert(kid_key(&b));
+        } else {
+            rec.push(0);
+        }
+        rec.extend_from_slice(&(pexcs.len() as u16).to_le_bytes());
+        for id in &pexcs {
+            let es = gov_all.get(id).cloned().unwrap_or_default();
+            rec.extend_from_slice(&id.0);
+            rec.push(es.len() as u8);
+            for (pid, w, v) in &es {
+                rec.extend_from_slice(&pid.to_le_bytes());
+                rec.extend_from_slice(&w.to_le_bytes());
+                rec.push(*v as u8);
+            }
+            pexc_kid(&mut b, id);
             keys.insert(kid_key(&b));
         }
         let keys: Vec<H> = keys.into_iter().collect();
