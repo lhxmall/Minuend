@@ -463,8 +463,13 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
 /// round 21: an ADVERSARIAL operator fixpoint -- the builder's forge flags as set by the caller, and the needs `deny`
 /// rejects are never supplied (the run is then reported as it stands: a refusal)
 pub fn operate_deny(b: &WitBuilder, seg: &[u32], deny: &dyn Fn(&Need) -> bool) -> (sl::SlOut, Vec<u32>) {
+    operate_deny_h(b, seg, deny, None)
+}
+/// round 23: with the height hook
+pub fn operate_deny_h(b: &WitBuilder, seg: &[u32], deny: &dyn Fn(&Need) -> bool, height: Option<u64>) -> (sl::SlOut, Vec<u32>) {
     let mut needs: BTreeSet<Need> = guess(seg).into_iter().filter(|n| !deny(n)).collect();
-    let mut last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), None);
+    b.live_h.set(height.unwrap_or(0).max(b.s.height));
+    let mut last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), height);
     for _ in 0..20_000u32 {
         if last.0.status != sl::ST_SL_MISSING {
             break;
@@ -473,7 +478,7 @@ pub fn operate_deny(b: &WitBuilder, seg: &[u32], deny: &dyn Fn(&Need) -> bool) -
         if deny(&n) || !needs.insert(n) {
             break;
         }
-        last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), None);
+        last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), height);
     }
     last
 }
@@ -492,6 +497,16 @@ pub fn operate_h(b: &WitBuilder, seg: &[u32], height: Option<u64>) -> Result<(BT
             let n = o.need.unwrap();
             if !needs.insert(n) {
                 return Err(format!("need loop: {:?} already supplied (iteration {})", n, it));
+            }
+            // round 23 (operator shortcut, not a guest rule): an expiry group the hook drops brings its records and
+            // their owners' indexes at once (the guest would ask for them one by one)
+            if let Need::Cexp(u) = n {
+                if u < height.unwrap_or(0) {
+                    for (h, e) in b.s.commits.iter().filter(|(_, e)| e.ttl_height == u) {
+                        needs.insert(Need::Cmt(*h));
+                        needs.insert(Need::Acmt(e.account));
+                    }
+                }
             }
             continue;
         }
@@ -3888,7 +3903,7 @@ pub fn slpoc22() -> String {
         let pre = mk_pre(12);
         let (post, ev_s) = sess_seg(&pre, &w, cap);
         let room = cap - 12;
-        set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w);
         set_caps(sl::SL_CAPS_PROD);
@@ -3903,7 +3918,7 @@ pub fn slpoc22() -> String {
         res.push(line);
         // P2: forged counts / omission (at the caps)
         if let (Some((needs, pre)), 12) = (needs, cap) {
-            set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+            set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
             let b = WitBuilder::new(&pre);
             let (mut runs, mut refused, mut wrong) = (0u32, 0u32, 0u32);
             for t in 1u8..=4 {
@@ -3946,7 +3961,7 @@ pub fn slpoc22() -> String {
         let pre = mk_pre(12);
         let w4 = seg_words2(&table, &[[7 | (3 << 8), 0, 0, 0, 0, 0, 0, 1], GB::w_gwd(3, 5, 1)], &[]);
         let (post, ev_s) = sess_seg(&pre, &w4, 11);
-        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w4);
         let (od, evd) = operate_deny(&b, &w4, &|n: &Need| *n == Need::Gcnt);
@@ -3975,7 +3990,7 @@ pub fn slpoc22() -> String {
         ext5.extend_from_slice(&[0u32; 16]);
         let w5 = seg_words2(&table, &[[21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0], [21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0]], &ext5);
         let (post, ev_s) = sess_seg(&pre, &w5, 11);
-        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w5);
         let (od, evd) = operate_deny(&b, &w5, &|n: &Need| *n == Need::Gcnt);
@@ -4013,4 +4028,493 @@ pub fn slpoc22() -> String {
     }
     let ok = res.iter().all(|l| l.contains("\"ok\":true"));
     format!("{{\"ok\":{},\"cases\":[{}]}}", ok, res.join(","))
+}
+
+// ------------------------------------------------------------------------------------------------
+// round 23: eager commit expiry (R16-I1 / R22-I2): `cexp:<u>` groups, stale cmt: deletion, MAX_STATE_COMMITS mirrored
+// ------------------------------------------------------------------------------------------------
+/// the 'cr' workload (MNP2 on the REAL engine, gov::GB, PERP holders 4..9): commit-reveal at BOUND heights -- every
+/// segment of `size` units runs at the height of `sched` (orc_sched), so commits are made with TTLs relative to the
+/// height they run at (mostly short: they expire within a few heights; some invalid: ttl = height or height + 17),
+/// reveals of pending commits (many after their expiry), re-commits of an expired hash by its author or another
+/// account, commits by non-holders (bond: code 19), GovDeposits (more bond room), deposits and trades. The generator's
+/// real engine follows the heights (prune at every segment start), so reveals are realistic.
+pub fn cr_batch(seed: u64, n_ops: u32, size: u32, sched: &[(u64, Option<u64>)]) -> Vec<u32> {
+    use crate::gov::GB;
+    let mut rng = Rng(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
+    let n_acc = 10 + rng.below(6) as u32;
+    let mut g = GB::new(n_acc, mnpilot::PERP_FLAG);
+    let mid = 100_000 * PRICE_SCALE as i64;
+    let dollar = PRICE_SCALE as i64;
+    let mut pending: Vec<(u32, [u8; 32], [u8; 32], [u32; 8], [u8; 32])> = Vec::new();
+    let mut expired: Vec<(u32, [u8; 32], [u8; 32], [u32; 8])> = Vec::new();
+    let height_of = |i: usize| -> u64 {
+        let k = (i / size.max(1) as usize).min(sched.len().saturating_sub(1));
+        sched[k].0
+    };
+    let mut cur_h = 0u64;
+    let mut gnonce = 1_000u64;
+    let mut done = 0u32;
+    while done < n_ops {
+        let h = height_of(g.ops.len());
+        if h > cur_h {
+            cur_h = h;
+            g.eng.state.height = h;
+            g.eng.state.prune_commits(h);
+            g.eng.state.prune_withdrawals(h);
+            g.eng.state.prune_oracle_unbonding(h);
+        }
+        done += 1;
+        let a = 1 + rng.below((n_acc - 1) as u64) as u32;
+        let holder = 4 + rng.below(6) as u32;
+        let salt = {
+            let mut s = [0u8; 32];
+            for k in 0..4 {
+                s[8 * k..8 * k + 8].copy_from_slice(&rng.next().to_le_bytes());
+            }
+            s
+        };
+        match rng.below(100) {
+            0..=39 => {
+                let who = if rng.below(8) == 0 { a } else { holder };
+                // inner ops the engine runs revealed (Place, GovWithdraw); a Deposit (never an inner kind) now and then
+                let inner = match rng.below(10) {
+                    0..=6 => {
+                        let px = mid + (rng.below(11) as i64 - 5) * dollar * 100;
+                        g.w_place(who, rng.below(2) == 0, rng.below(2) == 0, px, QTY_SCALE / 1000, 1)
+                    }
+                    7 | 8 => {
+                        gnonce += 1;
+                        GB::w_gwd(who, 1 + rng.below(50), gnonce)
+                    }
+                    _ => GB::w_dep(who, 5 * USD_SCALE as i64),
+                };
+                let mut hash = g.commit_hash_any(&inner, &salt);
+                if rng.below(15) == 0 {
+                    hash[0] ^= 1;
+                }
+                let ttl = match rng.below(12) {
+                    0 => h,
+                    1 => h + minuend_types::COMMIT_TTL_HEIGHTS + 1,
+                    2 | 3 => h + minuend_types::COMMIT_TTL_HEIGHTS,
+                    _ => h + 1 + rng.below(3),
+                };
+                let w = g.w_commit(who, &hash, ttl);
+                g.op(w);
+                let uid = *g.uids.last().unwrap();
+                pending.push((who, hash, salt, inner, uid));
+            }
+            40..=69 if !pending.is_empty() => {
+                // mostly one of the newest commits (likely still live), sometimes any (likely expired)
+                let k = if rng.below(10) < 7 { pending.len() - 1 - rng.below(pending.len().min(3) as u64) as usize } else { rng.below(pending.len() as u64) as usize };
+                let (ca, hash, salt, inner, cu) = pending[k];
+                let who = if rng.below(10) == 0 { a } else { ca };
+                let p1 = g.last();
+                let w = g.w_reveal(who, &hash, &salt, &inner, p1, cu);
+                g.op(w);
+                if rng.below(3) != 0 {
+                    let x = pending.swap_remove(k);
+                    expired.push((x.0, x.1, x.2, x.3));
+                }
+            }
+            70..=77 if !expired.is_empty() => {
+                // re-commit of a used / (maybe) expired hash, by its author or another holder
+                let k = rng.below(expired.len() as u64) as usize;
+                let (ca, hash, salt, inner) = expired[k];
+                let who = if rng.below(3) == 0 { holder } else { ca };
+                let w = g.w_commit(who, &hash, h + 1 + rng.below(4));
+                g.op(w);
+                let uid = *g.uids.last().unwrap();
+                pending.push((ca, hash, salt, inner, uid));
+            }
+            78..=83 => {
+                g.op(GB::w_gdep(holder, 1_000 + rng.below(20_000)));
+            }
+            84..=92 => {
+                let px = mid + (rng.below(7) as i64 - 3) * dollar * 50;
+                let mk = 1 + rng.below((n_acc - 1) as u64) as u32;
+                let w1 = g.w_place(mk, rng.below(2) == 0, false, px, QTY_SCALE / 1000, 1);
+                g.op(w1);
+            }
+            _ => {
+                g.op(GB::w_dep(a, USD_SCALE as i64 * (1 + rng.below(100) as i64)));
+            }
+        }
+    }
+    g.words()
+}
+
+/// slcr <n> <orders> <hstep> [adv]: per seed a 'cr' batch cut into segments of 1..12 units at bound heights advancing
+/// by 1 + rand(hstep) (plus hook-only runs, orc_sched); every segment is proven statelessly from the session pre-state
+/// with the height hook and must give status 0, the session's events and the MNWIT-S root of the SESSION post-state
+/// (round 23: eager commit expiry -- before it, the lazily expired commit leaves made the session root unusable as the
+/// reference at bound heights). `adv`: per segment with a hook expiry: omission of each supplied need, a denied
+/// Cexp / Cmt / Acmt / Gcnt (adversarial operator), forged groups (t_cdrop 1-3), a forged commit count (t_gdrop 5).
+pub fn slcr(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
+    let mut a = Adv { cases: 0, sound: 0, unsound: Vec::new(), counts: Default::default() };
+    let (mut ok, mut segs, mut units, mut bad, mut unsup) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut wbytes, mut maxw) = (0u64, 0usize);
+    // [commit ok, commit rej, reveal ok, reveal rej]
+    let mut kinds = [0u64; 4];
+    let (mut hook_segs, mut expired_n, mut max_group, mut recommit) = (0u64, 0u64, 0usize, 0u64);
+    let mut rej_codes: std::collections::BTreeMap<(u32, u32), u64> = Default::default();
+    let mut first_bad = String::new();
+    for seed in 1..=n {
+        let mut rng = Rng(seed.wrapping_mul(0x3C6E_F372_FE94_F82B) | 1);
+        let size = 1 + rng.below(12) as u32;
+        let sched = orc_sched(hstep, seed ^ 0x23, (3 * ord as usize + 64) / size as usize + 2);
+        let w = cr_batch(seed, ord, size, &sched);
+        let refs = orc_refs(&w, size, &sched);
+        let mut batch_ok = true;
+        for (k, (r, h)) in refs.iter().enumerate() {
+            segs += 1;
+            units += r.seg[2] as u64;
+            let b = WitBuilder::new(&r.pre);
+            let res = operate_h(&b, &r.seg, Some(*h));
+            if matches!(&res, Ok((_, _, o, _, _)) if o.status == sl::ST_SL_UNSUPPORTED) {
+                unsup += 1;
+                continue;
+            }
+            let why = match &res {
+                Err(e) => Some(e.clone()),
+                Ok((needs, wit, o, ev, _)) => {
+                    wbytes += wit.len() as u64;
+                    maxw = maxw.max(wit.len());
+                    if o.status != 0 {
+                        Some(format!("status {} need {:?}", o.status, o.need))
+                    } else if o.end_root != r.post_root {
+                        Some(format!("end root; {}", diag(r, o)))
+                    } else if *ev != r.ev {
+                        Some(format!("events differ (len {} vs {})", ev.len(), r.ev.len()))
+                    } else {
+                        let gone: Vec<_> = r.pre.commits.values().filter(|e| e.ttl_height < *h).collect();
+                        if !gone.is_empty() && *h > r.pre.height {
+                            hook_segs += 1;
+                            expired_n += gone.len() as u64;
+                            let mut gs: std::collections::BTreeMap<u64, usize> = Default::default();
+                            for e in &gone {
+                                *gs.entry(e.ttl_height).or_default() += 1;
+                            }
+                            max_group = max_group.max(gs.values().copied().max().unwrap_or(0));
+                        }
+                        let base = 4 + 8 * r.seg[1] as usize;
+                        let mut i = 0usize;
+                        for kk in 0..r.seg[2] as usize {
+                            let x = r.ev.get(i).copied().unwrap_or(0);
+                            let app = x & mnpilot::EV_APPLIED != 0;
+                            i += if app { 1 + 6 * (x & 0xFFFF) as usize } else { 1 };
+                            let kd = r.seg[base + 8 * kk] & 0xff;
+                            let slot = match kd {
+                                20 => Some(0),
+                                21 => Some(2),
+                                _ => None,
+                            };
+                            if let Some(sl0) = slot {
+                                kinds[sl0 + (!app) as usize] += 1;
+                                if !app {
+                                    *rej_codes.entry((kd, x)).or_insert(0u64) += 1;
+                                }
+                            }
+                        }
+                        // a commit applied in this segment whose hash was in the pre-state's tree (expiring now)
+                        for (hh, e) in &r.post.commits {
+                            if !r.pre.commits.contains_key(hh) {
+                                continue;
+                            }
+                            if r.pre.commits[hh] != *e && r.pre.commits[hh].ttl_height < *h {
+                                recommit += 1;
+                            }
+                        }
+                        if adv && !gone.is_empty() {
+                            cr_adv(&mut a, &b, r, *h, needs, wit, &mut rng);
+                        }
+                        None
+                    }
+                }
+            };
+            if let Some(why) = why {
+                bad += 1;
+                batch_ok = false;
+                if first_bad.is_empty() {
+                    first_bad = format!("seed {} seg {} (size {}, h {}): {}", seed, k, size, h, why);
+                }
+                break;
+            }
+        }
+        if batch_ok {
+            ok += 1;
+        }
+    }
+    let mut cs: Vec<String> = a.counts.iter().map(|(k, v)| format!("\"{}\":[{},{},{}]", k, v.0, v.1, v.2)).collect();
+    cs.sort();
+    format!(
+        "{{\"mode\":\"cr\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"proven_commit_ok_rej_reveal_ok_rej\":{:?},\"hook_expiry_segments\":{},\"expired_commits\":{},\"max_expiry_group\":{},\"recommits_of_expiring_hash\":{},\"rejections_kind_code\":\"{:?}\",\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
+        n, ok, bad, unsup, segs, units, wbytes, maxw, kinds, hook_segs, expired_n, max_group, recommit, rej_codes, a.cases, a.unsound.len(), cs.join(","), a.unsound.first().cloned().unwrap_or_default(), first_bad
+    )
+}
+fn cr_adv(a: &mut Adv, b: &WitBuilder, r: &SegRef, h: u64, needs: &BTreeSet<Need>, wit: &[u8], rng: &mut Rng) {
+    let run = |w: &[u8]| run_sl_xh(&r.seg, w, Some(&b.root), Some(h));
+    for nd in needs.iter() {
+        let kind = match nd {
+            Need::Cexp(_) => "omit23:cexp",
+            Need::Cmt(_) => "omit23:cmt",
+            Need::Acmt(_) => "omit23:acmt",
+            Need::Gcnt => "omit23:gcnt",
+            _ => {
+                if rng.below(4) != 0 {
+                    continue;
+                }
+                "omit23:other"
+            }
+        };
+        let mut n2 = needs.clone();
+        n2.remove(nd);
+        let (o2, ev2) = run(&b.build(&n2));
+        a.rec(kind, r, &o2, &ev2, false);
+    }
+    // adversarial operators that never supply one need class (the run must not succeed with another result)
+    let denies: [(&str, &dyn Fn(&Need) -> bool); 4] = [
+        ("deny23:cexp", &|n: &Need| matches!(n, Need::Cexp(_))),
+        ("deny23:cmt", &|n: &Need| matches!(n, Need::Cmt(_))),
+        ("deny23:acmt", &|n: &Need| matches!(n, Need::Acmt(_))),
+        ("deny23:gcnt", &|n: &Need| matches!(n, Need::Gcnt)),
+    ];
+    for (kind, d) in denies {
+        let (o2, ev2) = operate_deny_h(b, &r.seg, d, Some(h));
+        a.rec(kind, r, &o2, &ev2, false);
+    }
+    // forged groups / count under the honest root
+    for t in 1u8..=3 {
+        b.t_cdrop.set(t);
+        let w2 = b.build(needs);
+        b.t_cdrop.set(0);
+        if w2.as_slice() == wit {
+            continue;
+        }
+        let (o2, ev2) = run(&w2);
+        a.rec(["forge23:cexp-drop", "forge23:cexp-absent", "forge23:cexp-fake"][t as usize - 1], r, &o2, &ev2, true);
+    }
+    if needs.contains(&Need::Gcnt) {
+        b.t_gdrop.set(5);
+        let w2 = b.build(needs);
+        b.t_gdrop.set(0);
+        let (o2, ev2) = run(&w2);
+        a.rec("forge23:gcnt-commits", r, &o2, &ev2, true);
+    }
+    // extra valid records: every group of the pre-state + a few absent heights, every commit, every index
+    let mut n3 = needs.clone();
+    for (u, _) in sl::cexp_groups(&r.pre) {
+        n3.insert(Need::Cexp(u));
+    }
+    n3.insert(Need::Cexp(h + 100));
+    n3.insert(Need::Cexp(h + 1));
+    for (hh, e) in &r.pre.commits {
+        n3.insert(Need::Cmt(*hh));
+        n3.insert(Need::Acmt(e.account));
+    }
+    let (o3, ev3) = run(&b.build(&n3));
+    a.rec("extra23:valid", r, &o3, &ev3, false);
+    if o3.status != 0 {
+        a.unsound.push(format!("extra valid commit records refused: status {} {:?}", o3.status, o3.need));
+    }
+    let lay = layout(wit);
+    for _ in 0..2 {
+        if wit.len() <= lay.tree_end {
+            break;
+        }
+        let mut w2 = wit.to_vec();
+        let i = lay.tree_end + rng.below((wit.len() - lay.tree_end) as u64) as usize;
+        w2[i] ^= 1 << rng.below(8);
+        let (o4, ev4) = run(&w2);
+        a.rec("flip23:records", r, &o4, &ev4, false);
+    }
+}
+
+/// the SESSION image on one segment from an arbitrary pre-state at a BOUND height h (commit_height hook first)
+pub fn sess_seg_h(pre: &mnpilot::state::ChainState, w: &[u32], cap: usize, h: u64) -> (mnpilot::state::ChainState, Vec<u32>) {
+    let eng = mnpilot::engine::Engine { state: pre.clone() };
+    let wt = mnpilot::wit::Wit::from_state(&eng.state);
+    let mut sess = Some(mnpilot::Session { eng, w: Some(wt), mode: mnpilot::WitMode::Incremental, segs: pre.height as u32, state_cap: cap, bind_height: true });
+    let mut ev = Vec::new();
+    let (_, st, _) = mnpilot::run_segment_n(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(h as u32), bind: true });
+    assert_eq!(st.status, 0);
+    let mut s = sess.unwrap().eng.state;
+    let _ = s.take_dirty();
+    (s, ev)
+}
+
+/// slpoc23 (round 23: eager commit expiry, MAX_STATE_COMMITS mirrored):
+///  P1 the session's commit cap: a pre-state with MAX_STATE_COMMITS - 1 live commits (16 owners, TTLs spread over the
+///     17 live heights), Commit by a holder (fits), Commit by another holder (at the cap -> 19), = SESSION image; one
+///     below: both applied;
+///  P2 hook at the cap: the full commit set, run at height h0 + 1 -> the group of TTL h0 expires (cmt: leaves, group,
+///     owners' indexes rewritten), a Commit now fits; root = s_root(session post);
+///  P3 a jump of 40 heights: every commit expires (17 groups), worst-case expiry witness at the cap;
+///  P4 adversarial on P2 / P3: omitted / denied Cexp, Cmt, Acmt, Gcnt; forged groups (t_cdrop 1-3); forged count
+///     (t_gdrop 5) -> refused, never a different result;
+///  P5 a re-commit of an expiring hash by another account in the hook's run (session: pruned -> applied): the cmt:
+///     leaf is rewritten, not deleted; a Reveal of an expiring commit -> BadCommit = session;
+///  P6 migration: the full commit set migrates (root = s_root incl. cexp groups and gcnt:0 commits); a TTL outside
+///     [height, height + COMMIT_TTL_HEIGHTS] or a count above SL_CAPS.commits is refused (ST_SL_MIG_BOUNDS).
+pub fn slpoc23() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    let mut res: Vec<String> = Vec::new();
+    let mut all_ok = true;
+    let id = |i: u32| A(acct_id(i).0);
+    let h0: u64 = 100;
+    let cap = mnpilot::MAX_STATE_COMMITS;
+    let ttl_n = minuend_types::COMMIT_TTL_HEIGHTS + 1;
+    let hash_of = |i: u32| -> [u8; 32] {
+        use sha2::Digest;
+        let mut x = sha2::Sha256::new();
+        x.update(b"poc23");
+        x.update(i.to_le_bytes());
+        x.finalize().into()
+    };
+    // table accounts 0..3 = committers in the segments (acct_id 0..3), owners of the pre-state commits: 1000..1015
+    let mk_pre = |n: usize| -> mnpilot::state::ChainState {
+        let mut s = mnpilot::state::ChainState::genesis();
+        s.height = h0;
+        for i in 0..4u32 {
+            let mut a = mnpilot::account::Account::new(id(i));
+            a.collateral = 1_000_000 * USD_SCALE as i128;
+            s.put_account(id(i), a);
+            s.perp_balances.insert(id(i), 10_000_000);
+            s.perp_supply += 10_000_000;
+        }
+        for j in 0..16u32 {
+            s.perp_balances.insert(id(1000 + j), 10_000_000);
+            s.perp_supply += 10_000_000;
+        }
+        for i in 0..n as u32 {
+            let ttl = h0 + (i as u64 % ttl_n);
+            let e = mnpilot::state::CommitEntry { account: id(1000 + i / 64), commit_unit: hash_of(1_000_000 + i), commit_height: ttl.saturating_sub(minuend_types::COMMIT_TTL_HEIGHTS).max(1).min(h0), ttl_height: ttl, revealed: i % 5 == 0 };
+            s.commits.insert(hash_of(i), e);
+        }
+        let _ = s.take_dirty();
+        s
+    };
+    let table = [0u32, 1, 2, 3];
+    // commit ops: hash words in the ext area
+    let hw = |h: &[u8; 32]| -> Vec<u32> { (0..8).map(|k| u32::from_le_bytes(h[4 * k..4 * k + 4].try_into().unwrap())).collect() };
+    let commit = |a: u32, off: u32, ttl: u64| -> [u32; 8] { [20 | (a << 8), ttl as u32, (ttl >> 32) as u32, 0, 0, 0, 0, off] };
+    let new_h = [hash_of(5_000_000), hash_of(5_000_001), hash_of(5_000_002)];
+    let mut ext: Vec<u32> = Vec::new();
+    for h in &new_h {
+        ext.extend_from_slice(&hw(h));
+    }
+    // P1 (no hook): at the cap and one below
+    let w1 = seg_words2(&table, &[commit(1, 0, h0 + 5), commit(2, 8, h0 + 6), GB_dep(3)], &ext);
+    for (name, n, want19) in [("P1 at the commit cap", cap - 1, 1usize), ("P1 one below the commit cap", cap - 2, 0)] {
+        let pre = mk_pre(n);
+        let (post, ev_s) = sess_seg(&pre, &w1, 256);
+        let b = WitBuilder::new(&pre);
+        let line = match operate(&b, &w1) {
+            Ok((needs, wit, o, ev, _)) => {
+                let n19 = ev_units(&ev_s).iter().filter(|x| *x == "19").count();
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && n19 == want19 && needs.contains(&Need::Gcnt);
+                all_ok &= ok;
+                format!("{{\"case\":\"{}\",\"ok\":{},\"session\":{:?},\"stateless\":{:?},\"witness_bytes\":{}}}", name, ok, ev_units(&ev_s), ev_units(&ev), wit.len())
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"{}\",\"ok\":false,\"why\":\"{}\"}}", name, e)
+            }
+        };
+        res.push(line);
+    }
+    // P2 / P3: hook expiry at the cap (full set), then commits fit again
+    let full = mk_pre(cap);
+    let w2 = seg_words2(&table, &[commit(1, 0, h0 + 41 + 5), commit(2, 8, h0 + 41 + 6)], &ext);
+    for (name, h1) in [("P2 hook at the cap (one group expires)", h0 + 1), ("P3 jump of 40 heights (every group expires)", h0 + 40)] {
+        let w = if h1 == h0 + 1 { seg_words2(&table, &[commit(1, 0, h1 + 5), commit(2, 8, h1 + 6)], &ext) } else { w2.clone() };
+        let (post, ev_s) = sess_seg_h(&full, &w, 256, h1);
+        let gone = full.commits.values().filter(|e| e.ttl_height < h1).count();
+        let b = WitBuilder::new(&full);
+        let line = match operate_h(&b, &w, Some(h1)) {
+            Ok((needs, wit, o, ev, it)) => {
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && ev_units(&ev_s).iter().all(|x| x.starts_with("applied")) && post.commits.len() == cap - gone + 2;
+                all_ok &= ok;
+                // P4 on this run
+                let mut adv = Adv { cases: 0, sound: 0, unsound: Vec::new(), counts: Default::default() };
+                let r = SegRef { pre: full.clone(), post_root: sl::s_root(&post), post: post.clone(), ev: ev_s.clone(), seg: w.clone(), sess_hashes: 0 };
+                let mut rng = Rng(h1);
+                cr_adv(&mut adv, &b, &r, h1, &needs, &wit, &mut rng);
+                let adv_ok = adv.unsound.is_empty();
+                all_ok &= adv_ok;
+                let mut cs: Vec<String> = adv.counts.iter().map(|(k, v)| format!("\"{}\":[{},{},{}]", k, v.0, v.1, v.2)).collect();
+                cs.sort();
+                format!(
+                    "{{\"case\":\"{}\",\"ok\":{},\"expired\":{},\"session\":{:?},\"stateless\":{:?},\"dels\":{},\"witness_bytes\":{},\"operator_iterations\":{},\"P4_adv_ok\":{},\"P4_cases\":{},\"P4_unsound\":{},\"P4_counts\":{{{}}},\"first_unsound\":\"{}\"}}",
+                    name, ok, gone, ev_units(&ev_s), ev_units(&ev), o.dels.len(), wit.len(), it, adv_ok, adv.cases, adv.unsound.len(), cs.join(","), adv.unsound.first().cloned().unwrap_or_default()
+                )
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"{}\",\"ok\":false,\"why\":\"{}\"}}", name, e)
+            }
+        };
+        res.push(line);
+    }
+    // P5: re-commit of an expiring hash (group h0, owner 1000) by account 1; Reveal of an expiring commit by its owner
+    {
+        let pre = mk_pre(64);
+        let (hx0, e0) = pre.commits.iter().find(|(_, e)| e.ttl_height == h0).map(|(h, e)| (*h, *e)).unwrap();
+        let mut ext5 = hw(&hx0);
+        // reveal ext: commit_ref, salt, inner op, parents (the commit unit)
+        ext5.extend_from_slice(&hw(&hx0));
+        ext5.extend_from_slice(&[0u32; 8]);
+        ext5.extend_from_slice(&GB_dep(3));
+        ext5.extend_from_slice(&hw(&[9u8; 32]));
+        ext5.extend_from_slice(&hw(&e0.commit_unit));
+        let tbl = [0u32, 1, 2, 1000];
+        let w5 = seg_words2(&tbl, &[commit(1, 0, h0 + 3), [21 | (3 << 8), 0, 0, 0, 0, 0, 0, 8]], &ext5);
+        let h1 = h0 + 1;
+        let (post, ev_s) = sess_seg_h(&pre, &w5, 256, h1);
+        let b = WitBuilder::new(&pre);
+        let line = match operate_h(&b, &w5, Some(h1)) {
+            Ok((_, _, o, ev, _)) => {
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && post.commits.get(&hx0).is_some_and(|e| e.account == id(1)) && ev_units(&ev_s)[0].starts_with("applied") && !ev_units(&ev_s)[1].starts_with("applied");
+                all_ok &= ok;
+                format!("{{\"case\":\"P5 re-commit of an expiring hash + Reveal of an expiring commit\",\"ok\":{},\"session\":{:?},\"stateless\":{:?}}}", ok, ev_units(&ev_s), ev_units(&ev))
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"P5\",\"ok\":false,\"why\":\"{}\"}}", e)
+            }
+        };
+        res.push(line);
+    }
+    // P6: migration of the full commit set; bounds
+    {
+        let mig = |st: &mnpilot::state::ChainState| -> (u32, bool) {
+            let eng = mnpilot::engine::Engine { state: st.clone() };
+            let wt = mnpilot::wit::Wit::from_state(&eng.state);
+            let sess = mnpilot::Session { eng, w: Some(wt), mode: mnpilot::WitMode::Incremental, segs: st.height as u32, state_cap: 256, bind_height: true };
+            let (dg, nw, words) = mnpilot::snapshot::export(&sess, true);
+            let mut inp = vec![sl::SL_MIG_MAGIC];
+            inp.extend_from_slice(&words.unwrap());
+            let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+            (mo.status, mo.root == sl::s_root(st))
+        };
+        let (st_full, root_ok) = mig(&full);
+        let mut bad_ttl = mk_pre(10);
+        bad_ttl.commits.values_mut().next().unwrap().ttl_height = h0 + minuend_types::COMMIT_TTL_HEIGHTS + 1;
+        let (st_ttl, _) = mig(&bad_ttl);
+        let mut old_ttl = mk_pre(10);
+        old_ttl.commits.values_mut().next().unwrap().ttl_height = h0 - 1;
+        let (st_old, _) = mig(&old_ttl);
+        unsafe { sl::SL_CAPS = sl::SlCaps { commits: cap as u64 - 1, ..sl::SL_CAPS_PROD } };
+        let (st_cap, _) = mig(&full);
+        unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
+        let ok = st_full == 0 && root_ok && st_ttl == sl::ST_SL_MIG_BOUNDS && st_old == sl::ST_SL_MIG_BOUNDS && st_cap == sl::ST_SL_MIG_BOUNDS;
+        all_ok &= ok;
+        res.push(format!("{{\"case\":\"P6 migration (full commit set; TTL / count bounds)\",\"ok\":{},\"full\":[{},{}],\"ttl_above\":{},\"ttl_below\":{},\"count_above_cap\":{}}}", ok, st_full, root_ok, st_ttl, st_old, st_cap));
+    }
+    let _ = M(0);
+    format!("{{\"slpoc23\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
+}
+#[allow(non_snake_case)]
+fn GB_dep(a: u32) -> [u32; 8] {
+    crate::gov::GB::w_dep(a, 5 * USD_SCALE as i64)
 }

@@ -81,15 +81,23 @@ pub const SL_MAX_ACMT: usize = 64;
 /// users that costs an attacker only one dust Deposit per slot (the session's 256 has the same flaw, pilot limit);
 /// listings (burned fee) and oracle bonds (bonded PERP) are capped. The counts are still kept (export precondition,
 /// R16-I2: a lineage state fits the session image iff its counts are within the session's caps). The session's
-/// MAX_STATE_COMMITS is NOT mirrored (R22-I2: lazy commit expiry -- live commits are not an aggregate of the touched
-/// records; the per-account SL_MAX_ACMT bound stays).
+/// Round 23 (R22-I2 / R16-I1): commits expire EAGERLY (per-TTL groups `cexp:<u>`, the height hook deletes the expired
+/// `cmt:` leaves), so the live-commit count is a fifth `gcnt:0` field and the session's MAX_STATE_COMMITS is mirrored:
+/// `commits` = MAX_STATE_COMMITS in production too (a full commit set locks commit-reveal for at most
+/// COMMIT_TTL_HEIGHTS heights at COMMIT_BOND_PERP per slot, R7-M2 -- not a permanent lockout like an id cap -- and it
+/// bounds one height's expiry work; decision R23-D1). The per-account SL_MAX_ACMT bound stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlCaps {
     pub accounts: u64,
     pub markets: u64,
     pub oracles: u64,
+    /// round 23: live commits (the session's MAX_STATE_COMMITS)
+    pub commits: u64,
 }
-pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12 };
+pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12, commits: crate::MAX_STATE_COMMITS as u64 };
+/// round 23: loader bound of one expiry group `cexp:<u>` (hashes) and of the groups one witness may carry
+pub const SL_MAX_CEXP: usize = 4096;
+pub const SL_MAX_CEXP_GROUPS: usize = 64;
 /// the lineage's caps (the guest never writes it; host tests set the session's values to compare the two images at
 /// the caps)
 pub static mut SL_CAPS: SlCaps = SL_CAPS_PROD;
@@ -297,15 +305,47 @@ pub fn gcnt_kid(b: &mut Buf) {
     let _ = write!(b, "gcnt:0");
     mark(b);
 }
-/// round 22: `gcnt:0:<accounts>:<PERP ids>:<markets>:<oracle bonds>` (always present): the sizes of the session maps
-/// its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`)
-pub fn gcnt_leaf(b: &mut Buf, g: &[u64; 4]) {
+/// round 22: `gcnt:0:<accounts>:<PERP ids>:<markets>:<oracle bonds>:<commits>` (always present): the sizes of the
+/// session maps its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`; round 23: `commits`)
+pub const GCNT_N: usize = 5;
+pub type Gcnt = [u64; GCNT_N];
+pub fn gcnt_leaf(b: &mut Buf, g: &Gcnt) {
     gcnt_kid(b);
-    let _ = write!(b, ":{}:{}:{}:{}", g[0], g[1], g[2], g[3]);
+    let _ = write!(b, ":{}:{}:{}:{}:{}", g[0], g[1], g[2], g[3], g[4]);
 }
 /// reference counts of a full state
-pub fn gcnt_of(s: &ChainState) -> [u64; 4] {
-    [s.accounts.len() as u64, s.perp_balances.len() as u64, s.markets.len() as u64, s.oracle_bonds.len() as u64]
+pub fn gcnt_of(s: &ChainState) -> Gcnt {
+    [s.accounts.len() as u64, s.perp_balances.len() as u64, s.markets.len() as u64, s.oracle_bonds.len() as u64, s.commits.len() as u64]
+}
+// ---- round 23: eager commit expiry (R16-I1 / R22-I2) ----
+pub fn cexp_kid(b: &mut Buf, u: u64) {
+    b.n = 0;
+    let _ = write!(b, "cexp:{}", u);
+    mark(b);
+}
+pub fn cexp_digest(hs: &[H]) -> H {
+    let mut h = Sha256::new();
+    for x in hs {
+        h.update(x);
+    }
+    h.finalize().into()
+}
+/// round 23: `cexp:<u>:<n>:<sha256(commit hashes ascending)>` (absent = no live commit with ttl_height u): the expiry
+/// group of TTL height u. Every live commit has ttl in [height, height + COMMIT_TTL_HEIGHTS] (Commit's TTL rule, the
+/// height only grows, the hook drops ttl < height), so one hook from h0 to h1 > h0 reads at most
+/// COMMIT_TTL_HEIGHTS + 1 groups (u in [h0, min(h1, h0 + COMMIT_TTL_HEIGHTS + 1))) -- no queue is needed
+pub fn cexp_leaf(b: &mut Buf, u: u64, hs: &[H]) {
+    cexp_kid(b, u);
+    let _ = write!(b, ":{}:", hs.len());
+    hexw(b, &cexp_digest(hs));
+}
+/// the expiry groups of a full state (hashes ascending: BTreeMap order)
+pub fn cexp_groups(s: &ChainState) -> BTreeMap<u64, Vec<H>> {
+    let mut g: BTreeMap<u64, Vec<H>> = BTreeMap::new();
+    for (h, e) in &s.commits {
+        g.entry(e.ttl_height).or_default().push(*h);
+    }
+    g
 }
 pub fn xsrc_kid(b: &mut Buf, id: &AccountId) {
     b.n = 0;
@@ -603,6 +643,11 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         push(&b);
         for (h, e) in &s.commits {
             wit::cmt_leaf(&mut b, h, e);
+            push(&b);
+        }
+        // round 23: expiry groups
+        for (u, hs) in &cexp_groups(s) {
+            cexp_leaf(&mut b, *u, hs);
             push(&b);
         }
         for (a, n) in &s.seen_gov_nonces {
@@ -1059,6 +1104,8 @@ pub enum Need {
     AdlKey(u32, u8, H),
     /// round 22: the `gcnt:0` record (global cap counts)
     Gcnt,
+    /// round 23: the expiry group `cexp:<u>` of TTL height u (present or proven absent)
+    Cexp(u64),
 }
 
 /// Result of a stateless segment run.
@@ -1122,6 +1169,12 @@ struct Sl {
     cmts: BTreeSet<H>,
     /// round 16: commit hashes in the partial state at load (live)
     cmt0: BTreeSet<H>,
+    /// round 23: loaded commit indexes as committed (every entry, also the ones expiring at this run's hook)
+    acmt_all: BTreeMap<AccountId, Vec<AcmtE>>,
+    /// round 23: loaded single `cmt:` records that expire at this run's hook (ttl < the run's height)
+    cmtx: BTreeMap<H, crate::state::CommitEntry>,
+    /// round 23: loaded expiry groups: TTL height -> hashes at load (empty = proven absent)
+    cx: BTreeMap<u64, Vec<H>>,
     /// round 18: `pglob:0` loaded: (non-zero PERP holders at load, live proposal -> exception sub-tree root at load)
     pglob: Option<(u64, BTreeMap<u64, H>)>,
     /// round 19: the loaded exception sub-tree of every live proposal (pruned to the loaded accounts' paths)
@@ -1138,7 +1191,7 @@ struct Sl {
     /// round 21: the loaded rank sub-trees (adl.rs)
     adl: adl::Adl,
     /// round 22: `gcnt:0` loaded (the counts at load)
-    gcnt: Option<[u64; 4]>,
+    gcnt: Option<Gcnt>,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -1234,6 +1287,9 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         acmt: BTreeMap::new(),
         cmts: BTreeSet::new(),
         cmt0: BTreeSet::new(),
+        acmt_all: BTreeMap::new(),
+        cmtx: BTreeMap::new(),
+        cx: BTreeMap::new(),
         pglob: None,
         xt: BTreeMap::new(),
         pexc: BTreeMap::new(),
@@ -1662,8 +1718,9 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         }
     }
     // commit indexes: entries {hash, ttl, commit_unit, commit_height, revealed}; a live entry (ttl >= height) is checked
-    // against its cmt: leaf and enters the state; an expired one is covered by the digest only (lazy expiry: its cmt:
-    // leaf may since have been re-created by another account, so it is neither read nor deleted)
+    // against its cmt: leaf and enters the state; one expiring at this run's hook (round 23: eager expiry -- the only
+    // non-live entries a committed index can hold) is covered by the digest here; its cmt: record comes from the
+    // single-record section (cmtx) and the index is rewritten without it (end root)
     let n = bad!(r.u16()) as usize;
     if n > SL_MAX_ACCOUNTS {
         return Err(ST_SL_BADWIT);
@@ -1702,6 +1759,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             sl.check(&b, true)?;
         }
         sl.acmt.insert(id, live);
+        sl.acmt_all.insert(id, es);
     }
     // single commit records by hash (present: the full entry; absent proven)
     let n = bad!(r.u16()) as usize;
@@ -1717,9 +1775,12 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             let e = crate::state::CommitEntry { account: AccountId(bad!(r.h32())), commit_unit: bad!(r.h32()), commit_height: bad!(r.u64()), ttl_height: bad!(r.u64()), revealed: bad!(r.bool()) };
             wit::cmt_leaf(&mut b, &h, &e);
             sl.check(&b, true)?;
-            // lazy expiry: an expired commit reads as absent (the session pruned it at its TTL)
+            // an expired commit reads as absent (the session pruned it at its TTL); round 23: it expires at this run's
+            // hook (eager expiry: the only non-live record a committed tree holds) -> its leaf is deleted (end root)
             if e.ttl_height >= s.height {
                 s.commits.insert(h, e);
+            } else {
+                sl.cmtx.insert(h, e);
             }
         } else {
             wit::cmt_kid(&mut b, &h);
@@ -1874,12 +1935,43 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     match bad!(r.u8()) {
         0 => {}
         1 => {
-            let g = [bad!(r.u64()), bad!(r.u64()), bad!(r.u64()), bad!(r.u64())];
+            let mut g: Gcnt = [0; GCNT_N];
+            for x in g.iter_mut() {
+                *x = bad!(r.u64());
+            }
             gcnt_leaf(&mut b, &g);
             sl.check(&b, true)?;
             sl.gcnt = Some(g);
         }
         _ => return Err(ST_SL_BADWIT),
+    }
+    // round 23: commit expiry groups (n = 0: proven absent)
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_CEXP_GROUPS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let u = bad!(r.u64());
+        let k = bad!(r.u16()) as usize;
+        if k > SL_MAX_CEXP || sl.cx.contains_key(&u) {
+            return Err(ST_SL_BADWIT);
+        }
+        let mut hs: Vec<H> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let h = bad!(r.h32());
+            if hs.last().is_some_and(|x| *x >= h) {
+                return Err(ST_SL_BADWIT);
+            }
+            hs.push(h);
+        }
+        if k == 0 {
+            cexp_kid(&mut b, u);
+            sl.absent(&b)?;
+        } else {
+            cexp_leaf(&mut b, u, &hs);
+            sl.check(&b, true)?;
+        }
+        sl.cx.insert(u, hs);
     }
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
@@ -2232,8 +2324,8 @@ fn holders_now(sl: &Sl, s: &ChainState) -> u64 {
 /// (accounts / PERP ids: the loaded account records -- a dirty account is always loaded, a light record's flags never
 /// change; markets: the loaded / proven-absent market records -- a listing proves its id absent; bonds: the loaded
 /// `ostk:` records -- guard (a) of ora::post)
-fn gcnt_delta(sl: &Sl, s: &ChainState) -> [i64; 4] {
-    let mut d = [0i64; 4];
+fn gcnt_delta(sl: &Sl, s: &ChainState) -> [i64; GCNT_N] {
+    let mut d = [0i64; GCNT_N];
     for (a, rec) in &sl.accts {
         d[0] += s.accounts.contains_key(a) as i64 - (rec.f0 & 1) as i64;
         d[1] += s.perp_balances.contains_key(a) as i64 - ((rec.f0 >> 1) & 1) as i64;
@@ -2244,11 +2336,41 @@ fn gcnt_delta(sl: &Sl, s: &ChainState) -> [i64; 4] {
     for a in &sl.o.stk {
         d[3] += s.oracle_bonds.contains_key(a) as i64 - sl.o.bonds0.contains_key(a) as i64;
     }
+    // round 23: commits are created only through loaded records (cmt0 = the live ones at load; a commit is never removed
+    // inside a run) and expire only at the hook, as whole loaded groups (cexp_hook)
+    d[4] = s.commits.len() as i64 - sl.cmt0.len() as i64 - cexp_gone(sl, s) as i64;
     d
 }
-fn gcnt_add(g: &[u64; 4], d: &[i64; 4]) -> [u64; 4] {
-    let mut o = [0u64; 4];
-    for i in 0..4 {
+/// round 23: commits expired by this run's hook (the loaded groups below the run's height)
+fn cexp_gone(sl: &Sl, s: &ChainState) -> usize {
+    sl.cx.range(..s.height).map(|(_, g)| g.len()).sum()
+}
+/// round 23 (R16-I1 / R22-I2): the inputs of the hook's eager commit expiry from the committed height h0 to the run's
+/// height: every group u in [h0, min(height, h0 + COMMIT_TTL_HEIGHTS + 1)) (no live commit can have a larger TTL),
+/// the `cmt:` record of each of its hashes (ttl must be u) and its owner's commit index
+fn cexp_hook(sl: &Sl, s: &ChainState) -> Result<(), Result<Need, u32>> {
+    if cfg!(not(feature = "govwit")) {
+        return Ok(());
+    }
+    let h0 = sl.o.h0;
+    let end = s.height.min(h0.saturating_add(COMMIT_TTL_HEIGHTS + 1));
+    for u in h0..end {
+        let Some(g) = sl.cx.get(&u) else { return Err(Ok(Need::Cexp(u))) };
+        for h in g {
+            let Some(e) = sl.cmtx.get(h) else { return Err(Ok(Need::Cmt(*h))) };
+            if e.ttl_height != u {
+                return Err(Err(ST_SL_BADWIT));
+            }
+            if !sl.acmt.contains_key(&e.account) {
+                return Err(Ok(Need::Acmt(e.account)));
+            }
+        }
+    }
+    Ok(())
+}
+fn gcnt_add(g: &Gcnt, d: &[i64; GCNT_N]) -> Gcnt {
+    let mut o = [0u64; GCNT_N];
+    for i in 0..GCNT_N {
         o[i] = (g[i] as i64).wrapping_add(d[i]) as u64;
     }
     o
@@ -2270,6 +2392,8 @@ fn gcap_pre(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> Resul
             }
         }
         B::CreateMarket { .. } => false,
+        // round 23: the session's MAX_STATE_COMMITS (every Commit reads the count)
+        B::Commit { .. } => false,
         B::Stake { .. } => {
             if !sl.o.stk.contains(a) {
                 return Err(Ok(Need::Ostk(*a)));
@@ -2288,13 +2412,14 @@ fn gcap_ok(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> bool {
     use crate::BatchOp as B;
     let c = sl_caps();
     let now = |i: usize| -> u64 {
-        let g0 = sl.gcnt.unwrap_or([0; 4]);
+        let g0 = sl.gcnt.unwrap_or([0; GCNT_N]);
         gcnt_add(&g0, &gcnt_delta(sl, s))[i]
     };
     match *o {
         B::Deposit { .. } | B::Liquidate { .. } => s.accounts.contains_key(a) || now(0) < c.accounts,
         B::GovDeposit { .. } | B::GovWithdraw { .. } | B::Slash { .. } => s.perp_balances.contains_key(a) || now(1) < c.accounts,
         B::CreateMarket { .. } => now(2) < c.markets,
+        B::Commit { .. } => now(4) < c.commits,
         B::Stake { .. } => s.oracle_bonds.contains_key(a) || now(3) < c.oracles,
         _ => true,
     }
@@ -2429,6 +2554,9 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
     // pglob / exception list, oracle records, queue update)
     if eng.state.height > sl.o.h0 {
         let hk = (|| -> Result<(), Result<Need, u32>> {
+            // round 23: the eager commit expiry of the same hook (prune_commits): the loader already reads the expiring
+            // commits as absent; their groups, records and owners' indexes must be loaded so the end root deletes them
+            cexp_hook(&sl, &eng.state)?;
             let gone = ora::hook_pre(&sl, &eng.state)?;
             ora::set_gone(&mut sl, gone);
             let h = eng.state.height;
@@ -2823,6 +2951,10 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 if !sl.cmt0.contains(h) && !sl.acmt.contains_key(&e.account) {
                     return Err(Need::Acmt(e.account));
                 }
+                // round 23: a created commit joins its TTL's expiry group
+                if !sl.cmt0.contains(h) && !sl.cx.contains_key(&e.ttl_height) {
+                    return Err(Need::Cexp(e.ttl_height));
+                }
             }
             if !sl.perp && (eng.state.perp_supply != 0 || eng.state.perp_burned != 0 || eng.state.next_market_id != 0) {
                 return Err(Need::Perp);
@@ -3153,7 +3285,7 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         }
     }
     let gd = gcnt_delta(sl, s);
-    if gd != [0; 4] {
+    if gd != [0; GCNT_N] {
         let Some(g0) = sl.gcnt else { return Err(Need::Gcnt) };
         gcnt_leaf(&mut b, &gcnt_add(&g0, &gd));
         puts.push(kh(&b));
@@ -3176,11 +3308,41 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         wit::cmt_leaf(&mut b, h, e);
         puts.push(kh(&b));
     }
-    for (id, live0) in &sl.acmt {
-        // rewritten only when the live set changed (lazy expiry on touch, witness-independent); the cmt: leaves of
-        // dropped expired entries are not deleted (one may since belong to another account's commit)
+    // round 23 (R16-I1): eager expiry -- the cmt: records that expired at this run's hook are deleted (a hash re-used
+    // by a new commit in the run was just rewritten above)
+    for h in sl.cmtx.keys() {
+        if !s.commits.contains_key(h) {
+            wit::cmt_kid(&mut b, h);
+            dels.push(kid_key(&b));
+        }
+    }
+    // the expiry groups: an expired group (u < height) is deleted; a live one gains the commits created in the run
+    for (u, g0) in &sl.cx {
+        let mut now: Vec<H> = Vec::new();
+        if *u >= s.height {
+            now.extend_from_slice(g0);
+            for (h, e) in &s.commits {
+                if e.ttl_height == *u && !sl.cmt0.contains(h) {
+                    now.push(*h);
+                }
+            }
+            now.sort_unstable();
+        }
+        if now != *g0 {
+            if now.is_empty() {
+                cexp_kid(&mut b, *u);
+                dels.push(kid_key(&b));
+            } else {
+                cexp_leaf(&mut b, *u, &now);
+                puts.push(kh(&b));
+            }
+        }
+    }
+    for (id, all0) in &sl.acmt_all {
+        // round 23: rewritten when the committed entry list changed (a created commit, or entries dropped by the hook's
+        // eager expiry); rounds 16-22: lazily, when the live set changed
         let now = acmt_of(s, id);
-        if now != *live0 {
+        if now != *all0 {
             if now.is_empty() {
                 acmt_kid(&mut b, id);
                 dels.push(kid_key(&b));
@@ -3331,7 +3493,13 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
             }
             // round 22: the migrated state is within the lineage's global caps (gcnt:0 starts at its counts)
             let (g, c) = (gcnt_of(st), sl_caps());
-            if g[0] > c.accounts || g[1] > c.accounts || g[2] > c.markets || g[3] > c.oracles {
+            // round 23: + live commits, and every commit's TTL within [height, height + COMMIT_TTL_HEIGHTS] (the session
+            // invariant the bounded eager expiry relies on)
+            if g[0] > c.accounts || g[1] > c.accounts || g[2] > c.markets || g[3] > c.oracles || g[4] > c.commits {
+                o.status = ST_SL_MIG_BOUNDS;
+                return o;
+            }
+            if st.commits.values().any(|e| e.ttl_height < st.height || e.ttl_height > st.height.saturating_add(COMMIT_TTL_HEIGHTS)) {
                 o.status = ST_SL_MIG_BOUNDS;
                 return o;
             }
@@ -3373,6 +3541,9 @@ pub struct WitBuilder<'a> {
     pub t_adrop: core::cell::Cell<u8>,
     /// round 22 tests: forged `gcnt:0` counts (see build)
     pub t_gdrop: core::cell::Cell<u8>,
+    /// round 23 (adversarial tests only): forged expiry groups -- 1: drop the first hash of every sent present group,
+    /// 2: send every present group as absent (n = 0), 3: add a fake hash to every sent group
+    pub t_cdrop: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -3403,7 +3574,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0), t_adrop: core::cell::Cell::new(0), t_gdrop: core::cell::Cell::new(0) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0), t_adrop: core::cell::Cell::new(0), t_gdrop: core::cell::Cell::new(0), t_cdrop: core::cell::Cell::new(0) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -3429,6 +3600,7 @@ impl<'a> WitBuilder<'a> {
         let mut lsel: BTreeMap<(u32, u8, Price), BTreeSet<OrderId>> = BTreeMap::new();
         let mut perp = false;
         let mut gcnt = false;
+        let mut cexps: BTreeSet<u64> = BTreeSet::new();
         let mut gnons: BTreeSet<AccountId> = BTreeSet::new();
         let mut xsrcs: BTreeSet<AccountId> = BTreeSet::new();
         let mut acmts: BTreeSet<AccountId> = BTreeSet::new();
@@ -3482,6 +3654,9 @@ impl<'a> WitBuilder<'a> {
                 }
                 Need::Perp => perp = true,
                 Need::Gcnt => gcnt = true,
+                Need::Cexp(u) => {
+                    cexps.insert(u);
+                }
                 Need::Gnon(a) => {
                     gnons.insert(a);
                 }
@@ -3851,7 +4026,7 @@ impl<'a> WitBuilder<'a> {
             rec.push(1);
             let mut g = gcnt_of(s);
             let t = self.t_gdrop.get();
-            if (1..=4).contains(&t) {
+            if (1..=GCNT_N as u8).contains(&t) {
                 g[t as usize - 1] = g[t as usize - 1].wrapping_sub(1);
             }
             for x in g {
@@ -3861,6 +4036,35 @@ impl<'a> WitBuilder<'a> {
             keys.insert(kid_key(&b));
         } else {
             rec.push(0);
+        }
+        // round 23: commit expiry groups
+        let groups = cexp_groups(s);
+        rec.extend_from_slice(&(cexps.len() as u16).to_le_bytes());
+        let t = self.t_cdrop.get();
+        for u in &cexps {
+            let mut hs: Vec<H> = groups.get(u).cloned().unwrap_or_default();
+            match t {
+                1 if !hs.is_empty() => {
+                    hs.remove(0);
+                }
+                2 => hs.clear(),
+                3 => {
+                    let mut f = [0x5Au8; 32];
+                    f[..8].copy_from_slice(&u.to_le_bytes());
+                    if !hs.contains(&f) {
+                        hs.push(f);
+                        hs.sort_unstable();
+                    }
+                }
+                _ => {}
+            }
+            rec.extend_from_slice(&u.to_le_bytes());
+            rec.extend_from_slice(&(hs.len() as u16).to_le_bytes());
+            for h in &hs {
+                rec.extend_from_slice(h);
+            }
+            cexp_kid(&mut b, *u);
+            keys.insert(kid_key(&b));
         }
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
