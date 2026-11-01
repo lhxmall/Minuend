@@ -958,10 +958,13 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
             }
             // round 19: forged exception lists against the proposals' exception sub-trees (must be refused)
             if needs.iter().any(|n| matches!(n, Need::Pexc(_))) && !r.pre.proposals.is_empty() {
-                for (m, kind) in [(1u8, "forge19:pxe-drop"), (2u8, "forge19:pxe-weight")] {
+                for (m, kind) in [(1u8, "forge19:pxe-drop"), (2u8, "forge19:pxe-weight"), (3u8, "forge19:pxe-subtree")] {
                     b.t_pxe.set(m);
                     let w2 = b.build(&needs);
                     b.t_pxe.set(0);
+                    if w2 == wit {
+                        continue; // mode 3 on accounts without entries = the honest witness
+                    }
                     let (o2, ev2) = run_sl(&r.seg, &w2);
                     a.rec(kind, r, &o2, &ev2, true);
                 }
@@ -2579,11 +2582,12 @@ pub fn slpoc18(big: u32) -> String {
             let seg = seg_words(&[vi], &[crate::gov::GB::w_vote(0, 1, true)]);
             let b = WitBuilder::new(&s);
             if let Ok((needs, _, o0, _, _)) = operate(&b, &seg) {
-                for (m, f) in [(1u8, "drop / fake entry"), (2u8, "weight + 1 / fake entry")] {
+                for (m, f) in [(1u8, "drop / fake entry"), (2u8, "weight + 1 / fake entry"), (3u8, "entry-less + sub-trees without its entries")] {
                     b.t_pxe.set(m);
                     let (o, _) = run_sl(&seg, &b.build(&needs));
                     b.t_pxe.set(0);
-                    let ok = o0.status == 0 && o.status == sl::ST_SL_BADWIT;
+                    // mode 3 on an entry-less account is the honest witness
+                    let ok = o0.status == 0 && if m == 3 && vi == 6 { o.status == 0 } else { o.status == sl::ST_SL_BADWIT };
                     all_ok &= ok;
                     res.push(format!("{{\"case\":\"P5 vote by {} ({}): forged list {}\",\"ok\":{},\"status\":{}}}", vi, who, f, ok, o.status));
                 }

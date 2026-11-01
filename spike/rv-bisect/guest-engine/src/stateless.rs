@@ -3009,7 +3009,9 @@ pub struct WitBuilder<'a> {
     /// round 18 (adversarial tests only): do not add `pglob:` for an exception list
     pub t_omit_pglob: core::cell::Cell<bool>,
     /// round 19 (adversarial tests only): forge every sent exception list against its sub-trees -- 1: drop the first
-    /// entry, 2: weight + 1 on the first entry (both: add a fake entry for the first live proposal when the list is empty)
+    /// entry, 2: weight + 1 on the first entry (both: add a fake entry for the first live proposal when the list is empty),
+    /// 3: send every listed account as entry-less AND its sub-trees built without its entries (consistent forgery: only
+    /// the sub-tree roots bound by `pglob:` tell it apart)
     pub t_pxe: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
@@ -3438,6 +3440,7 @@ impl<'a> WitBuilder<'a> {
                     es.remove(0);
                 }
                 (2, false, _) => es[0].1 += 1,
+                (3, _, _) => es.clear(),
                 _ => {}
             }
             rec.extend_from_slice(&id.0);
@@ -3450,7 +3453,11 @@ impl<'a> WitBuilder<'a> {
         }
         // round 19: every live proposal's exception sub-tree, expanded at the loaded accounts' keys
         if pglob {
-            for (pid, v) in pxe_sets(s, &gov_all) {
+            let mut forged = gov_all.clone();
+            if self.t_pxe.get() == 3 {
+                forged.retain(|a, _| !pexcs.contains(a));
+            }
+            for (pid, v) in pxe_sets(s, &forged) {
                 let mut ks: Vec<H> = pexcs
                     .iter()
                     .map(|a| {
