@@ -1043,6 +1043,11 @@ impl ChainState {
     /// until the budget is spent. Conservation is exact; insurance
     /// participates like any account.
     fn transfer_funding(&mut self, market: MarketId, funding_index: Price, diff_bps: i128) {
+        #[cfg(feature = "stateless")]
+        // loop round 20: the stateless image refuses a unit that reaches a funding transfer / the peg (O(holders))
+        unsafe {
+            crate::stateless::SL_FUNDING_REACHED = true;
+        }
         // Phase 1: signed payments in ascending AccountId order.
         // PILOT (loop round 4): holders index instead of every account (same ids, same order).
         let payments: Vec<(AccountId, i128)> = self
@@ -1100,6 +1105,11 @@ impl ChainState {
     /// - diff is `mark rate − index rate`, clamped to the market's
     ///   `funding_cap_bps`, then paid rate-cash peer-to-peer.
     pub fn settle_funding_peg(&mut self, market: MarketId) {
+        #[cfg(feature = "stateless")]
+        // loop round 20: the stateless image refuses a unit that reaches a funding transfer / the peg (O(holders))
+        unsafe {
+            crate::stateless::SL_FUNDING_REACHED = true;
+        }
         let mark = match self.marks.get(&market).copied() {
             Some(m) if m != 0 => m,
             _ => return,
@@ -1140,6 +1150,11 @@ impl ChainState {
     /// conservation, but each payment is `funding_rate_cash(qty, diff_bps,
     /// usd_per_unit)` of the market's listing-time multiplier.
     fn transfer_funding_rate(&mut self, market: MarketId, diff_bps: i64) {
+        #[cfg(feature = "stateless")]
+        // loop round 20: the stateless image refuses a unit that reaches a funding transfer / the peg (O(holders))
+        unsafe {
+            crate::stateless::SL_FUNDING_REACHED = true;
+        }
         let usd = match self.markets.get(&market) {
             Some(p) if p.funding_rate => p.usd_per_unit,
             _ => return,

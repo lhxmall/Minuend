@@ -430,6 +430,19 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 mnpilot::BatchOp::Finalize { .. } => {
                     n.insert(Need::Pglob);
                 }
+                // round 20: oracle
+                mnpilot::BatchOp::Stake { .. } | mnpilot::BatchOp::Unstake { .. } => {
+                    n.insert(Need::Ostk(a));
+                }
+                mnpilot::BatchOp::Report { market, .. } => {
+                    n.insert(Need::Ostk(a));
+                    n.insert(Need::Market(market));
+                    n.insert(Need::Oglob);
+                    n.insert(Need::Orep(market));
+                    n.insert(Need::Ohist(market, a));
+                    n.insert(Need::Orm(a));
+                    n.insert(Need::Omk(market));
+                }
                 _ => {}
             }
         }
@@ -953,6 +966,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Cmt(_) => "omit:cmt",
                     Need::Pglob => "omit:pglob",
                     Need::Pexc(_) => "omit:pexc",
+                    _ => "omit:oracle",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
             }
@@ -2678,4 +2692,369 @@ pub fn slmiggov(n: u64, ord: u32) -> String {
         }
     }
     format!("{{\"batches\":{},\"ok\":{},\"migrations\":{},\"with_live_proposals\":{},\"with_exception_lists\":{},\"first_bad\":\"{}\"}}", n, ok, migs, with_props, with_exc, first_bad)
+}
+
+
+// ------------------------------------------------------------------------------------------------
+// round 20: stateless oracle (design §12.1): Stake / Unstake / Report + the eager unbonding expiry (R19-I2)
+// ------------------------------------------------------------------------------------------------
+fn w_report(a: u32, price: i64, market: u32) -> [u32; 8] {
+    [8 | (a << 8), 0, price as u32, (price >> 32) as u32, 0, 0, 0, market]
+}
+fn w_stake(a: u32) -> [u32; 8] {
+    [11 | (a << 8), 0, 0, 0, 0, 0, 0, 0]
+}
+fn w_unstake(a: u32) -> [u32; 8] {
+    [12 | (a << 8), 0, 0, 0, 0, 0, 0, 0]
+}
+/// the 'orc' workload (MNP2, built on the REAL engine by gov::GB): genesis oracles 1..3 (ORACLES_FLAG), PERP holders
+/// 4..9 (PERP_FLAG: two bonds each), markets 1 and 2; reports (mostly at the market's mid so the funding premium is 0,
+/// some off-mid -> a funding transfer -> unsupported segment; zero / MARK_CAP / unknown market / unbonded reporter),
+/// stakes / unstakes (re-stake after the unbonding expired, unstake twice, unbonded), trading on both markets (fills on
+/// oracled markets), deposits, PERP deposits. No withdrawals / commits (their lazy expiry is tested by slmig).
+pub fn orc_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+    use crate::gov::GB;
+    let mut rng = Rng(seed.wrapping_mul(0x8CB9_2BA7_2F3D_8DD7) | 1);
+    let n_acc = 12 + rng.below(5) as u32;
+    let mut g = GB::new(n_acc, mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG | mnpilot::MARKET2_FLAG);
+    let mid = 100_000 * PRICE_SCALE as i64;
+    let dollar = PRICE_SCALE as i64;
+    for a in 1..n_acc {
+        g.op(GB::w_dep(a, 20_000 * USD_SCALE as i64));
+    }
+    let off = (seed % 3) as i64; // seed 0 mod 3: every report at mid (no funding at all)
+    // seed 2 mod 3: reports drift +-2 000 dollars around mid (median moves -> a funding premium -> unsupported segments)
+    let drift = [0i64, 1, 100][(seed % 3) as usize] * dollar;
+    for _ in 0..n_ops {
+        let a = 1 + rng.below((n_acc - 1) as u64) as u32;
+        let orc = 1 + rng.below(9) as u32;
+        match rng.below(100) {
+            0..=24 => {
+                let m = match rng.below(10) {
+                    0..=5 => 1,
+                    6..=8 => 2,
+                    _ => 99,
+                };
+                let px = match rng.below(20) {
+                    0 => 0,
+                    1 => mnpilot::types::MARK_CAP,
+                    2..=4 => mid + (rng.below(5) as i64 - 2) * dollar * 500 * off.min(1),
+                    _ => mid + drift * (rng.below(41) as i64 - 20) * (rng.below(2) == 0) as i64,
+                };
+                let who = if rng.below(8) == 0 { a } else { orc };
+                g.op(w_report(who, px, m));
+            }
+            25..=31 => {
+                g.op(w_stake(if rng.below(6) == 0 { a } else { orc }));
+            }
+            32..=37 => {
+                g.op(w_unstake(if rng.below(6) == 0 { a } else { orc }));
+            }
+            38..=74 => {
+                let m = 1 + rng.below(2) as u32;
+                let px = mid + (rng.below(7) as i64 - 3) * dollar * 50;
+                let mk = 1 + rng.below((n_acc - 1) as u64) as u32;
+                let w1 = g.w_place(mk, rng.below(2) == 0, false, px, QTY_SCALE / 100, m);
+                g.op(w1);
+                if rng.below(2) == 0 {
+                    let w2 = g.w_place(a, rng.below(2) == 0, rng.below(2) == 0, px, QTY_SCALE / 100, m);
+                    g.op(w2);
+                }
+            }
+            75..=79 => {
+                g.op(GB::w_gdep(4 + rng.below(6) as u32, 1_000 + rng.below(60_000)));
+            }
+            _ => {
+                g.op(GB::w_dep(a, USD_SCALE as i64 * (1 + rng.below(100) as i64)));
+            }
+        }
+    }
+    g.words()
+}
+/// session reference with the height binding (run number = height): heights advance by 1 + rand(hstep) per segment
+pub fn orc_refs(w: &[u32], s: u32, hstep: u64, seed: u64) -> Vec<(SegRef, u64)> {
+    let n_acc = w[1];
+    let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+        .map(|a| {
+            let mut id = [0u8; 32];
+            for k in 0..8 {
+                id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + (a * 8) as usize + k].to_le_bytes());
+            }
+            mnpilot::types::AccountId(id)
+        })
+        .collect();
+    let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
+    sess.as_mut().unwrap().bind_height = true;
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x2020);
+    let mut out = Vec::new();
+    let n = w[2] as usize;
+    let mut lo = 0usize;
+    let mut h = 0u64;
+    loop {
+        let hi = (lo + s as usize).min(n);
+        let mut sw = crate::gov::cut_v2(w, lo, hi);
+        sw[3] = 0;
+        h += 1 + if hstep > 0 { rng.below(hstep) } else { 0 };
+        let pre = sess.as_ref().unwrap().eng.state.clone();
+        let mut ev = Vec::new();
+        let (_, st, _) = mnpilot::run_segment_n(
+            &mut |i| sw.get(i as usize).copied().unwrap_or(0),
+            &mut |x| ev.push(x),
+            &mut |_, _, _| {},
+            mnpilot::WitMode::Incremental,
+            &mut sess,
+            mnpilot::SegOpt { run_no: Some(h as u32), bind: true },
+        );
+        assert_eq!(st.status, 0);
+        let s1 = sess.as_ref().unwrap();
+        out.push((SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: sw, sess_hashes: 0 }, h));
+        if hi >= n {
+            break;
+        }
+        lo = hi;
+        // a few empty heights (runs without units: only the hook)
+        if rng.below(10) == 0 {
+            let mut ew = crate::gov::cut_v2(w, lo, lo);
+            ew[3] = 0;
+            h += 1 + if hstep > 0 { rng.below(hstep * 4) } else { 0 };
+            let pre = sess.as_ref().unwrap().eng.state.clone();
+            let mut ev = Vec::new();
+            let (_, st, _) = mnpilot::run_segment_n(&mut |i| ew.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(h as u32), bind: true });
+            assert_eq!(st.status, 0);
+            let s1 = sess.as_ref().unwrap();
+            out.push((SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: ew, sess_hashes: 0 }, h));
+        }
+    }
+    out
+}
+/// forged oracle records under the honest tree / root (state edits of the pre-state, records spliced): must be refused
+fn ora_forges(pre: &mnpilot::state::ChainState, needs: &BTreeSet<Need>) -> Vec<(&'static str, mnpilot::state::ChainState)> {
+    use mnpilot::types::MarketId;
+    let mut v: Vec<(&'static str, mnpilot::state::ChainState)> = Vec::new();
+    for n in needs {
+        match *n {
+            Need::Ostk(a) => {
+                let mut p = pre.clone();
+                if p.oracle_bonds.remove(&a).is_none() {
+                    p.oracle_bonds.insert(a, mnpilot::types::ORACLE_BOND_PERP);
+                }
+                v.push(("forge20:ostk-bond", p));
+                if pre.oracle_unbonding.contains_key(&a) {
+                    let mut p = pre.clone();
+                    *p.oracle_unbonding.get_mut(&a).unwrap() += 1;
+                    v.push(("forge20:ostk-unlock", p));
+                }
+            }
+            Need::Orep(m) => {
+                if let Some((k, _)) = pre.oracle_reports.range((MarketId(m), mnpilot::types::AccountId([0; 32]))..).next().filter(|(k, _)| k.0 .0 == m) {
+                    let mut p = pre.clone();
+                    *p.oracle_reports.get_mut(k).unwrap() += 1;
+                    v.push(("forge20:orep-price", p));
+                }
+            }
+            Need::Ohist(m, a) => {
+                if let Some(q) = pre.oracle_report_history.get(&(MarketId(m), a)) {
+                    let mut p = pre.clone();
+                    let q2 = p.oracle_report_history.get_mut(&(MarketId(m), a)).unwrap();
+                    q2.back_mut().unwrap().price += 1;
+                    let _ = q;
+                    v.push(("forge20:ohist-sample", p));
+                }
+            }
+            Need::Omk(m) => {
+                if pre.oracle_twap.get(&MarketId(m)).is_some_and(|q| !q.is_empty()) {
+                    let mut p = pre.clone();
+                    p.oracle_twap.get_mut(&MarketId(m)).unwrap().pop_front();
+                    v.push(("forge20:omk-ring", p));
+                }
+            }
+            Need::Oglob => {
+                let mut p = pre.clone();
+                p.oracle_slash_nonce += 1;
+                v.push(("forge20:oglob-nonce", p));
+            }
+            _ => {}
+        }
+    }
+    v
+}
+/// slora <n> <orders> <hstep> [adv]: per seed an 'orc' batch cut into segments of 1..12 units, each run at a bound
+/// height (run number) advancing by 1 + rand(hstep); every segment is proven statelessly from the session pre-state
+/// (operator fixpoint with the height hook) and must give status 0, the session's events and the MNWIT-S root of the
+/// session post-state (or UNSUPPORTED: a funding transfer). `adv`: per segment, omission of each supplied need, extra
+/// valid oracle records, forged oracle records under the honest root, dropped list entries (t_odrop), byte flips.
+pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
+    let mut a = Adv { cases: 0, sound: 0, unsound: Vec::new(), counts: Default::default() };
+    let (mut ok, mut segs, mut units, mut bad, mut unsup) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut wbytes, mut maxw, mut iters) = (0u64, 0usize, 0u64);
+    // proven with status 0: [report applied, report rejected, stake applied, stake rejected, unstake applied, unstake
+    // rejected], segments whose hook released bonds, released oracles, empty-height runs
+    let mut kinds = [0u64; 6];
+    let (mut hook_segs, mut released, mut empty_runs) = (0u64, 0u64, 0u64);
+    let mut first_bad = String::new();
+    for seed in 1..=n {
+        let w = orc_batch(seed, ord);
+        let mut rng = Rng(seed.wrapping_mul(0x51_7CC1_B727_220A) | 1);
+        let size = 1 + rng.below(12) as u32;
+        let refs = orc_refs(&w, size, hstep, seed);
+        let mut batch_ok = true;
+        for (k, (r, h)) in refs.iter().enumerate() {
+            segs += 1;
+            units += r.seg[2] as u64;
+            let b = WitBuilder::new(&r.pre);
+            let res = operate_h(&b, &r.seg, Some(*h));
+            if matches!(&res, Ok((_, _, o, _, _)) if o.status == sl::ST_SL_UNSUPPORTED) {
+                unsup += 1;
+                continue;
+            }
+            let why = match &res {
+                Err(e) => Some(e.clone()),
+                Ok((needs, wit, o, ev, it)) => {
+                    wbytes += wit.len() as u64;
+                    maxw = maxw.max(wit.len());
+                    iters += *it as u64;
+                    if o.status != 0 {
+                        Some(format!("status {} need {:?}", o.status, o.need))
+                    } else if o.start_root != b.root {
+                        Some("start root".into())
+                    } else if o.end_root != r.post_root {
+                        Some(format!("end root; {}", diag(r, o)))
+                    } else if *ev != r.ev {
+                        Some(format!("events differ (len {} vs {})", ev.len(), r.ev.len()))
+                    } else {
+                        let rel = r.pre.oracle_unbonding.values().filter(|u| **u <= *h).count() as u64;
+                        if rel > 0 {
+                            hook_segs += 1;
+                            released += rel;
+                        }
+                        if r.seg[2] == 0 {
+                            empty_runs += 1;
+                        }
+                        let base = 4 + 8 * r.seg[1] as usize;
+                        let mut i = 0usize;
+                        for kk in 0..r.seg[2] as usize {
+                            let x = r.ev.get(i).copied().unwrap_or(0);
+                            let app = x & mnpilot::EV_APPLIED != 0;
+                            i += if app { 1 + 6 * (x & 0xFFFF) as usize } else { 1 };
+                            let kd = r.seg[base + 8 * kk] & 0xff;
+                            let slot = match kd {
+                                8 => Some(0),
+                                11 => Some(2),
+                                12 => Some(4),
+                                _ => None,
+                            };
+                            if let Some(sl0) = slot {
+                                kinds[sl0 + (!app) as usize] += 1;
+                            }
+                        }
+                        if adv {
+                            ora_adv(&mut a, &b, r, *h, needs, wit, &mut rng);
+                        }
+                        None
+                    }
+                }
+            };
+            if let Some(why) = why {
+                bad += 1;
+                batch_ok = false;
+                if first_bad.is_empty() {
+                    first_bad = format!("seed {} seg {} (size {}, h {}): {}", seed, k, size, h, why);
+                }
+                break;
+            }
+        }
+        if batch_ok {
+            ok += 1;
+        }
+    }
+    let mut cs: Vec<String> = a.counts.iter().map(|(k, v)| format!("\"{}\":[{},{},{}]", k, v.0, v.1, v.2)).collect();
+    cs.sort();
+    format!(
+        "{{\"mode\":\"orc\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"operator_iterations\":{},\"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej\":{:?},\"hook_segments\":{},\"released_oracles\":{},\"empty_runs\":{},\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
+        n, ok, bad, unsup, segs, units, wbytes, maxw, iters, kinds, hook_segs, released, empty_runs, a.cases, a.unsound.len(), cs.join(","), a.unsound.first().cloned().unwrap_or_default(), first_bad
+    )
+}
+fn ora_adv(a: &mut Adv, b: &WitBuilder, r: &SegRef, h: u64, needs: &BTreeSet<Need>, wit: &[u8], rng: &mut Rng) {
+    let run = |w: &[u8]| run_sl_xh(&r.seg, w, Some(&b.root), Some(h));
+    // omission of each supplied need: status 0 must still be the reference
+    for nd in needs.iter() {
+        let mut n2 = needs.clone();
+        n2.remove(nd);
+        let (o2, ev2) = run(&b.build(&n2));
+        let kind = match nd {
+            Need::Oglob => "omit20:oglob",
+            Need::Ostk(_) => "omit20:ostk",
+            Need::Orm(_) => "omit20:orm",
+            Need::Orep(_) => "omit20:orep",
+            Need::Ohist(..) => "omit20:ohist",
+            Need::Omk(_) => "omit20:omk",
+            Need::Oexp(_) => "omit20:oexp",
+            Need::Account(_) => "omit20:account",
+            Need::Market(_) => "omit20:market",
+            _ => "omit20:other",
+        };
+        a.rec(kind, r, &o2, &ev2, false);
+    }
+    // extra valid oracle records: every account's ostk / orm, both markets' orep / omk, every history, every queue
+    // group + absent heights around the hook
+    let mut n3 = needs.clone();
+    let ids: BTreeSet<mnpilot::types::AccountId> = r.pre.accounts.keys().chain(r.pre.oracle_bonds.keys()).copied().collect();
+    for id in &ids {
+        n3.insert(Need::Ostk(*id));
+        n3.insert(Need::Orm(*id));
+        n3.insert(Need::Ohist(1, *id));
+        n3.insert(Need::Ohist(2, *id));
+    }
+    for m in [1u32, 2, 99] {
+        n3.insert(Need::Orep(m));
+        n3.insert(Need::Omk(m));
+        n3.insert(Need::Market(m));
+    }
+    n3.insert(Need::Oglob);
+    for u in r.pre.oracle_unbonding.values() {
+        n3.insert(Need::Oexp(*u));
+    }
+    n3.insert(Need::Oexp(h + 256));
+    n3.insert(Need::Oexp(h + 1));
+    let (o3, ev3) = run(&b.build(&n3));
+    a.rec("extra20:valid", r, &o3, &ev3, false);
+    if o3.status != 0 {
+        a.unsound.push(format!("extra valid oracle records refused: status {} {:?}", o3.status, o3.need));
+    }
+    // dropped list entries (orep / orm / oexp): the digests bind them -> refused
+    for (m, kind) in [(1u8, "forge20:orep-drop"), (2u8, "forge20:orm-drop"), (3u8, "forge20:oexp-drop")] {
+        b.t_odrop.set(m);
+        let w2 = b.build(needs);
+        b.t_odrop.set(0);
+        if w2.as_slice() == wit {
+            continue;
+        }
+        let (o2, ev2) = run(&w2);
+        a.rec(kind, r, &o2, &ev2, true);
+    }
+    // forged records under the honest tree / root
+    let lay = layout(wit);
+    for (kind, p2) in ora_forges(&r.pre, needs) {
+        let bf = WitBuilder::new(&p2);
+        let forged = bf.build(needs);
+        let lay_f = layout(&forged);
+        let mut wf = wit[..lay.tree_end].to_vec();
+        wf.extend_from_slice(&forged[lay_f.tree_end..]);
+        if wf.as_slice() == wit {
+            continue;
+        }
+        let (o2, ev2) = run(&wf);
+        a.rec(kind, r, &o2, &ev2, true);
+    }
+    // byte flips in the record area
+    for _ in 0..3 {
+        if wit.len() <= lay.tree_end {
+            break;
+        }
+        let mut w2 = wit.to_vec();
+        let i = lay.tree_end + rng.below((wit.len() - lay.tree_end) as u64) as usize;
+        w2[i] ^= 1 << rng.below(8);
+        let (o4, ev4) = run(&w2);
+        a.rec("flip20:records", r, &o4, &ev4, false);
+    }
 }

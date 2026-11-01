@@ -568,6 +568,8 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
             push(&b);
         }
     }
+    // round 20: oracle leaves
+    ora::leaves(s, push);
 }
 /// MNWIT-S root of a full state (reference). Round 16 (step 4): bulk build over the sorted leaf set -- one hash per
 /// internal node of the compact tree (a single-leaf subtree is the leaf) instead of an incremental `Smt::set` per leaf
@@ -966,6 +968,20 @@ pub enum Need {
     /// round 18: an account's exception list -- with its account record; round 19: its `pxe:` entry (present or proven
     /// absent) in every live proposal's exception sub-tree (brings `pglob:`)
     Pexc(AccountId),
+    /// round 20 (oracle, §12.1): `oglob:0` (funding source, slash nonce, expiry queue ends; present or proven absent)
+    Oglob,
+    /// round 20: an account's bond record `ostk:` (present or proven absent)
+    Ostk(AccountId),
+    /// round 20: an oracle's market list `orm:` (present or proven absent)
+    Orm(AccountId),
+    /// round 20: a market's report set `orep:` (present or proven absent)
+    Orep(u32),
+    /// round 20: an oracle's report history in a market `ohist:` (present or proven absent)
+    Ohist(u32, AccountId),
+    /// round 20: a market's oracle config / TWAP rings / funding clock `omk:` (present or proven absent)
+    Omk(u32),
+    /// round 20: the expiry queue group of an unlock height `oexp:` (present or proven absent)
+    Oexp(u64),
 }
 
 /// Result of a stateless segment run.
@@ -1038,6 +1054,8 @@ struct Sl {
     pcnt: BTreeMap<u64, (usize, usize, usize)>,
     /// round 18: PERP balance at load of every loaded account
     bal0: BTreeMap<AccountId, u128>,
+    /// round 20: the loaded oracle records (ora.rs)
+    o: ora::Ora,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -1050,6 +1068,11 @@ macro_rules! bad {
         }
     };
 }
+/// round 20: the stateless oracle (design §12.1)
+pub mod ora;
+/// round 20: set by state.rs when a unit reaches a funding transfer / the funding-rate peg (O(holders), R19-I1): the
+/// unit is unsupported (cleared before every stateless unit, checked after it)
+pub static mut SL_FUNDING_REACHED: bool = false;
 
 impl Sl {
     fn check(&mut self, b: &Buf, present: bool) -> Result<(), u32> {
@@ -1129,6 +1152,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         pexc: BTreeMap::new(),
         pcnt: BTreeMap::new(),
         bal0: BTreeMap::new(),
+        o: ora::Ora::default(),
         verified: 0,
         leaf_hashes: 0,
     };
@@ -1139,6 +1163,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     s.height = bad!(r.u64());
     glob_leaf(&mut b, s.seq, s.height);
     sl.check(&b, true)?;
+    sl.o.h0 = s.height;
     // round 15 height hook (lazy): a bound run (prod: run number = rollup height, like the session's bind_height)
     // moves the engine height first; every height-dependent record read below (withdrawal expiry) is filtered at
     // the new height, and nothing else is pruned eagerly (design §11 item 2)
@@ -1750,6 +1775,8 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     for a in sl.accts.keys() {
         sl.bal0.insert(*a, s.perp_balances.get(a).copied().unwrap_or(0));
     }
+    // round 20: oracle records
+    ora::load(&mut sl, &mut s, &mut r, &mut b)?;
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
@@ -2058,6 +2085,9 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
                 }
             }
         }
+        // ---- round 20: oracle (§12.1) ----
+        Stake { .. } | Unstake { .. } => ora::pre_stake(sl, &author)?,
+        Report { market, price, .. } => ora::pre_report(sl, s, &author, market, price)?,
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
     }
     Ok(())
@@ -2208,6 +2238,41 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         out.node_hashes = sl.t.node_hashes;
         out.leaf_hashes = sl.leaf_hashes;
     };
+    // round 20 (R19-I2): the eager oracle expiry of the session's height hook (commit_height -> prune_oracle_unbonding)
+    // when the run moved the height: the queue groups up to the new height are loaded with their oracles, the prune
+    // runs on the partial state, then the same completeness guards as after a unit (dirty accounts, PERP balance ->
+    // pglob / exception list, oracle records, queue update)
+    if eng.state.height > sl.o.h0 {
+        let hk = (|| -> Result<(), Result<Need, u32>> {
+            ora::hook_pre(&sl, &eng.state)?;
+            let h = eng.state.height;
+            eng.state.prune_oracle_unbonding(h);
+            let d = eng.state.take_dirty();
+            for a in &d.accounts {
+                if !sl.accts.contains_key(a) {
+                    return Err(Ok(Need::Account(*a)));
+                }
+            }
+            for (a, b0) in &sl.bal0 {
+                if eng.state.perp_balances.get(a).copied().unwrap_or(0) != *b0 {
+                    if sl.pglob.is_none() {
+                        return Err(Ok(Need::Pglob));
+                    }
+                    if !sl.pexc.contains_key(a) {
+                        return Err(Ok(Need::Pexc(*a)));
+                    }
+                }
+            }
+            ora::post(&mut sl, &eng.state)
+        })();
+        if let Err(e) = hk {
+            match e {
+                Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
+                Err(st) => fin(&mut out, &sl, st, None),
+            }
+            return out;
+        }
+    }
     for i in 0..n_ops {
         let mut ow = [0u32; 8];
         for (k, x) in ow.iter_mut().enumerate() {
@@ -2368,6 +2433,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                         _ => true,
                     }
                 };
+                // round 20: the stateless oracle bounds (SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS)
+                let rule_ok = |o: &crate::BatchOp| rule_ok(o) && ora::cap_ok(&sl, st, o, &a);
                 if !rule_ok(&op) || inner.is_some_and(|io| !rule_ok(&io)) {
                     out.rejected += 1;
                     ev(crate::STATE_CAP_CODE);
@@ -2441,12 +2508,18 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             b.sl.short = None;
         }
         unsafe { SL_ADL_REACHED = false };
+        unsafe { SL_FUNDING_REACHED = false };
         let res = crate::dispatch(&mut eng, &op, &accts, crate::Uid { v2, at: uid_base + i * 8 }, seq, &ext, rd, false);
         // round 17: a liquidation that reached the ADL remainder picked -- or failed to find, or failed to apply -- its
         // counterparty among the LOADED holders only; the session ranks every opposite holder of the market (design
         // §12.2) -> unsupported, never a status-0 result. Flag from the engine (any result) + the outcome forms
         // (Ok with no fill: the remainder ran; an ADL fill of kind 2) as defence in depth
         let adl = unsafe { SL_ADL_REACHED };
+        // round 20: a funding transfer / the funding-rate peg reads every holder of the market (R19-I1)
+        if unsafe { SL_FUNDING_REACHED } {
+            fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
+            return out;
+        }
         if adl {
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
@@ -2580,6 +2653,14 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         })();
         if let Err(n) = post {
             fin(&mut out, &sl, ST_SL_MISSING, Some(n));
+            return out;
+        }
+        // round 20: oracle records + expiry queue
+        if let Err(e) = ora::post(&mut sl, &eng.state) {
+            match e {
+                Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
+                Err(st) => fin(&mut out, &sl, st, None),
+            }
             return out;
         }
         match res {
@@ -2892,6 +2973,8 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         pglob_leaf(&mut b, s.next_proposal_id, holders_now(sl, s), &es);
         puts.push(kh(&b));
     }
+    // round 20: oracle records
+    ora::end(sl, s, &mut puts, &mut dels);
     glob_leaf(&mut b, s.seq, s.height);
     puts.push(kh(&b));
     sl.leaf_hashes += puts.len() as u64 + dels.len() as u64;
@@ -2982,6 +3065,11 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
                 o.status = ST_SL_MIG_BOUNDS;
                 return o;
             }
+            // round 20: oracle objects (orm: / orep: / rings / expiry groups) must stay loadable
+            if !ora::mig_ok(st) {
+                o.status = ST_SL_MIG_BOUNDS;
+                return o;
+            }
             o.root = s_root(st);
             o.digest = d;
             o.words = *words;
@@ -3013,6 +3101,8 @@ pub struct WitBuilder<'a> {
     /// 3: send every listed account as entry-less AND its sub-trees built without its entries (consistent forgery: only
     /// the sub-tree roots bound by `pglob:` tell it apart)
     pub t_pxe: core::cell::Cell<u8>,
+    /// round 20 (adversarial tests only): drop the first entry of every sent oracle list record (1 orep, 2 orm, 3 oexp)
+    pub t_odrop: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -3043,7 +3133,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -3076,7 +3166,12 @@ impl<'a> WitBuilder<'a> {
         let mut pglob = false;
         let mut pexcs: BTreeSet<AccountId> = BTreeSet::new();
         let gov_all = if needs.iter().any(|n| matches!(n, Need::Pexc(_) | Need::Pglob)) { pexc_all(s) } else { BTreeMap::new() };
+        // round 20: oracle needs
+        let mut on = ora::ONeeds::default();
         for n in needs {
+            if on.add(n) {
+                continue;
+            }
             match *n {
                 Need::Account(a) => {
                     accts.insert(a);
@@ -3130,6 +3225,7 @@ impl<'a> WitBuilder<'a> {
                     pexcs.insert(a);
                     accts.insert(a);
                 }
+                _ => {}
             }
         }
         // an exception list is read against the complete proposal set
@@ -3471,6 +3567,8 @@ impl<'a> WitBuilder<'a> {
                 emit_tree(&lv, &st, &mut rec, 0, lv.len(), 0, &ks, false, &BTreeSet::new());
             }
         }
+        // round 20: oracle records
+        ora::build(s, &on, &mut rec, &mut keys, self.t_odrop.get());
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
         o.extend_from_slice(&rec);
