@@ -1,0 +1,21 @@
+# Radicle native CI (radicle-native-ci) for Minuend.
+shell: |
+  set -eu
+  export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
+  export CARGO_INCREMENTAL=0
+  export CARGO_PROFILE_DEV_DEBUG=0
+  export CARGO_PROFILE_TEST_DEBUG=0
+  cargo --version
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo test --workspace
+  # spike/rv-bisect (this branch): the spike crates (guest-engine = mnpilot, engine-diff) are outside the root
+  # workspace (each has its own [workspace]) and have no #[test]s; their real checks are the engine-diff differential
+  # runs (real engine fix/47-all @ 20326c0, extracted by fetch-engine.sh, vs the port / stateless image).
+  git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
+  sh spike/rv-bisect/engine-diff/fetch-engine.sh
+  for c in "slpoc15" "slpoc18 5000" "slcaps" "slfuzz 10 300" "slfuzz 10 300 gov" "sladv 2 200 gov" "slmig 5 300 0" "slmiggov 5 300"; do
+    out=$(cargo run -q --release --features stateless --manifest-path spike/rv-bisect/engine-diff/Cargo.toml -- $c)
+    echo "== $c: $(printf '%s' "$out" | head -c 300)"
+    if printf '%s' "$out" | grep -Eq '"ok":false|"unsound":[1-9]|"bad_segments":[1-9]'; then echo "FAIL: $c"; exit 1; fi
+  done
