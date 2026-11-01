@@ -309,29 +309,35 @@ pub fn acmt_of(s: &ChainState, id: &AccountId) -> Vec<AcmtE> {
 // ---- loop round 18: governance (design §12.3, round-18 form) ----
 /// one exception entry of an account: (proposal id, snapshot weight, voted)
 pub type PexcE = (u64, u128, bool);
-pub fn pexc_kid(b: &mut Buf, id: &AccountId) {
+/// round 19 (R18-M1 fix): one exception entry lives in its proposal's exception sub-tree (a compact SMT of the same
+/// form as MNWIT-S) as the leaf `pxe:<pid>:<acct>` -> `:<weight>:<voted>`; the sub-tree root is a field of `pglob:0`, so
+/// a Finalize drops the whole sub-tree with the proposal's `pglob:` entry (O(1)) and no exception holder is loaded.
+pub fn pxe_kid(b: &mut Buf, pid: u64, id: &AccountId) {
     b.n = 0;
-    let _ = write!(b, "pexc:");
+    let _ = write!(b, "pxe:{}:", pid);
     hexw(b, &id.0);
     mark(b);
 }
-pub fn pexc_digest(es: &[PexcE]) -> H {
-    let mut h = Sha256::new();
-    for (p, w, v) in es {
-        h.update(p.to_le_bytes());
-        h.update(w.to_le_bytes());
-        h.update([*v as u8]);
-    }
-    h.finalize().into()
+pub fn pxe_leaf(b: &mut Buf, pid: u64, id: &AccountId, w: u128, voted: bool) {
+    pxe_kid(b, pid, id);
+    let _ = write!(b, ":{}:{}", w, voted as u8);
 }
-/// `pexc:<id>:<n>:<sha256(entries by proposal id)>` (absent = none): the live proposals for which the account's
-/// snapshot weight differs from its current PERP balance or which it voted on. Every other (account, live proposal)
-/// pair has weight = current balance and no vote, so a Vote / balance change reads one record per account and a
-/// proposal is created without copying the PERP ledger (the session's weight_snapshot). <= 64 entries (live cap).
-pub fn pexc_leaf(b: &mut Buf, id: &AccountId, es: &[PexcE]) {
-    pexc_kid(b, id);
-    let _ = write!(b, ":{}:", es.len());
-    hexw(b, &pexc_digest(es));
+/// (key, leaf hash, kid length, leaf string) of every leaf of each live proposal's exception sub-tree (reference),
+/// sorted by key
+pub fn pxe_sets(s: &ChainState, all: &BTreeMap<AccountId, Vec<PexcE>>) -> BTreeMap<u64, Vec<(H, H, usize, Vec<u8>)>> {
+    let mut out: BTreeMap<u64, Vec<(H, H, usize, Vec<u8>)>> = s.proposals.keys().map(|k| (*k, Vec::new())).collect();
+    let mut b = Buf::new();
+    for (a, es) in all {
+        for (pid, w, v) in es {
+            pxe_leaf(&mut b, *pid, a, *w, *v);
+            let (k, lh) = kh(&b);
+            out.get_mut(pid).unwrap().push((k, lh, b.kid, b.as_bytes().to_vec()));
+        }
+    }
+    for v in out.values_mut() {
+        v.sort_by(|x, y| x.0.cmp(&y.0));
+    }
+    out
 }
 /// the exception list of `a` over the proposals of `s` (reference AND guest: in the stateless image the proposals map
 /// is complete -- every live proposal is loaded with `pglob:` -- and their snapshot / voter sets hold `a` iff the
@@ -372,15 +378,15 @@ pub fn pglob_kid(b: &mut Buf) {
     let _ = write!(b, "pglob:0");
     mark(b);
 }
-/// `pglob:0:<next proposal id>:<non-zero PERP holders>:<n live>:<sha256((id u64, n_exc u32) by id)>` (always present):
-/// the proposal cursor, the live-proposal set (cap 64) with each proposal's exception count (the accounts holding a
-/// `pexc:` entry for it: a Finalize loads all of them), and the snapshot size a new proposal records
-pub fn pglob_leaf(b: &mut Buf, next: u64, holders: u64, es: &[(u64, u32)]) {
+/// `pglob:0:<next proposal id>:<non-zero PERP holders>:<n live>:<sha256((id u64, xroot) by id)>` (always present):
+/// the proposal cursor, the live-proposal set (cap 64) with each proposal's exception sub-tree root (round 19; round 18
+/// carried an exception count here and per-account `pexc:` leaves), and the snapshot size a new proposal records
+pub fn pglob_leaf(b: &mut Buf, next: u64, holders: u64, es: &[(u64, H)]) {
     pglob_kid(b);
     let mut h = Sha256::new();
-    for (id, n) in es {
+    for (id, x) in es {
         h.update(id.to_le_bytes());
-        h.update(n.to_le_bytes());
+        h.update(x);
     }
     let d: H = h.finalize().into();
     let _ = write!(b, ":{}:{}:{}:", next, holders, es.len());
@@ -389,15 +395,15 @@ pub fn pglob_leaf(b: &mut Buf, next: u64, holders: u64, es: &[(u64, u32)]) {
 pub fn perp_holders(s: &ChainState) -> u64 {
     s.perp_balances.values().filter(|b| **b != 0).count() as u64
 }
-/// (id, exception count) of every live proposal (reference)
-pub fn pglob_entries(s: &ChainState, all: &BTreeMap<AccountId, Vec<PexcE>>) -> Vec<(u64, u32)> {
-    let mut n: BTreeMap<u64, u32> = s.proposals.keys().map(|k| (*k, 0)).collect();
-    for es in all.values() {
-        for e in es {
-            *n.get_mut(&e.0).unwrap() += 1;
-        }
-    }
-    n.into_iter().collect()
+/// (id, exception sub-tree root) of every live proposal (reference)
+pub fn pglob_entries(s: &ChainState, all: &BTreeMap<AccountId, Vec<PexcE>>) -> Vec<(u64, H)> {
+    pxe_sets(s, all)
+        .into_iter()
+        .map(|(id, v)| {
+            let kv: Vec<(H, H)> = v.iter().map(|x| (x.0, x.1)).collect();
+            (id, root_of_sorted(&kv))
+        })
+        .collect()
 }
 fn kh(b: &Buf) -> (H, H) {
     wit::key_and_hash(b)
@@ -553,10 +559,6 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         let all = pexc_all(s);
         pglob_leaf(&mut b, s.next_proposal_id, perp_holders(s), &pglob_entries(s, &all));
         push(&b);
-        for (a, es) in &all {
-            pexc_leaf(&mut b, a, es);
-            push(&b);
-        }
         for (h, e) in &s.commits {
             wit::cmt_leaf(&mut b, h, e);
             push(&b);
@@ -956,10 +958,9 @@ pub enum Need {
     Cmt(H),
     /// round 18: `pglob:0` with every live proposal's `prop:` record
     Pglob,
-    /// round 18: an account's exception list `pexc:` (present or proven absent) -- with its account record
+    /// round 18: an account's exception list -- with its account record; round 19: its `pxe:` entry (present or proven
+    /// absent) in every live proposal's exception sub-tree (brings `pglob:`)
     Pexc(AccountId),
-    /// round 18: the `pexc:` records of every account holding an entry for this proposal (a Finalize deletes them)
-    PexcOf(u64),
 }
 
 /// Result of a stateless segment run.
@@ -1021,8 +1022,10 @@ struct Sl {
     cmts: BTreeSet<H>,
     /// round 16: commit hashes in the partial state at load (live)
     cmt0: BTreeSet<H>,
-    /// round 18: `pglob:0` loaded: (non-zero PERP holders at load, live proposal -> exception count at load)
-    pglob: Option<(u64, BTreeMap<u64, u32>)>,
+    /// round 18: `pglob:0` loaded: (non-zero PERP holders at load, live proposal -> exception sub-tree root at load)
+    pglob: Option<(u64, BTreeMap<u64, H>)>,
+    /// round 19: the loaded exception sub-tree of every live proposal (pruned to the loaded accounts' paths)
+    xt: BTreeMap<u64, PTree>,
     /// round 18: loaded exception lists (as loaded)
     pexc: BTreeMap<AccountId, Vec<PexcE>>,
     /// round 18: proposal -> (voters at load, snapshot size, voters in the partial state at load); a proposal created in
@@ -1117,6 +1120,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         cmts: BTreeSet::new(),
         cmt0: BTreeSet::new(),
         pglob: None,
+        xt: BTreeMap::new(),
         pexc: BTreeMap::new(),
         pcnt: BTreeMap::new(),
         bal0: BTreeMap::new(),
@@ -1609,11 +1613,11 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         if n > 64 {
             return Err(ST_SL_BADWIT);
         }
-        let mut es: Vec<(u64, u32)> = Vec::with_capacity(n);
+        let mut es: Vec<(u64, H)> = Vec::with_capacity(n);
         let mut cnt: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
         for _ in 0..n {
             let id = bad!(r.u64());
-            let nx = bad!(r.u32());
+            let nx = bad!(r.h32());
             if es.last().is_some_and(|x| x.0 >= id) {
                 return Err(ST_SL_BADWIT);
             }
@@ -1676,19 +1680,43 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             }
             es.push((pid, wt, v));
         }
-        if k == 0 {
-            pexc_kid(&mut b, &id);
-            sl.absent(&b)?;
-        } else {
-            pexc_leaf(&mut b, &id, &es);
-            sl.check(&b, true)?;
-        }
         sl.pexc.insert(id, es);
     }
     // a loaded exception list needs the complete proposal set (an entry-less pair means "weight = balance, no vote"
     // only against the live set)
     if !sl.pexc.is_empty() && sl.pglob.is_none() {
         return Err(ST_SL_BADWIT);
+    }
+    // round 19 (R18-M1 fix): every live proposal's exception sub-tree, pruned to the loaded accounts' paths; each loaded
+    // list must match it exactly: a listed entry is a member (leaf hash recomputed), an unlisted pair proven absent
+    if let Some((_, xr)) = &sl.pglob {
+        let mut seen = 0usize;
+        for (pid, x) in xr {
+            let mut st = bad!(PTree::decode(&mut r));
+            seen += st.nodes.len();
+            if seen > SL_MAX_TREE_NODES || st.root_hash() != *x {
+                return Err(ST_SL_BADWIT);
+            }
+            for (a, es) in &sl.pexc {
+                match es.iter().find(|e| e.0 == *pid) {
+                    Some(e) => {
+                        pxe_leaf(&mut b, *pid, a, e.1, e.2);
+                        let (k, lh) = kh(&b);
+                        match st.get(&k) {
+                            Look::Present(h) if h == lh => st.mark_verified(&k),
+                            _ => return Err(ST_SL_BADWIT),
+                        }
+                    }
+                    None => {
+                        pxe_kid(&mut b, *pid, a);
+                        if !matches!(st.get(&kid_key(&b)), Look::Absent) {
+                            return Err(ST_SL_BADWIT);
+                        }
+                    }
+                }
+            }
+            sl.xt.insert(*pid, st);
+        }
     }
     // the partial proposals hold, for every account with a loaded exception list, exactly the session's snapshot
     // weight (non-zero only, like the session's copy) and vote membership
@@ -2014,18 +2042,13 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
             need_acct(sl, s, &author).map_err(Ok)?;
             need_gov(sl, Some(&author))?;
         }
-        // finalize: the proposal, its market (params rewritten when it passes), and every exception list holding an
-        // entry for it (the proposal's removal drops those entries)
+        // finalize: the proposal and its market (params rewritten when it passes); round 19 (R18-M1 fix): the proposal's
+        // exception sub-tree goes with its pglob: entry, no exception holder is read
         Finalize { id, .. } => {
             need_gov(sl, None)?;
             if let Some(p) = s.proposals.get(&id) {
                 if !sl.markets.contains_key(&p.market.0) {
                     return Err(Ok(Need::Market(p.market.0)));
-                }
-                let nx = sl.pglob.as_ref().and_then(|g| g.1.get(&id).copied()).unwrap_or(0) as usize;
-                let have = sl.pexc.values().filter(|es| es.iter().any(|e| e.0 == id)).count();
-                if have != nx {
-                    return Err(Ok(Need::PexcOf(id)));
                 }
             }
         }
@@ -2823,36 +2846,31 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
             }
         }
     }
-    // round 18: governance -- exception lists recomputed on the (complete) proposal set, exception counts by delta,
-    // prop: leaves with their counts, pglob:0
-    if let Some((_, nx0)) = &sl.pglob {
-        let mut nx: BTreeMap<u64, i64> = s.proposals.keys().map(|id| (*id, nx0.get(id).copied().unwrap_or(0) as i64)).collect();
-        for (a, l0) in &sl.pexc {
-            let now = pexc_of(s, a);
-            for e in l0 {
-                if let Some(c) = nx.get_mut(&e.0) {
-                    *c -= 1;
+    // round 18: governance -- exception lists recomputed on the (complete) proposal set; round 19 (R18-M1 fix): each
+    // live proposal's exception sub-tree updated at the loaded accounts' keys (a proposal created in the segment starts
+    // empty: every exception it can have is a loaded account's), a finalized proposal's sub-tree dropped with its
+    // pglob: entry; prop: leaves with their counts, pglob:0
+    if sl.pglob.is_some() {
+        let now: BTreeMap<AccountId, Vec<PexcE>> = sl.pexc.keys().map(|a| (*a, pexc_of(s, a))).collect();
+        let mut es: Vec<(u64, H)> = Vec::with_capacity(s.proposals.len());
+        for pid in s.proposals.keys() {
+            let mut st = sl.xt.remove(pid).unwrap_or(PTree { nodes: Vec::new(), root: P::E, node_hashes: 0 });
+            for (a, l) in &now {
+                match l.iter().find(|e| e.0 == *pid) {
+                    Some(e) => {
+                        pxe_leaf(&mut b, *pid, a, e.1, e.2);
+                        let (k, lh) = kh(&b);
+                        st.set(k, lh).map_err(|_| Need::Pexc(*a))?;
+                    }
+                    None => {
+                        pxe_kid(&mut b, *pid, a);
+                        st.remove(&kid_key(&b)).map_err(|_| Need::Pexc(*a))?;
+                    }
                 }
             }
-            for e in &now {
-                *nx.get_mut(&e.0).unwrap() += 1;
-            }
-            if now != *l0 {
-                if now.is_empty() {
-                    pexc_kid(&mut b, a);
-                    dels.push(kid_key(&b));
-                } else {
-                    pexc_leaf(&mut b, a, &now);
-                    puts.push(kh(&b));
-                }
-            }
-        }
-        let mut es: Vec<(u64, u32)> = Vec::with_capacity(nx.len());
-        for (id, c) in nx {
-            if c < 0 {
-                return Err(Need::PexcOf(id));
-            }
-            es.push((id, c as u32));
+            sl.leaf_hashes += now.len() as u64;
+            es.push((*pid, st.root_hash()));
+            sl.xt.insert(*pid, st);
         }
         for (id, p) in &s.proposals {
             let (vn0, sn, pv0) = sl.pcnt[id];
@@ -2984,6 +3002,9 @@ pub struct WitBuilder<'a> {
     pub t_omit_head: core::cell::Cell<bool>,
     /// round 18 (adversarial tests only): do not add `pglob:` for an exception list
     pub t_omit_pglob: core::cell::Cell<bool>,
+    /// round 19 (adversarial tests only): forge every sent exception list against its sub-trees -- 1: drop the first
+    /// entry, 2: weight + 1 on the first entry (both: add a fake entry for the first live proposal when the list is empty)
+    pub t_pxe: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -3014,7 +3035,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -3046,7 +3067,7 @@ impl<'a> WitBuilder<'a> {
         // round 18
         let mut pglob = false;
         let mut pexcs: BTreeSet<AccountId> = BTreeSet::new();
-        let gov_all = if needs.iter().any(|n| matches!(n, Need::Pexc(_) | Need::PexcOf(_))) { pexc_all(s) } else { BTreeMap::new() };
+        let gov_all = if needs.iter().any(|n| matches!(n, Need::Pexc(_) | Need::Pglob)) { pexc_all(s) } else { BTreeMap::new() };
         for n in needs {
             match *n {
                 Need::Account(a) => {
@@ -3100,14 +3121,6 @@ impl<'a> WitBuilder<'a> {
                 Need::Pexc(a) => {
                     pexcs.insert(a);
                     accts.insert(a);
-                }
-                Need::PexcOf(id) => {
-                    for (a, es) in &gov_all {
-                        if es.iter().any(|e| e.0 == id) {
-                            pexcs.insert(*a);
-                            accts.insert(*a);
-                        }
-                    }
                 }
             }
         }
@@ -3387,11 +3400,10 @@ impl<'a> WitBuilder<'a> {
             rec.extend_from_slice(&s.next_proposal_id.to_le_bytes());
             rec.extend_from_slice(&perp_holders(s).to_le_bytes());
             rec.push(s.proposals.len() as u8);
-            let all = if gov_all.is_empty() { pexc_all(s) } else { gov_all.clone() };
-            let ent: BTreeMap<u64, u32> = pglob_entries(s, &all).into_iter().collect();
+            let ent: BTreeMap<u64, H> = pglob_entries(s, &gov_all).into_iter().collect();
             for (id, p) in &s.proposals {
                 rec.extend_from_slice(&id.to_le_bytes());
-                rec.extend_from_slice(&ent[id].to_le_bytes());
+                rec.extend_from_slice(&ent[id]);
                 rec.extend_from_slice(&p.creator.0);
                 rec.extend_from_slice(&p.market.0.to_le_bytes());
                 rec.push(p.key.as_u8());
@@ -3413,7 +3425,15 @@ impl<'a> WitBuilder<'a> {
         }
         rec.extend_from_slice(&(pexcs.len() as u16).to_le_bytes());
         for id in &pexcs {
-            let es = gov_all.get(id).cloned().unwrap_or_default();
+            let mut es = gov_all.get(id).cloned().unwrap_or_default();
+            match (self.t_pxe.get(), es.is_empty(), s.proposals.keys().next()) {
+                (1 | 2, true, Some(pid)) => es.push((*pid, 7, false)),
+                (1, false, _) => {
+                    es.remove(0);
+                }
+                (2, false, _) => es[0].1 += 1,
+                _ => {}
+            }
             rec.extend_from_slice(&id.0);
             rec.push(es.len() as u8);
             for (pid, w, v) in &es {
@@ -3421,62 +3441,81 @@ impl<'a> WitBuilder<'a> {
                 rec.extend_from_slice(&w.to_le_bytes());
                 rec.push(*v as u8);
             }
-            pexc_kid(&mut b, id);
-            keys.insert(kid_key(&b));
+        }
+        // round 19: every live proposal's exception sub-tree, expanded at the loaded accounts' keys
+        if pglob {
+            for (pid, v) in pxe_sets(s, &gov_all) {
+                let mut ks: Vec<H> = pexcs
+                    .iter()
+                    .map(|a| {
+                        pxe_kid(&mut b, pid, a);
+                        kid_key(&b)
+                    })
+                    .collect();
+                ks.sort();
+                let lv: Vec<(H, H)> = v.iter().map(|x| (x.0, x.1)).collect();
+                let st: Vec<(usize, Vec<u8>)> = v.into_iter().map(|x| (x.2, x.3)).collect();
+                emit_tree(&lv, &st, &mut rec, 0, lv.len(), 0, &ks, false, &BTreeSet::new());
+            }
         }
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
         o.extend_from_slice(&rec);
         o
     }
-    fn range_hash(&self, lo: usize, hi: usize, d: usize) -> H {
-        match hi - lo {
-            0 => EMPTY,
-            1 => self.leaves[lo].1,
-            _ => {
-                let mid = lo + self.leaves[lo..hi].partition_point(|(k, _)| kbit(k, d) == 0);
-                let a = self.range_hash(lo, mid, d + 1);
-                let b = self.range_hash(mid, hi, d + 1);
-                wit::node_hash(&a, &b)
-            }
+    fn tree(&self, o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>) {
+        emit_tree(&self.leaves, &self.strs, o, lo, hi, d, keys, sib, pk)
+    }
+}
+fn range_hash(leaves: &[(H, H)], lo: usize, hi: usize, d: usize) -> H {
+    match hi - lo {
+        0 => EMPTY,
+        1 => leaves[lo].1,
+        _ => {
+            let mid = lo + leaves[lo..hi].partition_point(|(k, _)| kbit(k, d) == 0);
+            let a = range_hash(leaves, lo, mid, d + 1);
+            let b = range_hash(leaves, mid, hi, d + 1);
+            wit::node_hash(&a, &b)
         }
     }
-    /// preorder pruned tree over leaves[lo..hi) at depth d; `keys` = sorted keys whose paths to expand.
-    /// A single leaf is always emitted as L (never hidden in an O). `sib`: this subtree is the sibling
-    /// of an expanded path -> expand one more level, so a later deletion on the path can prove the
-    /// sibling is an internal node (no collapse) instead of an opaque hash (ambiguous -> missing).
-    fn tree(&self, o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>) {
-        match hi - lo {
-            0 => o.push(0),
-            1 => {
-                // a key whose path ends at ANOTHER leaf needs that leaf verified (exclusion / split, R14-C1);
-                // so does a single-leaf sibling of a path: a deletion on the path may lift it to where a later
-                // insertion must split it
-                if sib || keys.iter().any(|k| *k != self.leaves[lo].0) || pk.contains(&self.leaves[lo].0) {
-                    let (kl, st) = &self.strs[lo];
-                    o.push(4);
-                    o.extend_from_slice(&(*kl as u16).to_le_bytes());
-                    o.extend_from_slice(&st[..*kl]);
-                    o.extend_from_slice(&((st.len() - kl) as u16).to_le_bytes());
-                    o.extend_from_slice(&st[*kl..]);
-                } else {
-                    o.push(2);
-                    o.extend_from_slice(&self.leaves[lo].0);
-                    o.extend_from_slice(&self.leaves[lo].1);
-                }
+}
+/// preorder pruned tree over leaves[lo..hi) at depth d; `keys` = sorted keys whose paths to expand.
+/// A single leaf is always emitted as L (never hidden in an O). `sib`: this subtree is the sibling
+/// of an expanded path -> expand one more level, so a later deletion on the path can prove the
+/// sibling is an internal node (no collapse) instead of an opaque hash (ambiguous -> missing).
+/// (round 19: a free function over any sorted leaf set -- the MNWIT-S tree and the proposals' exception sub-trees)
+#[allow(clippy::too_many_arguments)]
+fn emit_tree(leaves: &[(H, H)], strs: &[(usize, Vec<u8>)], o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>) {
+    match hi - lo {
+        0 => o.push(0),
+        1 => {
+            // a key whose path ends at ANOTHER leaf needs that leaf verified (exclusion / split, R14-C1);
+            // so does a single-leaf sibling of a path: a deletion on the path may lift it to where a later
+            // insertion must split it
+            if sib || keys.iter().any(|k| *k != leaves[lo].0) || pk.contains(&leaves[lo].0) {
+                let (kl, st) = &strs[lo];
+                o.push(4);
+                o.extend_from_slice(&(*kl as u16).to_le_bytes());
+                o.extend_from_slice(&st[..*kl]);
+                o.extend_from_slice(&((st.len() - kl) as u16).to_le_bytes());
+                o.extend_from_slice(&st[*kl..]);
+            } else {
+                o.push(2);
+                o.extend_from_slice(&leaves[lo].0);
+                o.extend_from_slice(&leaves[lo].1);
             }
-            _ => {
-                let mid = lo + self.leaves[lo..hi].partition_point(|(k, _)| kbit(k, d) == 0);
-                if keys.is_empty() && !sib {
-                    o.push(1);
-                    o.extend_from_slice(&self.range_hash(lo, hi, d));
-                    return;
-                }
-                let km = keys.partition_point(|k| kbit(k, d) == 0);
-                o.push(3);
-                self.tree(o, lo, mid, d + 1, &keys[..km], !keys.is_empty() && km == 0, pk);
-                self.tree(o, mid, hi, d + 1, &keys[km..], !keys.is_empty() && km == keys.len(), pk);
+        }
+        _ => {
+            let mid = lo + leaves[lo..hi].partition_point(|(k, _)| kbit(k, d) == 0);
+            if keys.is_empty() && !sib {
+                o.push(1);
+                o.extend_from_slice(&range_hash(leaves, lo, hi, d));
+                return;
             }
+            let km = keys.partition_point(|k| kbit(k, d) == 0);
+            o.push(3);
+            emit_tree(leaves, strs, o, lo, mid, d + 1, &keys[..km], !keys.is_empty() && km == 0, pk);
+            emit_tree(leaves, strs, o, mid, hi, d + 1, &keys[km..], !keys.is_empty() && km == keys.len(), pk);
         }
     }
 }

@@ -426,8 +426,9 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 mnpilot::BatchOp::Vote { .. } => {
                     n.insert(Need::Pexc(a));
                 }
-                mnpilot::BatchOp::Finalize { id, .. } => {
-                    n.insert(Need::PexcOf(id));
+                // round 19 (R18-M1 fix): a Finalize reads no exception holder
+                mnpilot::BatchOp::Finalize { .. } => {
+                    n.insert(Need::Pglob);
                 }
                 _ => {}
             }
@@ -952,9 +953,18 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Cmt(_) => "omit:cmt",
                     Need::Pglob => "omit:pglob",
                     Need::Pexc(_) => "omit:pexc",
-                    Need::PexcOf(_) => "omit:pexc-of",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
+            }
+            // round 19: forged exception lists against the proposals' exception sub-trees (must be refused)
+            if needs.iter().any(|n| matches!(n, Need::Pexc(_))) && !r.pre.proposals.is_empty() {
+                for (m, kind) in [(1u8, "forge19:pxe-drop"), (2u8, "forge19:pxe-weight")] {
+                    b.t_pxe.set(m);
+                    let w2 = b.build(&needs);
+                    b.t_pxe.set(0);
+                    let (o2, ev2) = run_sl(&r.seg, &w2);
+                    a.rec(kind, r, &o2, &ev2, true);
+                }
             }
             // A2 extra valid records: every account / market of the pre-state + every level of market 1
             let mut n3 = needs.clone();
@@ -1313,7 +1323,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
             }
             if let Some(x) = needs.iter().find_map(|n| match n {
                 // round 18: an account whose exception list is sent comes with its full record (builder): not this case
-                Need::Account(id) if *id != ins && r.pre.accounts.contains_key(id) && !needs.contains(&Need::Pexc(*id)) && !needs.iter().any(|n| matches!(n, Need::PexcOf(_))) => Some(*id),
+                Need::Account(id) if *id != ins && r.pre.accounts.contains_key(id) && !needs.contains(&Need::Pexc(*id)) => Some(*id),
                 _ => None,
             }) {
                 let mut n2 = needs.clone();
@@ -2469,10 +2479,11 @@ pub fn sldiff(seed: u64, ord: u32, mode: &str) -> String {
 
 /// slpoc18 (round 18 PoCs / regression, stateless governance):
 ///  P1 a vote after a balance change weighs the snapshot weight (pexc: entry), not the balance; events + end root = direct
-///  P2 finalize of a proposal with exception holders: honest -> status 0 = direct; the witness without one holder's
-///     pexc: record -> MISSING (the pglob: exception count is the completeness proof), never a status-0 result
-///  P3 R18-M1 (liveness bound): a proposal with `v` voters needs `v` exception records at Finalize; above
-///     SL_MAX_ACCOUNTS (4096) records the witness is refused (BADWIT) -- the proposal can never be finalized statelessly
+///  P2 finalize of a proposal with exception holders: honest -> status 0 = direct; round 19 (R18-M1 fix): the operator
+///     loads no exception holder (the proposal's exception sub-tree goes with its pglob: entry)
+///  P3 R18-M1 (fixed in round 19): a proposal with `v` voters finalizes with an O(1) witness for any `v` (round 18:
+///     `v` exception records, above SL_MAX_ACCOUNTS (4096) refused -> the proposal could never be finalized)
+///  P5 round 19: forged exception lists (entry dropped / weight altered / fake entry) against the sub-trees -> BADWIT
 pub fn slpoc18(big: u32) -> String {
     use mnpilot::types::AccountId as A;
     let id = |i: u32| A(acct_id(i).0);
@@ -2526,15 +2537,10 @@ pub fn slpoc18(big: u32) -> String {
         all_ok &= l.contains("\"ok\":true");
         res.push(l);
         let b = WitBuilder::new(&s);
-        if let Ok((needs, _, _, _, _)) = operate(&b, &seg) {
-            let mut n2: BTreeSet<Need> = needs.iter().filter(|n| !matches!(n, Need::PexcOf(_))).copied().collect();
-            for i in 1..10 {
-                n2.insert(Need::Pexc(id(i)));
-            }
-            let (o, _) = run_sl(&seg, &b.build(&n2));
-            let ok = o.status == sl::ST_SL_MISSING;
+        if let Ok((needs, wit, o, _, _)) = operate(&b, &seg) {
+            let ok = o.status == 0 && !needs.iter().any(|n| matches!(n, Need::Pexc(_)));
             all_ok &= ok;
-            res.push(format!("{{\"case\":\"P2 finalize witness missing one exception holder\",\"ok\":{},\"status\":{},\"need\":\"{:?}\"}}", ok, o.status, o.need));
+            res.push(format!("{{\"case\":\"P2 finalize reads no exception holder\",\"ok\":{},\"status\":{},\"needs\":\"{:?}\",\"witness_bytes\":{}}}", ok, o.status, needs, wit.len()));
         }
     }
     // ---- P4: R6-H2 (session state_cap_ok) evaluated statelessly: |snapshot| = 1, 65 zero-weight voters recorded ->
@@ -2563,16 +2569,38 @@ pub fn slpoc18(big: u32) -> String {
         };
         res.push(line);
     }
-    // ---- P3: R18-M1 ----
-    for v in [big.min(4000), 4097] {
+    // ---- P5: forged exception lists (P1 state: account 1 has an entry, account 0 none) ----
+    {
+        let mut s = mk(8, 3, 100);
+        s.set_perp(id(1), 500);
+        s.set_perp(id(5), 900);
+        let _ = s.take_dirty();
+        for (vi, who) in [(1u32, "entry holder"), (6u32, "no entry")] {
+            let seg = seg_words(&[vi], &[crate::gov::GB::w_vote(0, 1, true)]);
+            let b = WitBuilder::new(&s);
+            if let Ok((needs, _, o0, _, _)) = operate(&b, &seg) {
+                for (m, f) in [(1u8, "drop / fake entry"), (2u8, "weight + 1 / fake entry")] {
+                    b.t_pxe.set(m);
+                    let (o, _) = run_sl(&seg, &b.build(&needs));
+                    b.t_pxe.set(0);
+                    let ok = o0.status == 0 && o.status == sl::ST_SL_BADWIT;
+                    all_ok &= ok;
+                    res.push(format!("{{\"case\":\"P5 vote by {} ({}): forged list {}\",\"ok\":{},\"status\":{}}}", vi, who, f, ok, o.status));
+                }
+            } else {
+                all_ok = false;
+            }
+        }
+    }
+    // ---- P3: R18-M1 (fixed: any number of voters) ----
+    for v in [big.min(4000), 4097, big.max(4097)] {
         let s = mk(v, v, minuend_types::PROPOSAL_DURATION_SEQS + 5);
         let seg = seg_words(&[0], &[crate::gov::GB::w_fin(0, 1)]);
         let b = WitBuilder::new(&s);
         match operate(&b, &seg) {
             Ok((needs, wit, o, _, _)) => {
                 let (post, _) = direct(&s, &seg);
-                let exp_ok = v <= 4000;
-                let ok = if exp_ok { o.status == 0 && o.end_root == sl::s_root(&post) } else { o.status == sl::ST_SL_BADWIT };
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && wit.len() < 64 * 1024;
                 all_ok &= ok;
                 res.push(format!("{{\"case\":\"P3 R18-M1 finalize with {} voters\",\"ok\":{},\"status\":{},\"needs\":{},\"witness_bytes\":{}}}", v, ok, o.status, needs.len(), wit.len()));
             }

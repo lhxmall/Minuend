@@ -39,10 +39,10 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `xsrc:<acct>` | `:1` (absent = not a source) | round 16: `external_sources` membership (a funding-market creator) |
 | `acmt:<acct>` | `:<n>:<sha256((commit hash, ttl) sorted by hash)>` (absent = none; n ≤ `SL_MAX_ACMT` 64) | round 16: the account's commit index (R7-M2 commit bond, Commit's pending count); lazy expiry like `wdl:`; live entries are checked against their `cmt:` leaves (MNWIT1 `govwit` kind), `gnon:` read as in MNWIT1 |
 
-| `pglob:0` | `:<next_proposal_id>:<non-zero PERP holders>:<n live>:<sha256((id u64, n_exc u32) by id)>` (always present, `govwit`) | round 18: proposal cursor, the live set (≤ 64) with each proposal's exception count, the snapshot size a new proposal records; loaded together with every live `prop:` |
-| `pexc:<acct>` | `:<n>:<sha256((pid u64, weight u128, voted u8) by pid)>` (absent = none) | round 18: the live proposals where the account's snapshot weight ≠ its current PERP balance, or that it voted on |
+| `pglob:0` | `:<next_proposal_id>:<non-zero PERP holders>:<n live>:<sha256((id u64, xroot 32 B) by id)>` (always present, `govwit`) | round 18: proposal cursor, the live set (≤ 64), the snapshot size a new proposal records; round 19: each live proposal's **exception sub-tree root** `xroot` (round 18: an exception count); loaded together with every live `prop:` and every live proposal's pruned sub-tree |
+| `pxe:<pid>:<acct>` (leaf of proposal `pid`'s exception sub-tree, not of MNWIT-S) | `:<weight>:<voted 0/1>` | round 19 (R18-M1 fix; replaces round 18's per-account `pexc:<acct>` lists): the pair (account, live proposal) where the account's snapshot weight ≠ its current PERP balance, or it voted. Sub-tree = compact SMT of the MNWIT-S form over these leaves |
 
-`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob/pexc` are pure functions of the state; `bmp` too (the reference builder derives it from
+`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob` (with its `pxe` sub-trees) are pure functions of the state; `bmp` too (the reference builder derives it from
 the levels), but the guest maintains it by **delta** (sets / clears path bits of the levels a unit created or
 emptied), so a node is updated without loading the other levels under it. Consensus change: every MNWIT root changes
 (the AA verifiers keep working — they only prove `acct:` / `pos:` / `ord:` leaves — but W<h> roots are MNWIT-S roots).
@@ -151,12 +151,15 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   (design §12.2). A revealed Liquidate (Reveal inner op) → unsupported.
 
 * Governance (round 18, §12.3): CreateProposal (creator record, `perp:0`, the market present / absent, `pglob:` with
-  every live `prop:`), Vote (voter record + `pexc:`, `pglob:`; also for a Reveal's inner Vote, whose R6-H2 zero-voter rule
-  the session evaluates whether or not it runs), FinalizeProposal (`pglob:`, the proposal's market, and the `pexc:` of
-  **every** account holding an entry for it: loaded count = `n_exc` from `pglob:` is the completeness proof). The loader
-  fills the partial proposals' `weight_snapshot` / `voted` for every account whose `pexc:` is loaded (entry-less pair =
-  weight = balance, not voted), so the engine runs unchanged; `prop:` counts are carried explicitly. Post-unit: a PERP
-  balance change needs `pglob:` (holder count) and the account's `pexc:`. SetSeq (test fixture) runs in non-prod builds.
+  every live `prop:`), Vote (voter record + its exception list, `pglob:`; also for a Reveal's inner Vote, whose R6-H2
+  zero-voter rule the session evaluates whether or not it runs), FinalizeProposal (`pglob:` and the proposal's market;
+  round 19: no exception holder -- the proposal's sub-tree leaves with its `pglob:` entry). An account's exception list
+  is its `pxe:` entries across the live proposals' sub-trees: the witness sends the list and each live sub-tree pruned
+  to the loaded accounts' keys; the loader checks every listed entry as a member (leaf hash recomputed) and every other
+  (account, live proposal) pair as proven absent, then fills the partial proposals' `weight_snapshot` / `voted`
+  (entry-less pair = weight = balance, not voted), so the engine runs unchanged; `prop:` counts are carried explicitly.
+  Post-unit: a PERP balance change needs `pglob:` (holder count) and the account's exception list. SetSeq (test
+  fixture) runs in non-prod builds.
 
 Unsupported ops (ADL, oracle report / stake / slash / funding, fixtures other than SetSeq) →
 `ST_SL_UNSUPPORTED = 14` (designs: §12).
@@ -402,7 +405,7 @@ consensus change to a mark-independent rank.)
   index exists. Note the index must also be maintained by every op that changes a position (fills of Place, the
   liquidation itself), so it lands together with its maintenance in all supported ops, and in the migration.
 
-### 12.3 Governance (implemented, round 18)
+### 12.3 Governance (implemented, round 18; exception sub-trees round 19)
 
 Session facts (engine.rs propose / vote / finalize): a proposal copies every non-zero PERP balance (`weight_snapshot`,
 O(holders)) at creation; a vote weighs the voter's snapshotted balance and is recorded in `voted`; finalize compares the
@@ -414,19 +417,24 @@ so the reference MNWIT-S root (a function of the session state) could not contai
 
 | leaf | value |
 |---|---|
-| `pglob:0` | `:<next id>:<non-zero holders>:<n live>:<sha256((id, n_exc))>` — n_exc = accounts with a `pexc:` entry for the id |
-| `pexc:<acct>` | entries (pid, weight, voted) for the live proposals where weight ≠ current balance, or voted |
+| `pglob:0` | `:<next id>:<non-zero holders>:<n live>:<sha256((id, xroot))>` — xroot = root of the proposal's exception sub-tree (round 19; round 18: n_exc) |
+| `pxe:<pid>:<acct>` (sub-tree leaf) | `:<weight>:<voted>` for a live proposal where weight ≠ the account's current balance, or voted (round 18: per-account `pexc:<acct>` lists in MNWIT-S) |
 | `prop:<id>` (MNWIT1 `govwit`) | unchanged; the stateless image writes its |voted| / |snapshot| counts from the loaded counts + deltas |
 
 * Every (account, live proposal) pair without an entry has weight = the account's current balance and no vote; so a
   proposal is created in O(1) (no entry for anyone; |snapshot| = the holder count), a vote reads one record, and a
   balance change rewrites the account's own list (the old balance becomes an explicit entry for every live proposal).
-* Finalize removes the proposal, so every entry for it disappears from the reference: the unit loads **all** n_exc
-  holders (count-verified). This is the one O(exceptions) step: above SL_MAX_ACCOUNTS (4096) holders a proposal cannot
-  be finalized statelessly (R18-M1, open). A lazy rule (dead entries ignored, pruned on touch) needs a reference that
-  is not a function of the session state (the stateless lineage as its own consensus) — the same obstacle as the
-  oracle's lazy unbonding (§12.1, R18-I2). Recommended fix: a per-proposal sub-SMT of exceptions (account → weight,
-  voted) whose root is a field of the `prop:` leaf — Finalize drops the leaf and the sub-tree in O(1), a Vote updates
-  one sub-tree path, a balance change one path per live proposal (≤ 64); still a pure function of the session state.
+* Finalize removes the proposal, so every entry for it disappears from the reference. Round 18 kept the entries in
+  per-account `pexc:` leaves, so a Finalize had to load **all** n_exc holders (count-verified) and above SL_MAX_ACCOUNTS
+  (4096) holders a proposal could never be finalized (R18-M1). **Round 19 fix**: each live proposal's entries form its
+  own exception sub-tree whose root is a field of `pglob:`; a Finalize drops the `pglob:` entry and with it the whole
+  sub-tree (O(1), no holder loaded: slpoc18 P3 finalizes 20 000 voters with an 11.7 KB witness). A Vote updates one
+  sub-tree path; a balance change one path in each live proposal's sub-tree (≤ 64); a proposal created in the segment
+  starts with an empty sub-tree (every exception it can get in the segment is a loaded account's). Still a pure
+  function of the session state (s_root / migration unchanged in principle; the MNWIT-S root changes format).
+* Witness (round 19): the `pglob:` section carries (id, xroot, `prop:` fields) per live proposal; after the exception
+  lists (account, k, entries) come the live proposals' sub-trees in id order, each a pruned compact SMT (same preorder
+  encoding as the MNWIT-S tree, ≤ SL_MAX_TREE_NODES nodes in total) whose root must equal its xroot.
 * Tests: slfuzz / sladv `gov` (gov_batch on the real engine: deposits / withdrawals, proposals, votes, SetSeq jumps,
-  finalize), slpoc18, slmiggov (migration of states with live proposals), loop18-mut.py (guard mutants).
+  finalize), slpoc18, slmiggov (migration of states with live proposals), loop18-mut.py / loop19-mut.py (guard mutants); sladv
+  `forge19:pxe-drop` / `forge19:pxe-weight` (forged exception lists against the sub-trees, must be refused).
