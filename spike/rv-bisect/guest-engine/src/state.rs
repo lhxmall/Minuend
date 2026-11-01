@@ -363,6 +363,24 @@ impl ChainState {
         }
         self.commits.retain(|_, e| e.ttl_height >= min_height);
     }
+    /// Loop round 23 (R23-H2, PILOT rule of the bound batch-commit hook, both images): release at most `max` due
+    /// unbondings (unlock <= height) per hook, in (unlock height, id) order; the rest follows at the next heights. A
+    /// failed run still counts as a height, so after k failed runs the upstream hook would release k + 1 expiry groups at
+    /// once -- more report sets than one stateless witness may carry (SL_MAX_MARKETS): the height would be unprovable.
+    pub fn prune_oracle_unbonding_n(&mut self, current_height: Height, max: usize) {
+        let mut due: Vec<(Height, AccountId)> = self.oracle_unbonding.iter().filter(|(_, u)| **u <= current_height).map(|(a, u)| (*u, *a)).collect();
+        due.sort_unstable();
+        due.truncate(max);
+        for (_, acct) in due {
+            self.oracle_unbonding.remove(&acct);
+            if let Some(bond) = self.oracle_bonds.remove(&acct) {
+                let bal = self.perp_balances.get(&acct).copied().unwrap_or(0);
+                self.set_perp(acct, bal.saturating_add(bond));
+                self.oracle_reports.retain(|(_, o), _| *o != acct);
+                self.oracle_report_history.retain(|(_, o), _| *o != acct);
+            }
+        }
+    }
     /// Verbatim `prune_oracle_unbonding` (batch-commit hook).
     pub fn prune_oracle_unbonding(&mut self, current_height: Height) {
         let mut to_release = Vec::new();

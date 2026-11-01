@@ -1132,6 +1132,16 @@ pub fn commit_height(s: &mut state::ChainState, height: Height) {
     // loop round 6: and drops expired commits
     s.prune_commits(height);
 }
+/// Loop round 23 (R23-H2): the hook of a BOUND run (run number = height; the session image's bind_height, the stateless
+/// image's height hook): as `commit_height`, but at most MAX_UNSTAKES_PER_HEIGHT oracle unbondings are released per
+/// run (state::prune_oracle_unbonding_n). `commit_height` (all due unbondings, as upstream) stays for the unbound
+/// SetHeight test fixture.
+pub fn commit_height_bound(s: &mut state::ChainState, height: Height) {
+    s.height = height;
+    s.withdrawals.retain(|_, w| w.height + REPLAY_WINDOW > height);
+    s.prune_oracle_unbonding_n(height, MAX_UNSTAKES_PER_HEIGHT);
+    s.prune_commits(height);
+}
 
 /// `run_segment` with options (loop round 5: run number = rollup height, height binding).
 pub fn run_segment_n(
@@ -1188,7 +1198,7 @@ pub fn run_segment_n(
     // without units (before: they first appeared in the next unit's root, and W<h> of an empty
     // height showed the pre-release balance); with units the first unit's root contains them anyway.
     if bind_height && (*segs as Height) > eng.state.height {
-        commit_height(&mut eng.state, *segs as Height);
+        commit_height_bound(&mut eng.state, *segs as Height);
         if let Some(w) = w.as_mut() {
             wo.root = w.commit(&mut eng.state);
         }

@@ -766,12 +766,20 @@ pub(super) fn hook_pre(sl: &Sl, s: &ChainState) -> Result<BTreeSet<AccountId>, R
     let Some(g) = sl.o.glob else { return Err(Ok(Need::Oglob)) };
     let mut cur = g.2;
     let mut gone = BTreeSet::new();
-    while let Some(u) = cur {
+    // round 23 (R23-H2): the hook releases at most SL_MAX_UNSTAKES due unbondings, in (unlock height, id) order -- the
+    // queue order, a group's accounts ascending -- so one hook needs at most SL_MAX_UNSTAKES x SL_MAX_ORACLE_MKTS report
+    // sets even after a jump (failed runs); the rest stays queued for the next heights
+    let mut taken = 0usize;
+    'q: while let Some(u) = cur {
         if u > s.height {
             break;
         }
         let Some(grp) = sl.o.exp.get(&u) else { return Err(Ok(Need::Oexp(u))) };
         for a in &grp.2 {
+            if taken == SL_MAX_UNSTAKES {
+                break 'q;
+            }
+            taken += 1;
             need_stk(sl, a)?;
             if !sl.accts.contains_key(a) {
                 return Err(Ok(Need::Account(*a)));

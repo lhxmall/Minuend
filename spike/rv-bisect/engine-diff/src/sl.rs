@@ -4618,6 +4618,59 @@ pub fn slpoc23() -> String {
         all_ok &= ok8;
         res.push(format!("{{\"case\":\"P8 (R23-H1) jump hook: every live commit expires\",\"ok\":{},{}}}", ok8, lines.join(",")));
     }
+    // P9 (R23-H2, review of the round-20 oracle hook): the same jump on the oracle expiry queue -- R20-M3 sized one
+    // height's expiry (16 oracles x 16 markets = SL_MAX_MARKETS report sets), but after a failed run the upstream hook
+    // releases every due group: two adjacent full groups with disjoint markets (32 oracles, 512 markets) needed 512
+    // report-set / market records -> no witness existed at that height (round-22 code: status 12). Fix: the bound hook
+    // releases at most MAX_UNSTAKES_PER_HEIGHT due unbondings per run in (unlock, id) order, in BOTH images
+    // (commit_height_bound): the jump hook releases the first group, the next run the second; root = SESSION image
+    {
+        let nu = sl::ora::SL_MAX_UNSTAKES as u32;
+        let nm = sl::ora::SL_MAX_ORACLE_MKTS as u32;
+        let u = 5_000u64;
+        let mut s = mnpilot::state::ChainState::genesis();
+        for m in 2..=2 * nu * nm {
+            s.markets.insert(M(m), s.markets[&M(1)]);
+            s.books.insert(M(m), mnpilot::book::OrderBook::new(M(m)));
+        }
+        for i in 0..2 * nu {
+            s.oracle_bonds.insert(id(100 + i), mnpilot::types::ORACLE_BOND_PERP);
+            s.oracle_unbonding.insert(id(100 + i), if i < nu { u } else { u + 1 });
+            for k in 1..=nm {
+                s.oracle_reports.insert((M(i * nm + k), id(100 + i)), MID);
+            }
+        }
+        s.height = u - 1;
+        let _ = s.take_dirty();
+        let table: Vec<u32> = vec![100];
+        let empty = seg_words(&table, &[]);
+        let mut out: Vec<String> = Vec::new();
+        let mut ok9 = true;
+        // one-step hook (u): 16 released; jump (u + 1, one failed run): 16 released, 16 left due; the next run (u + 2): the rest
+        let mut pre = s.clone();
+        for (k, h) in [(0, u), (1, u + 1), (2, u + 2)] {
+            if k == 2 {
+                // continue from the jump's post-state
+            } else {
+                pre = s.clone();
+            }
+            let (post, _) = sess_seg_h(&pre, &empty, 256, h);
+            let b = WitBuilder::new(&pre);
+            let r = operate_h(&b, &empty, Some(h));
+            let (st, proven, wb) = match &r {
+                Ok((_, wit, o, _, _)) => (o.status, o.status == 0 && o.end_root == sl::s_root(&post), wit.len()),
+                Err(_) => (99, false, 0),
+            };
+            let rel = pre.oracle_unbonding.len() - post.oracle_unbonding.len();
+            let want_rel = nu as usize;
+            let k_ok = proven && rel == want_rel;
+            ok9 &= k_ok;
+            out.push(format!("\"run {} at h0+{} ({} due, {} released)\":{{\"ok\":{},\"status\":{},\"witness_bytes\":{}}}", k, h - (u - 1), pre.oracle_unbonding.values().filter(|x| **x <= h).count(), rel, k_ok, st, wb));
+            pre = post;
+        }
+        all_ok &= ok9;
+        res.push(format!("{{\"case\":\"P9 (R23-H2) oracle expiry after a jump: at most 16 releases per run\",\"ok\":{},{}}}", ok9, out.join(",")));
+    }
     unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
     let _ = M(0);
     format!("{{\"slpoc23\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))

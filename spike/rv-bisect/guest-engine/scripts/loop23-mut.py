@@ -6,7 +6,8 @@ usage (box): python3 loop23-mut.py /data/hark/spike-rv/loop23mut -> stdout (MUTD
 import os, re, subprocess, sys
 W = sys.argv[1]
 A = os.path.join(W, 'guest-engine/src/stateless/adl.rs'); S = os.path.join(W, 'guest-engine/src/stateless.rs')
-ORIG = {f: open(f).read() for f in (A, S)}
+A2 = os.path.join(W, 'guest-engine/src/stateless/ora.rs'); L = os.path.join(W, 'guest-engine/src/lib.rs'); ST = os.path.join(W, 'guest-engine/src/state.rs')
+ORIG = {f: open(f).read() for f in (A, S, A2, L, ST)}
 T = '/data/hark/target-spike'
 B = os.path.join(W, 'bin-mut/engine-diff')
 ENV = dict(os.environ, CARGO_TARGET_DIR=T)
@@ -73,11 +74,21 @@ MUTS2 = [
         }
         B::Stake { .. } => {"""),
   ('ttl-ok-upper-off', S, "    ttl > s.height && ttl <= s.height.saturating_add(COMMIT_TTL_HEIGHTS)", "    ttl > s.height"),
+  # R23-H1 / R23-H2 fixes
+  ('cmt-recs-bound-accounts', S, "pub const SL_MAX_CMT_RECS: usize = 2 * SL_MAX_CMT_LIVE;", "pub const SL_MAX_CMT_RECS: usize = SL_MAX_ACCOUNTS;"),
+  ('ora-hook-limit-off', A2, """            if taken == SL_MAX_UNSTAKES {
+                break 'q;
+            }""", """            if taken == usize::MAX {
+                break 'q;
+            }"""),
+  ('ora-prune-n-full', S, "            eng.state.prune_oracle_unbonding_n(h, ora::SL_MAX_UNSTAKES);", "            eng.state.prune_oracle_unbonding(h);"),
+  ('session-bound-hook-full', L, "    s.prune_oracle_unbonding_n(height, MAX_UNSTAKES_PER_HEIGHT);\n    s.prune_commits(height);", "    s.prune_oracle_unbonding(height);\n    s.prune_commits(height);"),
+  ('prune-n-order-desc', ST, "        due.sort_unstable();\n        due.truncate(max);", "        due.sort_unstable_by(|x, y| y.cmp(x));\n        due.truncate(max);"),
   ('mig-group-bound-off', S, " || cexp_groups(st).values().any(|g| g.len() as u64 > c.commit_group) {", " {"),
   ('mig-ttl-bound-off', S, "            if st.commits.values().any(|e| e.ttl_height < st.height || e.ttl_height > st.height.saturating_add(COMMIT_TTL_HEIGHTS)) ||", "            if false ||"),
   ('mig-count-bound-off', S, "|| g[3] > c.oracles || g[4] > c.commits {", "|| g[3] > c.oracles {"),
 ]
-TESTS = [(['slpoc23'], 900), (['slcr', '6', '300', '0'], 900), (['slcr', '4', '300', '2'], 900), (['slcr', '3', '300', '1', 'adv'], 1200), (['slpoc22'], 600), (['slfuzz', '10', '300', 'perp'], 900), (['slmig', '5', '300', '0'], 900), (['slora', '10', '300', '40'], 900)]
+TESTS = [(['slpoc23'], 900), (['slpoc20'], 900), (['slcr', '6', '300', '0'], 900), (['slcr', '4', '300', '2'], 900), (['slcr', '3', '300', '1', 'adv'], 1200), (['slpoc22'], 600), (['slfuzz', '10', '300', 'perp'], 900), (['slmig', '5', '300', '0'], 900), (['slora', '10', '300', '40'], 900)]
 
 def norm(m):
     return m[0], [(m[1], m[2], m[3])]

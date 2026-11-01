@@ -37,7 +37,8 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `aord:<acct>` | `:<n>:<sha256(entries sorted by id)>`, entry = (order id, market, side, price) | the account's live orders across markets (≤ 64) and where they rest |
 | `perp:0` | `:<perp_supply>:<perp_burned>:<next_market_id>` (always present) | round 16: PERP ledger aggregates + the market-id cursor (GovDeposit / GovWithdraw / CreateMarket) |
 | `xsrc:<acct>` | `:1` (absent = not a source) | round 16: `external_sources` membership (a funding-market creator) |
-| `acmt:<acct>` | `:<n>:<sha256((commit hash, ttl) sorted by hash)>` (absent = none; n ≤ `SL_MAX_ACMT` 64) | round 16: the account's commit index (R7-M2 commit bond, Commit's pending count); lazy expiry like `wdl:`; live entries are checked against their `cmt:` leaves (MNWIT1 `govwit` kind), `gnon:` read as in MNWIT1 |
+| `acmt:<acct>` | `:<n>:<sha256((commit hash, ttl) sorted by hash)>` (absent = none; n ≤ `SL_MAX_ACMT` 64) | round 16: the account's commit index (R7-M2 commit bond, Commit's pending count); live entries are checked against their `cmt:` leaves (MNWIT1 `govwit` kind), `gnon:` read as in MNWIT1. Rounds 16–22: lazy expiry like `wdl:`; round 23: eager (rewritten by the hook that expires an entry) |
+| `cexp:<u>` | `:<n>:<sha256(commit hashes ascending)>` (absent = no live commit with `ttl_height` u) | round 23 (R16-I1 / R22-I2): the commits that expire after height u (one expiry group); every live TTL is in [height, height + 16], so a hook reads ≤ 17 groups — no queue |
 
 | `pglob:0` | `:<next_proposal_id>:<non-zero PERP holders>:<n live>:<sha256((id u64, xroot 32 B) by id)>` (always present, `govwit`) | round 18: proposal cursor, the live set (≤ 64), the snapshot size a new proposal records; round 19: each live proposal's **exception sub-tree root** `xroot` (round 18: an exception count); loaded together with every live `prop:` and every live proposal's pruned sub-tree |
 | `pxe:<pid>:<acct>` (leaf of proposal `pid`'s exception sub-tree, not of MNWIT-S) | `:<weight>:<voted 0/1>` | round 19 (R18-M1 fix; replaces round 18's per-account `pexc:<acct>` lists): the pair (account, live proposal) where the account's snapshot weight ≠ its current PERP balance, or it voted. Sub-tree = compact SMT of the MNWIT-S form over these leaves |
@@ -47,7 +48,7 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `omk:<m>` | `:<deviation,window,reward or ->:<funding_index_twap or ->:<last_funding_height or ->:<n>:<dg oracle TWAP ring>:<n>:<dg funding TWAP ring>` | round 20: the market's oracle config, funding clock and TWAP rings (absent = all default) |
 | `oglob:0` | `:<funding source>:<slash nonce>:<queue head or ->:<queue tail or ->` (absent = all default) | round 20: global oracle facts + the expiry queue's ends |
 | `oexp:<u>` | `:<prev u or ->:<next u or ->:<n>:<sha256(accounts)>` (n ≤ `SL_MAX_UNSTAKES` 16) | round 20 (R19-I2): the oracles whose unbonding ends at height u; a doubly linked list over the distinct unlock heights, ascending |
-| `gcnt:0` | `:<accounts>:<PERP ids>:<markets>:<oracle bonds>` (always present) | round 22 (R16-I3 / R17-I3): the sizes of the session maps its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`); kept by delta, read by the global caps (§5) |
+| `gcnt:0` | `:<accounts>:<PERP ids>:<markets>:<oracle bonds>:<commits>` (always present) | round 22 (R16-I3 / R17-I3): the sizes of the session maps its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`; round 23: `commits`); kept by delta, read by the global caps (§5) |
 | `adlr:<m>:<sign>` | `:<rank sub-tree root hex>` (absent = no holder of that sign; sign 0 long, 1 short) | round 21 (ADL, §12.2): the root of the market's **rank sub-tree** for one sign |
 | rank leaf (of the `adlr:` sub-tree, not of MNWIT-S) | key = `BE(u64::MAX − |qty|)` (8 B) ‖ `AccountId[0..24]`, leaf = `sha256("~R1:" ‖ key ‖ AccountId)` | round 21: one leaf per non-insurance holder; the keys are raw (not hashed), so the compact SMT's bit order is the ADL order (|qty| descending, AccountId ascending) and its leftmost leaf is the pick |
 
@@ -236,8 +237,16 @@ of `state_cap_ok` on it, for the op and a Reveal's inner op with the author, exa
   `CREATE_MARKET_FEE_PERP`). Oracle bonds: 2^12 (each locks `ORACLE_BOND_PERP`). With the session's values (host tests)
   the two images agree at the caps (slpoc22 P1). The counts stay useful uncapped: export precondition (§9, R16-I2) and
   storage metering.
-* **Not mirrored:** the session's `MAX_STATE_COMMITS` (R22-I2): commits expire lazily in the stateless image (R16-I1),
-  so the number of live commits is not an aggregate of touched records; the per-account `SL_MAX_ACMT` bound stays.
+* **Commits (round 23, R22-I2).** With the eager commit expiry (§9) the live-commit count is the fifth `gcnt:0` field
+  (delta: commits created in the run − the groups the hook dropped) and the session's `MAX_STATE_COMMITS` rule runs on
+  it for every Commit (`SL_CAPS.commits`), plus a per-TTL bound `SL_CAPS.commit_group` (a Commit with a valid TTL into
+  a full group is refused, code 19; the group `cexp:<ttl>` is an input). Production values (decision R23-D1, R23-M1 /
+  R23-H1): total 4 096 (`SL_MAX_CMT_LIVE`, 4× the session's 1 024: a full set is a renewable commit-reveal lockout, so
+  the cap should be large; but a failed run still counts as a height, so the next hook can expire every live commit at
+  once and the total must fit the loader's commit-record bounds `SL_MAX_CMT_RECS` = 8 192 — above it the height would
+  be unprovable), 1 024 per TTL group (the normal one-step hook). With the session's values both images agree (the
+  session never holds more than 1 024 commits, so the group bound never binds there; slpoc23 P1–P6). The per-account
+  `SL_MAX_ACMT` bound stays.
 * Migration: a snapshot whose counts exceed `SL_CAPS` is refused (`ST_SL_MIG_BOUNDS`).
 
 ## 6. Order-book matching with partial state
@@ -323,10 +332,15 @@ memory whose OUT words say status 0, start root S and end root E.
   only if `height + REPLAY_WINDOW > height` and a `wdl:` set is rewritten only when the unit changed its live set (so an
   untouched extra record never changes the root). The stateless chain's root is therefore the root of the *lazily
   committed* state, not of the session's eagerly pruned one; behaviour is identical (`slmig … 900`, lazy reference
-  model). Commits (round 16) use the same lazy rule: an `acmt:` entry is live while ttl ≥ height, an expired commit's
-  `cmt:` record reads as absent, and the index is rewritten only when its live set changes. Known gap (R16-I1): an
-  expired commit's `cmt:` leaf is never deleted (stale leaves accumulate; harmless for behaviour, costs tree size) — a
-  lazy delete on the next touch of the hash is the fix. Oracle unbonding needs the same rule once supported (§12).
+  model). Commits: rounds 16–22 used the same lazy rule (R16-I1: an expired commit's `cmt:` leaf was never deleted).
+  **Round 23: eager commit expiry.** Commits are grouped by TTL (`cexp:<u>`); a hook from the committed height h0 to the
+  run's height h loads every group u in [h0, min(h, h0 + 17)) (live TTLs never exceed h0 + 16), each of their `cmt:`
+  records (their TTL must be u) and each owner's `acmt:`; the loader already reads them as absent, and the end root
+  deletes the `cmt:` leaves (unless a unit re-commits the hash) and the groups and rewrites the owners' indexes. The
+  commit leaves are now a pure function of the session state: at bound heights the stateless root is the session's
+  (`slcr`; withdrawals stay lazy). A Commit adds its hash to its TTL's group (catch-all `Need::Cexp`). Migration
+  refuses a TTL outside [height, height + 16] and counts above the caps. Oracle unbonding is eager since round 20
+  (§12.1; R23-H2: its jump case is open).
 * **MNWIT-S genesis by migration (round 15).** Instead of (not in addition to — R15-L1) a compiled
   `MNPILOT_SL_GENESIS`, a fresh stateless image accepts one migration run `[SL_MIG_MAGIC, snapshot words]` whose digest /
   length equal the compiled-in `MNPILOT_IMPORT_DIGEST` (the export digest of the session image, chosen by governance —
@@ -381,8 +395,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
    §12.3); book-path liquidation (round 17);
    withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
    `acmt:`).
-2. Height hook: lazy for withdrawals (round 15) and commits (round 16); stale `cmt:` leaves are never deleted (R16-I1);
-   oracle unbonding needs the same rule (§12.1).
+2. Height hook: lazy for withdrawals (round 15); eager for oracle unbonding (round 20) and commits (round 23, `cexp:`
+   groups; R16-I1 closed). R23-H2 (open): the oracle hook after a jump (failed runs) can exceed the per-segment limits.
 3. Rollup integration: SNAP_KIND 3 digest binding done (round 16); leaves for the state a migration drops (R15-I2:
    oracle rings / TWAPs / unbonding, proposals / voter sets / weight snapshots, funding clocks); export path of the
    stateless lineage (R16-I2); DA of the witness. Migration cost: the guest decode rebuilds the MNWIT1 witness tree of the
@@ -393,7 +407,7 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
 7. Upstream: the leaf kinds and the guards must be mirrored by the real engine's witness code (consensus).
 8. ~~No global caps in the stateless image (R16-I3)~~ — round 22 (§5): `gcnt:0` + the session's global rules with the
-   lineage's own values (accounts uncapped, R22-M1); the session's commit cap is not mirrored (R22-I2).
+   lineage's own values (accounts uncapped, R22-M1); round 23: the commit count (R22-I2 closed; lineage values R23-D1).
 
 ## 12. Designs for the remaining ops (round 16)
 

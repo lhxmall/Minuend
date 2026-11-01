@@ -2588,7 +2588,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             let gone = ora::hook_pre(&sl, &eng.state)?;
             ora::set_gone(&mut sl, gone);
             let h = eng.state.height;
-            eng.state.prune_oracle_unbonding(h);
+            // round 23 (R23-H2): at most SL_MAX_UNSTAKES releases per hook (the session's commit_height_bound)
+            eng.state.prune_oracle_unbonding_n(h, ora::SL_MAX_UNSTAKES);
             let d = eng.state.take_dirty();
             for a in &d.accounts {
                 if !sl.accts.contains_key(a) {
