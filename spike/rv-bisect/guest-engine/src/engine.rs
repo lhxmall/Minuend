@@ -1548,10 +1548,12 @@ impl Engine {
         // `Liquidate`.
         if still && remaining_pos != 0 && fills.is_empty() {
             // loop round 17 (stateless guest): the ADL remainder ranks every opposite holder of the market -- a partial
-            // state holds only the loaded ones, so the stateless run refuses any unit that gets here (UNSUPPORTED)
+            // state holds only the loaded ones; round 21: the stateless run checks the pick against the rank sub-tree of
+            // the candidates' sign (stateless/adl.rs)
             #[cfg(feature = "stateless")]
             unsafe {
                 crate::stateless::SL_ADL_REACHED = true;
+                crate::stateless::SL_ADL_SIDE = (market.0, if remaining_pos > 0 { 1 } else { 0 });
             }
             // ADL remainder: the book did not finish the close, so the
             // still-liquidatable remainder is walked onto opposite-sign

@@ -1,0 +1,4 @@
+== slfuzz 10 300 liq (04:03:22)
+{"mode":"liq","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":4,"segments":460,"units":18852,"witness_bytes":58188830,"max_witness":189303,"leaves_verified":308996,"tree_nodes":545709,"sl_hashes":1647673,"session_hashes":114261,"operator_iterations":113717,"liq_units_proven":705,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":""}
+exit 0 (04:06:13)
+TDONE

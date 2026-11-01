@@ -570,6 +570,8 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
     }
     // round 20: oracle leaves
     ora::leaves(s, push);
+    // round 21: ADL rank sub-tree roots
+    adl::leaves(s, push);
 }
 /// MNWIT-S root of a full state (reference). Round 16 (step 4): bulk build over the sorted leaf set -- one hash per
 /// internal node of the compact tree (a single-leaf subtree is the leaf) instead of an incremental `Smt::set` per leaf
@@ -628,6 +630,8 @@ pub struct PTree {
     nodes: Vec<PN>,
     pub root: P,
     pub node_hashes: u64,
+    /// round 21: the (key, account) of every tag-5 leaf of a rank sub-tree (adl.rs)
+    pub rids: Vec<(H, [u8; 32])>,
 }
 #[inline]
 fn kbit(k: &H, d: usize) -> usize {
@@ -644,12 +648,21 @@ impl PTree {
     /// round 19 (R19-L1): decode with a node budget -- the proposals' exception sub-trees share SL_MAX_TREE_NODES
     /// with the MNWIT-S tree (one heap bound for every tree of a witness)
     pub fn decode_lim(r: &mut Rd, lim: usize) -> Option<PTree> {
-        let mut t = PTree { nodes: Vec::new(), root: P::E, node_hashes: 0 };
+        let mut t = PTree { nodes: Vec::new(), root: P::E, node_hashes: 0, rids: Vec::new() };
         let mut path = [0u8; 32];
-        t.root = t.dec(r, 0, &mut path, lim)?;
+        t.root = t.dec(r, 0, &mut path, lim, false)?;
         Some(t)
     }
-    fn dec(&mut self, r: &mut Rd, d: usize, path: &mut [u8; 32], lim: usize) -> Option<P> {
+    /// round 21: a rank sub-tree (adl.rs): raw keys (not hashes of a kid), verified leaves as tag 5 = key32 + account
+    /// id32 with key[8..32] == id[0..24] and leaf hash sha256("~R1:" || key || id). Tag 4 is not accepted here, tag 5
+    /// nowhere else
+    pub fn decode_raw(r: &mut Rd, lim: usize) -> Option<PTree> {
+        let mut t = PTree { nodes: Vec::new(), root: P::E, node_hashes: 0, rids: Vec::new() };
+        let mut path = [0u8; 32];
+        t.root = t.dec(r, 0, &mut path, lim, true)?;
+        Some(t)
+    }
+    fn dec(&mut self, r: &mut Rd, d: usize, path: &mut [u8; 32], lim: usize, raw: bool) -> Option<P> {
         if self.nodes.len() > lim {
             return None;
         }
@@ -669,7 +682,21 @@ impl PTree {
                 }
                 Some(P::L(k, lh, false))
             }
-            4 => {
+            5 if raw => {
+                let k = r.h32()?;
+                let id = r.h32()?;
+                if k[8..] != id[..24] {
+                    return None;
+                }
+                for i in 0..d {
+                    if kbit(&k, i) != kbit(path, i) {
+                        return None;
+                    }
+                }
+                self.rids.push((k, id));
+                Some(P::L(k, adl::rleaf(&k, &AccountId(id)), true))
+            }
+            4 if !raw => {
                 let kl = r.u16()? as usize;
                 if kl == 0 || kl > 384 {
                     return None;
@@ -703,9 +730,9 @@ impl PTree {
                 self.nodes.push(PN { ch: [P::E, P::E], h: None });
                 let m = 1u8 << (7 - (d & 7));
                 path[d >> 3] &= !m;
-                let a = self.dec(r, d + 1, path, lim)?;
+                let a = self.dec(r, d + 1, path, lim, raw)?;
                 path[d >> 3] |= m;
-                let b = self.dec(r, d + 1, path, lim)?;
+                let b = self.dec(r, d + 1, path, lim, raw)?;
                 path[d >> 3] &= !m;
                 match (a, b) {
                     (P::E, P::E) | (P::E, P::L(..)) | (P::L(..), P::E) => return None,
@@ -982,6 +1009,12 @@ pub enum Need {
     Omk(u32),
     /// round 20: the expiry queue group of an unlock height `oexp:` (present or proven absent)
     Oexp(u64),
+    /// round 21: the rank sub-tree of (market, sign) with its `adlr:` leaf (present or proven absent), leftmost path
+    Adl(u32, u8),
+    /// round 21: the leftmost path through the first k start keys of a rank sub-tree (after removals)
+    AdlTop(u32, u8, u16),
+    /// round 21: a rank sub-tree path to this key (removal / insertion)
+    AdlKey(u32, u8, H),
 }
 
 /// Result of a stateless segment run.
@@ -1056,6 +1089,8 @@ struct Sl {
     bal0: BTreeMap<AccountId, u128>,
     /// round 20: the loaded oracle records (ora.rs)
     o: ora::Ora,
+    /// round 21: the loaded rank sub-trees (adl.rs)
+    adl: adl::Adl,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -1070,6 +1105,10 @@ macro_rules! bad {
 }
 /// round 20: the stateless oracle (design §12.1)
 pub mod ora;
+/// round 21: the stateless ADL remainder (design §12.2, rank sub-trees)
+pub mod adl;
+/// round 21: set by the engine with SL_ADL_REACHED: (market, sign of the ADL candidates: 0 long, 1 short)
+pub static mut SL_ADL_SIDE: (u32, u8) = (0, 0);
 /// round 20: set by state.rs when a unit reaches a funding transfer / the funding-rate peg (O(holders), R19-I1): the
 /// unit is unsupported (cleared before every stateless unit, checked after it)
 pub static mut SL_FUNDING_REACHED: bool = false;
@@ -1153,6 +1192,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         pcnt: BTreeMap::new(),
         bal0: BTreeMap::new(),
         o: ora::Ora::default(),
+        adl: adl::Adl::default(),
         verified: 0,
         leaf_hashes: 0,
     };
@@ -1777,6 +1817,8 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     }
     // round 20: oracle records
     ora::load(&mut sl, &mut s, &mut r, &mut b)?;
+    // round 21: rank sub-trees
+    adl::load(&mut sl, &s, &mut r, &mut b)?;
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
@@ -2129,7 +2171,7 @@ fn holders_now(sl: &Sl, s: &ChainState) -> u64 {
 /// set (the IOC's cancel-maker STP and refunds), the insurance light record (fee leg), and a proof of the R7-H1 dust
 /// check's input (`first_maker_qty`: the first live maker of another account on the opposite side, liq_first_maker).
 /// A funding-rate market (off-book close + ADL over all holders) is unsupported. The ADL remainder (book fills nothing)
-/// is detected after the unit (run loop): ADL picks over all holders of the market (global) -> unsupported.
+/// is detected after the unit (run loop); round 21: checked against the rank sub-tree of the candidates' sign (adl.rs).
 fn liq_pre(sl: &Sl, s: &ChainState, t: &AccountId, m: u32) -> Result<(), Result<Need, u32>> {
     need_acct(sl, s, t).map_err(Ok)?;
     match sl.markets.get(&m) {
@@ -2272,6 +2314,9 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     }
                 }
             }
+            // round 21: the prune moves no position; rank maintenance on its dirty accounts anyway (no-op)
+            let da: Vec<AccountId> = d.accounts.iter().copied().collect();
+            adl::maint(&mut sl, &eng.state, &da)?;
             ora::post(&mut sl, &eng.state)
         })();
         if let Err(e) = hk {
@@ -2538,16 +2583,38 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
         }
+        // round 21 (design §12.2): the ADL remainder ranks every opposite holder -- the rank sub-tree of the candidates'
+        // sign (as of unit start: maintained through the previous units, this unit's maintenance runs below) must show
+        // its leftmost leaf with that holder's record loaded; the engine's pick among the loaded holders is then the
+        // session's (checked on the fill as defence in depth)
         if adl {
-            fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
-            return out;
+            let (am, asd) = unsafe { SL_ADL_SIDE };
+            match adl::pick(&sl, &eng.state, am, asd) {
+                Ok(top) => {
+                    if let Ok(f) = &res {
+                        if f.iter().any(|x| x.kind == 2 && Some(x.maker) != top) {
+                            fin(&mut out, &sl, ST_SL_BADWIT, None);
+                            return out;
+                        }
+                    }
+                }
+                Err(Ok(n)) => {
+                    fin(&mut out, &sl, ST_SL_MISSING, Some(n));
+                    return out;
+                }
+                Err(Err(st)) => {
+                    fin(&mut out, &sl, st, None);
+                    return out;
+                }
+            }
         }
         if let (crate::BatchOp::Liquidate { .. }, Ok(f)) = (&op, &res) {
-            if f.is_empty() || f.iter().any(|x| x.kind == 2) {
+            if !adl && (f.is_empty() || f.iter().any(|x| x.kind == 2)) {
                 fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
                 return out;
             }
         }
+        let mut dirty_accts: Vec<AccountId> = Vec::new();
         // ---- post-unit guards (on the outcome, applied or rolled back) ----
         let post = (|| -> Result<(), Need> {
             // walk check
@@ -2622,6 +2689,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     return Err(Need::Account(*a));
                 }
             }
+            dirty_accts.extend(d.accounts.iter().copied());
             for m in &d.markets {
                 if !sl.markets.contains_key(&m.0) {
                     return Err(Need::Market(m.0));
@@ -2675,6 +2743,14 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         }
         // round 20: oracle records + expiry queue
         if let Err(e) = ora::post(&mut sl, &eng.state) {
+            match e {
+                Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
+                Err(st) => fin(&mut out, &sl, st, None),
+            }
+            return out;
+        }
+        // round 21: rank sub-tree maintenance (positions changed by the unit)
+        if let Err(e) = adl::maint(&mut sl, &eng.state, &dirty_accts) {
             match e {
                 Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
                 Err(st) => fin(&mut out, &sl, st, None),
@@ -2959,7 +3035,7 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         let now: BTreeMap<AccountId, Vec<PexcE>> = sl.pexc.keys().map(|a| (*a, pexc_of(s, a))).collect();
         let mut es: Vec<(u64, H)> = Vec::with_capacity(s.proposals.len());
         for pid in s.proposals.keys() {
-            let mut st = sl.xt.remove(pid).unwrap_or(PTree { nodes: Vec::new(), root: P::E, node_hashes: 0 });
+            let mut st = sl.xt.remove(pid).unwrap_or(PTree { nodes: Vec::new(), root: P::E, node_hashes: 0, rids: Vec::new() });
             for (a, l) in &now {
                 match l.iter().find(|e| e.0 == *pid) {
                     Some(e) => {
@@ -2993,6 +3069,8 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
     }
     // round 20: oracle records
     ora::end(sl, s, &mut puts, &mut dels);
+    // round 21: rank sub-tree roots
+    adl::end(sl, &mut puts, &mut dels);
     glob_leaf(&mut b, s.seq, s.height);
     puts.push(kh(&b));
     sl.leaf_hashes += puts.len() as u64 + dels.len() as u64;
@@ -3122,6 +3200,8 @@ pub struct WitBuilder<'a> {
     /// round 20 (adversarial tests only): drop the first entry of every sent oracle list record (1 orep, 2 orm, 3 oexp);
     /// 4: forge the first sample of every sent history (its report-set entry honest)
     pub t_odrop: core::cell::Cell<u8>,
+    /// round 21 (adversarial tests only): rank sub-trees -- 1 send the leftmost leaf unverified, 2 hide the leftmost path
+    pub t_adrop: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -3152,7 +3232,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0), t_adrop: core::cell::Cell::new(0) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -3187,8 +3267,10 @@ impl<'a> WitBuilder<'a> {
         let gov_all = if needs.iter().any(|n| matches!(n, Need::Pexc(_) | Need::Pglob)) { pexc_all(s) } else { BTreeMap::new() };
         // round 20: oracle needs
         let mut on = ora::ONeeds::default();
+        // round 21: rank sub-tree needs
+        let mut an = adl::ANeeds::default();
         for n in needs {
-            if on.add(n) {
+            if on.add(n) || an.add(n) {
                 continue;
             }
             match *n {
@@ -3588,6 +3670,8 @@ impl<'a> WitBuilder<'a> {
         }
         // round 20: oracle records
         ora::build(s, &on, &mut rec, &mut keys, self.t_odrop.get());
+        // round 21: rank sub-trees
+        adl::build(s, &an, &mut rec, &mut keys, self.t_adrop.get());
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
         o.extend_from_slice(&rec);

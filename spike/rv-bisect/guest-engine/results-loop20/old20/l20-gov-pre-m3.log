@@ -1,0 +1,31 @@
+== slpoc18 20000 (04:10:04)
+{"ok":true,"cases":[{"case":"P1 vote after a balance change: snapshot weight 2000 (balance 500)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":4,"iterations":1,"witness_bytes":2218},
+{"case":"P2 finalize, 10 exception holders (passes: taker fee -> 5)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":5,"iterations":2,"witness_bytes":2915},
+{"case":"P2 finalize reads no exception holder","ok":true,"status":0,"needs":"{Account(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Light(AccountId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), Market(1), Aord(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Pglob}","witness_bytes":2915},
+{"case":"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes","ok":true,"status":0,"ev":[19, 2147483648]},
+{"case":"P5 vote by 1 (entry holder): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list entry-less + sub-trees without its entries","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list entry-less + sub-trees without its entries","ok":true,"status":0},
+{"case":"P3 R18-M1 finalize with 4000 voters","ok":true,"status":0,"needs":5,"witness_bytes":10421},
+{"case":"P3 R18-M1 finalize with 4097 voters","ok":true,"status":0,"needs":5,"witness_bytes":10313},
+{"case":"P3 R18-M1 finalize with 20000 voters","ok":true,"status":0,"needs":5,"witness_bytes":11735}]}
+exit 0 (04:10:06)
+== slfuzz 100 300 gov (04:10:06)
+{"mode":"gov","batches":100,"ok":100,"bad_segments":0,"unsupported_segments":0,"segments":666,"units":33040,"witness_bytes":7838237,"max_witness":28486,"leaves_verified":62773,"tree_nodes":78918,"sl_hashes":282226,"session_hashes":164973,"operator_iterations":15360,"liq_units_proven":0,"gov_units_proven":[1178, 1747, 1575, 7443, 703, 2651],"first_bad":""}
+exit 0 (04:10:16)
+== slfuzz 30 1000 gov (04:10:16)
+{"mode":"gov","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":0,"segments":610,"units":32230,"witness_bytes":12001925,"max_witness":39123,"leaves_verified":70755,"tree_nodes":104900,"sl_hashes":357758,"session_hashes":162479,"operator_iterations":14533,"liq_units_proven":0,"gov_units_proven":[1088, 1898, 779, 8285, 759, 2586],"first_bad":""}
+exit 0 (04:10:31)
+== sladv 20 300 gov (04:10:31)
+{"segments":189,"cases":25593,"sound":25593,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[115,115,0],"book:hide-level-in-trie":[115,115,0],"book:omit-best-level":[141,113,28],"book:omit-head":[189,118,71],"book:reorder-fifo":[38,38,0],"duplicate:account":[189,189,0],"extra:valid":[189,0,189],"flip:records":[567,550,17],"flip:tree":[567,563,4],"forge16:acmt-add":[458,458,0],"forge16:gnon":[484,484,0],"forge16:next-market":[187,187,0],"forge16:perp-supply":[187,187,0],"forge19:pxe-drop":[150,150,0],"forge19:pxe-subtree":[138,138,0],"forge19:pxe-weight":[150,150,0],"forge:absent-via-leaf-key":[155,155,0],"forge:account":[169,169,0],"forge:self-consistent":[169,169,0],"forge:self-consistent:bound":[169,169,0],"honest":[189,0,189],"light:forged-collateral":[189,189,0],"light:forged-digest":[189,189,0],"light:user-account":[166,166,0],"limit:accounts":[189,189,0],"omit:account":[2020,679,1341],"omit:acmt":[484,484,0],"omit:aord":[2020,915,1105],"omit:bmp":[3200,1772,1428],"omit:gnon":[484,484,0],"omit:level":[213,166,47],"omit:light":[189,177,12],"omit:market":[303,159,144],"omit:order":[301,280,21],"omit:path":[34,17,17],"omit:perp":[187,187,0],"omit:pexc":[1265,1265,0],"omit:pglob":[185,185,0],"trailing":[189,189,0],"tree:leaf-as-opaque":[8544,7082,1462],"truncate":[189,189,0],"wrong-root":[169,81,88],"wrong-root:bound":[169,169,0]},"unsound_first":[]}
+exit 0 (04:10:38)
+== slmiggov 30 300 (04:10:38)
+{"batches":30,"ok":30,"migrations":115,"with_live_proposals":115,"with_exception_lists":107,"first_bad":""}
+exit 0 (04:10:40)
+== slmiggov 10 1000 (04:10:40)
+{"batches":10,"ok":10,"migrations":40,"with_live_proposals":40,"with_exception_lists":39,"first_bad":""}
+exit 0 (04:10:43)
+TDONE

@@ -1,0 +1,13 @@
+== slora 30 400 40 (04:03:22)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":405,"segments":3488,"units":14679,"witness_bytes":43732522,"max_witness":34931,"operator_iterations":56633,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[893, 1367, 285, 433, 252, 322],"hook_segments":184,"released_oracles":213,"empty_runs":315,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:03:47)
+== slora 20 1000 25 (04:03:47)
+{"mode":"orc","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":875,"segments":5948,"units":24068,"witness_bytes":94888753,"max_witness":46203,"operator_iterations":98158,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[1456, 1892, 389, 763, 371, 564],"hook_segments":314,"released_oracles":362,"empty_runs":536,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:04:38)
+== slora 30 300 300 (04:04:38)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":250,"segments":2637,"units":11117,"witness_bytes":30602813,"max_witness":32603,"operator_iterations":43169,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[582, 1237, 266, 297, 208, 237],"hook_segments":194,"released_oracles":212,"empty_runs":232,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:04:49)
+== slora 10 400 60 adv (04:04:49)
+{"mode":"orc","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":151,"segments":833,"units":4926,"witness_bytes":11701636,"max_witness":34136,"operator_iterations":15829,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[311, 377, 100, 117, 84, 91],"hook_segments":68,"released_oracles":78,"empty_runs":73,"adv_cases":32895,"adv_unsound":0,"adv_counts":{"extra20:valid":[682,0,682],"flip20:records":[2046,1988,58],"forge20:oexp-drop":[107,107,0],"forge20:oglob-nonce":[682,682,0],"forge20:ohist-sample":[273,273,0],"forge20:omk-ring":[386,386,0],"forge20:orep-drop":[350,350,0],"forge20:orep-price":[449,449,0],"forge20:orm-drop":[227,227,0],"forge20:ostk-bond":[1043,1043,0],"forge20:ostk-unlock":[165,165,0],"omit20:account":[3366,2606,760],"omit20:market":[1170,234,936],"omit20:oexp":[149,149,0],"omit20:oglob":[682,682,0],"omit20:ohist":[756,372,384],"omit20:omk":[485,220,265],"omit20:orep":[559,304,255],"omit20:orm":[792,440,352],"omit20:ostk":[1043,1043,0],"omit20:other":[17483,9470,8013]},"first_unsound":"","first_bad":""}
+exit 0 (04:05:01)
+TDONE

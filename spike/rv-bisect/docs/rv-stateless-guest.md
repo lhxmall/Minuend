@@ -47,8 +47,10 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `omk:<m>` | `:<deviation,window,reward or ->:<funding_index_twap or ->:<last_funding_height or ->:<n>:<dg oracle TWAP ring>:<n>:<dg funding TWAP ring>` | round 20: the market's oracle config, funding clock and TWAP rings (absent = all default) |
 | `oglob:0` | `:<funding source>:<slash nonce>:<queue head or ->:<queue tail or ->` (absent = all default) | round 20: global oracle facts + the expiry queue's ends |
 | `oexp:<u>` | `:<prev u or ->:<next u or ->:<n>:<sha256(accounts)>` (n ≤ `SL_MAX_UNSTAKES` 16) | round 20 (R19-I2): the oracles whose unbonding ends at height u; a doubly linked list over the distinct unlock heights, ascending |
+| `adlr:<m>:<sign>` | `:<rank sub-tree root hex>` (absent = no holder of that sign; sign 0 long, 1 short) | round 21 (ADL, §12.2): the root of the market's **rank sub-tree** for one sign |
+| rank leaf (of the `adlr:` sub-tree, not of MNWIT-S) | key = `BE(u64::MAX − |qty|)` (8 B) ‖ `AccountId[0..24]`, leaf = `sha256("~R1:" ‖ key ‖ AccountId)` | round 21: one leaf per non-insurance holder; the keys are raw (not hashed), so the compact SMT's bit order is the ADL order (|qty| descending, AccountId ascending) and its leftmost leaf is the pick |
 
-`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob` (with its `pxe` sub-trees) are pure functions of the state; `bmp` too (the reference builder derives it from
+`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob` (with its `pxe` sub-trees), the oracle leaves and `adlr` (with its rank sub-tree) are pure functions of the state; `bmp` too (the reference builder derives it from
 the levels), but the guest maintains it by **delta** (sets / clears path bits of the levels a unit created or
 emptied), so a node is updated without loading the other levels under it. Consensus change: every MNWIT root changes
 (the AA verifiers keep working — they only prove `acct:` / `pos:` / `ord:` leaves — but W<h> roots are MNWIT-S roots).
@@ -152,9 +154,12 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   every order in it (the IOC's cancel-maker STP / refunds), and a proof of the R7-H1 dust check's input
   (`first_maker_qty`: every level in price priority up to the first one holding a live order of another account is
   known, its start FIFO chain loaded up to that order — `liq_first_maker`). The IOC walk is checked like a Place's
-  (§6). **ADL remainder** (the book filled nothing: the unit returns no fill, or an ADL fill of kind 2) → unsupported:
-  the session ranks every opposite holder of the market; the stateless image would pick among the loaded ones only
-  (design §12.2). A revealed Liquidate (Reveal inner op) → unsupported.
+  (§6). **ADL remainder** (the book filled nothing; round 21, §12.2 round-21 implementation): the rank sub-tree of the
+  candidates' sign (`adlr:<m>:<sign>`, as of unit start) must show its leftmost leaf (verified, tag 5) and that holder's
+  full record must be loaded; the engine's pick among the loaded holders is then the session's (also checked on the
+  kind-2 fill). Rounds 17–20: unsupported. A revealed Liquidate (Reveal inner op) → unsupported.
+* Rank maintenance (round 21, every unit and the height hook): a dirty non-insurance account whose (sign, |qty|) changed in
+  a market moves in the rank sub-trees (old key removed, new key inserted; `Need::Adl` / `AdlKey` / `AdlTop`).
 
 * Governance (round 18, §12.3): CreateProposal (creator record, `perp:0`, the market present / absent, `pglob:` with
   every live `prop:`), Vote (voter record + its exception list, `pglob:`; also for a Reveal's inner Vote, whose R6-H2
@@ -183,7 +188,8 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   (a released oracle's entries leave every report set, loaded samples or not), then the post-unit guards (dirty accounts,
   PERP balance → `pglob:` / exception list, oracle records, queue).
 
-Unsupported ops (ADL, funding transfers / the funding-rate peg, ExtPrice, fixtures other than SetSeq) →
+Unsupported ops (funding transfers / the funding-rate peg — incl. a funding-rate market's liquidation / ADL —, ExtPrice,
+fixtures other than SetSeq; rounds 17–20 also the ADL remainder) →
 `ST_SL_UNSUPPORTED = 14` (designs: §12).
 Withdraw is supported since round 15; the height hook runs lazily (§9).
 
@@ -338,7 +344,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops: ADL, funding transfers / peg, ExtPrice — designs in §12 (funding: R20-I1). Done: oracle stake / unstake / report /
+1. Ops: funding transfers / peg, ExtPrice — designs in §12 (funding: R20-I1). Done: the book-path ADL remainder (round 21,
+   rank sub-trees, §12.2); oracle stake / unstake / report /
    slash + the eager unbonding expiry (round 20, §12.1); proposals / vote / finalize (round 18,
    §12.3); book-path liquidation (round 17);
    withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
@@ -477,6 +484,38 @@ consensus change to a mark-independent rank.)
 * Status (round 17): the book path is supported (§4); a unit that reaches the ADL remainder is unsupported until this
   index exists. Note the index must also be maintained by every op that changes a position (fills of Place, the
   liquidation itself), so it lands together with its maintenance in all supported ops, and in the migration.
+
+**Round-21 implementation (rank sub-trees instead of `adlq:` trie + `adlv:` / `alk:` lists)** — `stateless/adl.rs`.
+The trie + linked lists above need a sorted insert with two verified neighbours and a trie update per list; the round-19
+machinery (a compact SMT per object whose root is a field of an MNWIT-S leaf, pruned multiproof, `PTree::set` /
+`remove`) does the same job with one structure if the sub-tree's keys are the rank itself instead of a hash:
+
+* `adlr:<m>:<sign>` holds the root of a compact SMT over the market's holders of that sign; key = `BE(u64::MAX − |qty|)`
+  ‖ `AccountId[0..24]` (256 bits: the tree's depth limit), leaf hash = `sha256("~R1:" ‖ key ‖ AccountId)`. Bit order =
+  rank order, so the leftmost leaf is the ADL counterparty. Insurance is never in a tree (never a candidate); the target
+  is in the other sign's tree. A pure function of the session state: the reference root stays `s_root(state)`, the
+  migration commits the trees with every other leaf.
+* Witness: per needed tree (`Need::Adl(m, sign)`) the `adlr:` leaf (present / proven absent) and the sub-tree pruned to
+  its leftmost path (`AdlTop(k)`: through the first k start keys — after k − 1 removals the leftmost remaining start key
+  is among them) and the paths of the keys a unit removes / inserts (`AdlKey`). A verified rank leaf is a new tag 5
+  (key + AccountId; key[8..] = id[..24] and the leaf hash recomputed), accepted only by `PTree::decode_raw` (tag 4 —
+  hashed kid keys — is refused there, tag 5 everywhere else).
+* ADL pick (run loop; engine flags `SL_ADL_REACHED` + `SL_ADL_SIDE`): the candidates' tree as of unit start (maintained
+  through the previous units; this unit's maintenance runs after) must expose its leftmost leaf verified, and that
+  holder's full record must be loaded (its tree entry is checked against the key). Every loaded holder is in the tree
+  under its current key, so none ranks before the leftmost: the engine's pick among the loaded holders is the session's.
+  An empty tree = no candidate anywhere. A kind-2 fill whose maker is not the leftmost holder → BADWIT (defence).
+* Maintenance (after every unit and after the height hook): for each dirty non-insurance account, every market whose
+  (sign, |qty|) changed against the account's current tree entry (initialised from its loaded record) — remove the old
+  key (must be present with this account's leaf; unknown path → `AdlKey`), insert the new one (must be absent; unknown
+  → `AdlKey`). End root: each loaded tree's root into its `adlr:` leaf (put; delete when it became empty).
+* Cost: a unit that reaches the ADL reads one leftmost path (≤ depth of the sub-tree) and one account record; every
+  position change costs a removal + an insertion path in the market's sub-trees (O(log holders), shared prefixes).
+  `slpoc21` P1 (2 000 extra holders): the rank section of the witness 1.4 → 1.9 KB.
+* Assumption (R21-I2): two holders of one market with the same |qty| never share a 24-byte AccountId prefix (ids are
+  hashes of ed25519 keys); an insertion onto a present key is refused as UNSUPPORTED rather than mis-ranked.
+* The funding-rate off-book path ranks by unrealized funding cash (mark-dependent) and stays unsupported (the whole
+  liquidation of a funding-rate market is, `liq_pre`). A revealed Liquidate stays unsupported.
 
 ### 12.3 Governance (implemented, round 18; exception sub-trees round 19)
 

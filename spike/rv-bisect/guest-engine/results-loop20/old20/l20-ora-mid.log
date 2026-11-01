@@ -1,0 +1,27 @@
+== slpoc20 (04:22:51)
+{"ok":true,"cases":[{"case":"P1 R20-M2 20 unstakes at one height: 16 start unbonding, 4 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24189},
+{"case":"P2 R19-I2 / R20-M1 / R20-M3 hook releases 16 oracles x 16 distinct markets: one report-set record per market","ok":true,"status":0,"root_ok":true,"oracled_flipped":true,"orep_records":256,"market_records":256,"witness_bytes":124928},
+{"case":"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped","ok":true,"runs":4,"refused":4,"wrong":0},
+{"case":"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 17th market refused (19)","ok":true,"status":[0,0],"root_ok":[true,true],"ev_ok":[true,true]},
+{"case":"P5 migration bound (65 reporters in a market)","ok":true},
+{"case":"P6 Slash: honest Y refused, deviant X slashed (queue head unlinked, market 2 oracled flips, challenger reward), X again refused","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":[16, 2147483648, 13],"witness_bytes":2932}]}
+exit 0 (04:23:01)
+== slora 40 300 1 (04:23:01)
+{"mode":"orc","batches":40,"ok":40,"bad_segments":0,"unsupported_segments":1087,"segments":3649,"units":14799,"witness_bytes":28777663,"max_witness":33014,"operator_iterations":40258,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[641, 866, 135, 316, 133, 280, 4, 213],"hook_segments":5,"released_oracles":5,"empty_runs":310,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:23:40)
+== slora 30 400 40 (04:23:40)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":864,"segments":3483,"units":14665,"witness_bytes":34163169,"max_witness":33971,"operator_iterations":45051,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[630, 1299, 221, 296, 196, 260, 0, 261],"hook_segments":165,"released_oracles":190,"empty_runs":314,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:24:20)
+== slora 20 1000 25 (04:24:20)
+{"mode":"orc","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":1613,"segments":5946,"units":24040,"witness_bytes":73978666,"max_witness":47503,"operator_iterations":76677,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[865, 1844, 295, 514, 286, 389, 0, 364],"hook_segments":252,"released_oracles":291,"empty_runs":536,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:25:32)
+== slora 30 300 300 (04:25:32)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":572,"segments":2636,"units":11115,"witness_bytes":24482562,"max_witness":32857,"operator_iterations":34986,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[390, 1173, 202, 194, 153, 210, 0, 196],"hook_segments":147,"released_oracles":167,"empty_runs":230,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:25:43)
+== slora 15 600 1 adv (04:25:43)
+{"mode":"orc","batches":15,"ok":15,"bad_segments":0,"unsupported_segments":811,"segments":2186,"units":10956,"witness_bytes":22235094,"max_witness":41647,"operator_iterations":27346,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[415, 545, 58, 232, 71, 206, 1, 163],"hook_segments":7,"released_oracles":8,"empty_runs":194,"adv_cases":55552,"adv_unsound":0,"adv_counts":{"extra20:valid":[1375,0,1375],"flip20:records":[4125,4038,87],"forge20:oexp-drop":[65,65,0],"forge20:oglob-nonce":[1375,1375,0],"forge20:ohist-sample":[420,420,0],"forge20:omk-ring":[655,655,0],"forge20:orep-drop":[534,534,0],"forge20:orep-price":[582,582,0],"forge20:orm-drop":[363,363,0],"forge20:ostk-bond":[1474,1474,0],"forge20:ostk-unlock":[642,642,0],"omit20:account":[5101,4113,988],"omit20:market":[2237,503,1734],"omit20:oexp":[72,72,0],"omit20:oglob":[1375,1375,0],"omit20:ohist":[1028,448,580],"omit20:omk":[811,380,431],"omit20:orep":[737,14,723],"omit20:orm":[919,413,506],"omit20:ostk":[1474,1474,0],"omit20:other":[30188,16053,14135]},"first_unsound":"","first_bad":""}
+exit 0 (04:26:20)
+== slora 10 400 60 adv (04:26:20)
+{"mode":"orc","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":299,"segments":827,"units":4927,"witness_bytes":7679725,"max_witness":33594,"operator_iterations":10990,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[136, 368, 58, 69, 53, 70, 0, 72],"hook_segments":52,"released_oracles":59,"empty_runs":72,"adv_cases":23340,"adv_unsound":0,"adv_counts":{"extra20:valid":[528,0,528],"flip20:records":[1584,1539,45],"forge20:oexp-drop":[77,77,0],"forge20:oglob-nonce":[528,528,0],"forge20:ohist-sample":[96,96,0],"forge20:omk-ring":[323,323,0],"forge20:orep-drop":[279,279,0],"forge20:orep-price":[333,333,0],"forge20:orm-drop":[140,140,0],"forge20:ostk-bond":[768,768,0],"forge20:ostk-unlock":[104,104,0],"omit20:account":[2275,1719,556],"omit20:market":[837,184,653],"omit20:oexp":[109,109,0],"omit20:oglob":[528,528,0],"omit20:ohist":[523,129,394],"omit20:omk":[396,114,282],"omit20:orep":[419,55,364],"omit20:orm":[553,221,332],"omit20:ostk":[768,768,0],"omit20:other":[12172,6375,5797]},"first_unsound":"","first_bad":""}
+exit 0 (04:26:38)
+TDONE

@@ -1,0 +1,10 @@
+== govfuzz 30 300 (04:26:03)
+{"seeds":30,"match":30,"units":10056,"why":"","coverage":{"commit:0x11":159,"commit:0x13":364,"commit:ok":738,"delisted":17,"final:0x7":213,"final:0xc":134,"final:ok":77,"gdep:0x7":156,"gdep:ok":589,"gwd:0x6":189,"gwd:0x9":141,"gwd:ok":228,"market:0x13":124,"market:0x7":93,"market:0x9":50,"market:ok":410,"markets_created":425,"param_changed":13,"place:0x7":484,"place:ok":644,"prop:0x7":414,"prop:0x9":20,"prop:0xa":69,"prop:ok":180,"reveal:0x11":838,"reveal:0x13":25,"reveal:0x2":251,"reveal:0x3":6,"reveal:0x7":35,"reveal:0x9":20,"reveal:0xa":1,"reveal:0xc":10,"reveal:0xd":14,"reveal:0xe":8,"reveal:ok":129,"vote:0x7":386,"vote:0xc":296,"vote:ok":404}}
+exit 0 (04:26:09)
+== liqfuzz 20 300 (04:26:09)
+{"seeds":20,"match":20,"units":21882,"liq_fills_unmasked_v2":26,"funding_clock_armed_batches":20,"coverage":{"deposit:ok0":754,"extprice:0x2":33,"extprice:0xa":71,"extprice:ok0":249,"height:0x2":3,"height:set":239,"liquidate1:0x2":69,"liquidate1:0xb":604,"liquidate1:ok1":24,"liquidate2:0x2":5,"liquidate2:0xb":55,"liquidate2:ok1":1,"liquidate3:0x2":41,"liquidate3:0xb":323,"liquidate3:ok1":1,"liquidate:adl":4,"liquidate:book":22,"place1:0x107":2612,"place1:0x7":4322,"place1:ok0":5167,"place1:ok1":1835,"place2:0x107":74,"place2:0x7":181,"place2:ok0":215,"place2:ok1":162,"place3:0x107":565,"place3:0x7":1032,"place3:ok0":1091,"place3:ok1":402,"report:0x2":49,"report:ok0":1170,"withdraw:0x6":2,"withdraw:0x7":106,"withdraw:0x9":231,"withdraw:ok0":194}}
+exit 0 (04:27:13)
+== slora 20 300 1 (04:27:13)
+{"mode":"orc","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":525,"segments":1815,"units":7419,"witness_bytes":14831097,"max_witness":33014,"operator_iterations":20584,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej":[364, 434, 66, 166, 69, 144, 1, 116],"hook_segments":3,"released_oracles":3,"empty_runs":147,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:27:19)
+TDONE

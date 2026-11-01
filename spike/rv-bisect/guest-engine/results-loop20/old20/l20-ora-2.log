@@ -1,0 +1,21 @@
+== slpoc20 (04:10:04)
+{"ok":true,"cases":[{"case":"P1 R20-M2 70 unstakes at one height: 64 start unbonding, 6 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24374},
+{"case":"P2 R19-I2 / R20-M1 hook releases 64 oracles (60 x 16 markets): 16 report-set records","ok":true,"status":0,"root_ok":true,"oracled_flipped":true,"orep_records":16,"witness_bytes":105752},
+{"case":"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped","ok":true,"runs":4,"refused":4,"wrong":0}]}
+exit 0 (04:10:05)
+== slora 30 400 40 (04:10:05)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":405,"segments":3488,"units":14679,"witness_bytes":42914625,"max_witness":34222,"operator_iterations":56293,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[893, 1367, 285, 433, 252, 322],"hook_segments":184,"released_oracles":213,"empty_runs":315,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:10:22)
+== slora 20 1000 25 (04:10:22)
+{"mode":"orc","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":875,"segments":5948,"units":24068,"witness_bytes":93225341,"max_witness":45540,"operator_iterations":97492,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[1456, 1892, 389, 763, 371, 564],"hook_segments":314,"released_oracles":362,"empty_runs":536,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:10:56)
+== slora 30 300 300 (04:10:56)
+{"mode":"orc","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":250,"segments":2637,"units":11117,"witness_bytes":30078589,"max_witness":31737,"operator_iterations":42914,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[582, 1237, 266, 297, 208, 237],"hook_segments":194,"released_oracles":212,"empty_runs":232,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":""}
+exit 0 (04:11:05)
+== slora 10 400 60 adv (04:11:05)
+{"mode":"orc","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":151,"segments":833,"units":4926,"witness_bytes":11474353,"max_witness":33542,"operator_iterations":15701,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[311, 377, 100, 117, 84, 91],"hook_segments":68,"released_oracles":78,"empty_runs":73,"adv_cases":32669,"adv_unsound":0,"adv_counts":{"extra20:valid":[682,0,682],"flip20:records":[2046,1994,52],"forge20:oexp-drop":[107,107,0],"forge20:oglob-nonce":[682,682,0],"forge20:ohist-sample":[175,175,0],"forge20:omk-ring":[386,386,0],"forge20:orep-drop":[350,350,0],"forge20:orep-price":[449,449,0],"forge20:orm-drop":[227,227,0],"forge20:ostk-bond":[1043,1043,0],"forge20:ostk-unlock":[165,165,0],"omit20:account":[3366,2606,760],"omit20:market":[1170,234,936],"omit20:oexp":[149,149,0],"omit20:oglob":[682,682,0],"omit20:ohist":[658,271,387],"omit20:omk":[485,220,265],"omit20:orep":[559,74,485],"omit20:orm":[792,440,352],"omit20:ostk":[1043,1043,0],"omit20:other":[17453,9440,8013]},"first_unsound":"","first_bad":""}
+exit 0 (04:11:18)
+== slora 20 300 5 adv (04:11:18)
+{"mode":"orc","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":263,"segments":1820,"units":7427,"witness_bytes":20007204,"max_witness":32889,"operator_iterations":26653,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej":[516, 508, 99, 275, 104, 173],"hook_segments":14,"released_oracles":14,"empty_runs":148,"adv_cases":56392,"adv_unsound":0,"adv_counts":{"extra20:valid":[1557,0,1557],"flip20:records":[4671,4556,115],"forge20:oexp-drop":[92,92,0],"forge20:oglob-nonce":[1557,1557,0],"forge20:ohist-sample":[326,326,0],"forge20:omk-ring":[610,610,0],"forge20:orep-drop":[524,524,0],"forge20:orep-price":[628,628,0],"forge20:orm-drop":[332,332,0],"forge20:ostk-bond":[1543,1543,0],"forge20:ostk-unlock":[460,460,0],"omit20:account":[5458,4359,1099],"omit20:market":[2434,758,1676],"omit20:oexp":[103,103,0],"omit20:oglob":[1557,1557,0],"omit20:ohist":[984,455,529],"omit20:omk":[773,369,404],"omit20:orep":[791,18,773],"omit20:orm":[1058,565,493],"omit20:ostk":[1543,1543,0],"omit20:other":[29391,15234,14157]},"first_unsound":"","first_bad":""}
+exit 0 (04:11:35)
+TDONE

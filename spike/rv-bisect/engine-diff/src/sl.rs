@@ -976,6 +976,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Cmt(_) => "omit:cmt",
                     Need::Pglob => "omit:pglob",
                     Need::Pexc(_) => "omit:pexc",
+                    Need::Adl(..) | Need::AdlTop(..) | Need::AdlKey(..) => "omit:adl",
                     _ => "omit:oracle",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
@@ -2338,21 +2339,15 @@ pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
     out.join("\n")
 }
 
-/// round 17 PoC (stateless liquidation, ADL remainder): on the `liq` workload, find the segments whose units reach the
-/// ADL remainder (session-side replay with the engine's SL_ADL_REACHED flag) and check the stateless outcome:
-/// with the honest witness and with a witness that additionally carries every position holder's record (so the
-/// partial state DOES hold candidates and the ADL leg would pick one), the status must be UNSUPPORTED (14) or another
-/// refusal -- never 0 (a status-0 run would have picked among the loaded holders only). Also counts the
-/// book-path liquidations proven in the other segments.
-pub fn slpoc17(n: u64, ord: u32) -> String {
-    let (mut segs_adl, mut honest_14, mut extra_refused, mut wrong, mut op_err) = (0u64, 0u64, 0u64, 0u64, 0u64);
-    let mut first_wrong = String::new();
+/// round 21: the `liq` workload's segments whose units reach the ADL remainder (session-side replay with the engine's
+/// SL_ADL_REACHED flag): (seed, segment index, reference, (market, candidates' sign) of the first ADL unit)
+pub fn adl_segments(n: u64, ord: u32, limit: usize) -> Vec<(u64, usize, SegRef, (u32, u8))> {
+    let mut out = Vec::new();
     for s in 1..=n {
         let w = liq_sl_batch(s, ord);
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(200) as u32;
-        for (k, r) in session_refs(&w, size).iter().enumerate() {
-            // session-side replay of the units (dispatch on the full pre-state) -> does any unit reach the ADL leg?
+        for (k, r) in session_refs(&w, size).into_iter().enumerate() {
             let seg = &r.seg;
             let n_acc = seg[1];
             let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
@@ -2367,7 +2362,7 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
             let base = 4 + 8 * n_acc;
             let mut eng = mnpilot::engine::Engine { state: r.pre.clone() };
             let mut rd = |i: u32| seg.get(i as usize).copied().unwrap_or(0);
-            let mut adl = false;
+            let mut side = None;
             for i in 0..seg[2] {
                 let mut ow = [0u32; 8];
                 for (q, x) in ow.iter_mut().enumerate() {
@@ -2378,7 +2373,7 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
                 unsafe { sl::SL_ADL_REACHED = false };
                 let res = mnpilot::dispatch(&mut eng, &op, &accts, mnpilot::Uid { v2: false, at: base + 8 * seg[2] + i * 8 }, seq, &mnpilot::Ext::NONE, &mut rd, false);
                 if unsafe { sl::SL_ADL_REACHED } {
-                    adl = true;
+                    side = Some(unsafe { sl::SL_ADL_SIDE });
                     break;
                 }
                 if res.is_ok() {
@@ -2386,46 +2381,192 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
                 }
                 let _ = eng.state.take_dirty();
             }
-            if !adl {
-                continue;
-            }
-            segs_adl += 1;
-            let b = WitBuilder::new(&r.pre);
-            match operate(&b, seg) {
-                Ok((needs, _, o, ev, _)) => {
-                    if o.status == sl::ST_SL_UNSUPPORTED {
-                        honest_14 += 1;
-                    } else if o.status == 0 && (o.end_root != r.post_root || ev != r.ev) {
-                        wrong += 1;
-                        if first_wrong.is_empty() {
-                            first_wrong = format!("seed {} seg {}: honest status 0 with a different result", s, k);
-                        }
-                    }
-                    let mut nx = needs.clone();
-                    for (id, a) in r.pre.accounts.iter() {
-                        if !a.positions.is_empty() && *id != mnpilot::types::INSURANCE_ACCOUNT {
-                            nx.insert(Need::Account(*id));
-                        }
-                    }
-                    let wf = b.build(&nx);
-                    let (ox, evx) = run_sl(seg, &wf);
-                    if ox.status != 0 {
-                        extra_refused += 1;
-                    } else if ox.end_root != r.post_root || evx != r.ev {
-                        wrong += 1;
-                        if first_wrong.is_empty() {
-                            first_wrong = format!("seed {} seg {}: extra-holders witness status 0 with a different result", s, k);
-                        }
-                    }
+            if let Some(sd) = side {
+                out.push((s, k, r, sd));
+                if out.len() >= limit {
+                    return out;
                 }
-                Err(_) => op_err += 1,
             }
         }
     }
-    let ok = wrong == 0 && segs_adl > 0 && honest_14 + op_err == segs_adl;
+    out
+}
+
+/// round 17 PoC, round-21 semantics (stateless ADL via the rank sub-trees, design §12.2): on the `liq` workload, every
+/// segment whose units reach the ADL remainder must now be PROVEN by the honest operator (status 0 = the session's
+/// root and events; another refusal, e.g. an oracle report in the segment, is counted apart), and a witness that
+/// additionally carries every position holder's record must give the same result or a refusal -- never a different
+/// status-0 result. Round 17-20 form: such segments were UNSUPPORTED (14).
+pub fn slpoc17(n: u64, ord: u32) -> String {
+    let (mut segs_adl, mut proven, mut honest_14, mut extra_refused, mut wrong, mut op_err) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut first_wrong = String::new();
+    for (s, k, r, _) in adl_segments(n, ord, usize::MAX) {
+        let seg = &r.seg;
+        segs_adl += 1;
+        let b = WitBuilder::new(&r.pre);
+        match operate(&b, seg) {
+            Ok((needs, _, o, ev, _)) => {
+                if o.status == 0 && o.end_root == r.post_root && ev == r.ev {
+                    proven += 1;
+                } else if o.status == 0 {
+                    wrong += 1;
+                    if first_wrong.is_empty() {
+                        first_wrong = format!("seed {} seg {}: honest status 0 with a different result", s, k);
+                    }
+                } else if o.status == sl::ST_SL_UNSUPPORTED {
+                    honest_14 += 1;
+                }
+                let mut nx = needs.clone();
+                for (id, a) in r.pre.accounts.iter() {
+                    if !a.positions.is_empty() && *id != mnpilot::types::INSURANCE_ACCOUNT {
+                        nx.insert(Need::Account(*id));
+                    }
+                }
+                let wf = b.build(&nx);
+                let (ox, evx) = run_sl(seg, &wf);
+                if ox.status != 0 {
+                    extra_refused += 1;
+                } else if ox.end_root != r.post_root || evx != r.ev {
+                    wrong += 1;
+                    if first_wrong.is_empty() {
+                        first_wrong = format!("seed {} seg {}: extra-holders witness status 0 with a different result", s, k);
+                    }
+                }
+            }
+            Err(e) => {
+                op_err += 1;
+                if first_wrong.is_empty() {
+                    first_wrong = format!("seed {} seg {}: operator {}", s, k, e);
+                }
+            }
+        }
+    }
+    let ok = wrong == 0 && op_err == 0 && segs_adl > 0 && proven > 0;
     format!(
-        "{{\"ok\":{},\"batches\":{},\"segments_reaching_adl\":{},\"honest_unsupported\":{},\"extra_holders_refused\":{},\"wrong_status0\":{},\"operator_errors\":{},\"first_wrong\":\"{}\"}}",
-        ok, n, segs_adl, honest_14, extra_refused, wrong, op_err, first_wrong
+        "{{\"ok\":{},\"batches\":{},\"segments_reaching_adl\":{},\"proven\":{},\"honest_unsupported\":{},\"extra_holders_refused\":{},\"wrong_status0\":{},\"operator_errors\":{},\"first_wrong\":\"{}\"}}",
+        ok, n, segs_adl, proven, honest_14, extra_refused, wrong, op_err, first_wrong
+    )
+}
+
+/// round 21 PoC (stateless ADL, rank sub-trees): on up to `lim` ADL segments of the `liq` workload --
+///  P1 inflation: the pre-state gets `extra` more holders of the candidates' sign in the ADL market (small positions,
+///     deep collateral) plus a WHALE (the largest |qty|, a high id) and a TIE (the whale's |qty|, a lower id: the tie
+///     goes to the lower id): the stateless run must equal the session (root) with the tie winner as the counterparty,
+///     and its witness must not grow with `extra` (rank sub-tree: the leftmost path only);
+///  P2 every single omission from the honest witness of a round-21 need (Adl / AdlTop / AdlKey / Account) and the
+///     forged sub-trees (leftmost leaf unverified, leftmost path hidden) -> refused or the identical result.
+pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    let segs = adl_segments(n, ord, lim);
+    let (mut p1_runs, mut p1_ok, mut p1_skip) = (0u32, 0u32, 0u32);
+    let mut p1_first = String::new();
+    let (mut wb0_max, mut wb1_max) = (0usize, 0usize);
+    let (mut p2_runs, mut p2_ref, mut p2_wrong) = (0u32, 0u32, 0u32);
+    let mut p2_first = String::new();
+    let mut proven = 0u32;
+    let (mut adl_b0, mut adl_b1) = (0usize, 0usize);
+    for (s, k, r, (m, sd)) in &segs {
+        let b0 = WitBuilder::new(&r.pre);
+        let (needs, wit0, o0, ev0) = match operate(&b0, &r.seg) {
+            Ok((a, b, c, d, _)) => (a, b, c, d),
+            Err(e) => {
+                p1_skip += 1;
+                if p1_first.is_empty() {
+                    p1_first = format!("seed {} seg {}: honest operator {}", s, k, e);
+                }
+                continue;
+            }
+        };
+        if o0.status != 0 {
+            if p1_first.is_empty() {
+                p1_first = format!("seed {} seg {}: honest status {} need {:?}", s, k, o0.status, o0.need);
+            }
+            p1_skip += 1;
+            continue;
+        }
+        proven += (o0.end_root == r.post_root && ev0 == r.ev) as u32;
+        // ---- P2 ----
+        for nd in needs.iter().filter(|x| matches!(x, Need::Adl(..) | Need::AdlTop(..) | Need::AdlKey(..) | Need::Account(_))) {
+            let mut n2 = needs.clone();
+            n2.remove(nd);
+            p2_runs += 1;
+            let (o, ev) = run_sl(&r.seg, &b0.build(&n2));
+            if o.status != 0 {
+                p2_ref += 1;
+            } else if o.end_root != r.post_root || ev != r.ev {
+                p2_wrong += 1;
+                if p2_first.is_empty() {
+                    p2_first = format!("seed {} seg {}: omit {:?}", s, k, nd);
+                }
+            }
+        }
+        for t in [1u8, 2, 3, 4] {
+            b0.t_adrop.set(t);
+            let w2 = b0.build(&needs);
+            b0.t_adrop.set(0);
+            if w2 == wit0 {
+                continue;
+            }
+            p2_runs += 1;
+            let (o, ev) = run_sl(&r.seg, &w2);
+            if o.status != 0 {
+                p2_ref += 1;
+            } else if o.end_root != r.post_root || ev != r.ev {
+                p2_wrong += 1;
+                if p2_first.is_empty() {
+                    p2_first = format!("seed {} seg {}: t_adrop {}", s, k, t);
+                }
+            }
+        }
+        // ---- P1 ----
+        let mut pre = r.pre.clone();
+        let top = pre.accounts.iter().filter(|(id, _)| **id != mnpilot::types::INSURANCE_ACCOUNT).filter_map(|(_, a)| a.positions.get(&M(*m)).map(|p| p.qty)).filter(|q| *q != 0 && (sl::adl::sgn(*q) == *sd)).map(|q| q.unsigned_abs()).max().unwrap_or(0);
+        let wq = (top + 7).max(QTY_SCALE);
+        let mk = |pre: &mut mnpilot::state::ChainState, i: u32, q: u64| -> A {
+            let id = A(acct_id(900_000 + i).0);
+            let mut a = mnpilot::account::Account { id, collateral: 1_000_000_000 * USD_SCALE as i128, realized_pnl: 0, positions: Default::default(), isolated_margin: Default::default() };
+            let qty = if *sd == 0 { q as i64 } else { -(q as i64) };
+            a.positions.insert(M(*m), mnpilot::account::Position { market: M(*m), qty, entry_price: MID, isolated: false });
+            pre.accounts.insert(id, a);
+            id
+        };
+        for i in 0..extra {
+            mk(&mut pre, i, 1 + (i as u64 % 5));
+        }
+        let (x, y) = (mk(&mut pre, extra, wq), mk(&mut pre, extra + 1, wq));
+        let (lo, hi) = if x < y { (x, y) } else { (y, x) };
+        let _ = pre.take_dirty();
+        let (post, _) = direct(&pre, &r.seg);
+        let b1 = WitBuilder::new(&pre);
+        p1_runs += 1;
+        match operate(&b1, &r.seg) {
+            Ok((n1, w1, o1, _, _)) => {
+                let strip = |n: &BTreeSet<Need>| -> BTreeSet<Need> { n.iter().filter(|x| !matches!(x, Need::Adl(..) | Need::AdlTop(..) | Need::AdlKey(..))).copied().collect() };
+                adl_b0 = adl_b0.max(wit0.len() - b0.build(&strip(&needs)).len());
+                adl_b1 = adl_b1.max(w1.len() - b1.build(&strip(&n1)).len());
+                let lo_hit = post.accounts.get(&lo).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
+                let hi_hit = post.accounts.get(&hi).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
+                // the root is the check (the tie goes to the lower id first; a later ADL unit may take the other)
+                let good = o1.status == 0 && o1.end_root == sl::s_root(&post) && (lo_hit || hi_hit);
+                if good {
+                    p1_ok += 1;
+                    wb0_max = wb0_max.max(wit0.len());
+                    wb1_max = wb1_max.max(w1.len());
+                } else if p1_first.is_empty() {
+                    p1_first = format!("seed {} seg {}: status {} root_ok {} lo_hit {} hi_hit {} need {:?}", s, k, o1.status, o1.end_root == sl::s_root(&post), lo_hit, hi_hit, o1.need);
+                }
+            }
+            Err(e) => {
+                if p1_first.is_empty() {
+                    p1_first = format!("seed {} seg {}: operator {}", s, k, e);
+                }
+            }
+        }
+    }
+    let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len();
+    format!(
+        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\"}}",
+        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first
     )
 }
 
@@ -3387,6 +3528,28 @@ pub fn slpoc20() -> String {
         let ok = st == 0 && root_ok && ev_ok && applied && flip;
         all_ok &= ok;
         res.push(format!("{{\"case\":\"P6 Slash: honest Y refused, deviant X slashed (queue head unlinked, market 2 oracled flips, challenger reward), X again refused\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"ev\":{:?},\"witness_bytes\":{}}}", ok, st, root_ok, ev_ok, ev6d, wb));
+        // ---- P9 (round-20 closing, kills pass-2 survivor pre-slash-omk-off): every single omission from the P6 witness
+        // -- the honest operator's guess supplies `omk:` for a Slash, so only a forged witness can leave it out; a
+        // Slash of X without its market's TWAP would be refused (SlashNotEligible) with status 0 -> wrong
+        if let Ok((needs, _, _, _, _)) = &r6 {
+            let (mut runs, mut refused, mut wrong) = (0u32, 0u32, 0u32);
+            let mut wrong_kinds: Vec<String> = Vec::new();
+            for nd in needs.iter() {
+                let mut n2 = needs.clone();
+                n2.remove(nd);
+                runs += 1;
+                let (o, ev) = run_sl_xh(&seg6, &b6.build(&n2), Some(&b6.root), Some(h0));
+                if o.status != 0 {
+                    refused += 1;
+                } else if o.end_root != sl::s_root(&post6) || ev != ev6d {
+                    wrong += 1;
+                    wrong_kinds.push(format!("{:?}", nd));
+                }
+            }
+            let ok9 = wrong == 0 && runs > 0 && needs.contains(&Need::Omk(1));
+            all_ok &= ok9;
+            res.push(format!("{{\"case\":\"P9 single omissions from the P6 (Slash) witness: refused or identical\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{},\"wrong_needs\":{:?}}}", ok9, runs, refused, wrong, wrong_kinds));
+        }
     }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }
