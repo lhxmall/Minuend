@@ -434,9 +434,24 @@ pub fn mktcap(n: u32, m: u32, r: u32) -> String {
 /// markets; isolated in even markets like the positions) and `wd` pending withdrawals, positions in even markets isolated (isolated_margin
 /// entries): every per-account state kind at once = the whole-state heap bound at the caps.
 pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
-    use mnpilot::types::{AccountId as A, MarketId as M, OrderType, Side as S, TimeInForce as T};
     heapsim::reset();
     heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (sess, fails, why) = mktcap_sess(n, m, r, orders, wd);
+    heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (top, peak, _) = heapsim::read();
+    let (_, words, _) = mnpilot::snapshot::export(&sess, false);
+    let st = &sess.eng.state;
+    let pos: usize = st.accounts.values().map(|a| a.positions.len()).sum();
+    let hist: usize = st.oracle_report_history.values().map(|q| q.len()).sum();
+    format!(
+        "{{\"accounts\":{},\"markets\":{},\"orders_per_account\":{},\"withdrawals_per_account\":{},\"live_orders\":{},\"isolated_entries\":{},\"marks\":{},\"positions\":{},\"oracles\":{},\"oracle_reports\":{},\"history_samples\":{},\"rejected_ops\":{},\"why\":\"{}\",\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{},\"guest_heap_limit\":{}}}",
+        st.accounts.len(), st.markets.len(), orders, wd, st.books.values().map(|b| b.live_orders().count()).sum::<usize>(), st.accounts.values().map(|a| a.isolated_margin.len()).sum::<usize>(), st.marks.len(), pos, st.oracle_bonds.len(), st.oracle_reports.len(), hist, fails, format!("{:?}", why).replace('"', "'"),
+        sess.w.as_ref().map(|w| w.smt.count).unwrap_or(0), top, peak, heapsim::sum_class_peaks(), words, 0x0300_0000u32 - 0x0002_0000
+    )
+}
+/// loop round 16: the mktcap whole-state session (real engine entry points only), returned for reuse (slmigcap).
+pub fn mktcap_sess(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> (mnpilot::Session, u32, std::collections::BTreeMap<String, u32>) {
+    use mnpilot::types::{AccountId as A, MarketId as M, OrderType, Side as S, TimeInForce as T};
     let mut sess = mnpilot::Session::genesis(0, mnpilot::WitMode::Incremental);
     let id = |i: u32| A(Sha256::digest(format!("mktcap-{}", i).as_bytes()).into());
     let mut fails = 0u32;
@@ -525,15 +540,5 @@ pub fn mktcap_full(n: u32, m: u32, r: u32, orders: u32, wd: u32) -> String {
             w.commit(&mut sess.eng.state);
         }
     }
-    heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
-    let (top, peak, _) = heapsim::read();
-    let (_, words, _) = mnpilot::snapshot::export(&sess, false);
-    let st = &sess.eng.state;
-    let pos: usize = st.accounts.values().map(|a| a.positions.len()).sum();
-    let hist: usize = st.oracle_report_history.values().map(|q| q.len()).sum();
-    format!(
-        "{{\"accounts\":{},\"markets\":{},\"orders_per_account\":{},\"withdrawals_per_account\":{},\"live_orders\":{},\"isolated_entries\":{},\"marks\":{},\"positions\":{},\"oracles\":{},\"oracle_reports\":{},\"history_samples\":{},\"rejected_ops\":{},\"why\":\"{}\",\"leaves\":{},\"sizeclass_highwater\":{},\"peak_live\":{},\"sum_class_peaks\":{},\"snapshot_words\":{},\"guest_heap_limit\":{}}}",
-        st.accounts.len(), st.markets.len(), orders, wd, st.books.values().map(|b| b.live_orders().count()).sum::<usize>(), st.accounts.values().map(|a| a.isolated_margin.len()).sum::<usize>(), st.marks.len(), pos, st.oracle_bonds.len(), st.oracle_reports.len(), hist, fails, format!("{:?}", why).replace('"', "'"),
-        sess.w.as_ref().map(|w| w.smt.count).unwrap_or(0), top, peak, heapsim::sum_class_peaks(), words, 0x0300_0000u32 - 0x0002_0000
-    )
+    (sess, fails, why)
 }

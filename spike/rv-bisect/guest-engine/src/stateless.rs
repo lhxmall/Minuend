@@ -64,6 +64,10 @@ pub const SL_MAX_BMP: usize = 16384;
 pub const SL_MAX_MARKETS: usize = 256;
 /// R14-H1: per-account exposure cap (markets with a position or a live order); also the apos: bound
 pub const SL_MAX_POS: usize = 64;
+/// round 16: per-account bound of live commits (revealed ones count until their TTL, as in the session); a Commit by an
+/// account at the bound is refused (code 19) -- keeps the `acmt:` record loadable (the session's global
+/// MAX_STATE_COMMITS cap does not exist in the stateless image)
+pub const SL_MAX_ACMT: usize = 64;
 
 // ------------------------------------------------------------------------------------------------
 // leaf strings (extension kinds)
@@ -221,6 +225,56 @@ pub fn wdl_leaf(b: &mut Buf, id: &AccountId, es: &[WdlE]) {
 fn wdl_of(s: &ChainState, id: &AccountId) -> Vec<WdlE> {
     s.withdrawals.range((*id, 0)..=(*id, u64::MAX)).map(|((_, n), w)| (*n, w.amount, w.pending, w.height)).collect()
 }
+// ---- round 16: PERP ledger / listing / commit-reveal leaves ----
+pub fn perp_kid(b: &mut Buf) {
+    b.n = 0;
+    let _ = write!(b, "perp:0");
+    mark(b);
+}
+/// `perp:0:<perp_supply>:<perp_burned>:<next_market_id>` (always present): the PERP ledger aggregates and the
+/// market-id cursor (GovDeposit / GovWithdraw / CreateMarket read them; the session kept them only in memory)
+pub fn perp_leaf(b: &mut Buf, supply: u128, burned: u128, next_market: u32) {
+    perp_kid(b);
+    let _ = write!(b, ":{}:{}:{}", supply, burned, next_market);
+}
+pub fn xsrc_kid(b: &mut Buf, id: &AccountId) {
+    b.n = 0;
+    let _ = write!(b, "xsrc:");
+    hexw(b, &id.0);
+    mark(b);
+}
+/// `xsrc:<id>:1`: membership in `external_sources` (a funding-market creator may push external prices)
+pub fn xsrc_leaf(b: &mut Buf, id: &AccountId) {
+    xsrc_kid(b, id);
+    let _ = write!(b, ":1");
+}
+pub fn acmt_kid(b: &mut Buf, id: &AccountId) {
+    b.n = 0;
+    let _ = write!(b, "acmt:");
+    hexw(b, &id.0);
+    mark(b);
+}
+/// round 16: an account's commits (commit hash, ttl height), sorted by hash
+pub type AcmtE = (H, u64);
+pub fn acmt_digest(es: &[AcmtE]) -> H {
+    let mut h = Sha256::new();
+    for (c, t) in es {
+        h.update(c);
+        h.update(t.to_le_bytes());
+    }
+    h.finalize().into()
+}
+/// `acmt:<id>:<n>:<sha256(entries)>` (absent = no commit): the per-account commit index the commit-bond rule
+/// (R7-M2: live commits of the author) and Commit's pending count read. Lazy expiry like `wdl:` (an entry is live
+/// while ttl >= height); bounded per account by SL_MAX_ACMT (stateless rule).
+pub fn acmt_leaf(b: &mut Buf, id: &AccountId, es: &[AcmtE]) {
+    acmt_kid(b, id);
+    let _ = write!(b, ":{}:", es.len());
+    hexw(b, &acmt_digest(es));
+}
+pub fn acmt_of(s: &ChainState, id: &AccountId) -> Vec<AcmtE> {
+    s.commits.iter().filter(|(_, e)| e.account == *id).map(|(h, e)| (*h, e.ttl_height)).collect()
+}
 fn kh(b: &Buf) -> (H, H) {
     wit::key_and_hash(b)
 }
@@ -349,8 +403,20 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
     }
     glob_leaf(&mut b, s.seq, s.height);
     push(&b);
+    // round 16
+    perp_leaf(&mut b, s.perp_supply, s.perp_burned, s.next_market_id);
+    push(&b);
+    for id in &s.external_sources {
+        xsrc_leaf(&mut b, id);
+        push(&b);
+    }
     #[cfg(feature = "govwit")]
     {
+        let cids: BTreeSet<AccountId> = s.commits.values().map(|e| e.account).collect();
+        for id in &cids {
+            acmt_leaf(&mut b, id, &acmt_of(s, id));
+            push(&b);
+        }
         for (id, p) in &s.proposals {
             wit::prop_leaf(&mut b, *id, p);
             push(&b);
@@ -725,6 +791,16 @@ pub enum Need {
     Path(H),
     /// round 15: an account's withdrawal records (`wdl:`, present or proven absent)
     Wdl(AccountId),
+    /// round 16: the `perp:0` record (PERP supply / burned, next market id)
+    Perp,
+    /// round 16: an account's governance nonce watermark (`gnon:`, present or proven absent)
+    Gnon(AccountId),
+    /// round 16: an account's `external_sources` membership (`xsrc:`)
+    Xsrc(AccountId),
+    /// round 16: an account's commit index (`acmt:`) with its commits' `cmt:` records
+    Acmt(AccountId),
+    /// round 16: one commit hash's `cmt:` record (present or proven absent)
+    Cmt(H),
 }
 
 /// Result of a stateless segment run.
@@ -774,6 +850,18 @@ struct Sl {
     ordx: BTreeSet<OrderId>,
     /// round 15: loaded withdrawal record sets: account -> live records at load (what the ChainState holds)
     wdl: BTreeMap<AccountId, Vec<WdlE>>,
+    /// round 16: `perp:0` loaded
+    perp: bool,
+    /// round 16: loaded gov nonce watermarks (0 = proven absent)
+    gnon: BTreeMap<AccountId, u64>,
+    /// round 16: loaded `external_sources` memberships
+    xsrc: BTreeMap<AccountId, bool>,
+    /// round 16: loaded commit indexes: account -> live entries at load (what the ChainState holds)
+    acmt: BTreeMap<AccountId, Vec<AcmtE>>,
+    /// round 16: commit hashes whose `cmt:` record was loaded (present, expired or proven absent)
+    cmts: BTreeSet<H>,
+    /// round 16: commit hashes in the partial state at load (live)
+    cmt0: BTreeSet<H>,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -854,6 +942,12 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         oloc: BTreeMap::new(),
         ordx: BTreeSet::new(),
         wdl: BTreeMap::new(),
+        perp: false,
+        gnon: BTreeMap::new(),
+        xsrc: BTreeMap::new(),
+        acmt: BTreeMap::new(),
+        cmts: BTreeSet::new(),
+        cmt0: BTreeSet::new(),
         verified: 0,
         leaf_hashes: 0,
     };
@@ -1190,9 +1284,129 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         }
         sl.wdl.insert(id, live);
     }
+    // ---- round 16 sections ----
+    // perp:0 (u8 flag: loaded)
+    match bad!(r.u8()) {
+        0 => {}
+        1 => {
+            s.perp_supply = bad!(r.u128());
+            s.perp_burned = bad!(r.u128());
+            s.next_market_id = bad!(r.u32());
+            perp_leaf(&mut b, s.perp_supply, s.perp_burned, s.next_market_id);
+            sl.check(&b, true)?;
+            sl.perp = true;
+        }
+        _ => return Err(ST_SL_BADWIT),
+    }
+    // gov nonce watermarks (0 = proven absent)
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let id = AccountId(bad!(r.h32()));
+        let v = bad!(r.u64());
+        if sl.gnon.insert(id, v).is_some() {
+            return Err(ST_SL_BADWIT);
+        }
+        if v == 0 {
+            wit::gnon_kid(&mut b, &id);
+            sl.absent(&b)?;
+        } else {
+            wit::gnon_leaf(&mut b, &id, v);
+            sl.check(&b, true)?;
+            s.seen_gov_nonces.insert(id, v);
+        }
+    }
+    // external_sources memberships
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let id = AccountId(bad!(r.h32()));
+        let present = bad!(r.bool());
+        if sl.xsrc.insert(id, present).is_some() {
+            return Err(ST_SL_BADWIT);
+        }
+        if present {
+            xsrc_leaf(&mut b, &id);
+            sl.check(&b, true)?;
+            s.external_sources.insert(id);
+        } else {
+            xsrc_kid(&mut b, &id);
+            sl.absent(&b)?;
+        }
+    }
+    // commit indexes: entries {hash, ttl, commit_unit, commit_height, revealed}; a live entry (ttl >= height) is checked
+    // against its cmt: leaf and enters the state; an expired one is covered by the digest only (lazy expiry: its cmt:
+    // leaf may since have been re-created by another account, so it is neither read nor deleted)
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let id = AccountId(bad!(r.h32()));
+        let k = bad!(r.u8()) as usize;
+        if k > SL_MAX_ACMT || sl.acmt.contains_key(&id) {
+            return Err(ST_SL_BADWIT);
+        }
+        let mut es: Vec<AcmtE> = Vec::with_capacity(k);
+        let mut live: Vec<AcmtE> = Vec::new();
+        for _ in 0..k {
+            let h = bad!(r.h32());
+            let ttl = bad!(r.u64());
+            let e = crate::state::CommitEntry { account: id, commit_unit: bad!(r.h32()), commit_height: bad!(r.u64()), ttl_height: ttl, revealed: bad!(r.bool()) };
+            if es.last().is_some_and(|x| x.0 >= h) {
+                return Err(ST_SL_BADWIT);
+            }
+            es.push((h, ttl));
+            if ttl >= s.height {
+                if !sl.cmts.insert(h) {
+                    return Err(ST_SL_BADWIT);
+                }
+                wit::cmt_leaf(&mut b, &h, &e);
+                sl.check(&b, true)?;
+                s.commits.insert(h, e);
+                live.push((h, ttl));
+            }
+        }
+        if k == 0 {
+            acmt_kid(&mut b, &id);
+            sl.absent(&b)?;
+        } else {
+            acmt_leaf(&mut b, &id, &es);
+            sl.check(&b, true)?;
+        }
+        sl.acmt.insert(id, live);
+    }
+    // single commit records by hash (present: the full entry; absent proven)
+    let n = bad!(r.u16()) as usize;
+    if n > SL_MAX_ACCOUNTS {
+        return Err(ST_SL_BADWIT);
+    }
+    for _ in 0..n {
+        let h = bad!(r.h32());
+        if !sl.cmts.insert(h) {
+            return Err(ST_SL_BADWIT);
+        }
+        if bad!(r.bool()) {
+            let e = crate::state::CommitEntry { account: AccountId(bad!(r.h32())), commit_unit: bad!(r.h32()), commit_height: bad!(r.u64()), ttl_height: bad!(r.u64()), revealed: bad!(r.bool()) };
+            wit::cmt_leaf(&mut b, &h, &e);
+            sl.check(&b, true)?;
+            // lazy expiry: an expired commit reads as absent (the session pruned it at its TTL)
+            if e.ttl_height >= s.height {
+                s.commits.insert(h, e);
+            }
+        } else {
+            wit::cmt_kid(&mut b, &h);
+            sl.absent(&b)?;
+        }
+    }
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
+    sl.cmt0 = s.commits.keys().copied().collect();
     let _ = s.take_dirty();
     // the session's books carry the peek log; start empty
     Ok((sl, s, claimed))
@@ -1308,10 +1522,75 @@ fn trie_set(sl: &mut Sl, m: u32, sd: u8, price: Price, v: bool) -> Result<(), Ne
     Ok(())
 }
 
-/// pre-unit guards (reads)
-fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId) -> Result<(), Result<Need, u32>> {
+fn need_acmt(sl: &Sl, a: &AccountId) -> Result<(), Result<Need, u32>> {
+    if cfg!(not(feature = "govwit")) {
+        return Err(Err(ST_SL_UNSUPPORTED));
+    }
+    if !sl.acmt.contains_key(a) {
+        return Err(Ok(Need::Acmt(*a)));
+    }
+    Ok(())
+}
+/// pre-unit guards (reads). `x`: round 16 -- the commit hash of a Commit / the commit_ref of a Reveal (from the ext area)
+fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Option<H>) -> Result<(), Result<Need, u32>> {
     use crate::BatchOp::*;
     match *op {
+        // ---- round 16: PERP ledger ops, listings, commit-reveal ----
+        GovDeposit { .. } => {
+            need_acct(sl, s, &author).map_err(Ok)?;
+            if !sl.perp {
+                return Err(Ok(Need::Perp));
+            }
+        }
+        GovWithdraw { .. } => {
+            if cfg!(not(feature = "govwit")) {
+                return Err(Err(ST_SL_UNSUPPORTED));
+            }
+            need_acct(sl, s, &author).map_err(Ok)?;
+            if !sl.perp {
+                return Err(Ok(Need::Perp));
+            }
+            if !sl.gnon.contains_key(&author) {
+                return Err(Ok(Need::Gnon(author)));
+            }
+            // R7-M2 commit bond: the author's live commits
+            need_acmt(sl, &author)?;
+        }
+        CreateMarket { .. } => {
+            need_acct(sl, s, &author).map_err(Ok)?;
+            if !sl.perp {
+                return Err(Ok(Need::Perp));
+            }
+            need_acmt(sl, &author)?;
+            // the new market id: proven absent (its band: / meta: / mkx: keys are created)
+            if !sl.markets.contains_key(&s.next_market_id) {
+                return Err(Ok(Need::Market(s.next_market_id)));
+            }
+            // a funding-rate listing adds the creator to external_sources
+            if !sl.xsrc.contains_key(&author) {
+                return Err(Ok(Need::Xsrc(author)));
+            }
+        }
+        Commit { .. } => {
+            // bond: the author's PERP balance and live commits; pending count; the hash's existence
+            need_acct(sl, s, &author).map_err(Ok)?;
+            need_acmt(sl, &author)?;
+            if let Some(h) = x {
+                if !sl.cmts.contains(&h) {
+                    return Err(Ok(Need::Cmt(h)));
+                }
+            }
+        }
+        Reveal { .. } => {
+            if cfg!(not(feature = "govwit")) {
+                return Err(Err(ST_SL_UNSUPPORTED));
+            }
+            if let Some(h) = x {
+                if !sl.cmts.contains(&h) {
+                    return Err(Ok(Need::Cmt(h)));
+                }
+            }
+        }
         Deposit { .. } => need_acct(sl, s, &author).map_err(Ok)?,
         Place { market, .. } => {
             need_acct(sl, s, &author).map_err(Ok)?;
@@ -1439,8 +1718,52 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         let acct_of = |a: u32| accts.get(a as usize).copied().filter(|id| *id != INSURANCE_ACCOUNT);
         let op = crate::decode_op(&ow);
         let author = op.signer().and_then(acct_of);
+        // round 16: the commit hash of a Commit / commit_ref + inner op of a Reveal (ext area; unreadable -> the
+        // engine refuses the unit, nothing to load)
+        let id32 = |e: &[u32]| -> H {
+            let mut h = [0u8; 32];
+            for k in 0..8 {
+                h[4 * k..4 * k + 4].copy_from_slice(&e[k].to_le_bytes());
+            }
+            h
+        };
+        let (x, inner) = match op {
+            crate::BatchOp::Commit { ext: off, .. } => (ext.read(rd, off, crate::EXT_COMMIT_LEN).map(|e| id32(&e)), None),
+            crate::BatchOp::Reveal { ext: off, .. } => match ext.read(rd, off, crate::EXT_REVEAL_LEN) {
+                Some(e) => {
+                    let mut iw = [0u32; 8];
+                    iw.copy_from_slice(&e[16..24]);
+                    (Some(id32(&e[0..8])), Some(crate::decode_op(&iw)))
+                }
+                None => (None, None),
+            },
+            _ => (None, None),
+        };
         if let Some(a) = author {
-            if let Err(e) = pre(&sl, &eng.state, &op, a) {
+            // a Reveal's inner op (signed by the same author; any other signer / kind is refused by the engine before
+            // it runs) reads what it would read at top level
+            // (kinds the engine never runs as an inner op -- encode_op None: Deposit / GovDeposit / Commit / Reveal /
+            // fixtures -- and foreign signers are refused before anything is read)
+            let runs_inner = |io: &crate::BatchOp| {
+                io.signer().and_then(acct_of) == Some(a)
+                    && !matches!(io, crate::BatchOp::Deposit { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::SetHeight { .. } | crate::BatchOp::SetSeq { .. } | crate::BatchOp::Bad)
+            };
+            // the per-account rules below (commit bond, zero GovWithdraw) read the author's record and live commits for
+            // the op AND the inner op whatever its signer (the session's state_cap_ok runs on both with the author)
+            let bonded = |o: &crate::BatchOp| matches!(o, crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Stake { .. } | crate::BatchOp::Commit { .. });
+            let pr = pre(&sl, &eng.state, &op, a, x)
+                .and_then(|_| match inner {
+                    Some(io) if runs_inner(&io) => pre(&sl, &eng.state, &io, a, None),
+                    _ => Ok(()),
+                })
+                .and_then(|_| {
+                    if bonded(&op) || inner.is_some_and(|io| bonded(&io)) {
+                        need_acct(&sl, &eng.state, &a).map_err(Ok)?;
+                        need_acmt(&sl, &a)?;
+                    }
+                    Ok(())
+                });
+            if let Err(e) = pr {
                 match e {
                     Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
                     Err(st) => fin(&mut out, &sl, st, None),
@@ -1450,7 +1773,34 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             // round 14 consensus rules of the stateless image (no global caps; per-account / per-level bounds that keep
             // every record loadable -- R14-H1 / R14-M1). Inputs are fully loaded (pre), so the outcome does not depend
             // on extra witness records.
-            if let crate::BatchOp::Place { market, side, typ, tif, price, .. } = op {
+            // round 16: the session's per-account rules of state_cap_ok (not its global caps): the R7-M2 commit bond
+            // and the R7-M1 zero GovWithdraw by an id without a PERP entry -- on the op and on a Reveal's inner op;
+            // plus the stateless bound on live commits per account (SL_MAX_ACMT)
+            {
+                let st = &eng.state;
+                let live = st.commits.values().filter(|e| e.account == a).count();
+                let bal = st.perp_balances.get(&a).copied().unwrap_or(0);
+                let rule_ok = |o: &crate::BatchOp| -> bool {
+                    if !crate::commit_bond_ok(o, || bal, || live) {
+                        return false;
+                    }
+                    match *o {
+                        crate::BatchOp::GovWithdraw { amount: 0, .. } => st.perp_balances.contains_key(&a),
+                        crate::BatchOp::Commit { .. } => live < SL_MAX_ACMT,
+                        _ => true,
+                    }
+                };
+                if !rule_ok(&op) || inner.is_some_and(|io| !rule_ok(&io)) {
+                    out.rejected += 1;
+                    ev(crate::STATE_CAP_CODE);
+                    continue;
+                }
+            }
+            let place_op = match (op, inner) {
+                (crate::BatchOp::Reveal { .. }, Some(io)) if io.signer().and_then(acct_of) == Some(a) => io,
+                _ => op,
+            };
+            if let crate::BatchOp::Place { market, side, typ, tif, price, .. } = place_op {
                 let m = MarketId(market);
                 let st = &eng.state;
                 let has = st.accounts.get(&a).is_some_and(|x| x.positions.contains_key(&m)) || st.books.get(&m).is_some_and(|b| b.live_orders_of(a).next().is_some());
@@ -1467,20 +1817,26 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     continue;
                 }
             }
-            // W2 depth rule on the MNWIT-S tree (keys the unit may create)
+            // W2 depth rule on the MNWIT-S tree (keys the unit may create); round 16: + GovDeposit / CreateMarket and a
+            // Reveal's inner op (the session's wit_depth_ok runs on both with the author)
             let mut keys: Vec<H> = Vec::new();
-            match op {
-                crate::BatchOp::Deposit { .. } if !eng.state.accounts.contains_key(&a) => keys.push(wit::acct_key(&a)),
-                crate::BatchOp::Place { market, client_seq, .. } => {
-                    if !eng.state.accounts.contains_key(&a) {
-                        keys.push(wit::acct_key(&a));
+            for o in core::iter::once(op).chain(inner) {
+                let st = &eng.state;
+                match o {
+                    crate::BatchOp::Deposit { .. } if !st.accounts.contains_key(&a) => keys.push(wit::acct_key(&a)),
+                    crate::BatchOp::Place { market, client_seq, .. } => {
+                        if !st.accounts.contains_key(&a) {
+                            keys.push(wit::acct_key(&a));
+                        }
+                        keys.push(wit::ord_key(&order_id(a, MarketId(market), client_seq)));
+                        if !st.accounts.get(&a).is_some_and(|x| x.positions.contains_key(&MarketId(market))) {
+                            keys.push(wit::pos_key(&a, MarketId(market)));
+                        }
                     }
-                    keys.push(wit::ord_key(&order_id(a, MarketId(market), client_seq)));
-                    if !eng.state.accounts.get(&a).is_some_and(|x| x.positions.contains_key(&MarketId(market))) {
-                        keys.push(wit::pos_key(&a, MarketId(market)));
-                    }
+                    crate::BatchOp::GovDeposit { .. } if !st.accounts.contains_key(&a) && !st.perp_balances.contains_key(&a) && !st.withdrawn_total.contains_key(&a) => keys.push(wit::acct_key(&a)),
+                    crate::BatchOp::CreateMarket { .. } => keys.extend(wit::market_keys(MarketId(st.next_market_id))),
+                    _ => {}
                 }
-                _ => {}
             }
             let mut deep = false;
             for k in &keys {
@@ -1498,7 +1854,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 ev(crate::WIT_DEPTH_CODE);
                 continue;
             }
-        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::Bad) {
+        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::Bad) {
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
         }
@@ -1519,6 +1875,30 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 if !sl.wdl.contains_key(a) {
                     return Err(Need::Wdl(*a));
                 }
+            }
+            // round 16 catch-alls: every governance nonce / external source / commit in the partial state has its
+            // record loaded; a commit created in the segment has its author's index loaded; the PERP aggregates move
+            // only when `perp:0` is loaded
+            for a in eng.state.seen_gov_nonces.keys() {
+                if !sl.gnon.contains_key(a) {
+                    return Err(Need::Gnon(*a));
+                }
+            }
+            for a in &eng.state.external_sources {
+                if !sl.xsrc.contains_key(a) {
+                    return Err(Need::Xsrc(*a));
+                }
+            }
+            for (h, e) in &eng.state.commits {
+                if !sl.cmts.contains(h) {
+                    return Err(Need::Cmt(*h));
+                }
+                if !sl.cmt0.contains(h) && !sl.acmt.contains_key(&e.account) {
+                    return Err(Need::Acmt(e.account));
+                }
+            }
+            if !sl.perp && (eng.state.perp_supply != 0 || eng.state.perp_burned != 0 || eng.state.next_market_id != 0) {
+                return Err(Need::Perp);
             }
             let d = eng.state.take_dirty();
             // every account the unit wrote (incl. rolled-back journals) must be loaded
@@ -1663,9 +2043,9 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         let _ = rec.present;
     }
     // markets (present ones: the mark may move)
-    for (m, present) in &sl.markets {
-        if *present {
-            let p = &s.markets[&MarketId(*m)];
+    for m in sl.markets.keys() {
+        // round 16: a market created in the segment (loaded as proven absent) is put too
+        if let Some(p) = s.markets.get(&MarketId(*m)) {
             wit::band_leaf(&mut b, MarketId(*m), p);
             puts.push(kh(&b));
             wit::meta_leaf(&mut b, MarketId(*m), p, s.marks.get(&MarketId(*m)).copied().unwrap_or(0));
@@ -1732,6 +2112,43 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
                 dels.push(kid_key(&b));
             } else {
                 wdl_leaf(&mut b, id, &now);
+                puts.push(kh(&b));
+            }
+        }
+    }
+    // round 16: PERP aggregates, governance nonces, external sources, commits and commit indexes
+    if sl.perp {
+        perp_leaf(&mut b, s.perp_supply, s.perp_burned, s.next_market_id);
+        puts.push(kh(&b));
+    }
+    for (id, v0) in &sl.gnon {
+        if let Some(v) = s.seen_gov_nonces.get(id) {
+            if v != v0 {
+                wit::gnon_leaf(&mut b, id, *v);
+                puts.push(kh(&b));
+            }
+        }
+    }
+    for (id, x0) in &sl.xsrc {
+        if !*x0 && s.external_sources.contains(id) {
+            xsrc_leaf(&mut b, id);
+            puts.push(kh(&b));
+        }
+    }
+    for (h, e) in &s.commits {
+        wit::cmt_leaf(&mut b, h, e);
+        puts.push(kh(&b));
+    }
+    for (id, live0) in &sl.acmt {
+        // rewritten only when the live set changed (lazy expiry on touch, witness-independent); the cmt: leaves of
+        // dropped expired entries are not deleted (one may since belong to another account's commit)
+        let now = acmt_of(s, id);
+        if now != *live0 {
+            if now.is_empty() {
+                acmt_kid(&mut b, id);
+                dels.push(kid_key(&b));
+            } else {
+                acmt_leaf(&mut b, id, &now);
                 puts.push(kh(&b));
             }
         }
@@ -1815,6 +2232,15 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
                     expo.entry(od.account).or_default().insert(m.0);
                 }
             }
+            // round 16: an account's commit index must stay loadable (SL_MAX_ACMT)
+            let mut nc: BTreeMap<AccountId, usize> = BTreeMap::new();
+            for e in st.commits.values() {
+                *nc.entry(e.account).or_default() += 1;
+            }
+            if nc.values().any(|n| *n > SL_MAX_ACMT) {
+                o.status = ST_SL_MIG_BOUNDS;
+                return o;
+            }
             // the insurance account is loaded light (R14-M2): its position count is unbounded
             if expo.iter().any(|(id, e)| *id != INSURANCE_ACCOUNT && e.len() > SL_MAX_POS) {
                 o.status = ST_SL_MIG_BOUNDS;
@@ -1840,6 +2266,8 @@ pub struct WitBuilder<'a> {
     /// leaf strings (kid length, bytes), parallel to `leaves` (verified-leaf form, R14-C1)
     pub strs: Vec<(usize, Vec<u8>)>,
     pub root: H,
+    /// round 16: the run's engine height (height hook) -- a commit index entry is live iff ttl >= it
+    pub live_h: core::cell::Cell<u64>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -1870,7 +2298,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -1892,6 +2320,11 @@ impl<'a> WitBuilder<'a> {
         let mut bmps: BTreeSet<(u32, u8, u8, u64)> = BTreeSet::new();
         let mut ordx: BTreeSet<OrderId> = BTreeSet::new();
         let mut paths: BTreeSet<H> = BTreeSet::new();
+        let mut perp = false;
+        let mut gnons: BTreeSet<AccountId> = BTreeSet::new();
+        let mut xsrcs: BTreeSet<AccountId> = BTreeSet::new();
+        let mut acmts: BTreeSet<AccountId> = BTreeSet::new();
+        let mut cmts: BTreeSet<H> = BTreeSet::new();
         for n in needs {
             match *n {
                 Need::Account(a) => {
@@ -1926,6 +2359,19 @@ impl<'a> WitBuilder<'a> {
                 }
                 Need::Path(k) => {
                     paths.insert(k);
+                }
+                Need::Perp => perp = true,
+                Need::Gnon(a) => {
+                    gnons.insert(a);
+                }
+                Need::Xsrc(a) => {
+                    xsrcs.insert(a);
+                }
+                Need::Acmt(a) => {
+                    acmts.insert(a);
+                }
+                Need::Cmt(h) => {
+                    cmts.insert(h);
                 }
             }
         }
@@ -2113,6 +2559,72 @@ impl<'a> WitBuilder<'a> {
                 rec.extend_from_slice(&h.to_le_bytes());
             }
             wdl_kid(&mut b, id);
+            keys.insert(kid_key(&b));
+        }
+        // ---- round 16 sections ----
+        if perp {
+            rec.push(1);
+            rec.extend_from_slice(&s.perp_supply.to_le_bytes());
+            rec.extend_from_slice(&s.perp_burned.to_le_bytes());
+            rec.extend_from_slice(&s.next_market_id.to_le_bytes());
+            perp_kid(&mut b);
+            keys.insert(kid_key(&b));
+        } else {
+            rec.push(0);
+        }
+        rec.extend_from_slice(&(gnons.len() as u16).to_le_bytes());
+        for id in &gnons {
+            rec.extend_from_slice(&id.0);
+            rec.extend_from_slice(&s.seen_gov_nonces.get(id).copied().unwrap_or(0).to_le_bytes());
+            wit::gnon_kid(&mut b, id);
+            keys.insert(kid_key(&b));
+        }
+        rec.extend_from_slice(&(xsrcs.len() as u16).to_le_bytes());
+        for id in &xsrcs {
+            rec.extend_from_slice(&id.0);
+            rec.push(s.external_sources.contains(id) as u8);
+            xsrc_kid(&mut b, id);
+            keys.insert(kid_key(&b));
+        }
+        // the operator's state is the (lazily committed) full state: every listed commit is in s.commits; a hash
+        // that is live in a loaded index is not repeated in the single-record section
+        let mut in_idx: BTreeSet<H> = BTreeSet::new();
+        rec.extend_from_slice(&(acmts.len() as u16).to_le_bytes());
+        for id in &acmts {
+            let es: Vec<(&H, &crate::state::CommitEntry)> = s.commits.iter().filter(|(_, e)| e.account == *id).collect();
+            rec.extend_from_slice(&id.0);
+            rec.push(es.len() as u8);
+            for (h, e) in &es {
+                rec.extend_from_slice(*h);
+                rec.extend_from_slice(&e.ttl_height.to_le_bytes());
+                rec.extend_from_slice(&e.commit_unit);
+                rec.extend_from_slice(&e.commit_height.to_le_bytes());
+                rec.push(e.revealed as u8);
+                wit::cmt_kid(&mut b, h);
+                keys.insert(kid_key(&b));
+                if e.ttl_height >= self.live_h.get().max(s.height) {
+                    in_idx.insert(**h);
+                }
+            }
+            acmt_kid(&mut b, id);
+            keys.insert(kid_key(&b));
+        }
+        let cmts: Vec<H> = cmts.difference(&in_idx).copied().collect();
+        rec.extend_from_slice(&(cmts.len() as u16).to_le_bytes());
+        for h in &cmts {
+            rec.extend_from_slice(h);
+            match s.commits.get(h) {
+                Some(e) => {
+                    rec.push(1);
+                    rec.extend_from_slice(&e.account.0);
+                    rec.extend_from_slice(&e.commit_unit);
+                    rec.extend_from_slice(&e.commit_height.to_le_bytes());
+                    rec.extend_from_slice(&e.ttl_height.to_le_bytes());
+                    rec.push(e.revealed as u8);
+                }
+                None => rec.push(0),
+            }
+            wit::cmt_kid(&mut b, h);
             keys.insert(kid_key(&b));
         }
         let keys: Vec<H> = keys.into_iter().collect();

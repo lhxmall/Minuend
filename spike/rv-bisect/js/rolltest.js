@@ -890,6 +890,58 @@ groups.upgrade = async () => { const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = 
 // ---------- loop round 9 (R9-H1): the permissionless brick path -- a fraud void below a pending upgrade lets ANY
 //            submitter re-submit uh - 1 as a normal (non-export) run; once it finalizes, nothing >= uh ever finalizes.
 //            cancel recovers, and keeps top when a void already lowered it below uh - 1.
+// ---------- loop round 16 (R15-I1): the stateless image's MNWIT-S genesis by migration (snapshot kind 3) finalizes on the
+// export(h-1) digest == migration(h) digest binding, like an import; no witness-root chain across the format change
+groups.r16mig = async () => { const g = 'r16 migration (R15-I1)'; const XK = 0x03F00000 / 4 + 0x1FFD6; const GOV = M.govAddr; const Z32 = Array(32).fill(0).join(',');
+  const memX = (kind, dw, tag) => { const m = new ref.Mem(); m.set(XK, kind); dw.forEach((w, k) => m.set(XK + 2 + k, w)); m.set(0x100, tag); m.root(); return m; };
+  const xb = (m, sid, o = {}) => ({ xbind: sid, words: [m.get(XK), ...Array.from({ length: 8 }, (_, k) => m.get(XK + 2 + k))], wsib: [m.proof(XK), ...Array.from({ length: 8 }, (_, k) => m.proof(XK + 2 + k))], ...o });
+  const D = Array.from({ length: 8 }, (_, k) => (0x7f4a7c15 * (k + 3)) >>> 0), D2 = D.map((w, k) => k === 2 ? (w ^ 8) >>> 0 : w);
+  const sub = async (C, h, pmem, fm, prevFinal, seed) => { const inp = new ref.Mem(); inp.set(0, seed); inp.root(); const steps = 100 + seed, fpc = 2, fregs = Z32.split(',').join(',');
+    const p = h > 1 ? tsOf(C, h) : null; const ts = Math.max(C.ts - TSLACK, p === null ? 0 : p + MINGAP); if (ts > C.ts) C.ts = ts;
+    const s0 = T.s0Of(ts, pmem, inp.root()); const final = ref.H(fpc + ':' + fregs + ':' + fm.root() + ':' + inp.root() + ':' + steps);
+    const r = await S(C, OP1, ROLL, OBOND, { submit: h, ts, s0, steps, final, inp: inp.root(), fpc, fregs, fmem: fm.root(), prev: prevFinal, units: 1 }); return { ...r, final, fm }; };
+  const G = T.genesis().root(); const SM = memX(0, [0, 0, 0, 0, 0, 0, 0, 0], 1616).root(); // the stateless image (MNPILOT_IMPORT_DIGEST = D)
+  { const C = new Chain();
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: SM });
+    const m = await sub(C, 2, SM, memX(3, D, 2), e.final, 2); rec(g, 'migration height 2 (kind 3) from the stateless image accepted', 'accepted', bnc(m));
+    C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    rec(g, 'finalize migration height 2 before any xbind', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    rec(g, 'xbind claiming kind 2 for a migration memory', 'bounce', bnc(await S(C, W, ROLL, 0, xb(m.fm, m.unit, { words: [2, ...xb(m.fm, m.unit).words.slice(1)] })), /word proof/));
+    rec(g, 'xbind migration height 2 (kind 3)', ['accepted', '3:' + D.join(',')], [bnc(await S(C, W, ROLL, 0, xb(m.fm, m.unit))), C.r('x' + m.unit)]);
+    rec(g, 'finalize with only the migration bound', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/));
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit));
+    rec(g, 'finalize migration height 2 (export digest == migration digest)', ['accepted', 2], [bnc(await S(C, W, ROLL, 0, { finalize: 2 })), C.r('lf')]);
+    const n3 = await sub(C, 3, m.fm.root(), memX(0, D, 3), m.final, 3);
+    rec(g, 'height 3 chains on the migration memory (stateless lineage)', 'accepted', bnc(n3)); }
+  { const C = new Chain(); // digest mismatch: never finalizes
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: SM });
+    const m = await sub(C, 2, SM, memX(3, D2, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(m.fm, m.unit));
+    rec(g, 'migration whose digest differs from the export never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/)); }
+  { const C = new Chain(); // h-1 is itself a migration (kind 3), not an export: refused
+    const e = await sub(C, 1, G, memX(3, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: SM });
+    const m = await sub(C, 2, SM, memX(3, D, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(m.fm, m.unit));
+    rec(g, 'kind 3 at h-1 (no export) + kind 3 at h never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/)); }
+  { const C = new Chain(); // the upgrade height publishes another EXPORT (kind 1): never finalizes
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: SM });
+    const m = await sub(C, 2, SM, memX(1, D, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(m.fm, m.unit));
+    rec(g, 'kind 1 at h-1 + kind 1 at the upgrade height never finalizes', 'bounce', bnc(await S(C, W, ROLL, 0, { finalize: 2 }), /import digest/)); }
+  { const C = new Chain(); // export at h-1, IMPORT kind 2 at h still works (unchanged path)
+    const e = await sub(C, 1, G, memX(1, D, 1), 'genesis', 1); await S(C, GOV, ROLL, 0, { upgrade: 2, mem: SM });
+    const i = await sub(C, 2, SM, memX(2, D, 2), e.final, 2); C.ts += WIN; await S(C, W, ROLL, 0, { finalize: 1 });
+    await S(C, W, ROLL, 0, xb(e.fm, e.unit)); await S(C, W, ROLL, 0, xb(i.fm, i.unit));
+    rec(g, 'import (kind 2) path unchanged', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 2 })));
+    const k4 = memX(4, D, 5), n3 = await sub(C, 3, i.fm.root(), k4, i.final, 5);
+    rec(g, 'xbind kind 4 refused', 'bounce', bnc(await S(C, W, ROLL, 0, xb(k4, n3.unit)), /kind/));
+    const k0 = memX(0, D, 6), n4 = await sub(C, 4, k4.root(), k0, n3.final, 6);
+    rec(g, 'xbind kind 0 refused', 'bounce', bnc(await S(C, W, ROLL, 0, xb(k0, n4.unit)), /kind/)); }
+  { const C = new Chain(); // a kind-3 memory at a height WITHOUT a scheduled upgrade: no digest rule (normal height)
+    const h1 = await sub(C, 1, G, memX(3, D, 1), 'genesis', 1); C.ts += WIN;
+    rec(g, 'kind 3 at a normal height finalizes like any height (no U<h>)', 'accepted', bnc(await S(C, W, ROLL, 0, { finalize: 1 }))); }
+};
+
 groups.cancel9 = async () => { const G0 = T.genesis(); const g = 'cancel (R9-H1)'; const GOV = M.govAddr; const UM = ref.H('r9-image');
   const C = new Chain(); const b1 = T.batch(G0, 1); await submit(C, OP1, 1, b1, 'genesis');
   const h2 = T.batch(b1.mem, 2), L2 = T.batch(b1.mem, 2, { k: 25, mut: T.MUT.mem }); await submit(C, OP2, 2, L2, b1.final);

@@ -26,6 +26,206 @@ pub struct SegRef {
     pub sess_hashes: u64,
 }
 
+/// round 16: session reference for an MNP2 batch (unit ids + extension area), cut with gov::cut_v2
+pub fn session_refs_v2(w: &[u32], s: u32) -> Vec<SegRef> {
+    let n_acc = w[1];
+    let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+        .map(|a| {
+            let mut id = [0u8; 32];
+            for k in 0..8 {
+                id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + (a * 8) as usize + k].to_le_bytes());
+            }
+            mnpilot::types::AccountId(id)
+        })
+        .collect();
+    let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
+    let mut out = Vec::new();
+    let n = w[2] as usize;
+    let mut lo = 0usize;
+    while lo < n || (n == 0 && lo == 0) {
+        let hi = (lo + s as usize).min(n);
+        let mut sw = crate::gov::cut_v2(w, lo, hi);
+        sw[3] = 0;
+        let pre = sess.as_ref().unwrap().eng.state.clone();
+        let h0 = sess.as_ref().unwrap().w.as_ref().map(|x| x.smt.node_hashes + x.leaf_updates).unwrap_or(0);
+        let mut ev = Vec::new();
+        let (_, st, _) = mnpilot::run_segment(&mut |i| sw.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess);
+        assert_eq!(st.status, 0);
+        let s1 = sess.as_ref().unwrap();
+        let h1 = s1.w.as_ref().map(|x| x.smt.node_hashes + x.leaf_updates).unwrap_or(0);
+        out.push(SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: sw, sess_hashes: h1 - h0 });
+        if hi >= n {
+            break;
+        }
+        lo = hi;
+    }
+    out
+}
+
+/// round 16: the 'perp' workload (MNP2, built on the REAL engine by gov::GB): trading on market 1 and on new listings,
+/// deposits / withdrawals, gov deposits / withdrawals (nonce variants, 0 by a fresh id, near PERP_SUPPLY_MAX), listings
+/// (regular / spot / funding, perturbed), commits (valid / invalid ttl, wrong hash) and reveals of supported inner ops
+/// (place, gov withdraw, listing, withdraw) and of forbidden kinds / by a foreign revealer / with a wrong salt or parent.
+/// No SetHeight / SetSeq (fixtures, unsupported statelessly); at most 10 listings (the session keeps its 16-market cap).
+pub fn perp_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+    use crate::gov::{listing_funding, listing_regular, listing_spot, GB};
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let n_acc = 10 + rng.below(6) as u32;
+    let mut g = GB::new(n_acc, mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG);
+    let mid = 100_000 * PRICE_SCALE as i64;
+    let dollar = PRICE_SCALE as i64;
+    for a in 1..n_acc {
+        g.op(GB::w_dep(a, 20_000 * USD_SCALE as i64));
+    }
+    let mut nonce: Vec<u64> = vec![0; n_acc as usize];
+    let mut creates = 0u32;
+    let mut pending: Vec<(u32, [u8; 32], [u8; 32], [u32; 8], [u8; 32])> = Vec::new();
+    let mut n_done = 0u32;
+    while n_done < n_ops {
+        n_done += 1;
+        let a = 1 + rng.below((n_acc - 1) as u64) as u32;
+        let holder = 4 + rng.below(6) as u32;
+        let nm = g.eng.state.next_market_id;
+        match rng.below(100) {
+            0..=9 => {
+                let amt = match rng.below(10) {
+                    0 => u64::MAX,
+                    1 => (minuend_types::PERP_SUPPLY_MAX as u64).saturating_sub(rng.below(3)),
+                    _ => rng.below(30_000),
+                };
+                g.op(GB::w_gdep(if rng.below(3) == 0 { holder } else { a }, amt));
+            }
+            10..=19 => {
+                let who = if rng.below(2) == 0 { holder } else { a };
+                let n = nonce[who as usize];
+                let nn = match rng.below(6) {
+                    0 => n,
+                    1 => n.saturating_sub(1),
+                    2 => n + 5,
+                    _ => n + 1,
+                };
+                let amt = match rng.below(5) {
+                    0 => 0,
+                    1 => rng.below(300_000),
+                    _ => rng.below(5_000),
+                };
+                if g.applied(GB::w_gwd(who, amt, nn)) {
+                    nonce[who as usize] = nn;
+                }
+            }
+            20..=27 if creates < 10 => {
+                creates += 1;
+                let mut l = match rng.below(3) {
+                    0 => listing_regular("SLR"),
+                    1 => listing_spot("SLS"),
+                    _ => listing_funding("SLF"),
+                };
+                if rng.below(4) == 0 {
+                    let i = 4 + rng.below(19) as usize;
+                    l[i] = match rng.below(3) {
+                        0 => 0,
+                        1 => l[i].wrapping_add(1),
+                        _ => u32::MAX,
+                    };
+                }
+                let who = if rng.below(4) == 0 { a } else { holder };
+                let w = g.w_market(who, &l);
+                g.op(w);
+            }
+            28..=55 => {
+                // trade on market 1 or a non-funding listing
+                let m = if rng.below(3) == 0 && nm > 2 { 2 + rng.below((nm - 2) as u64) as u32 } else { 1 };
+                if g.eng.state.markets.get(&MarketId(m)).is_some_and(|p| p.funding_rate) {
+                    continue;
+                }
+                let px = mid + (rng.below(11) as i64 - 5) * dollar * 100;
+                let mk = 1 + rng.below((n_acc - 1) as u64) as u32;
+                let w1 = g.w_place(mk, rng.below(2) == 0, false, px, QTY_SCALE / 1000, m);
+                g.op(w1);
+                if rng.below(2) == 0 {
+                    let w2 = g.w_place(a, rng.below(2) == 0, rng.below(2) == 0, px, QTY_SCALE / 1000, m);
+                    g.op(w2);
+                }
+            }
+            56..=60 => {
+                let c = g.cseq(a).saturating_sub(1 + rng.below(3));
+                let m = if rng.below(3) == 0 && nm > 2 { 2 + rng.below((nm - 2) as u64) as u32 } else { 1 };
+                g.op([3 | (a << 8), 0, 0, 0, 0, 0, c as u32, m]);
+            }
+            61..=64 => {
+                g.op(GB::w_dep(a, (1 + rng.below(5_000)) as i64 * USD_SCALE as i64));
+            }
+            65..=68 => {
+                let amt = rng.below(3_000) as i64 * USD_SCALE as i64;
+                g.op([6 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, rng.below(20) as u32, 0]);
+            }
+            69..=84 => {
+                // commit of an inner op this account (mostly) reveals later
+                let inner = match rng.below(8) {
+                    0..=2 => {
+                        let px = mid + (rng.below(11) as i64 - 5) * dollar * 100;
+                        g.w_place(a, rng.below(2) == 0, rng.below(2) == 0, px, QTY_SCALE / 1000, 1)
+                    }
+                    3 => GB::w_gwd(a, rng.below(2_000), nonce[a as usize] + 1),
+                    4 if creates < 10 => {
+                        creates += 1;
+                        g.w_market(a, &listing_regular("SLC"))
+                    }
+                    5 => {
+                        let amt = rng.below(2000) as i64 * USD_SCALE as i64;
+                        [6 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 100 + rng.below(30) as u32, 0]
+                    }
+                    _ => match rng.below(3) {
+                        0 => GB::w_dep(a, 5 * USD_SCALE as i64),
+                        1 => GB::w_gdep(a, 5),
+                        _ => [11 | (((a + 1) % n_acc) << 8), 0, 0, 0, 0, 0, 0, 0],
+                    },
+                };
+                let salt = {
+                    let mut s = [0u8; 32];
+                    for k in 0..4 {
+                        s[8 * k..8 * k + 8].copy_from_slice(&rng.next().to_le_bytes());
+                    }
+                    s
+                };
+                let mut hash = g.commit_hash_any(&inner, &salt);
+                if rng.below(12) == 0 {
+                    hash[0] ^= 1;
+                }
+                let ttl = match rng.below(10) {
+                    0 => 0,
+                    1 => minuend_types::COMMIT_TTL_HEIGHTS + 1,
+                    _ => 1 + rng.below(minuend_types::COMMIT_TTL_HEIGHTS),
+                };
+                let w = g.w_commit(a, &hash, ttl);
+                g.op(w);
+                let uid = *g.uids.last().unwrap();
+                pending.push((a, hash, salt, inner, uid));
+            }
+            _ if !pending.is_empty() => {
+                let k = rng.below(pending.len() as u64) as usize;
+                let (ca, hash, salt, inner, cu) = pending[k];
+                let who = if rng.below(10) == 0 { a } else { ca };
+                let p2 = if rng.below(8) == 0 { [0u8; 32] } else { cu };
+                let mut st = salt;
+                if rng.below(15) == 0 {
+                    st[1] ^= 4;
+                }
+                let p1 = g.last();
+                let w = g.w_reveal(who, &hash, &st, &inner, p1, p2);
+                g.op(w);
+                if rng.below(3) != 0 {
+                    pending.swap_remove(k);
+                }
+            }
+            _ => {
+                g.op(GB::w_dep(a, USD_SCALE as i64));
+            }
+        }
+    }
+    g.words()
+}
+
 /// session reference: segments (flags zeroed) with pre-states, post MNWIT-S roots and events
 pub fn session_refs(w: &[u32], s: u32) -> Vec<SegRef> {
     let n_acc = w[1];
@@ -102,6 +302,23 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 mnpilot::BatchOp::Withdraw { .. } => {
                     n.insert(Need::Wdl(a));
                 }
+                // round 16
+                mnpilot::BatchOp::GovDeposit { .. } => {
+                    n.insert(Need::Perp);
+                }
+                mnpilot::BatchOp::GovWithdraw { .. } => {
+                    n.insert(Need::Perp);
+                    n.insert(Need::Gnon(a));
+                    n.insert(Need::Acmt(a));
+                }
+                mnpilot::BatchOp::CreateMarket { .. } => {
+                    n.insert(Need::Perp);
+                    n.insert(Need::Acmt(a));
+                    n.insert(Need::Xsrc(a));
+                }
+                mnpilot::BatchOp::Commit { .. } => {
+                    n.insert(Need::Acmt(a));
+                }
                 _ => {}
             }
         }
@@ -115,6 +332,7 @@ pub fn operate(b: &WitBuilder, seg: &[u32]) -> Result<(BTreeSet<Need>, Vec<u8>, 
 }
 pub fn operate_h(b: &WitBuilder, seg: &[u32], height: Option<u64>) -> Result<(BTreeSet<Need>, Vec<u8>, sl::SlOut, Vec<u32>, u32), String> {
     let mut needs = guess(seg);
+    b.live_h.set(height.unwrap_or(0).max(b.s.height));
     for it in 0..20_000u32 {
         let wit = b.build(&needs);
         let (o, ev) = run_sl_xh(seg, &wit, Some(&b.root), height);
@@ -248,6 +466,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
             ora_batch(s, ord)
         } else if mode == "wd" {
             wd_batch(s, ord)
+        } else if mode == "perp" {
+            perp_batch(s, ord)
         } else {
             let makers = 4 + (s % 9) as u32;
             let levels = 1 + (s % 25) as u32;
@@ -256,7 +476,7 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
         };
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(200) as u32;
-        let refs = session_refs(&w, size);
+        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         let mut batch_ok = true;
         for (k, r) in refs.iter().enumerate() {
             segs += 1;
@@ -445,10 +665,10 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
         let makers = 4 + (s % 9) as u32;
         let levels = 1 + (s % 25) as u32;
         let per = 1 + (s % 3) as u32;
-        let w = if mode == "wd" { wd_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
+        let w = if mode == "wd" { wd_batch(s, ord) } else if mode == "perp" { perp_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
         let mut rng = Rng(s.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let size = 8 + rng.below(64) as u32;
-        let refs = session_refs(&w, size);
+        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         // previous segment's pre-state (wrong-root attack)
         let mut prev_pre: Option<mnpilot::state::ChainState> = None;
         for r in refs.iter() {
@@ -474,6 +694,11 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Path(_) => "omit:path",
                     Need::Light(_) => "omit:light",
                     Need::Wdl(_) => "omit:wdl",
+                    Need::Perp => "omit:perp",
+                    Need::Gnon(_) => "omit:gnon",
+                    Need::Xsrc(_) => "omit:xsrc",
+                    Need::Acmt(_) => "omit:acmt",
+                    Need::Cmt(_) => "omit:cmt",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
             }
@@ -1600,4 +1825,61 @@ pub fn slmigdump(seed: u64, ord: u32, size: u32, dir: &str) -> String {
     }
     fs::write(format!("{}/manifest.json", dir), format!("{{\"migration\":{},\"segments\":[{}]}}", mig, man.join(",\n"))).unwrap();
     format!("{{\"segments\":{},\"dir\":\"{}\",\"migration\":{}}}", man.len(), dir, mig)
+}
+
+/// loop round 16 (step 4): a FULL-SIZE session migration measured natively. `slmigcap n m r orders wd dir`: the
+/// `mktcap` whole-state session (n accounts each with a position in every one of m markets, r bonded oracles with
+/// 8-deep report rings, `orders` resting bids and `wd` pending withdrawals per account; real engine entry points
+/// only) -> export -> host `migrate` (wall time, heapsim peak live bytes during the migration, MNWIT-S leaf count)
+/// -> `<dir>/mig.bin` ([SL_MIG_MAGIC, words]) + `<dir>/digest.txt` for the guest-level run (xval/migsail.js on an
+/// `embed,prod,stateless` image built with MNPILOT_IMPORT_DIGEST = digest.txt).
+pub fn slmigcap(n: u32, m: u32, r: u32, orders: u32, wd: u32, dir: &str) -> String {
+    fs::create_dir_all(dir).unwrap();
+    let (sess, fails, _why) = crate::snap::mktcap_sess(n, m, r, orders, wd);
+    let st = &sess.eng.state;
+    let live: usize = st.books.values().map(|b| b.live_orders().count()).sum();
+    let pos: usize = st.accounts.values().map(|a| a.positions.len()).sum();
+    let maxlvl = st.books.values().flat_map(|b| b.sl_levels().into_iter().map(|(_, _, ids)| ids.len())).max().unwrap_or(0);
+    let t0 = std::time::Instant::now();
+    let (dg, nw, words) = mnpilot::snapshot::export(&sess, true);
+    let t_exp = t0.elapsed().as_secs_f64();
+    let mut inp = vec![sl::SL_MIG_MAGIC];
+    inp.extend_from_slice(&words.unwrap());
+    let leaves = sl::s_leaves(st).len();
+    let host_root = sl::s_root(st);
+    drop(sess);
+    heapsim::reset();
+    heapsim::ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    let t1 = std::time::Instant::now();
+    let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+    let t_mig = t1.elapsed().as_secs_f64();
+    heapsim::ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (top, peak, _) = heapsim::read();
+    write_words(&format!("{}/mig.bin", dir), &inp);
+    fs::write(format!("{}/digest.txt", dir), format!("{}:{}", hx(&dg), nw)).unwrap();
+    fs::write(format!("{}/root.txt", dir), hx(&mo.root)).unwrap();
+    format!(
+        "{{\"ok\":{},\"status\":{},\"accounts\":{},\"markets\":{},\"oracles\":{},\"live_orders\":{},\"positions\":{},\"max_level_orders\":{},\"rejected_setup_ops\":{},\"snapshot_words\":{},\"mnwits_leaves\":{},\"root\":\"{}\",\"root_eq_host\":{},\"export_s\":{:.3},\"migrate_host_s\":{:.3},\"migrate_heap_peak_live\":{},\"migrate_heap_top\":{}}}",
+        mo.status == 0 && mo.root == host_root, mo.status, n, m, r, live, pos, maxlvl, fails, nw, leaves, hx(&mo.root), mo.root == host_root, t_exp, t_mig, peak, top
+    )
+}
+
+/// round 16: workload coverage of `perp` batches -- per op kind: applied / rejected codes (session reference)
+pub fn slperpstat(n: u64, ord: u32) -> String {
+    use std::collections::BTreeMap;
+    let mut t: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    for s in 1..=n {
+        let w = perp_batch(s, ord);
+        let refs = session_refs_v2(&w, 1_000_000);
+        let ev = &refs[0].ev;
+        let base = 4 + 8 * w[1] as usize;
+        let mut k = 0usize;
+        for i in 0..w[2] as usize {
+            let kind = w[base + 8 * i] & 0xff;
+            let e = ev[k];
+            let tag = if e & mnpilot::EV_APPLIED != 0 { k += 1 + 6 * (e & 0xffff) as usize; "ok".to_string() } else { k += 1; format!("r{}", e) };
+            *t.entry(format!("k{}", kind)).or_default().entry(tag).or_default() += 1;
+        }
+    }
+    format!("{:?}", t)
 }

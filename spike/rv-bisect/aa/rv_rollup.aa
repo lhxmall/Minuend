@@ -157,10 +157,13 @@ else if ($d.finalize) {
 	$pf = $h == 1 ? [] : split(var['s' || var['h' || ($h - 1)]], ':');
 	require($h == 1 OR $r[7] == $pf[2], 'prev');
 	// loop round 4: an upgrade height finalizes only on a proven export(h-1) / import(h) digest match
+	// loop round 16 (R15-I1): or export(h-1) / MNWIT-S migration(h) (kind 3, the stateless image's genesis run): the
+	// migration publishes the digest of the snapshot it decoded (= its compiled-in expectation); the binding is the
+	// digest, not a witness-root chain (the export's MNWIT1 end root and the migration's MNWIT-S root differ by design)
 	if (var['U' || $h]) {
 		$xi = split(var['x' || $sid] OTHERWISE '', ':');
 		$xe = split(var['x' || var['h' || ($h - 1)]] OTHERWISE '', ':');
-		require(length($xi) == 2 AND length($xe) == 2 AND $xi[0] == '2' AND $xe[0] == '1' AND $xi[1] == $xe[1], 'import digest');
+		require(length($xi) == 2 AND length($xe) == 2 AND ($xi[0] == '2' OR $xi[0] == '3') AND $xe[0] == '1' AND $xi[1] == $xe[1], 'import digest');
 	}
 	$st = {sid: $sid, pay: $r[1], amt: $bondOf($sid) - $FEE};
 }
@@ -207,7 +210,7 @@ else if (exists(trigger.data.xbind)) {
 	require(!var['x' || $sid], 'bound');
 	$w = trigger.data.words;
 	require(is_array($w) AND length($w) == 9 AND is_array(trigger.data.wsib) AND length(trigger.data.wsib) == 9, 'words');
-	require($w[0] == 1 OR $w[0] == 2, 'kind');
+	require($w[0] >= 1 AND $w[0] <= 3, 'kind');   // 1 export, 2 import, 3 MNWIT-S migration (loop round 16)
 	require(length(filter([0,1,2,3,4,5,6,7,8], 9, $k => !(is_integer($w[$k]) AND $w[$k] >= 0 AND $w[$k] < 4294967296
 		AND is_array(trigger.data.wsib[$k]) AND length(trigger.data.wsib[$k]) == $MD
 		AND is_valid_merkle_proof($w[$k], {root: $mem, siblings: trigger.data.wsib[$k], index: $XK + ($k == 0 ? 0 : $k + 1)})))) == 0, 'word proof');

@@ -239,6 +239,9 @@ mod rt {
                 SL_INIT = 1;
                 SL_RUNS = o.segs;
             }
+            // round 16 (R16-M1): the run counter = rollup height of this run (rv_witbind proves OUT[SEG_N] == h before it
+            // binds W<h>); the stateless image never wrote it, so no stateless height could be bound
+            OUT.add(SEG_N).write_volatile(SL_RUNS);
             put_root(0, &o.root);
             for k in 8..13 {
                 OUT.add(k).write_volatile(0);
@@ -305,6 +308,7 @@ mod rt {
                 SL_INIT = 1;
             }
             put_root(0, &o.end_root);
+            OUT.add(SEG_N).write_volatile(SL_RUNS); // round 16 (R16-M1)
             OUT.add(8).write_volatile(n_ev);
             OUT.add(9).write_volatile(o.applied);
             OUT.add(10).write_volatile(o.rejected);

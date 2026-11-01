@@ -16,20 +16,21 @@ function runOn(mem, entry, words, maxSteps = 4e10) {
   while (st.pc !== ref.HALT && st.pc !== ref.TRAP && st.step < maxSteps) ref.step(st, mem);
   const g = (k) => mem.get(OUT + k) >>> 0; const r8 = (k) => hexw(Array.from({ length: 8 }, (_, j) => g(k + j)));
   const nev = g(8); const ev = []; for (let k = 0; k < nev; k++) ev.push(g(13 + k));
-  return { halted: st.pc === ref.HALT, steps: st.step, status: g(0x1FFF9), start_root: r8(0x1FFF0), end_root: r8(0x1FFE8), ev };
+  return { halted: st.pc === ref.HALT, steps: st.step, status: g(0x1FFF9), segn: g(0x1FFE7), start_root: r8(0x1FFF0), end_root: r8(0x1FFE8), ev };
 }
 const words = (f) => { const b = fs.readFileSync(path.join(DIR, f)); return Array.from({ length: b.length / 4 }, (_, i) => b.readUInt32LE(4 * i)); };
 const mem = new FastMem(); const entry = load(ELF, mem);
 const res = []; let ok = 0;
 const mw = words(man.migration.mig);
 const m = runOn(mem, entry, mw);
-const mOk = m.halted && m.status === 0 && m.start_root === man.migration.root && m.end_root === man.migration.root;
-res.push({ run: 'migration', ok: mOk, status: m.status, steps: m.steps, root_ok: m.end_root === man.migration.root, words: man.migration.words });
+// round 16 (R16-M1): the run counter OUT[0x1FFE7] (rv_witbind proves it == h) must be the migration height / run height
+const mOk = m.halted && m.status === 0 && m.start_root === man.migration.root && m.end_root === man.migration.root && m.segn === man.migration.segs;
+res.push({ run: 'migration', ok: mOk, status: m.status, segn: m.segn, steps: m.steps, root_ok: m.end_root === man.migration.root, words: man.migration.words });
 for (const s of man.segments) {
   const r = runOn(mem, entry, words(s.sl));
-  const good = r.halted && r.status === 0 && JSON.stringify(r.ev) === JSON.stringify(s.ev) && r.start_root === s.s_start && r.end_root === s.s_end;
+  const good = r.halted && r.status === 0 && JSON.stringify(r.ev) === JSON.stringify(s.ev) && r.start_root === s.s_start && r.end_root === s.s_end && r.segn === s.height;
   if (good) ok++;
-  res.push({ run: s.sl, height: s.height, units: s.units, ok: good, status: r.status, steps: r.steps, ...(good ? {} : { roots: [r.start_root === s.s_start, r.end_root === s.s_end] }) });
+  res.push({ run: s.sl, height: s.height, units: s.units, ok: good, status: r.status, segn: r.segn, steps: r.steps, ...(good ? {} : { roots: [r.start_root === s.s_start, r.end_root === s.s_end] }) });
 }
 let negOk = true;
 if (NEG) {
