@@ -2086,7 +2086,8 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
             }
         }
         // ---- round 20: oracle (§12.1) ----
-        Stake { .. } | Unstake { .. } => ora::pre_stake(sl, &author)?,
+        Stake { .. } => ora::pre_stake(sl, s, &author, false)?,
+        Unstake { .. } => ora::pre_stake(sl, s, &author, true)?,
         Report { market, price, .. } => ora::pre_report(sl, s, &author, market, price)?,
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
     }
@@ -2244,7 +2245,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
     // pglob / exception list, oracle records, queue update)
     if eng.state.height > sl.o.h0 {
         let hk = (|| -> Result<(), Result<Need, u32>> {
-            ora::hook_pre(&sl, &eng.state)?;
+            let gone = ora::hook_pre(&sl, &eng.state)?;
+            ora::set_gone(&mut sl, gone);
             let h = eng.state.height;
             eng.state.prune_oracle_unbonding(h);
             let d = eng.state.take_dirty();

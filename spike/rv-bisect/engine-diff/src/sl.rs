@@ -3058,3 +3058,117 @@ fn ora_adv(a: &mut Adv, b: &WitBuilder, r: &SegRef, h: u64, needs: &BTreeSet<Nee
         a.rec("flip20:records", r, &o4, &ev4, false);
     }
 }
+
+/// slpoc20 (round 20 PoCs / regression, stateless oracle):
+///  P1 R20-M2: 70 bonded oracles unstake at one height: the first SL_MAX_UNSTAKES (64) start unbonding, the rest are
+///     refused (code 19, stateless bound); events + end root = direct (the first 64 units)
+///  P2 R19-I2 / R20-M1: at the unlock height the hook releases the 64 oracles (60 of them report in 16 markets) with
+///     one report-set record per MARKET (round-20 first form: one ohist: record per (market, oracle) = 960); end root =
+///     the session hook (prune_oracle_unbonding) on the full state; mkx `oracled` of the 16 markets flips
+///  P3 the expiry witness without a released oracle's ostk: / without oglob: / with a group entry dropped / with a report
+///     set entry dropped -> refused
+pub fn slpoc20() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    let mut res: Vec<String> = Vec::new();
+    let mut all_ok = true;
+    let id = |i: u32| A(acct_id(i).0);
+    let h0: u64 = 1_000;
+    let mut s = mnpilot::state::ChainState::genesis();
+    for m in 2..=16u32 {
+        s.markets.insert(M(m), s.markets[&M(1)]);
+        s.books.insert(M(m), mnpilot::book::OrderBook::new(M(m)));
+    }
+    for i in 0..70u32 {
+        s.oracle_bonds.insert(id(100 + i), mnpilot::types::ORACLE_BOND_PERP);
+        if i < 60 {
+            for m in 1..=16u32 {
+                s.oracle_reports.insert((M(m), id(100 + i)), MID + i as i64);
+                let mut q = std::collections::VecDeque::new();
+                q.push_back(mnpilot::types::ReportSample { height: h0 - 1, price: MID + i as i64, seq: i as u64 });
+                s.oracle_report_history.insert((M(m), id(100 + i)), q);
+            }
+        }
+    }
+    s.height = h0;
+    let _ = s.take_dirty();
+    let table: Vec<u32> = (100..170).collect();
+    let ops: Vec<[u32; 8]> = (0..70u32).map(w_unstake).collect();
+    let seg = seg_words(&table, &ops);
+    // ---- P1 ----
+    let b = WitBuilder::new(&s);
+    let p1 = operate_h(&b, &seg, Some(h0));
+    let (post64, ev64) = direct(&s, &seg_words(&table, &ops[..64]));
+    let mut want_ev = ev64.clone();
+    want_ev.extend(std::iter::repeat(mnpilot::STATE_CAP_CODE).take(6));
+    let (st1, root1, ev1, wb1) = match &p1 {
+        Ok((_, wit, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post64), *ev == want_ev, wit.len()),
+        Err(_) => (99, false, false, 0),
+    };
+    let ok1 = st1 == 0 && root1 && ev1 && post64.oracle_unbonding.len() == 64;
+    all_ok &= ok1;
+    res.push(format!("{{\"case\":\"P1 R20-M2 70 unstakes at one height: 64 start unbonding, 6 refused (19)\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"witness_bytes\":{}}}", ok1, st1, root1, ev1, wb1));
+    // ---- P2: the hook at the unlock height (an empty run) ----
+    let u = h0 + mnpilot::types::ORACLE_UNBOND_HEIGHTS;
+    let pre2 = post64.clone();
+    let mut want = pre2.clone();
+    want.height = u;
+    want.prune_oracle_unbonding(u);
+    let _ = want.take_dirty();
+    let empty = seg_words(&table, &[]);
+    let b2 = WitBuilder::new(&pre2);
+    let p2 = operate_h(&b2, &empty, Some(u));
+    let orc_flip = (1..=16u32).all(|m| sl::oracled(&pre2, M(m)) && !sl::oracled(&want, M(m)));
+    let (st2, root2, wb2, nrec) = match &p2 {
+        Ok((needs, wit, o, _, _)) => (o.status, o.end_root == sl::s_root(&want), wit.len(), needs.iter().filter(|n| matches!(n, Need::Orep(_))).count()),
+        Err(e) => {
+            res.push(format!("{{\"case\":\"P2 operator\",\"error\":\"{}\"}}", e));
+            (99, false, 0, 0)
+        }
+    };
+    let ok2 = st2 == 0 && root2 && orc_flip && want.oracle_bonds.len() == 6 && nrec == 16;
+    all_ok &= ok2;
+    res.push(format!("{{\"case\":\"P2 R19-I2 / R20-M1 hook releases 64 oracles (60 x 16 markets): 16 report-set records\",\"ok\":{},\"status\":{},\"root_ok\":{},\"oracled_flipped\":{},\"orep_records\":{},\"witness_bytes\":{}}}", ok2, st2, root2, orc_flip, nrec, wb2));
+    // ---- P3: incomplete / forged expiry witnesses ----
+    if let Ok((needs, wit, _, _, _)) = &p2 {
+        let mut refused = 0;
+        let mut runs = 0;
+        let mut wrong = 0;
+        let mut cases: Vec<BTreeSet<Need>> = Vec::new();
+        if let Some(x) = needs.iter().find(|n| matches!(n, Need::Ostk(_))) {
+            let mut n2 = needs.clone();
+            n2.remove(x);
+            cases.push(n2);
+        }
+        let mut n3 = needs.clone();
+        n3.remove(&Need::Oglob);
+        cases.push(n3);
+        for n2 in &cases {
+            runs += 1;
+            let (o, _) = run_sl_xh(&empty, &b2.build(n2), Some(&b2.root), Some(u));
+            if o.status != 0 {
+                refused += 1;
+            } else if o.end_root != sl::s_root(&want) {
+                wrong += 1;
+            }
+        }
+        for m in [1u8, 3] {
+            b2.t_odrop.set(m);
+            let w2 = b2.build(needs);
+            b2.t_odrop.set(0);
+            if w2 == *wit {
+                continue;
+            }
+            runs += 1;
+            let (o, _) = run_sl_xh(&empty, &w2, Some(&b2.root), Some(u));
+            if o.status != 0 {
+                refused += 1;
+            } else if o.end_root != sl::s_root(&want) {
+                wrong += 1;
+            }
+        }
+        let ok3 = runs == refused && wrong == 0 && runs == 4;
+        all_ok &= ok3;
+        res.push(format!("{{\"case\":\"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{}}}", ok3, runs, refused, wrong));
+    }
+    format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
+}

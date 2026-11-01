@@ -3,9 +3,13 @@
 //! MNWIT-S leaves (pure functions of the session state, absent = the session's default):
 //!   ostk:<acct>     :<bond or ->:<unlock or ->                 oracle_bonds / oracle_unbonding of one account
 //!   orm:<acct>      :<n>:<sha256(markets u32 LE ascending)>     markets where the account has a report or a history
-//!   orep:<m>        :<n>:<sha256((oracle, price, bonded) by oracle)>  the market's report set; `bonded` = the
-//!                                                               reporter holds a bond now (median / `oracled` input)
-//!   ohist:<m>:<acct> :<n>:<sha256((height, price, seq) ring order)>   the slash-streak ring (<= 8)
+//!   orep:<m>        :<n>:<sha256(entries by oracle)>            the market's reporters: one entry per oracle with a
+//!                                                               report or a history in m = (oracle, has report, price,
+//!                                                               bonded now, history length, sha256(history samples));
+//!                                                               `bonded` is the median / `oracled` input. The history
+//!                                                               ring (slash streak, <= 8 samples) is sent only where a
+//!                                                               unit reads / writes it (R20-M1: no per-(market, oracle)
+//!                                                               leaf -- a bond change costs one record per MARKET)
 //!   omk:<m>         :<cfg>:<fit>:<lfh>:<n>:<dg>:<n>:<dg>         oracle config, funding_index_twap, last_funding_height,
 //!                                                               the oracle / funding TWAP rings of the market
 //!   oglob:0         :<funding source>:<slash nonce>:<head>:<tail>  global oracle facts + the expiry queue's ends
@@ -13,8 +17,10 @@
 //!                                                               ends at height u; a doubly linked list over the
 //!                                                               distinct unlock heights in ascending order
 //! Eager expiry (R19-I2): a run that moves the height to h loads `oglob:0` and every queue group u <= h (plus the next
-//! one), every listed oracle's `ostk:` / account record / `orm:` and each `orep:` / `ohist:` of its list, and applies the
-//! session's `prune_oracle_unbonding(h)` on the partial state. Stake / Unstake / Report run unchanged on the loaded
+//! one), every listed oracle's `ostk:` / account record / `orm:` and each `orep:` of its list, and applies the session's
+//! `prune_oracle_unbonding(h)` on the partial state (an expired oracle's entries -- report and history -- leave the
+//! loaded report sets). R20-M2: at most SL_MAX_UNSTAKES oracles per expiry group (an Unstake beyond it is refused, code
+//! 19), so one height's expiry is bounded. Stake / Unstake / Report run unchanged on the loaded
 //! records; a Report that would pay funding (the O(holders) transfer, R19-I1) or runs on a funding-rate market /
 //! with the AggregatedExternal source is unsupported. Slash: unsupported (round-20 step 3).
 use super::*;
@@ -26,10 +32,10 @@ pub const SL_MAX_ORACLE_MKTS: usize = 64;
 /// stateless bound: reporters per market (keeps `orep:` loadable)
 pub const SL_MAX_REPORTERS: usize = 64;
 const HIST_MAX: usize = 8;
+/// R20-M2 (stateless bound, code 19): oracles that may start unbonding at one height (= one expiry group)
+pub const SL_MAX_UNSTAKES: usize = 64;
 const OTW_MAX: usize = crate::types::ORACLE_TWAP_MAX as usize;
 const FTW_MAX: usize = crate::types::FUNDING_TWAP_WINDOW as usize;
-/// accounts in one expiry group (one run's Unstake units; MAX_UNITS in a session image)
-const OEXP_MAX: usize = 1 << 16;
 
 const AMIN: AccountId = AccountId([0u8; 32]);
 const AMAX: AccountId = AccountId([0xffu8; 32]);
@@ -71,14 +77,25 @@ pub fn orm_leaf(b: &mut Buf, id: &AccountId, mk: &[u32]) {
     let _ = write!(b, ":{}:", mk.len());
     hexw(b, &apos_digest(mk));
 }
-/// (oracle, price, bonded now)
-pub type OrepE = (AccountId, Price, bool);
+/// (oracle, report price if any, bonded now, history length, history digest)
+pub type OrepE = (AccountId, Option<Price>, bool, u8, H);
+pub fn hist_digest(q: Option<&VecDeque<ReportSample>>) -> H {
+    let mut h = Sha256::new();
+    for x in q.into_iter().flatten() {
+        h.update(x.height.to_le_bytes());
+        h.update(x.price.to_le_bytes());
+        h.update(x.seq.to_le_bytes());
+    }
+    h.finalize().into()
+}
 pub fn orep_digest(es: &[OrepE]) -> H {
     let mut h = Sha256::new();
-    for (o, p, bd) in es {
+    for (o, p, bd, n, dg) in es {
         h.update(o.0);
-        h.update(p.to_le_bytes());
-        h.update([*bd as u8]);
+        h.update([p.is_some() as u8]);
+        h.update(p.unwrap_or(0).to_le_bytes());
+        h.update([*bd as u8, *n]);
+        h.update(dg);
     }
     h.finalize().into()
 }
@@ -91,24 +108,6 @@ pub fn orep_leaf(b: &mut Buf, m: u32, es: &[OrepE]) {
     orep_kid(b, m);
     let _ = write!(b, ":{}:", es.len());
     hexw(b, &orep_digest(es));
-}
-pub fn ohist_kid(b: &mut Buf, m: u32, id: &AccountId) {
-    b.n = 0;
-    let _ = write!(b, "ohist:{}:", m);
-    hexw(b, &id.0);
-    mark(b);
-}
-pub fn ohist_leaf(b: &mut Buf, m: u32, id: &AccountId, q: &VecDeque<ReportSample>) {
-    let mut h = Sha256::new();
-    for x in q {
-        h.update(x.height.to_le_bytes());
-        h.update(x.price.to_le_bytes());
-        h.update(x.seq.to_le_bytes());
-    }
-    let dg: H = h.finalize().into();
-    ohist_kid(b, m, id);
-    let _ = write!(b, ":{}:", q.len());
-    hexw(b, &dg);
 }
 fn twap_digest(q: Option<&VecDeque<TwapSample>>) -> H {
     let mut h = Sha256::new();
@@ -196,17 +195,23 @@ pub fn oexp_leaf(b: &mut Buf, u: u64, prev: Option<u64>, next: Option<u64>, ids:
 // ------------------------------------------------------------------------------------------------
 // reference (full state)
 // ------------------------------------------------------------------------------------------------
+/// (market, oracle) pairs with a report or a non-empty history (an empty ring is the session's "no history")
+fn pairs_of(s: &ChainState) -> BTreeSet<(MarketId, AccountId)> {
+    let mut v: BTreeSet<(MarketId, AccountId)> = s.oracle_reports.keys().copied().collect();
+    v.extend(s.oracle_report_history.iter().filter(|(_, q)| !q.is_empty()).map(|(k, _)| *k));
+    v.retain(|(_, o)| *o != pseudo_oracle());
+    v
+}
 pub fn orm_of(s: &ChainState, id: &AccountId) -> Vec<u32> {
-    let mut v: BTreeSet<u32> = s.oracle_reports.keys().filter(|(_, o)| o == id).map(|(m, _)| m.0).collect();
-    v.extend(s.oracle_report_history.keys().filter(|(_, o)| o == id).map(|(m, _)| m.0));
-    v.into_iter().collect()
+    pairs_of(s).into_iter().filter(|(_, o)| o == id).map(|(m, _)| m.0).collect()
+}
+fn entry_of(s: &ChainState, m: MarketId, o: &AccountId) -> OrepE {
+    let q = s.oracle_report_history.get(&(m, *o));
+    (*o, s.oracle_reports.get(&(m, *o)).copied(), s.oracle_bonds.contains_key(o), q.map(|q| q.len()).unwrap_or(0) as u8, hist_digest(q))
 }
 pub fn orep_of(s: &ChainState, m: u32) -> Vec<OrepE> {
-    s.oracle_reports
-        .range((MarketId(m), AMIN)..=(MarketId(m), AMAX))
-        .filter(|((_, o), _)| *o != pseudo_oracle())
-        .map(|((_, o), p)| (*o, *p, s.oracle_bonds.contains_key(o)))
-        .collect()
+    let mid = MarketId(m);
+    pairs_of(s).into_iter().filter(|(mm, _)| *mm == mid).map(|(_, o)| entry_of(s, mid, &o)).collect()
 }
 pub type OGroups = BTreeMap<u64, BTreeSet<AccountId>>;
 pub fn oexp_groups(s: &ChainState) -> OGroups {
@@ -226,18 +231,15 @@ pub fn leaves(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         ostk_leaf(&mut b, id, s.oracle_bonds.get(id).copied(), s.oracle_unbonding.get(id).copied());
         push(&b);
     }
-    let rids: BTreeSet<AccountId> = s.oracle_reports.keys().chain(s.oracle_report_history.keys()).map(|(_, o)| *o).collect();
+    let pr = pairs_of(s);
+    let rids: BTreeSet<AccountId> = pr.iter().map(|(_, o)| *o).collect();
     for id in &rids {
         orm_leaf(&mut b, id, &orm_of(s, id));
         push(&b);
     }
-    let rms: BTreeSet<u32> = s.oracle_reports.keys().map(|(m, _)| m.0).collect();
+    let rms: BTreeSet<u32> = pr.iter().map(|(m, _)| m.0).collect();
     for m in rms {
         orep_leaf(&mut b, m, &orep_of(s, m));
-        push(&b);
-    }
-    for ((m, id), q) in &s.oracle_report_history {
-        ohist_leaf(&mut b, m.0, id, q);
         push(&b);
     }
     let oms: BTreeSet<MarketId> = s
@@ -270,13 +272,15 @@ pub fn leaves(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
 }
 /// migration bound (R15-M1 style): every oracle object stays loadable under the stateless bounds
 pub fn mig_ok(s: &ChainState) -> bool {
-    let rids: BTreeSet<AccountId> = s.oracle_reports.keys().chain(s.oracle_report_history.keys()).map(|(_, o)| *o).collect();
-    if rids.iter().any(|a| orm_of(s, a).len() > SL_MAX_ORACLE_MKTS) {
-        return false;
-    }
+    let pr = pairs_of(s);
+    let mut per_o: BTreeMap<AccountId, usize> = BTreeMap::new();
     let mut per: BTreeMap<MarketId, usize> = BTreeMap::new();
-    for (m, _) in s.oracle_reports.keys() {
+    for (m, o) in &pr {
+        *per_o.entry(*o).or_default() += 1;
         *per.entry(*m).or_default() += 1;
+    }
+    if per_o.values().any(|n| *n > SL_MAX_ORACLE_MKTS) {
+        return false;
     }
     if per.values().any(|n| *n > SL_MAX_REPORTERS) {
         return false;
@@ -285,7 +289,7 @@ pub fn mig_ok(s: &ChainState) -> bool {
         return false;
     }
     // unlock height 0 is the queue's "none"; a group above OEXP_MAX accounts is not loadable
-    if s.oracle_unbonding.values().any(|u| *u == 0) || oexp_groups(s).values().any(|g| g.len() > OEXP_MAX) {
+    if s.oracle_unbonding.values().any(|u| *u == 0) || oexp_groups(s).values().any(|g| g.len() > SL_MAX_UNSTAKES) {
         return false;
     }
     !s.oracle_reports.keys().any(|(_, o)| *o == pseudo_oracle()) && !s.oracle_bonds.contains_key(&pseudo_oracle())
@@ -308,7 +312,12 @@ pub(super) struct Ora {
     pub rm: BTreeMap<AccountId, Vec<u32>>,
     /// markets whose report set was loaded, with `oracled` at load
     pub rep: BTreeMap<u32, bool>,
+    /// (market, oracle) whose history samples were loaded (verified against the orep: entry)
     pub hist: BTreeSet<(u32, AccountId)>,
+    /// entries of the loaded report sets at load: (market, oracle) -> (history length, digest)
+    pub ent0: BTreeMap<(u32, AccountId), (u8, H)>,
+    /// oracles released by this run's hook (their histories leave every report set, loaded or not)
+    pub gone: BTreeSet<AccountId>,
     pub mk: BTreeSet<u32>,
     /// expiry queue groups known now (loaded or created): u -> (prev, next, accounts)
     pub exp: BTreeMap<u64, (Option<u64>, Option<u64>, BTreeSet<AccountId>)>,
@@ -329,7 +338,7 @@ fn opt0(x: u64) -> Option<u64> {
     }
 }
 
-/// witness section (after the exception sub-trees): oglob, ostk, orm, orep, ohist, omk, oexp
+/// witness section (after the exception sub-trees): oglob, ostk, orm, orep, ohist (samples of loaded entries), omk, oexp
 pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> Result<(), u32> {
     // oglob
     match bad!(r.u8()) {
@@ -428,12 +437,14 @@ pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> 
         let mut es: Vec<OrepE> = Vec::with_capacity(k);
         for _ in 0..k {
             let o = AccountId(bad!(r.h32()));
-            let p = bad!(r.i64());
+            let p = if bad!(r.bool()) { Some(bad!(r.i64())) } else { None };
             let bd = bad!(r.bool());
-            if o == pseudo_oracle() || es.last().is_some_and(|x| x.0 >= o) {
+            let hn = bad!(r.u8());
+            let dg = bad!(r.h32());
+            if o == pseudo_oracle() || es.last().is_some_and(|x| x.0 >= o) || hn as usize > HIST_MAX || (p.is_none() && hn == 0) {
                 return Err(ST_SL_BADWIT);
             }
-            es.push((o, p, bd));
+            es.push((o, p, bd, hn, dg));
         }
         if k == 0 {
             orep_kid(b, m);
@@ -444,13 +455,16 @@ pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> 
         }
         let mid = MarketId(m);
         let pseudo = s.oracle_reports.remove(&(mid, pseudo_oracle())).is_some();
-        let orc = es.iter().any(|e| e.2);
+        let orc = es.iter().any(|e| e.1.is_some() && e.2);
         // the market's mkx: `oracled` bit (loaded as the stand-in reporter) is the same fact
         if sl.markets.get(&m) == Some(&true) && pseudo != orc {
             return Err(ST_SL_BADWIT);
         }
-        for (o, p, bd) in &es {
-            s.oracle_reports.insert((mid, *o), *p);
+        for (o, p, bd, hn, dg) in &es {
+            if let Some(p) = p {
+                s.oracle_reports.insert((mid, *o), *p);
+            }
+            sl.o.ent0.insert((m, *o), (*hn, *dg));
             if sl.o.stk.contains(o) {
                 if s.oracle_bonds.contains_key(o) != *bd {
                     return Err(ST_SL_BADWIT);
@@ -463,7 +477,7 @@ pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> 
         }
         sl.o.rep.insert(m, orc);
     }
-    // ohist
+    // ohist: the samples of entries of LOADED report sets, checked against the entry (absent entry: no samples)
     let n = bad!(r.u16()) as usize;
     if n > SL_MAX_ACCOUNTS {
         return Err(ST_SL_BADWIT);
@@ -472,19 +486,18 @@ pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> 
         let m = bad!(r.u32());
         let id = AccountId(bad!(r.h32()));
         let k = bad!(r.u8()) as usize;
-        if k > HIST_MAX || !sl.o.hist.insert((m, id)) {
+        if k > HIST_MAX || !sl.o.rep.contains_key(&m) || !sl.o.hist.insert((m, id)) {
             return Err(ST_SL_BADWIT);
         }
         let mut q: VecDeque<ReportSample> = VecDeque::with_capacity(k);
         for _ in 0..k {
             q.push_back(ReportSample { height: bad!(r.u64()), price: bad!(r.i64()), seq: bad!(r.u64()) });
         }
-        if k == 0 {
-            ohist_kid(b, m, &id);
-            sl.absent(b)?;
-        } else {
-            ohist_leaf(b, m, &id, &q);
-            sl.check(b, true)?;
+        let (hn, dg) = sl.o.ent0.get(&(m, id)).copied().unwrap_or((0, hist_digest(None)));
+        if hn as usize != k || dg != hist_digest(Some(&q)) {
+            return Err(ST_SL_BADWIT);
+        }
+        if k > 0 {
             s.oracle_report_history.insert((MarketId(m), id), q);
         }
     }
@@ -550,7 +563,7 @@ pub(super) fn load(sl: &mut Sl, s: &mut ChainState, r: &mut Rd, b: &mut Buf) -> 
             let prev = opt0(bad!(r.u64()));
             let next = opt0(bad!(r.u64()));
             let k = bad!(r.u32()) as usize;
-            if k == 0 || k > OEXP_MAX {
+            if k == 0 || k > SL_MAX_UNSTAKES {
                 return Err(ST_SL_BADWIT);
             }
             let mut ids: BTreeSet<AccountId> = BTreeSet::new();
@@ -594,9 +607,19 @@ fn need_stk(sl: &Sl, a: &AccountId) -> G {
     }
     Ok(())
 }
-/// Stake / Unstake: the author's bond record (Stake's PERP debit and commit bond: run loop `bonded`)
-pub(super) fn pre_stake(sl: &Sl, a: &AccountId) -> G {
-    need_stk(sl, a)
+/// Stake / Unstake: the author's bond record (Stake's PERP debit and commit bond: run loop `bonded`); an Unstake that
+/// starts an unbonding also reads the size of this height's expiry group (R20-M2 bound): `oglob:` and, when the group
+/// exists (it is the queue's tail), the group
+pub(super) fn pre_stake(sl: &Sl, s: &ChainState, a: &AccountId, unstake: bool) -> G {
+    need_stk(sl, a)?;
+    if unstake && s.oracle_bonds.contains_key(a) && !s.oracle_unbonding.contains_key(a) {
+        let Some(g) = sl.o.glob else { return nd(Need::Oglob) };
+        let u = s.height.saturating_add(crate::types::ORACLE_UNBOND_HEIGHTS);
+        if g.3 == Some(u) && !sl.o.exp.contains_key(&u) {
+            return nd(Need::Oexp(u));
+        }
+    }
+    Ok(())
 }
 /// Report: bond gate, market gate (present / spot), MARK_CAP gate; then what apply_report reads
 pub(super) fn pre_report(sl: &Sl, s: &ChainState, a: &AccountId, market: u32, price: Price) -> G {
@@ -632,66 +655,107 @@ pub(super) fn pre_report(sl: &Sl, s: &ChainState, a: &AccountId, market: u32, pr
     }
     Ok(())
 }
-/// the markets an account has a report / history in now: the loaded list, with the membership of every pair whose
-/// report set AND history are loaded taken from the partial state (any other pair cannot have changed: `post`)
+/// the entries of a LOADED report set now: reports from the partial state (complete for the market), histories from the
+/// partial state where loaded, else as at load unless the oracle was released by the hook (prune removes them)
+pub(super) fn entries_now(sl: &Sl, s: &ChainState, m: u32) -> Vec<OrepE> {
+    let mid = MarketId(m);
+    let mut ks: BTreeSet<AccountId> = s.oracle_reports.range((mid, AMIN)..=(mid, AMAX)).map(|((_, o), _)| *o).collect();
+    ks.extend(s.oracle_report_history.range((mid, AMIN)..=(mid, AMAX)).filter(|(_, q)| !q.is_empty()).map(|((_, o), _)| *o));
+    ks.extend(sl.o.ent0.range((m, AMIN)..=(m, AMAX)).filter(|((_, o), (n, _))| *n > 0 && !sl.o.hist.contains(&(m, *o)) && !sl.o.gone.contains(o)).map(|((_, o), _)| *o));
+    ks.remove(&pseudo_oracle());
+    ks.into_iter()
+        .filter_map(|o| {
+            let (hn, dg) = if sl.o.hist.contains(&(m, o)) || sl.o.gone.contains(&o) {
+                let q = s.oracle_report_history.get(&(mid, o));
+                (q.map(|q| q.len()).unwrap_or(0) as u8, hist_digest(q))
+            } else {
+                sl.o.ent0.get(&(m, o)).copied().unwrap_or((0, hist_digest(None)))
+            };
+            let p = s.oracle_reports.get(&(mid, o)).copied();
+            if p.is_none() && hn == 0 {
+                None
+            } else {
+                Some((o, p, s.oracle_bonds.contains_key(&o), hn, dg))
+            }
+        })
+        .collect()
+}
+/// the markets an account has an entry in now: the loaded list, with the membership in every LOADED report set taken
+/// from its entries now (any other membership cannot have changed: `post`)
 pub(super) fn orm_now(sl: &Sl, s: &ChainState, a: &AccountId) -> BTreeSet<u32> {
     let mut v: BTreeSet<u32> = sl.o.rm.get(a).map(|x| x.iter().copied().collect()).unwrap_or_default();
     for m in sl.o.rep.keys() {
-        if sl.o.hist.contains(&(*m, *a)) {
-            let mid = MarketId(*m);
-            if s.oracle_reports.contains_key(&(mid, *a)) || s.oracle_report_history.contains_key(&(mid, *a)) {
-                v.insert(*m);
-            } else {
-                v.remove(m);
-            }
+        if entries_now(sl, s, *m).iter().any(|e| e.0 == *a) {
+            v.insert(*m);
+        } else {
+            v.remove(m);
         }
     }
     v
 }
-/// stateless rule (code 19, like SL_MAX_POS): a Report that would add a reporter to a full report set or a market to
-/// a full `orm:` list is refused -- inputs loaded by pre_report
+/// stateless rules (code 19, like SL_MAX_POS): a Report that would add an entry to a full report set or a market to a
+/// full `orm:` list (inputs loaded by pre_report); an Unstake that would put more than SL_MAX_UNSTAKES oracles into this
+/// height's expiry group (R20-M2; inputs loaded by pre_stake)
 pub(super) fn cap_ok(sl: &Sl, s: &ChainState, op: &crate::BatchOp, a: &AccountId) -> bool {
-    let crate::BatchOp::Report { market, price, .. } = *op else { return true };
-    let mid = MarketId(market);
-    let gated = sl.o.stk.contains(a)
-        && s.oracle_bonds.contains_key(a)
-        && s.markets.get(&mid).is_some_and(|p| !p.spot_only && !p.funding_rate)
-        && price != 0
-        && price.unsigned_abs() < crate::types::MARK_CAP.unsigned_abs()
-        && sl.o.rep.contains_key(&market)
-        && sl.o.rm.contains_key(a);
-    if !gated {
-        return true;
+    match *op {
+        crate::BatchOp::Unstake { .. } => {
+            if !(sl.o.stk.contains(a) && s.oracle_bonds.contains_key(a) && !s.oracle_unbonding.contains_key(a)) {
+                return true;
+            }
+            let u = s.height.saturating_add(crate::types::ORACLE_UNBOND_HEIGHTS);
+            sl.o.exp.get(&u).map(|g| g.2.len()).unwrap_or(0) < SL_MAX_UNSTAKES
+        }
+        crate::BatchOp::Report { market, price, .. } => {
+            let mid = MarketId(market);
+            let gated = sl.o.stk.contains(a)
+                && s.oracle_bonds.contains_key(a)
+                && s.markets.get(&mid).is_some_and(|p| !p.spot_only && !p.funding_rate)
+                && price != 0
+                && price.unsigned_abs() < crate::types::MARK_CAP.unsigned_abs()
+                && sl.o.rep.contains_key(&market)
+                && sl.o.rm.contains_key(a);
+            if !gated {
+                return true;
+            }
+            let es = entries_now(sl, s, market);
+            if !es.iter().any(|e| e.0 == *a) && es.len() >= SL_MAX_REPORTERS {
+                return false;
+            }
+            let now = orm_now(sl, s, a);
+            now.contains(&market) || now.len() < SL_MAX_ORACLE_MKTS
+        }
+        _ => true,
     }
-    let mine = s.oracle_reports.contains_key(&(mid, *a));
-    let n = s.oracle_reports.range((mid, AMIN)..=(mid, AMAX)).filter(|((_, o), _)| *o != pseudo_oracle()).count();
-    if !mine && n >= SL_MAX_REPORTERS {
-        return false;
-    }
-    let now = orm_now(sl, s, a);
-    now.contains(&market) || now.len() < SL_MAX_ORACLE_MKTS
 }
-/// height hook (eager expiry, R19-I2): `oglob:` and every queue group up to the new height plus the next one, each
-/// listed oracle's `ostk:` and account record (its bond returns to its PERP balance); the rest (orm / orep / ohist,
-/// markets whose `oracled` changes, pglob / pexc) by `post` and the run loop's balance guard after the prune
-pub(super) fn hook_pre(sl: &Sl, s: &ChainState) -> G {
-    let Some(g) = sl.o.glob else { return nd(Need::Oglob) };
+/// height hook (eager expiry, R19-I2): `oglob:` and every queue group up to the new height, each listed oracle's `ostk:`
+/// and account record (its bond returns to its PERP balance); the rest (orm / orep, markets whose `oracled` changes,
+/// pglob / pexc, the group after the last released one) by `post` and the run loop's guards after the prune. Returns
+/// the oracles the prune releases (bonded + unlock <= height): their entries -- reports and histories -- leave every
+/// report set
+pub(super) fn hook_pre(sl: &Sl, s: &ChainState) -> Result<BTreeSet<AccountId>, Result<Need, u32>> {
+    let Some(g) = sl.o.glob else { return Err(Ok(Need::Oglob)) };
     let mut cur = g.2;
+    let mut gone = BTreeSet::new();
     while let Some(u) = cur {
-        // (the first group above the height is loaded only when its prev link changes: sync asks for it)
         if u > s.height {
             break;
         }
-        let Some(grp) = sl.o.exp.get(&u) else { return nd(Need::Oexp(u)) };
+        let Some(grp) = sl.o.exp.get(&u) else { return Err(Ok(Need::Oexp(u))) };
         for a in &grp.2 {
             need_stk(sl, a)?;
             if !sl.accts.contains_key(a) {
-                return nd(Need::Account(*a));
+                return Err(Ok(Need::Account(*a)));
+            }
+            if s.oracle_bonds.contains_key(a) {
+                gone.insert(*a);
             }
         }
         cur = grp.1;
     }
-    Ok(())
+    Ok(gone)
+}
+pub(super) fn set_gone(sl: &mut Sl, gone: BTreeSet<AccountId>) {
+    sl.o.gone.extend(gone);
 }
 /// post-unit (and post-hook) completeness of the oracle records + the expiry queue update
 pub(super) fn post(sl: &mut Sl, s: &ChainState) -> G {
@@ -706,8 +770,8 @@ pub(super) fn post(sl: &mut Sl, s: &ChainState) -> G {
             return nd(Need::Ostk(*a));
         }
     }
-    // (b) a bond that appeared / disappeared rewrites the `bonded` flag of every report of the oracle and (expiry /
-    // slash) removes its reports and histories: the whole orm: list with each orep: / ohist:
+    // (b) a bond that appeared / disappeared rewrites the `bonded` flag of every entry of the oracle (and, released by
+    // the hook, removes them): its orm: list with every report set of it (one record per market, R20-M1)
     for a in &sl.o.stk {
         if s.oracle_bonds.contains_key(a) != sl.o.bonds0.contains_key(a) {
             let Some(l) = sl.o.rm.get(a) else { return nd(Need::Orm(*a)) };
@@ -715,35 +779,25 @@ pub(super) fn post(sl: &mut Sl, s: &ChainState) -> G {
                 if !sl.o.rep.contains_key(m) {
                     return nd(Need::Orep(*m));
                 }
-                if !sl.o.hist.contains(&(*m, *a)) {
-                    return nd(Need::Ohist(*m, *a));
-                }
             }
         }
     }
-    // (c) reports / histories: a change outside the loaded records, and a membership change without orm:
-    let pairs: BTreeSet<(MarketId, AccountId)> = s.oracle_reports.keys().chain(s.oracle_report_history.keys()).chain(sl.o.reps0.iter()).chain(sl.o.hist0.iter()).copied().collect();
+    // (c) reports / histories exist in the partial state only inside loaded report sets (histories: loaded samples);
+    // an entry that appeared / disappeared needs the oracle's orm:
+    let mut pairs: BTreeSet<(MarketId, AccountId)> = s.oracle_reports.keys().chain(s.oracle_report_history.keys()).chain(sl.o.reps0.iter()).chain(sl.o.hist0.iter()).copied().collect();
+    pairs.retain(|(_, a)| *a != ps);
     for (m, a) in &pairs {
-        if *a == ps {
-            continue;
-        }
-        let r_now = s.oracle_reports.contains_key(&(*m, *a));
-        let h_now = s.oracle_report_history.contains_key(&(*m, *a));
-        let r0 = sl.o.reps0.contains(&(*m, *a));
-        let h0 = sl.o.hist0.contains(&(*m, *a));
-        if (r_now || r0) && !sl.o.rep.contains_key(&m.0) {
+        if !sl.o.rep.contains_key(&m.0) {
             return nd(Need::Orep(m.0));
         }
-        if (h_now || h0) && !sl.o.hist.contains(&(m.0, *a)) {
+        if s.oracle_report_history.contains_key(&(*m, *a)) && !sl.o.hist.contains(&(m.0, *a)) {
             return nd(Need::Ohist(m.0, *a));
         }
-        if (r_now || h_now) != (r0 || h0) {
-            if !sl.o.rep.contains_key(&m.0) {
-                return nd(Need::Orep(m.0));
-            }
-            if !sl.o.hist.contains(&(m.0, *a)) {
-                return nd(Need::Ohist(m.0, *a));
-            }
+    }
+    for m in sl.o.rep.keys() {
+        let now: BTreeSet<AccountId> = entries_now(sl, s, *m).into_iter().map(|e| e.0).collect();
+        let was: BTreeSet<AccountId> = sl.o.ent0.range((*m, AMIN)..=(*m, AMAX)).map(|((_, o), _)| *o).collect();
+        for a in now.symmetric_difference(&was) {
             if !sl.o.rm.contains_key(a) {
                 return nd(Need::Orm(*a));
             }
@@ -882,25 +936,13 @@ pub(super) fn end(sl: &Sl, s: &ChainState, puts: &mut Vec<(H, H)>, dels: &mut Ve
         }
     }
     for m in sl.o.rep.keys() {
-        let es = orep_of(s, *m);
+        let es = entries_now(sl, s, *m);
         if es.is_empty() {
             orep_kid(&mut b, *m);
             dels.push(kid_key(&b));
         } else {
             orep_leaf(&mut b, *m, &es);
             puts.push(kh(&b));
-        }
-    }
-    for (m, a) in &sl.o.hist {
-        match s.oracle_report_history.get(&(MarketId(*m), *a)) {
-            Some(q) if !q.is_empty() => {
-                ohist_leaf(&mut b, *m, a, q);
-                puts.push(kh(&b));
-            }
-            _ => {
-                ohist_kid(&mut b, *m, a);
-                dels.push(kid_key(&b));
-            }
         }
     }
     for m in &sl.o.mk {
@@ -1021,18 +1063,24 @@ pub fn build(s: &ChainState, n: &ONeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<
         orm_kid(&mut b, a);
         keys.insert(kid_key(&b));
     }
-    rec.extend_from_slice(&(n.rep.len() as u16).to_le_bytes());
-    for m in &n.rep {
+    let reps: BTreeSet<u32> = n.rep.iter().copied().chain(n.hist.iter().map(|x| x.0)).collect();
+    rec.extend_from_slice(&(reps.len() as u16).to_le_bytes());
+    for m in &reps {
         let mut es = orep_of(s, *m);
         if t_drop == 1 && !es.is_empty() {
             es.remove(0);
         }
         rec.extend_from_slice(&m.to_le_bytes());
         rec.extend_from_slice(&(es.len() as u16).to_le_bytes());
-        for (o, p, bd) in &es {
+        for (o, p, bd, hn, dg) in &es {
             rec.extend_from_slice(&o.0);
-            rec.extend_from_slice(&p.to_le_bytes());
+            rec.push(p.is_some() as u8);
+            if let Some(p) = p {
+                rec.extend_from_slice(&p.to_le_bytes());
+            }
             rec.push(*bd as u8);
+            rec.push(*hn);
+            rec.extend_from_slice(dg);
         }
         orep_kid(&mut b, *m);
         keys.insert(kid_key(&b));
@@ -1048,8 +1096,6 @@ pub fn build(s: &ChainState, n: &ONeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<
             rec.extend_from_slice(&x.price.to_le_bytes());
             rec.extend_from_slice(&x.seq.to_le_bytes());
         }
-        ohist_kid(&mut b, *m, a);
-        keys.insert(kid_key(&b));
     }
     rec.extend_from_slice(&(n.mk.len() as u16).to_le_bytes());
     for m in &n.mk {

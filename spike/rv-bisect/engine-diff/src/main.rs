@@ -1352,6 +1352,7 @@ fn main() {
         Some("slperpstat") => println!("{}", sl::slperpstat(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 16
         Some("sldbg") => println!("{}", sl::sldbg(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x.as_str()).unwrap_or("perp"))), // loop round 16
         Some("slmigcap") => println!("{}", sl::slmigcap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), a[5].parse().unwrap(), a[6].parse().unwrap(), &a[7])), // loop round 16
+        Some("slpoc20") => println!("{}", sl::slpoc20()), // loop round 20
         Some("slora") => println!("{}", sl::slora(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x.parse().unwrap()).unwrap_or(0), a.get(5).map(|x| x == "adv").unwrap_or(false))), // loop round 20
         Some("slmig") => println!("{}", sl::slmig(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x.parse().unwrap()).unwrap_or(0))), // loop round 15
         #[cfg(feature = "stateless")]
