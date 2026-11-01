@@ -59,7 +59,7 @@ rollup 与 vault，最后将两个 dispute AA 各绑定一次并核验绑定状�
 | `minuend-exec` | 引擎本体：ingest → apply → 事件流；place/cancel/deposit/withdraw/liquidate 全量入口校验 |
 | `minuend-settle` | 批次 checkpoint、`validate_against` 重放审计（含独立充值证据验证）、`temp_data` 载荷、提款证明生成 |
 | `minuend-gossip` | operator 之间 WantUnits/HaveUnits 按需孤儿同步（纯 P2P 层，传输无关，绝不进共识） |
-| `minuend-watch` | 独立 rollup watcher：重放 `da_unit_<h>` 并组谓词 proof.json；当前 `post_challenge.js` 仍是本地 aa-testkit CLI，未接生产 hub 提交路径，不声称生产环境自动揭发（#37 第 2 项仍开放） |
+| `minuend-watch` | 独立 rollup watcher：重放 `da_unit_<h>` 并组谓词 proof.json；设置 `MINUEND_WATCH_MNEMONIC` 后经 `post_challenge_live.js` 在正式网络自动提交挑战（#47 L5）；`post_challenge.js` 仍是本地 aa-testkit 演练 |
 
 ## 协议设计原理
 
@@ -104,9 +104,11 @@ i128 → 以 `Risk` 拒绝。每价档增量维护的 `visible_qty` 缓存使最
 每笔成交同时更新两腿（开仓用 VWAP 入场价）；**平仓瞬间已实现 PnL 即时
 结算进 collateral**，赢利者立刻可提利润，提款证明叶子（承诺
 `collateral`）反映真实偿付能力。快照计算维持保证金（名义额绝对值 5%）与
-初始保证金（10%）。普通 Fill 成交后会复核双方；仍可清算的一方可能在同一
-单元内被强制卖出。keeper 发起的清算先用 market IOC 吃簿；目标仍可清算时，
-剩余仓位按 mark 价 ADL 给反向持仓者；对手仓位不足时，未平数量留在目标账户。
+初始保证金（10%）。#47 第 7 轮起每个单元至多一笔成交：IOC / 市价单吃到第一个
+maker 即停，Gtc 限价单若会吃到第二个 maker 则整单拒绝，成交后也不再在同一单元内
+强制卖出成交方。keeper 发起的清算先用 market IOC 吃簿（一笔）；簿内没有成交且目标
+仍可清算时，按夹进价格带的 mark 价 ADL 给一个反向持仓者；第 7b 轮起，第一个会被吃的
+maker 不足目标仓位的十分之一时跳过簿、本单元直接 ADL（灰尘挂单挡不住清算）；其余仓位等下一次清算。
 keeper 奖励按市场 `keeper_reward_bps` 计算，只从目标账户的正抵押中支付
 （创世市场为 100 bps）；余额不足则只支付可用部分。非保险账户之间成交后，
 若一方 collateral 为负，只能从对手方可用的正抵押中有限回拨、保持零和；
@@ -202,7 +204,8 @@ obyte-local/
   test_settlement_aa.js          三门 AA E2E（Linux/CI；win32 skip）
   deploy_mainnet.js / issue_perp.js  主网发 AA / 发 PERP
   post_batch.js                  本地 aa-testkit temp_data+submit → finalize → claim；未接生产
-  post_challenge.js              本地 aa-testkit 谓词 CLI（`--pred --proof`）；未接生产提交
+  post_challenge.js              本地 aa-testkit 谓词 CLI（`--pred --proof [--fill|--bind]`）
+  post_challenge_live.js         正式网络挑战提交（轻钱包，发送前再检查 600 秒余量）
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -239,8 +242,10 @@ cd obyte-local && node test_settlement_aa.js
 # 部署结算 AA 到 Obyte 测试网（需已发行的 PERP asset id）
 cd obyte-local && node deploy_testnet.js
 
-# 本地 aa-testkit 发包/最终化演练；不是生产主网流程
-cd obyte-local && node post_batch.js
+# 本地 aa-testkit 发包/最终化演练；不是生产主网流程。
+# export_batch 的示例充值引用的锚点在临时 devnet 上不存在，演练必须跳过充值证据
+#（watcher 会拒绝这样的高度）：
+cd obyte-local && MINUEND_DRILL_NO_EVIDENCE=1 node post_batch.js
 ```
 
 实测数据（开发机）：`bench_raw` ≈ 5 500 ops/s；`hft_onedag`（8 市场、
@@ -300,9 +305,13 @@ cd obyte-local && node post_batch.js
     finalize-batch 确定性设计落地后回归。
 14. gov nonce WAL 在批次提交（`from_applied`）时持久化；未提交的批次
     不烧毁 nonce。
-15. 快照格式头当前为 v3；未知/旧版或不可读候选会被跳过，不做跨版本迁移。
-    若没有可加载快照，`load_or_genesis` 从 genesis 初始化，调用方须从 genesis
-    重放 finalized 批次；重启时另将 gov-nonce WAL 按最大 nonce 合并。
+15. 快照格式头当前为 v5（快照内容是 bincode 编码的 `(ChainState, DAG 锚点)`
+    元组；v5 对应 `MarketParams` 新增的价格区间字段）；未知/旧版或不可读候选
+    会被跳过，不做跨版本迁移。若没有可加载快照，`load_or_genesis` 从 genesis
+    初始化，调用方须从 genesis（或最近可读快照之后的批次）重放 finalized 批次。
+    重启时 gov-nonce WAL 不再并入快照里已提交的 `seen_gov_nonces`，而是单独
+    保存：出块路径拒绝 ≤ 两者任一的 nonce；验证重放（`validate_against`）只看
+    已提交状态，并在每次成功的 `GovWithdraw` 后推进（失败的提现不推进水位）。
 
 近期关闭：存款白名单、溢出防护、市场白名单、严格签名、孤儿恢复
 （确定性驱逐 + 缺失父反向索引）、日志按批裁剪、已实现 PnL 即时结算进
@@ -405,7 +414,7 @@ WantUnits gossip、资金费外部锚接线。
 ## 验证状态
 
 - **Rust / js-checks / e2e**：CI 跑 workspace 测试、四份 AA 复杂度门（每 formula ≤100 且 Σops ≤2000）、golden vector、`test_settlement_aa.js`（win32 skip）。
-- **Watcher：** `minuend-watch` 组 `proof.json` 打 dispute（`--pred --proof`，需 `MINUEND_WATCH_MNEMONIC` 与 `--vault/--rollup`）。未设助记词仅报警。须与 poster 分钥。
+- **Watcher：** `minuend-watch` 逐高度重放并组 `proof.json`（需 `--vault/--rollup`）。设了 `MINUEND_WATCH_MNEMONIC` 时，经 `obyte-local/post_challenge_live.js`（轻钱包；`MINUEND_WATCH_NETWORK=mainnet|testnet`，可选 `MINUEND_WATCH_HUB`）自动提交挑战：脚本在发送前重新读取链上 `submitted_at_<h>`/`frozen_<h>` 并用新的时钟再检查一次 600 秒余量；任何失败都以 `WATCH CRITICAL ... NOT posted` 报出并保留 proof 文件；未设助记词仅报警；`MINUEND_WATCH_DEVNET_CHALLENGE=1` 只在本地 aa-testkit 演练 `post_challenge.js`。距 3600 秒窗口截止 600 秒内不再发挑战；重放卡在某高度时持续告警，并对后续高度做 DA/`data_root` 检查。旧的 `OPERP_*` 环境变量仍可读取（会打印弃用警告）。须与 poster 分钥。
 
 ## 许可证
 

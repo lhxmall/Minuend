@@ -64,7 +64,7 @@ definition-hash cycle.
 | `minuend-exec` | The engine: ingest → apply → events; place/cancel/deposit/withdraw/liquidate with full intake validation |
 | `minuend-settle` | Batch checkpoints, `validate_against` replay verification, `temp_data` payloads, proof generation |
 | `minuend-gossip` | WantUnits/HaveUnits on-demand orphan sync between operators (pure P2P layer, transport-agnostic, never consensus) |
-| `minuend-watch` | Independent rollup watcher: replays `da_unit_<h>` and builds predicate `proof.json`; `post_challenge.js` is currently a local aa-testkit CLI, not a production hub submitter, so automatic production challenges are not claimed (#37 item 2 remains open) |
+| `minuend-watch` | Independent rollup watcher: replays `da_unit_<h>`, builds predicate `proof.json`, and (with `MINUEND_WATCH_MNEMONIC`) posts it live through `post_challenge_live.js` (#47 L5); `post_challenge.js` remains the local aa-testkit drill |
 
 ## Protocol principles
 
@@ -116,11 +116,15 @@ Each fill updates both legs (VWAP entry for opens); **realized PnL settles
 into collateral immediately at close time**, so winners can withdraw profits
 and the withdrawal-proof leaf (which commits `collateral`) reflects true
 solvency. Snapshots compute maintenance margin (5% of abs notional) and
-initial margin (10%). A user fill also rechecks both parties and may
-force-sell a still-liquidatable party in the same unit. Keeper liquidation
-first sends a market IOC; if the target remains liquidatable, remaining
-quantity is ADL'd at mark onto opposite-sign holders. If their positions are
-insufficient, the unsold position remains on the target. The market's
+initial margin (10%). Since round 7 of #47 a unit carries at most one fill
+(an IOC / market order stops after its first maker, a GTC limit order that
+would take a second maker is rejected, and a fill no longer force-sells a
+party in the same unit). Keeper liquidation first sends a market IOC (one
+fill); if the book filled nothing and the target remains liquidatable, the
+position is ADL'd at the band-clamped mark onto one opposite-sign holder.
+Since round 7b the book is skipped (ADL in the same unit) when the first maker
+would close less than a tenth of the position, so dust orders cannot stall a
+liquidation. Whatever is left waits for the next `Liquidate`. The market's
 `keeper_reward_bps` is paid only from the target's positive collateral
 (genesis market: 100 bps); if there is not enough, the keeper receives only
 what is available. For a non-insurance fill that leaves a party with negative
@@ -264,7 +268,8 @@ obyte-local/
   test_settlement_aa.js          three-AA E2E (Linux/CI; win32 skips)
   deploy_mainnet.js / issue_perp.js  mainnet AA deploy / PERP issuance
   post_batch.js                  local aa-testkit temp_data+submit → finalize → claim; not production-connected
-  post_challenge.js              local aa-testkit predicate CLI (`--pred --proof`); not production-connected
+  post_challenge.js              local aa-testkit predicate CLI (`--pred --proof [--fill|--bind]`)
+  post_challenge_live.js         live challenge poster (light headless wallet, 600 s margin re-check)
 docs/PROTOCOL.md / MECHANISMS.md / ROLLUP-UPGRADE.md
 ```
 
@@ -300,8 +305,10 @@ cd obyte-local && node test_settlement_aa.js
 # deploy settlement AAs to Obyte testnet (requires an issued PERP asset id)
 cd obyte-local && node deploy_testnet.js
 
-# local aa-testkit poster/finalization drill only; not a production mainnet flow
-cd obyte-local && node post_batch.js
+# local aa-testkit poster/finalization drill only; not a production mainnet flow.
+# export_batch's sample deposits cite anchors that do not exist on the throwaway
+# devnet, so the drill must skip deposit evidence (watchers reject such a height):
+cd obyte-local && MINUEND_DRILL_NO_EVIDENCE=1 node post_batch.js
 ```
 
 Measured on this machine: `bench_raw` ≈ 5 500 ops/s; `hft_onedag` (8 markets,
@@ -380,11 +387,17 @@ This codebase meets the plan's bar of *"deployable to Obyte testnet"*. It is
     finalize-batch determinization design lands.
 14. Gov nonce WAL persists at batch commit (`from_applied`); uncommitted
     batches do not burn nonces.
-15. Snapshots carry format version 3. Unknown/older or unreadable candidates
-    are skipped; there is no cross-version migration. If none can be loaded,
-    `load_or_genesis` initializes genesis and the caller must replay finalized
-    history from genesis (or batches newer than a valid snapshot); the gov-nonce
-    WAL is max-merged on restart.
+15. Snapshots carry format version 5 (a snapshot is the bincode tuple
+    `(ChainState, DAG anchors)`; v5 follows the `MarketParams` price-range
+    fields). Unknown/older or unreadable candidates are skipped; there is no
+    cross-version migration. If none can be loaded, `load_or_genesis`
+    initializes genesis and the caller must replay finalized history from
+    genesis (or batches newer than a valid snapshot). On restart the gov-nonce
+    WAL is kept as a separate watermark beside the snapshot's committed
+    `seen_gov_nonces`: producing ops reject any nonce at or below either one,
+    while validation replays (`validate_against`) judge only against committed
+    state, which the replay advances on every successful `GovWithdraw` (a
+    failed withdraw never moves the watermark).
 
 Recently closed: deposit whitelisting, overflow guards, market whitelist,
 strict signatures, orphan recovery with deterministic eviction plus a
@@ -472,10 +485,43 @@ records) and [ROLLUP-UPGRADE.md](docs/ROLLUP-UPGRADE.md). Validation:
 * **CI** runs workspace tests, the four-AA complexity gate (per-formula
   ≤ 100 and Σops ≤ 2000), the golden vector, and `test_settlement_aa.js`
   (win32 skips).
-* **Watcher:** `minuend-watch` builds `proof.json` and posts to the dispute AA
-  (`--pred --proof`; requires `MINUEND_WATCH_MNEMONIC`, `--vault` and
-  `--rollup`). Without a mnemonic it prints alerts only. Use a key separate
-  from the poster.
+* **Watcher:** `minuend-watch` replays every height and builds `proof.json`
+  for a fraud predicate (`--vault`, `--rollup`). With `MINUEND_WATCH_MNEMONIC`
+  set it posts the challenge on the live network via
+  `obyte-local/post_challenge_live.js` (light headless wallet;
+  `MINUEND_WATCH_NETWORK=mainnet|testnet`, optional `MINUEND_WATCH_HUB`); the
+  script re-reads `submitted_at_<h>`/`frozen_<h>` and re-checks the 600 s
+  margin with a fresh clock right before broadcasting, and the watcher keeps
+  the proof file and reports `WATCH CRITICAL ... NOT posted` if anything
+  fails. Without a mnemonic it prints alerts only;
+  `MINUEND_WATCH_DEVNET_CHALLENGE=1` runs `post_challenge.js` as a local
+  aa-testkit drill. It stops posting 600 s before the 3600 s window closes,
+  and keeps alerting (plus DA/`data_root` checks on later heights) when replay
+  is stuck at one height. Legacy `OPERP_*` variables are still read, with a
+  deprecation warning. Use a key separate from the poster.
+  Round 2 of #47: before replaying, the watcher requires the DA header to
+  equal the submit unit's `data` message and the roots the rollup AA stored
+  (`state_root_<h>`, `wit_root_<h>`, … and, on the binding AA, `da_bind_<h>`,
+  `data_root_<h>`, `counts_root_<h>`, `da_hash_<h>`); any difference is an
+  `ASSERTION/DA MISMATCH` alert and the height stays unverified (no dispute
+  predicate can prove it — the forged trees were never published).
+  `--state-dir DIR` checkpoints the replayed state after every verified
+  height so a restart resumes (temp_data is purged after ~24 h); to start
+  above height 1 put a trusted `chainstate.<h>.snap` there and pass
+  `--from-height h+1`. The live poster always receives `--rollup` (and
+  `--dispute-address` when configured) and posts to the dispute AA bound in
+  the rollup; posters run in the background and a `(height, predicate)` is
+  never posted twice. Limits: ≤ 64 MiB decompressed per package, ≤ 1 GiB per
+  height, single-member gzip only, `unit_count` ≤ 200 000 and equal to the
+  frame count. Replay cost stays O(units × state size) (the engine rebuilds
+  the witness tree per unit); size the watcher host for the largest state.
+* **Parent window (consensus, round 2 of #47):** a unit executes only if
+  every parent is among the last 400 000 executed units (genesis counts as
+  executed just before the first unit, so it stops being a valid parent
+  after 400 000 units). Older parents are refused by every node, which keeps
+  snapshot-restored nodes and long-running nodes in agreement and stops an
+  old unit from executing twice after a restart. Clients must build on
+  recent tips.
 
 ## License
 

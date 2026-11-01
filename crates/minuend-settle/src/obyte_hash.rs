@@ -175,6 +175,17 @@ pub fn get_json_source(v: &Value) -> String {
     get_json_source_string(v).expect("value has an Obyte canonical JSON source")
 }
 
+/// Obyte `payload_hash` of a message payload inside `unit` (ocore
+/// `objectHash.getBase64Hash(payload, version != '1.0')`): standard base64
+/// of sha256 over the canonical source. The unit hash covers only this
+/// hash (payloads are stripped), so a caller reading a payload must check
+/// it against the message's `payload_hash` (R3-A-5).
+pub fn get_payload_hash(payload: &Value, unit: &Value) -> Result<String, String> {
+    let h = get_base64_hash(payload, !version_is_legacy(unit))?;
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(h))
+}
+
 /// data_hash = sha256(get_json_source(v)), hex-encoded by callers.
 pub fn get_data_hash(v: &Value) -> [u8; 32] {
     Sha256::digest(get_json_source(v).as_bytes()).into()
@@ -355,6 +366,34 @@ mod tests {
         assert_eq!(
             hex::encode(h),
             "4efa7a37d070cbd34ac38b44ce5dfd0fc70f99fb62f3c619529cecb08a5f5180"
+        );
+    }
+
+    /// R3-A-5: payload hashes match ocore `objectHash.getBase64Hash(payload,
+    /// bVersion2)` (vectors computed with the vendored ocore).
+    #[test]
+    fn payload_hash_matches_ocore() {
+        let pay = json!({
+            "inputs": [{"unit": "abcdEFGH0123456789abcdEFGH0123456789abcdEFG=", "message_index": 0, "output_index": 1}],
+            "outputs": [
+                {"address": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "amount": 1010000},
+                {"address": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "amount": 98765432}
+            ]
+        });
+        let data = json!({"deposit": 1, "account": "ab".repeat(32)});
+        let v4 = json!({"version": "4.0"});
+        let v1 = json!({"version": "1.0"});
+        assert_eq!(
+            get_payload_hash(&pay, &v4).unwrap(),
+            "l904YMnNR+ownMd8E3hhc7rYcROsU2KZx58Qdj8S8TA="
+        );
+        assert_eq!(
+            get_payload_hash(&data, &v4).unwrap(),
+            "/3CieJIbTw/7msgN/sCq9xFIrNpatiphwaNRds0f318="
+        );
+        assert_eq!(
+            get_payload_hash(&pay, &v1).unwrap(),
+            "Z2hyr6G9GbOf39jJ/+5hhksqEJHYaq8N5zcaTirA6Xk="
         );
     }
 

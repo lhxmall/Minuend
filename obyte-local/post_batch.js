@@ -19,8 +19,10 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const zlib = require("zlib");
+const { envCompat, finalizeReached, daBindHash, DA_BIND_FIELDS } = require("./script_helpers");
 const {
   DEFAULT_PACKAGE_SOURCE_CAP,
+  assertPackageRawCaps,
   assertPackageSourceCap,
   packFrames,
 } = require("./batch_frames");
@@ -97,76 +99,30 @@ function tempDataMessage(data) {
   };
 }
 
-// Step4 — deposit independent verification: for every Deposit/GovDeposit
-// op in the batch, fetch the endorsing Obyte joint and build a
-// DepositEvidence sorted lexicographically by aa_unit. Watchers re-derive
-// unit_hash(joint) and compare against the sidechain deposit's aa_unit, so
-// a deposit endorsement is verifiable without trusting the operator.
-const { hub } = require(path.join(aaRoot, "node_modules", "ocore", "network.js"));
-async function buildDepositEvidences(batchData, vaultAddress) {
-  const evidences = [];
-  const seen = new Set();
-  const frameUnits = Array.isArray(batchData.frames)
-    ? batchData.frames.map((f) => { try { return JSON.parse(f).u; } catch (_) { return null; } }).filter(Boolean)
-    : [];
-  const units = (batchData.units && batchData.units.length ? batchData.units : frameUnits) || [];
-  for (const u of units) {
-    const op = u.op || {};
-    const isPerp = op.GovDeposit !== undefined;
-    const dep = isPerp ? op.GovDeposit : op.Deposit;
-    if (!dep) continue;
-    const rawUnit = dep.aa_unit;
-    // serde emits aa_unit as a numeric byte array; accept both it and hex.
-    const aaUnit = Array.isArray(rawUnit)
-      ? Buffer.from(rawUnit).toString("hex")
-      : rawUnit;
-    if (typeof aaUnit !== "string" || aaUnit.length !== 64) continue;
-    if (seen.has(aaUnit)) continue;
-    seen.add(aaUnit);
-    let joint;
-    try {
-      joint = await new Promise((resolve, reject) => {
-        hub.getJoint(Buffer.from(aaUnit, "hex").toString("base64"), (err, j) => (err ? reject(err) : resolve(j)));
-      });
-    } catch (e) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for missing joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("deposit anchor missing on Obyte: " + aaUnit.slice(0, 16));
-    }
-    if (!joint || !joint.unit) {
-      if (process.env.devnet && !process.env.testnet && !process.env.mainnet) {
-        console.log("devnet fixture: evidence skipped for empty joint", aaUnit.slice(0, 16));
-        continue;
-      }
-      throw new Error("no joint for " + aaUnit.slice(0, 16));
-    }
-    // joint carries the FULL joint unit object: the watcher recomputes
-    // unit_hash(joint.unit) via minuend_settle::obyte_hash::get_unit_hash and
-    // compares against the sidechain deposit's aa_unit. The payer binds the
-    // credit: it must be the joint's first author AND the op's addr (#8).
-    const authors = Array.isArray(joint.unit.authors) ? joint.unit.authors : [];
-    const payer = authors[0] && authors[0].address;
-    if (typeof payer !== "string") {
-      throw new Error("deposit joint has no authors: " + aaUnit.slice(0, 16));
-    }
-    if (dep.addr && dep.addr !== payer) {
-      throw new Error(
-        `deposit payer ${payer} != sidechain op addr ${dep.addr}: ` + aaUnit.slice(0, 16)
-      );
-    }
-    evidences.push({
-      aa_unit: aaUnit,
-      is_perp: isPerp,
-      amount: String(dep.amount),
-      vault_address: vaultAddress,
-      payer,
-      joint: joint.unit,
-    });
-  }
-  evidences.sort((a, b) => (a.aa_unit < b.aa_unit ? -1 : 1));
-  return evidences;
+// Step4 — deposit independent verification (R4: per applied unit). For
+// every deposit unit the PRODUCER APPLIED (batch.json `applied_deposits`,
+// from `Batch::applied_deposit_list`) fetch the vault-trigger joint, derive
+// what the vault recorded for it (deposit_evidence.js, mirror of
+// minuend-settle deposit_verify::vault_deposit_of), cross-check the vault's
+// dep_/depp_ record, and stamp the evidence on THAT frame only. Rejected
+// deposit units carry nothing. Any failure for an applied deposit aborts
+// the post (R4-R-5: never post an applied deposit without evidence).
+const { buildAppliedEvidences } = require("./deposit_evidence");
+
+// `null` = the anchor joint does not exist; anything else unexpected THROWS
+// (buildAppliedEvidences retries with backoff, then aborts the post).
+async function fetchAnchorJoint(wallet, aaUnitHex) {
+  const r = await wallet.getUnitInfo({ unit: Buffer.from(aaUnitHex, "hex").toString("base64") });
+  if (r && r.unitObj) return r.unitObj;
+  if (r && r.error === "Unit not found") return null;
+  throw new Error("getUnitInfo failed: " + JSON.stringify(r && r.error));
+}
+
+async function readVaultRecord(wallet, vault, aaUnitHex, isPerp) {
+  const v = await wallet.readAAStateVars(vault);
+  const vars = (v && v.vars) || v || {};
+  const key = (isPerp ? "depp_" : "dep_") + Buffer.from(aaUnitHex, "hex").toString("base64");
+  return vars[key] === undefined ? null : String(vars[key]);
 }
 
 async function trigger(wallet, data, amount, toAddress) {
@@ -185,8 +141,8 @@ let network;
 async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const rollup = deploy.rollup_aa_address
-    || process.env.MINUEND_ROLLUP_AA;
-  if (!rollup) throw new Error("deployment.json rollup_aa_address (or MINUEND_ROLLUP_AA) missing");
+    || envCompat("MINUEND_ROLLUP_AA");
+  if (!rollup) throw new Error("deployment.json rollup_aa_address (or MINUEND_ROLLUP_AA / legacy OPERP_ROLLUP_AA) missing");
   const batchFile = process.argv[2] || path.join(__dirname, "batch.json");
   const batchData = JSON.parse(fs.readFileSync(batchFile, "utf8"));
   // H3 contract visibility: the canonical pair watchers recompute from
@@ -196,8 +152,17 @@ async function main() {
   console.log("batch:", batchData.chain_id, "height", batchData.height,
     "units", (batchData.unit_ids || []).length);
 
+  // Round 2: the vault is a parameterized instance of the base AA.
+  const vaultBasePath = resolveVaultAa();
+  let vaultBaseDef = null;
+  require("ocore/formula/parse_ojson").parse(fs.readFileSync(vaultBasePath, "utf8"), (err, res) => {
+    if (err) throw err;
+    vaultBaseDef = res[1];
+  });
+  const vaultBaseAddr = require("ocore/object_hash.js").getChash160(["autonomous agent", vaultBaseDef]);
   network = await Network.create()
-    .with.agent({ vault: resolveVaultAa() })
+    .with.agent({ vaultBase: vaultBasePath })
+    .with.agent({ vault: { base_aa: vaultBaseAddr, params: { rollup } } })
     .with.wallet({ poster: 1e13 })
     .run();
   const poster = network.wallet.poster;
@@ -209,20 +174,25 @@ async function main() {
   // post each package unit first, then the header da_unit nails the hash list.
   const frames = Array.isArray(batchData.frames) ? batchData.frames.slice() : [];
   if (!frames.length) throw new Error("batch.json is missing the frames array (re-run export_batch)");
-  const evByAnchor = new Map();
-  for (const e of await buildDepositEvidences(batchData, vault)) evByAnchor.set(String(e.aa_unit).toLowerCase(), e);
-  const stamped = frames.map((f) => {
-    let o;
-    try { o = JSON.parse(f); } catch (_) { return f; }
-    const dep = (o.u && o.u.op && (o.u.op.Deposit || o.u.op.GovDeposit)) || null;
-    if (dep) {
-      const raw = dep.aa_unit;
-      const hex = Array.isArray(raw) ? Buffer.from(raw).toString("hex") : raw;
-      const ev = evByAnchor.get(String(hex || "").toLowerCase());
-      if (ev) o.e = ev;
-    }
-    return JSON.stringify(o);
-  });
+  let evByIndex;
+  if (process.env.MINUEND_DRILL_NO_EVIDENCE) {
+    // Devnet drill only: export_batch's sample deposits cite fake anchors
+    // that are not on this throwaway network. Watchers WILL reject such a
+    // height (applied deposit without evidence) — never use for real posts.
+    console.log("MINUEND_DRILL_NO_EVIDENCE set: posting WITHOUT deposit evidence (drill only)");
+    evByIndex = new Map();
+  } else {
+    evByIndex = await buildAppliedEvidences(batchData.applied_deposits || (frames.some((f) => /"(Deposit|GovDeposit)":/.test(f)) ? undefined : []), frames, {
+      vault,
+      perpAsset: PERP_ASSET_ID,
+      fetchJoint: (aa) => fetchAnchorJoint(poster, aa),
+      readRecord: (aa, isPerp) => readVaultRecord(poster, vault, aa, isPerp),
+    });
+  }
+  // R2-R-4: frames pass through byte-for-byte (no JSON reparse, which
+  // rounded integers > 2^53); see frame_stamp.js. R4-E-1: stamped by frame
+  // index — only the applied deposit frames.
+  const stamped = require("./frame_stamp").stampDepositEvidence(frames, evByIndex);
   // Separators occur between frames/packages, never at the final byte. This
   // preserves old watcher split("\n") compatibility and avoids an empty
   // trailing frame. An indivisible oversized frame must fail before posting.
@@ -232,6 +202,8 @@ async function main() {
   };
   const packages = packFrames(stamped, packageOptions);
   assertPackageSourceCap(packages, packageOptions);
+  // R3-R-1: never post DA a watcher refuses for size (it would stall).
+  assertPackageRawCaps(packages);
   const rawBlobs = packages.map((b) => zlib.gunzipSync(Buffer.from(b, "base64")));
   const dataRoot = crypto.createHash("sha256").update(Buffer.concat(rawBlobs)).digest("hex");
   const header = Object.assign({}, batchData);
@@ -247,6 +219,7 @@ async function main() {
   delete header.fills;
   delete header.leaf_trace;
   delete header.deposit_evidences;
+  delete header.applied_deposits;
   // Multi-package: post each package unit FIRST, then the header nails the
   // real Obyte unit hashes (base64 unit ids as the hub returns them) so
   // watchers can get_joint each entry. Single package inlines frames_blob.
@@ -290,7 +263,12 @@ async function main() {
     // vault payments to the submitted corpus.
     aa_root: header.aa_root || require("crypto").createHash("sha256").update(aaForest, "utf8").digest("hex"),
     aa_forest: aaForest,
-    assertion_version: header.assertion_version || 1,
+    // #47 B8: the rollup pins assertion_version (now 9); never default a
+    // missing header field to a stale constant — the AA would bounce it.
+    assertion_version: (() => {
+      if (!Number.isInteger(header.assertion_version)) throw new Error("header.assertion_version missing");
+      return header.assertion_version;
+    })(),
     wit_root: header.wit_root,
     trace_root: header.trace_root,
     units_root: header.units_root,
@@ -301,7 +279,16 @@ async function main() {
     unit_count: header.unit_count,
     wit_count: header.wit_count,
     fill_count: header.fill_count,
+    // R2-R-1: data_root + da_bind ride the submit; the rollup AA recomputes
+    // da_bind from these fields and the header below carries the same value.
+    data_root: dataRoot,
   };
+  submitData.da_bind = daBindHash(submitData);
+  header.chain_id = submitData.chain_id;
+  header.da_bind = submitData.da_bind;
+  for (const k of DA_BIND_FIELDS)
+    if (String(header[k]) !== String(submitData[k]))
+      throw new Error(`header/submit mismatch on ${k}`);
   // Optional audit anchors: the rollup AA does not gate on these, but they
   // ride the submit data for indexers/self-checks (header temp_data carries
   // the same values for watchers).
@@ -337,14 +324,15 @@ async function main() {
     const varsNow = await poster.readAAStateVars(rollup);
     const vv = varsNow.vars || varsNow;
     const lf = Number(vv["last_finalized"]);
-    finalizedOk = lf === Number(header.height);
+    // L6 (#47): >= — a concurrent poster may already have finalized past us.
+    finalizedOk = finalizeReached(lf, header.height);
     if (!finalizedOk)
       console.log(`finalize not yet reflected (last_finalized=${lf}, want ${header.height}); retry ${attempt + 1}`);
   }
   if (!finalizedOk) {
     const varsNow = await poster.readAAStateVars(rollup);
     const lf = Number((varsNow.vars || varsNow)["last_finalized"]);
-    throw new Error(`finalize did not advance last_finalized to ${header.height} (got ${lf})`);
+    throw new Error(`finalize did not advance last_finalized to >= ${header.height} (got ${lf})`);
   }
   console.log("finalize confirmed on chain: last_finalized =", header.height);
 

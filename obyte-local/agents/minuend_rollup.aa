@@ -7,7 +7,7 @@
 	// path: {challenge:1} is not a case here and never freezes anything.
 // Constants mirror Rust (crates/minuend-types/src/lib.rs):
 //   'minuend-v2'      -> CHAIN_ID
-//   1               -> ASSERTION_VERSION
+//   4               -> ASSERTION_VERSION (#47 B8: 2; round 6/6b: 3 — Reveal{Place|Liquidate} commits the inner p:/L:, QTY_CAP; round 7: 4 — text unit ids (P-opbind), one fill per unit); round 7b: 5; round 8: 6; round 9: 7 — genesis witness root, MARK_CAP; round 10: 8 — P-wf AA, MARK_CAP rejects, exact funding step; round 11: 9 — element caps + open-element challenge, raw ids, P-wf newness
 //   3600            -> CHALLENGE_SECS (finalize clean window from submit)
 //   604800          -> ESCAPE_STALL_SECS (escape hatch)
 //   1000000000000   -> SUBMIT_BOND_NET (standing pool floor, not per-height lock)
@@ -15,16 +15,28 @@
 //   50              -> POOL_MAX_INFLIGHT (last_submitted-last_finalized < 50)
 //   500000000000    -> SUBMIT_BOND_SLASH_HALF (fraud slash to challenger)
 //   20000           -> RACE_REWARD (first-submitter reward)
-	// DA convention (social, enforced by watchers off-chain): the submit
-	// trigger unit carries a temp_data message with the batch JSON
-	// (trace/ops/fills arrays); da_unit_<h> pins that unit. The AA does NOT
-	// inspect unit[trigger.unit].messages (fragile at eval time).
+	// DA convention: the submit trigger unit carries exactly ONE temp_data
+	// message (batch header + frames); da_unit_<h> pins that unit.
+	// R2-R-1: the AA reads unit[trigger.unit] at submit (ocore strips the
+	// temp_data payload.data but keeps data_hash), requires exactly one
+	// temp_data message and stores its data_hash as da_hash_<h>; it also
+	// recomputes da_bind (sha256 over the submitted roots + data_root,
+	// format work/r2-da-binding.md 'minuend-da-v1') and stores it as
+	// da_bind_<h>. The header carries the same da_bind; watchers bind the
+	// published header to these on-chain values (header==roots itself is
+	// not provable on chain: the AA cannot read temp_data content).
 	// State vars:
-	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa
+	//   last_submitted, last_finalized, dispute_aa, dispute_fill_aa,
+	//   dispute_bind_aa (#47 A2), dispute_book_aa (round 2: ghost/skip),
+	//   dispute_claw_aa (round 6: P-claw)
+	//   dispute_xframe_aa (round 7b: P-xframe; round 8 also P-tsize)
+	//   dispute_mframe_aa (round 8: P-mframe / P-noband)
+	//   dispute_wf_aa (round 10: P-wf, malformed leaf / fill field)
 	//   submitted_at_<h>, state_root_<h>, aa_forest_<h> (1024 hex),
 	//   prev_<h>, wit_root_<h>, trace_root_<h>, units_root_<h>,
 	//   units_set_root_<h>, ops_root_<h>, fills_root_<h>,
 	//   unit_count_<h>, wit_count_<h>, fill_count_<h>, da_unit_<h>, active_bond_<h>,
+	//   counts_root_<h> (I-2), data_root_<h>, da_bind_<h>, da_hash_<h> (R2-R-1),
 	//   fee_winner_<h>, frozen_<h> (absent/0 live, 2 failed),
 	//   inbox_upto_<h> (submit timestamp: forces older than this belong here)
 	//   pool_<addr> (standing submit pool; submits need >= 1e12)
@@ -33,36 +45,34 @@
 	messages: {
 		cases: [
 			{
-				// #13 anti-hijack: only the two addresses hardcoded into this
+				// #13 anti-hijack: only the eight addresses hardcoded into this
 				// definition may bind — first-come is irrelevant, nobody can
 				// squat the verdict channel. The dispute AAs carry this rollup
 				// address in their bind trigger data instead of their own
 				// definition (mutual hardcoding would be a chash cycle).
-				if: "{trigger.data.set_dispute}",
+				// Round 10: all eight binds share ONE case (the AA-wide
+				// complexity budget of 100: one var read + one assignment
+				// instead of eight of each). Dispute AAs: main (#13), fill,
+				// bind (#47 A2), book (round 2: ghost / skip), claw (round 6),
+				// xframe (round 7b: P-xframe / P-tsize), mframe (round 8:
+				// P-mframe), wf (round 10: P-wf, malformed leaf / fill field).
+				if: "{trigger.data.set_dispute OR trigger.data.set_dispute_fill OR trigger.data.set_dispute_bind OR trigger.data.set_dispute_book
+					OR trigger.data.set_dispute_claw OR trigger.data.set_dispute_xframe OR trigger.data.set_dispute_mframe OR trigger.data.set_dispute_wf}",
 				init: "{
-					if (trigger.address != 'DISPUTE_AA_HERE' OR var['dispute_aa'])
+					$xb = trigger.data.set_dispute ? 'a' : (trigger.data.set_dispute_fill ? 'f' : (trigger.data.set_dispute_bind ? 'b' : (trigger.data.set_dispute_book ? 'k'
+						: (trigger.data.set_dispute_claw ? 'c' : (trigger.data.set_dispute_xframe ? 'x' : (trigger.data.set_dispute_mframe ? 'm' : 'w'))))));
+					$dkey = ($xb == 'a') ? 'dispute_aa' : (($xb == 'f') ? 'dispute_fill_aa' : (($xb == 'b') ? 'dispute_bind_aa' : (($xb == 'k') ? 'dispute_book_aa'
+						: (($xb == 'c') ? 'dispute_claw_aa' : (($xb == 'x') ? 'dispute_xframe_aa' : (($xb == 'm') ? 'dispute_mframe_aa' : 'dispute_wf_aa'))))));
+					$pin = ($xb == 'a') ? 'DISPUTE_AA_HERE' : (($xb == 'f') ? 'DISPUTE_FILL_AA_HERE' : (($xb == 'b') ? 'DISPUTE_BIND_AA_HERE' : (($xb == 'k') ? 'DISPUTE_BOOK_AA_HERE'
+						: (($xb == 'c') ? 'DISPUTE_CLAW_AA_HERE' : (($xb == 'x') ? 'DISPUTE_XFRAME_AA_HERE' : (($xb == 'm') ? 'DISPUTE_MFRAME_AA_HERE' : 'DISPUTE_WF_AA_HERE'))))));
+					if (trigger.address != $pin OR var[$dkey])
 						bounce('not authorized');
 				}",
 				messages: [
 					{
 						app: "state",
 						state: "{
-							var['dispute_aa'] = trigger.address;
-						}"
-					}
-				]
-			},
-			{
-				if: "{trigger.data.set_dispute_fill}",
-				init: "{
-					if (trigger.address != 'DISPUTE_FILL_AA_HERE' OR var['dispute_fill_aa'])
-						bounce('not authorized');
-				}",
-				messages: [
-					{
-						app: "state",
-						state: "{
-							var['dispute_fill_aa'] = trigger.address;
+							var[$dkey] = trigger.address;
 						}"
 					}
 				]
@@ -73,8 +83,11 @@
 				// forced before their submit (a missing one is P-omit fraud).
 				if: "{trigger.data.force}",
 				init: "{
-					$id = trigger.data.unit_id;
-					if (typeof($id) == 'boolean' OR length($id) != 64)
+					// R11-C4: a digit-only hex arrives as a Decimal; such an id
+					// is sent as 'Z' || hex (any id may be).
+					$rid = trigger.data.unit_id otherwise '';
+					$id = substring($rid, (typeof($rid) == 'string' AND starts_with($rid, 'Z')) ? 1 : 0);
+					if (length($id) != 64)
 						bounce('bad unit_id');
 					if (var['inbox_' || $id])
 						bounce('already forced');
@@ -85,7 +98,7 @@
 					{
 						app: "state",
 						state: "{
-							var['inbox_' || trigger.data.unit_id] = timestamp;
+							var['inbox_' || $id] = timestamp;
 						}"
 					}
 				]
@@ -114,17 +127,26 @@
 					$ls = (var['last_submitted'] otherwise 0);
 					$lf = (var['last_finalized'] otherwise 0);
 					// #37-7/37-8: a fraud-failed height (frozen==2) may be
-					// RE-SUBMITTED in place — verdict now KEEPS
-					// last_submitted pinned at the failed top, so both the
-					// failed top itself (h == ls) and a lower stale height
-					// (h < ls, blocked by frozen_6 in the adjacent-fraud
-					// case) are re-opened through this branch.
+					// RE-SUBMITTED in place. #47 A1: only at the live tip —
+					// verdict sets last_submitted = min(ls, h), so the
+					// failed height IS ls and every height above it is
+					// dead (unfinalizable: h > ls) and gets overwritten by
+					// ordinary forward submits once the tip is fixed.
+					// Re-submitting any frozen height above ls+1 (the old
+					// rule) re-raised ls over stale heights whose prev no
+					// longer chains, freezing finalize forever.
+					// Invariant kept by these two rules: no frozen height
+					// in (last_finalized, ls); at most ls itself is frozen.
 					$frozen_h = (var['frozen_' || $h] otherwise 0);
 					if (trigger.data.chain_id != 'minuend-v2'
-						OR !$h OR ($h != $ls + 1 AND $frozen_h != 2)
-						OR trigger.data.assertion_version != 1
+						OR !$h OR ($h != $ls + 1 AND !($frozen_h == 2 AND $h == $ls))
+						OR trigger.data.assertion_version != 9
 						OR !trigger.data.state_root OR length(trigger.data.state_root) != 64
 						OR !trigger.data.prev_state_hash OR length(trigger.data.prev_state_hash) != 64
+						// #47 A2: the vault no longer pays from the forest —
+						// it proves adr:/acct: leaves against wit_root_<h>,
+						// which the dispute AAs can judge. The forest stays
+						// an informational, hash-bound commitment.
 						// #37-4: the 1024-hex forest is bound to one 64-hex
 						// forest hash at SUBMIT time (sha256 over its
 						// concatenation, same domain as Rust's
@@ -142,10 +164,27 @@
 						OR !trigger.data.units_set_root OR length(trigger.data.units_set_root) != 44
 						OR !trigger.data.ops_root OR length(trigger.data.ops_root) != 44
 						OR !trigger.data.fills_root OR length(trigger.data.fills_root) != 44
+						// I-2 / R2-R-1: counts_root and data_root are now
+						// committed (stored below and bound into da_bind).
+						OR !trigger.data.counts_root OR length(trigger.data.counts_root) != 44
+						OR !trigger.data.data_root OR length(trigger.data.data_root) != 64
 						OR !is_integer(trigger.data.unit_count) OR trigger.data.unit_count < 1 OR trigger.data.unit_count > 200000
 						OR !is_integer(trigger.data.wit_count) OR trigger.data.wit_count < 1
 						OR !is_integer(trigger.data.fill_count) OR trigger.data.fill_count < 0)
 					bounce('bad submit');
+					// R2-R-1: DA binding. One hash over every submitted root
+					// (+ data_root of the frames) that the header must repeat.
+					$da_bind = sha256('minuend-da-v1|' || trigger.data.chain_id || '|' || $h
+						|| '|' || trigger.data.prev_state_hash || '|' || trigger.data.state_root
+						|| '|' || trigger.data.aa_root || '|' || trigger.data.wit_root
+						|| '|' || trigger.data.trace_root || '|' || trigger.data.units_root
+						|| '|' || trigger.data.units_set_root || '|' || trigger.data.ops_root
+						|| '|' || trigger.data.fills_root || '|' || trigger.data.counts_root
+						|| '|' || trigger.data.unit_count || '|' || trigger.data.wit_count
+						|| '|' || trigger.data.fill_count || '|' || trigger.data.assertion_version
+						|| '|' || trigger.data.data_root, 'hex');
+					if (trigger.data.da_bind != $da_bind)
+						bounce('bad da_bind');
 					// #37-8: a resubmit MUST bind to the actual pre-root of
 					// its height (prev == state_root_<h-1>) — never to the
 					// old cleared top/root pair. If the predecessor is also
@@ -173,11 +212,22 @@
 						bounce('pool occupancy');
 					if (var['active_bond_' || $h] AND $h <= $ls AND $frozen_h != 2)
 						bounce('height taken');
+					// Exactly one temp_data message (the header) in this unit (read last: cheap gates bounce first);
+					// its data_hash survives the temp_data purge.
+					$tds = filter(unit[trigger.unit].messages, 16, $m => $m.app == 'temp_data');
+					if (array_length($tds) != 1)
+						bounce('need one temp_data');
+					$da_hash = $tds[0].payload.data_hash;
 				}",
 				messages: [
 					{
 						app: "state",
 						state: "{
+							// #47 A1: ls before this submit — a forward submit
+							// (h > ls) may overwrite a DEAD height left above
+							// an earlier verdict; its stale fee winner must not
+							// collect the race reward for the new assertion.
+							$ls_s = (var['last_submitted'] otherwise 0);
 							var['submitted_at_' || trigger.data.height] = timestamp;
 							var['state_root_' || trigger.data.height] = trigger.data.state_root;
 							// #37-4: same-height twin binding — the forest hash
@@ -195,11 +245,15 @@
 							var['wit_count_' || trigger.data.height] = trigger.data.wit_count;
 							var['fill_count_' || trigger.data.height] = trigger.data.fill_count;
 							var['da_unit_' || trigger.data.height] = trigger.unit || '';
+							var['counts_root_' || trigger.data.height] = trigger.data.counts_root;
+							var['data_root_' || trigger.data.height] = trigger.data.data_root;
+							var['da_bind_' || trigger.data.height] = $da_bind;
+							var['da_hash_' || trigger.data.height] = $da_hash;
 							var['inbox_upto_' || trigger.data.height] = timestamp;
 							var['active_bond_' || trigger.data.height] = trigger.address;
 							var['frozen_' || trigger.data.height] = 0;
 							var['last_submitted'] = trigger.data.height;
-							if (!var['fee_winner_' || trigger.data.height]){
+							if (!var['fee_winner_' || trigger.data.height] OR trigger.data.height > $ls_s){
 								var['fee_winner_' || trigger.data.height] = trigger.address;
 							}
 						}"
@@ -264,7 +318,14 @@
 				init: "{
 					$da = (var['dispute_aa'] otherwise 0);
 					$df = (var['dispute_fill_aa'] otherwise 0);
-					if (trigger.address != $da AND trigger.address != $df)
+					$db = (var['dispute_bind_aa'] otherwise 0);
+					$dk = (var['dispute_book_aa'] otherwise 0);
+					$dc = (var['dispute_claw_aa'] otherwise 0);
+					$dx = (var['dispute_xframe_aa'] otherwise 0);
+					$dm = (var['dispute_mframe_aa'] otherwise 0);
+					$dw = (var['dispute_wf_aa'] otherwise 0);
+					if (trigger.address != $da AND trigger.address != $df AND trigger.address != $db AND trigger.address != $dk
+						AND trigger.address != $dc AND trigger.address != $dx AND trigger.address != $dm AND trigger.address != $dw)
 						bounce('not dispute');
 					if (trigger.data.verdict != 'fraud')
 						bounce('bad verdict');
@@ -295,16 +356,29 @@
 								$p = (var['pool_' || $op] otherwise 0);
 								$slashed = $p > 500000000000 ? 500000000000 : $p;
 								var['pool_' || $op] = $p - $slashed;
-								var['slash_reward_' || trigger.data.challenger] = (var['slash_reward_' || trigger.data.challenger] otherwise 0) + $slashed;
+								// R2-A-9: the challenger gets 1/5; the rest stays
+								// locked in this AA (no var ever credits it).
+								var['slash_reward_' || trigger.data.challenger] = (var['slash_reward_' || trigger.data.challenger] otherwise 0) + floor($slashed / 5);
+								var['slash_burned'] = (var['slash_burned'] otherwise 0) + $slashed - floor($slashed / 5);
 							}
 							var['active_bond_' || trigger.data.height] = 0;
 							var['fee_winner_' || trigger.data.height] = 0;
-							// #37-7: last_submitted STAYS at the failed height
-							// (frozen_<h>=2 means "failed, awaiting resubmit").
-							// Rolling back to h-1 let the operator drain the
-							// pool backing the still-live higher heights via
-							// {claim:'pool'} the moment ls==lf again.
-							var['last_submitted'] = trigger.data.height;
+							// #37-7: last_submitted lands ON the failed height
+							// (frozen_<h>=2 means "failed, awaiting resubmit"),
+							// never h-1: rolling back to h-1 let the operator
+							// drain the pool via {claim:'pool'} the moment
+							// ls==lf again (the claim gate blocks while
+							// frozen_<ls>==2).
+							// #47 A1: but NEVER raise it — a verdict on a stale
+							// height above the tip (still inside its window)
+							// used to lift ls over dead heights whose prev no
+							// longer chains, so finalize bounced 'stale height'
+							// and nothing could be re-submitted: permanent
+							// halt. min(ls, h) keeps ls at the lowest failed
+							// height; everything above it is dead and is
+							// overwritten by forward submits.
+							$ls_v = (var['last_submitted'] otherwise 0);
+							var['last_submitted'] = ($ls_v < trigger.data.height) ? $ls_v : trigger.data.height;
 						}"
 					}
 				]
@@ -320,10 +394,11 @@
 					// #37-7: a failed height keeps last_submitted pinned at
 					// itself, so the busy gate alone again reads idle even
 					// while that height still owes a correct re-submit —
-					// block the drain while the highest submitted height is
-					// fraud-failed (frozen==2). Heights j < h were finalized
-					// before h (finalize is strictly sequential) and > h
-					// cannot exist beyond the pinned top.
+					// block the drain while the tip is fraud-failed
+					// (frozen==2). #47 A1: heights above the tip may still
+					// hold stale data but are dead (finalize needs
+					// h <= last_submitted) and are overwritten by forward
+					// submits, so they back nothing.
 					if ($k == 'pool' AND (var['frozen_' || (var['last_submitted'] otherwise 0)] otherwise 0) == 2)
 						bounce('pool busy');
 					$key = ($k == 'reward' ? 'reward_' : ($k == 'sbond' ? 'sbond_' : ($k == 'slash' ? 'slash_reward_' : 'pool_')));

@@ -19,9 +19,48 @@ pub struct BuiltProof {
     pub pred: String,
     /// True → post to the fill dispute AA (`--fill`); false → main dispute AA.
     pub fill_aa: bool,
+    /// #47 A2: true → post to the binding dispute AA (`--bind`: `wpin`,
+    /// `adr`). Never set together with `fill_aa`.
+    pub bind_aa: bool,
     /// Exact `trigger.data` supplement (merged with `height`/`pred` by the
     /// poster): `k`, `op`, proofs, leaves, roots the AA stale-checks.
     pub data: serde_json::Value,
+}
+
+impl BuiltProof {
+    /// Which dispute AA takes this proof: `main`, `book` (round 2: P-ghost
+    /// and P-skip moved to `minuend_dispute_book.aa`), `fill`, `bind` or
+    /// `claw` (round 6: `minuend_dispute_claw.aa`).
+    pub fn target(&self) -> &'static str {
+        // `xframe` (round 7b): P-xframe / P-tsize; `mframe` (round 8):
+        // P-mframe; `claw` also takes P-noband since round 9 (ops budget).
+        if self.bind_aa {
+            "bind"
+        } else if self.fill_aa {
+            "fill"
+        } else if self.pred == "claw" || self.pred == "noband" {
+            "claw"
+        } else if matches!(self.pred.as_str(), "xframe" | "tsize") {
+            // Round 7b: minuend_dispute_xframe.aa (P-tsize since round 8).
+            "xframe"
+        } else if self.pred == "mframe" {
+            // Round 8: minuend_dispute_mframe.aa.
+            "mframe"
+        } else if matches!(self.pred.as_str(), "wf" | "open" | "answer" | "expire") {
+            // Round 11: the open-element challenge (R11-C2) lives on the
+            // wf AA too.
+            // Round 10: minuend_dispute_wf.aa (malformed leaf / fill field).
+            "wf"
+        } else if self.pred == "ghost"
+            || self.pred == "skip"
+            || self.pred == "mbind"
+            || self.pred == "fsane"
+        {
+            "book"
+        } else {
+            "main"
+        }
+    }
 }
 
 fn proof_json(elements: &[String], index: usize) -> serde_json::Value {
@@ -43,6 +82,75 @@ pub fn build_proof(
     inbox: &[(String, u64)],
     submit_ts: u64,
 ) -> Option<BuiltProof> {
+    build_proof_with_vault(batch, replay, inbox, submit_ts, &VaultLedger::new())
+}
+
+/// The vault AA's deposit ledger as read from the hub for the anchors a
+/// batch cites: key `dep_<anchor_b64>` / `depp_<anchor_b64>` →
+/// `Some("payer:amount:account")` (recorded) or `None` (read, absent). A
+/// key missing from the map is UNKNOWN (not read / hub error).
+pub type VaultLedger = std::collections::HashMap<String, Option<String>>;
+
+/// The vault ledger key the binding AA reads for a `d:`/`D:` op
+/// (`d:{acct}:{amount}:{addr}:{anchor_b64}`), if the op has that shape.
+pub fn vault_key_of_op(op: &str) -> Option<String> {
+    let o: Vec<&str> = op.split(':').collect();
+    match (o.first(), o.len()) {
+        (Some(&"d"), 5) => Some(format!("dep_{}", o[4])),
+        (Some(&"D"), 5) => Some(format!("depp_{}", o[4])),
+        _ => None,
+    }
+}
+
+/// [`build_proof`] with the vault deposit records the caller read from the
+/// hub. R4-A-4: a P-adr proof that rests on the vault record (a new
+/// binding whose anchor is unbacked / paid by someone else / for another
+/// account / of the other asset kind) is built only when that record is
+/// KNOWN — from `vault`, or from verified deposit evidence of that anchor
+/// in the batch. An unknown record (e.g. an anchor the vault recorded but
+/// the producer did not apply, so no evidence was stamped, and the hub was
+/// not read) never yields a proof the AA might bounce.
+pub fn build_proof_with_vault(
+    batch: &Batch,
+    replay: &mut Engine,
+    inbox: &[(String, u64)],
+    submit_ts: u64,
+    vault: &VaultLedger,
+) -> Option<BuiltProof> {
+    build_proof_with_prev(batch, replay, inbox, submit_ts, vault, None)
+}
+
+/// [`build_proof_with_vault`] with the previous height's committed final
+/// witness leaves (`prev_final`, the validated `leaf_trace` tail of h - 1).
+/// Every dispute AA anchors a k == 0 pre tree on `wit_root_{h-1}`, which is
+/// the tree BEFORE the commit-time prunes of h - 1 (oracle bond release,
+/// #37-15), while the replay engine starts this height AFTER them: at a
+/// bond-release boundary the replay pre tree is not the committed one and
+/// every k == 0 proof bounced 'bad pre wit'. With `prev_final` the k == 0
+/// pre leaves are the committed ones (R8 residue fix).
+pub fn build_proof_with_prev(
+    batch: &Batch,
+    replay: &mut Engine,
+    inbox: &[(String, u64)],
+    submit_ts: u64,
+    vault: &VaultLedger,
+    prev_final: Option<&[String]>,
+) -> Option<BuiltProof> {
+    // Round 7b P-tsize: a committed tree whose size breaks the exact proof
+    // depth every dispute AA now requires (provable before anything else).
+    if let Some(p) = tsize_proof(batch) {
+        return Some(p);
+    }
+    // Round 10 P-wf: a posted witness leaf or fills-tree element whose
+    // layout is not exactly what the engine writes is fraud by itself (the
+    // other predicates bounce on such a field).
+    if let Some(p) = wf_proof(batch, prev_final) {
+        return Some(p);
+    }
+    // Round 11 (R11-C2): an element no AA can read is opened instead.
+    if let Some(p) = open_proof(batch) {
+        return Some(p);
+    }
     let n = batch.units.len();
     if n == 0 || batch.checkpoint.unit_ids.len() != n || batch.ops.len() != n {
         return None;
@@ -59,39 +167,2238 @@ pub fn build_proof(
             return omit_proof(batch, &unit_hexes, id);
         }
     }
+    // R4-A-4: vault-record knowledge for P-adr, built once per batch.
+    let vault_aa = minuend_settle::expected_vault();
+    let backing = Backing {
+        ledger: vault,
+        evs: batch
+            .unit_evidences
+            .iter()
+            .flatten()
+            .filter(|e| {
+                minuend_settle::deposit_verify::verify_evidence(
+                    e,
+                    &vault_aa,
+                    &minuend_types::PERP_ASSET,
+                )
+                .is_ok()
+            })
+            .collect(),
+    };
     // 2+. Walk units: ingest one at a time, compare wit root + ops string.
     for (k, unit_hex) in unit_hexes.iter().enumerate() {
-        let pre_leaves = minuend_state::wit_leaves(&replay.state);
+        let pre_leaves = match prev_final {
+            Some(p) if k == 0 && !p.is_empty() => p.to_vec(),
+            _ => minuend_state::wit_leaves(&replay.state),
+        };
         let pre_wit = obyte_merkle::root(&pre_leaves);
         let expected_op = ops_element(unit_hex, &batch.units[k].op);
         let op_ok = batch.ops.get(k).map(|o| o == &expected_op).unwrap_or(false);
+        // Round 7 P-opbind (未修复项 10): the committed ops leaf is not the
+        // descriptor of the unit committed at k — provable from the unit
+        // text alone, before any state.
+        if !op_ok {
+            if let Some(p) = opbind_proof(batch, k, &unit_hexes) {
+                return Some(p);
+            }
+        }
         let wit_ok = batch.trace.get(k).map(|t| t == &pre_wit).unwrap_or(false);
         if !op_ok || !wit_ok {
             // Poster committed something unreplayable at k; the pre-state
             // leaves are still honest replay output — fall through to the
             // per-op proofs against the POSTED commitments below.
         }
-        if replay.ingest(batch.units[k].clone()).is_err() {
-            return None;
-        }
+        let events = match replay.ingest(batch.units[k].clone()) {
+            Ok(ev) => ev,
+            Err(_) => return None,
+        };
+        // The honest fill strings of this unit (replay output): a posted
+        // fill that is not among them is itself a lie, so the honest-tree
+        // gate in fill_math (built from the TRUE fills) does not apply.
+        let unit_id_k = batch.checkpoint.unit_ids[k];
+        let honest_fills: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                minuend_exec::ExecEvent::Applied { unit, fills, .. } if *unit == unit_id_k => {
+                    Some(fills)
+                }
+                _ => None,
+            })
+            .flat_map(|fills| {
+                fills
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| minuend_settle::fills_element(unit_hex, i, f))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let post_leaves = minuend_state::wit_leaves(&replay.state);
         let op = batch.ops.get(k)?.clone();
         if op.starts_with("d:") || op.starts_with("D:") {
-            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, true) {
+            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, true, vault) {
                 return Some(p);
             }
         } else if op.starts_with("w:") || op.starts_with("W:") {
-            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, false) {
+            if let Some(p) = deposit_proof(batch, k, &op, &pre_leaves, false, vault) {
                 return Some(p);
             }
         } else {
             // Fill-bearing unit: check fills of this unit against post state.
-            if let Some(p) = fill_proof(batch, k, unit_hex, &pre_leaves, &post_leaves) {
+            if let Some(p) =
+                fill_proof(batch, k, unit_hex, &pre_leaves, &post_leaves, &honest_fills)
+            {
                 return Some(p);
             }
         }
+        // Round 6: both legs of a single-fill unit against the engine's
+        // two-party claw (P-claw). R6-C1: under ANY committed op — a fill
+        // under a non-`p:` / `L:` op is itself the fraud.
+        if let Some(p) = claw_proof(
+            batch,
+            k,
+            unit_hex,
+            &expected_op,
+            &pre_leaves,
+            &post_leaves,
+            &honest_fills,
+        ) {
+            return Some(p);
+        }
+        // #47 A2: the two witness columns the vault pays against (W and
+        // the adr: binding), pinned on EVERY unit by the binding dispute AA.
+        if let Some(p) = binding_proof(batch, k, &op, &pre_leaves, &post_leaves, &backing) {
+            return Some(p);
+        }
+        // Round 2: permanent leaves kept, binding mirror intact.
+        if let Some(p) = keep_mirror_proof(batch, k, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        // R4-A-3: positions and orders frozen across c:/d:/w:/D:/W: units.
+        if let Some(p) = frame_proof(batch, k, &op, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        // Round 7b (R7-C3 / R7-H2): bystanders of `x:` units, the band: /
+        // meta: frame of every unit, and the band leaf of every market.
+        if let Some(p) = xframe_proof(batch, k, &op, &unit_hexes, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        if let Some(p) = mframe_proof(batch, k, &op, &unit_hexes, &pre_leaves, &post_leaves) {
+            return Some(p);
+        }
+        if let Some(p) = noband_proof(batch, k, &op, &post_leaves) {
+            return Some(p);
+        }
+    }
+    // R2-A-1: every unit transition replayed clean — the committed
+    // wit_root must still be the trace's last element (P-tip).
+    tip_proof(batch)
+}
+
+/// #47 A2 + round 2 mirror of `minuend_dispute_bind.aa` (P-wpin / P-adr)
+/// for one posted post leaf: `None` = the AA accepts the transition
+/// (bounces 'no fraud').
+fn binding_violation(
+    op: &str,
+    pre: &[String],
+    post_leaf: &str,
+    backing: Option<&Backing>,
+) -> Option<()> {
+    let p: Vec<&str> = post_leaf.split(':').collect();
+    let o: Vec<&str> = op.split(':').collect();
+    if p.len() == 5 && p[0] == "acct" && p[1].len() == 64 {
+        let key = format!("acct:{}:", p[1]);
+        let pre_leaf = pre.iter().find(|l| l.starts_with(&key));
+        let (w0, c0) = match pre_leaf {
+            Some(l) => {
+                let q: Vec<&str> = l.split(':').collect();
+                (q.get(4)?.to_string(), q.get(2)?.to_string())
+            }
+            None => ("0".to_string(), "0".to_string()),
+        };
+        let own = o.len() == 4 && o[0] == "w" && o[1] == p[1];
+        if !own {
+            return if p[4] == w0 { None } else { Some(()) };
+        }
+        // R2-A-2: rejected => both columns unchanged; accepted => W += amt
+        // AND collateral -= amt on an existing pre leaf (<= 15 digits).
+        if p[4] == w0 && p[2] == c0 {
+            return None;
+        }
+        let short = |s: &str| s.len() <= 15;
+        let accepted = pre_leaf.is_some()
+            && [o[2], p[2], p[4], c0.as_str(), w0.as_str()]
+                .iter()
+                .all(|v| short(v))
+            && (|| {
+                let amt: i128 = o[2].parse().ok()?;
+                let w0n: i128 = w0.parse().ok()?;
+                let c0n: i128 = c0.parse().ok()?;
+                let w1: i128 = p[4].parse().ok()?;
+                let c1: i128 = p[2].parse().ok()?;
+                // R3-A-1: an accepted withdrawal never leaves col < 0.
+                Some(amt > 0 && w1 == w0n + amt && c1 == c0n - amt && c1 >= 0)
+            })()
+            .unwrap_or(false);
+        return if accepted { None } else { Some(()) };
+    }
+    if p.len() == 3 && p[0] == "adr" && p[2].len() == 64 {
+        let key = format!("adr:{}:", p[1]);
+        return match pre.iter().find(|l| l.starts_with(&key)) {
+            Some(l) if l == post_leaf => None,
+            Some(_) => Some(()),
+            None => {
+                // R2-A-8: the account must not already be bound.
+                let bound = pre
+                    .iter()
+                    .any(|l| l.starts_with(&format!("adrx:{}:", p[2])));
+                // R3-A-7: D: carries its anchor too (5 parts).
+                let shape = (o.first() == Some(&"d") || o.first() == Some(&"D")) && o.len() == 5;
+                // R4-A-4: the AA also requires the vault's dep_/depp_
+                // record of the anchor, paid by this address for this
+                // account. Judged only when the record is KNOWN (hub read
+                // or verified batch evidence); unknown = no verdict here.
+                let ok = !bound
+                    && shape
+                    && o[1] == p[2]
+                    && o[3] == p[1]
+                    && backing.is_none_or(|b| match b.record(o[0] == "D", o[4]) {
+                        None => true,
+                        Some(None) => false,
+                        Some(Some((payer, account))) => {
+                            payer == o[3] && account.eq_ignore_ascii_case(o[1])
+                        }
+                    });
+                if ok {
+                    None
+                } else {
+                    Some(())
+                }
+            }
+        };
     }
     None
+}
+
+/// R4-A-4: what the watcher knows of the vault AA's deposit ledger for
+/// one batch — the hub reads (`ledger`) and the batch's deposit evidences
+/// that VERIFY against the vault (each one fully determines the vault's
+/// record of its anchor: the vault writes `dep_` or `depp_`, never both).
+pub(crate) struct Backing<'a> {
+    pub(crate) ledger: &'a VaultLedger,
+    pub(crate) evs: Vec<&'a minuend_settle::DepositEvidence>,
+}
+
+impl Backing<'_> {
+    /// The vault record the binding AA reads for (`is_perp`, anchor):
+    /// `Some(Some((payer, account_hex)))` recorded, `Some(None)` known
+    /// absent, `None` unknown.
+    fn record(&self, is_perp: bool, anchor_b64: &str) -> Option<Option<(String, String)>> {
+        let key = format!("{}{anchor_b64}", if is_perp { "depp_" } else { "dep_" });
+        if let Some(v) = self.ledger.get(&key) {
+            return Some(v.as_ref().and_then(|r| {
+                let q: Vec<&str> = r.split(':').collect();
+                (q.len() == 3).then(|| (q[0].to_string(), q[2].to_string()))
+            }));
+        }
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(anchor_b64)
+            .ok()?;
+        let hex_anchor = hex::encode(raw);
+        let ev = self
+            .evs
+            .iter()
+            .find(|e| e.aa_unit.eq_ignore_ascii_case(&hex_anchor))?;
+        if ev.is_perp == is_perp {
+            Some(Some((ev.payer.clone(), ev.account.clone())))
+        } else {
+            Some(None)
+        }
+    }
+}
+
+/// Prefix non-membership of `key` in the sorted `leaves`, in the AA's two
+/// shapes (adjacent straddle, before-min). Round 2: no after-max arm —
+/// every witness tree ends with the `~:end` sentinel (R2-A-10).
+fn prefix_absence(leaves: &[String], key: &str) -> Option<serde_json::Value> {
+    let pos = leaves
+        .iter()
+        .position(|l| l.as_str() >= key)
+        .unwrap_or(leaves.len());
+    if leaves.get(pos).is_some_and(|l| l.starts_with(key)) {
+        return None;
+    }
+    if pos > 0 && pos < leaves.len() {
+        Some(serde_json::json!({
+            "left": leaves[pos - 1], "left_proof": proof_json(leaves, pos - 1),
+            "right": leaves[pos], "right_proof": proof_json(leaves, pos),
+        }))
+    } else if pos == 0 && !leaves.is_empty() {
+        Some(serde_json::json!({"left": leaves[0], "left_proof": proof_json(leaves, 0)}))
+    } else {
+        None
+    }
+}
+
+/// Exact non-membership of `leaf` in the sorted `leaves` (P-keep /
+/// P-mirror / P-deposit marker shapes): adjacent straddle or before-min.
+fn exact_absence(leaves: &[String], leaf: &str, l: &str, r: &str) -> Option<serde_json::Value> {
+    if leaves.iter().any(|x| x == leaf) {
+        return None;
+    }
+    let pos = leaves
+        .iter()
+        .position(|x| x.as_str() > leaf)
+        .unwrap_or(leaves.len());
+    if pos > 0 && pos < leaves.len() {
+        let mut m = serde_json::Map::new();
+        m.insert(l.into(), leaves[pos - 1].clone().into());
+        m.insert(format!("{l}_proof"), proof_json(leaves, pos - 1));
+        m.insert(r.into(), leaves[pos].clone().into());
+        m.insert(format!("{r}_proof"), proof_json(leaves, pos));
+        Some(serde_json::Value::Object(m))
+    } else if pos == 0 && !leaves.is_empty() {
+        let mut m = serde_json::Map::new();
+        m.insert(l.into(), leaves[0].clone().into());
+        m.insert(format!("{l}_proof"), proof_json(leaves, 0));
+        Some(serde_json::Value::Object(m))
+    } else {
+        None
+    }
+}
+
+/// Mirror leaf of a binding leaf: adr:{A}:{X} <-> adrx:{X}:{A}.
+fn binding_mirror(leaf: &str) -> Option<String> {
+    let q: Vec<&str> = leaf.split(':').collect();
+    if q.len() != 3 {
+        return None;
+    }
+    match q[0] {
+        "adr" => Some(format!("adrx:{}:{}", q[2], q[1])),
+        "adrx" => Some(format!("adr:{}:{}", q[2], q[1])),
+        _ => None,
+    }
+}
+
+/// Round 2 P-keep / P-mirror for unit `k` (binding dispute AA): a
+/// permanent pre leaf (`adr:`/`adrx:`/`dep:`) missing from the POSTED post
+/// tree, or a posted binding leaf without its mirror. Emitted only when
+/// the honest replay's post tree does not break the same rule.
+fn keep_mirror_proof(
+    batch: &Batch,
+    k: usize,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    let permanent =
+        |l: &&String| l.starts_with("adr:") || l.starts_with("adrx:") || l.starts_with("dep:");
+    // R3-A-6: an account leaf may change but its account never vanishes.
+    let acct_key = |l: &str| -> Option<String> {
+        let q: Vec<&str> = l.split(':').collect();
+        (q.len() == 5 && q[0] == "acct" && q[1].len() == 64).then(|| format!("acct:{}:", q[1]))
+    };
+    let base = || {
+        serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "k": k,
+            "post_wit": batch.trace.get(k).cloned().unwrap_or_default(),
+            "post_proof": proof_json(&batch.trace, k),
+        })
+    };
+    // P-keep
+    if let Some(lost) = pre_leaves
+        .iter()
+        .filter(permanent)
+        .find(|l| !posted.contains(l) && post_leaves.contains(l))
+    {
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("leaf".into(), lost.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, lost)?),
+        );
+        obj.extend(
+            exact_absence(posted, lost, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "keep".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    // R3-A-6 P-keep (acct:): a pre account with no posted post leaf while
+    // the honest post tree still holds it.
+    for l in pre_leaves.iter() {
+        let Some(key) = acct_key(l) else { continue };
+        if posted.iter().any(|p| p.starts_with(&key))
+            || !post_leaves.iter().any(|p| p.starts_with(&key))
+        {
+            continue;
+        }
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("leaf".into(), l.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, l)?),
+        );
+        obj.extend(prefix_absence(posted, &key)?.as_object()?.clone());
+        return Some(BuiltProof {
+            pred: "keep".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    // P-mirror
+    for l in posted.iter() {
+        let Some(m) = binding_mirror(l) else { continue };
+        if posted.contains(&m) {
+            continue;
+        }
+        let honest_breaks = post_leaves
+            .iter()
+            .any(|h| binding_mirror(h).is_some_and(|hm| !post_leaves.contains(&hm)));
+        if honest_breaks {
+            return None;
+        }
+        let mut data = base();
+        let obj = data.as_object_mut()?;
+        obj.insert("leaf".into(), l.clone().into());
+        obj.insert(
+            "leaf_proof".into(),
+            proof_json(posted, index_of(posted, l)?),
+        );
+        obj.extend(
+            exact_absence(posted, &m, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "mirror".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    None
+}
+
+/// R6-C2: the accounts a zero- / single-fill Place / Liquidate unit on a
+/// regular market may write (engine `place` / `liquidate_book_path` /
+/// `apply_fill_pair`) and the P-frame evidence fields for it (unit, meta,
+/// the adjacent fills leaves that fix the fill count). `None` = the AA
+/// does not judge this unit (funding market, multi-fill, no meta).
+fn pl_frame_scope(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+) -> Option<(Vec<String>, serde_json::Value)> {
+    let o: Vec<&str> = op.split(':').collect();
+    let mkt = match (o.first().copied(), o.len()) {
+        (Some("p"), 10) => o[2],
+        (Some("L"), 4) => o[3],
+        _ => return None,
+    };
+    let meta = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{mkt}:")))?;
+    let m: Vec<&str> = meta.split(':').collect();
+    if m.len() != 11 || oscript_num(m[9]) != Some(0.0) {
+        return None;
+    }
+    let unit_hexes: Vec<String> = batch
+        .checkpoint
+        .unit_ids
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
+    let u = unit_hexes.get(k)?;
+    // A batch with fill_count 0: the AA reads it from the rollup (the
+    // one-leaf fills tree `n:0` has no sendable proof).
+    if batch.checkpoint.fill_count == 0 && batch.fills.is_empty() {
+        let data = serde_json::json!({
+            "fills_root": batch.checkpoint.fills_root,
+            "units_root": batch.checkpoint.units_root,
+            "unit": format!("Z{u}"),
+            "units_proof": proof_json(&unit_hexes, k),
+            "pre_meta": meta,
+            "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+        });
+        let mut allowed = vec![op.get(2..66)?.to_string()];
+        if o[0] == "L" {
+            allowed.push(op.get(67..131)?.to_string());
+        }
+        return Some((allowed, data));
+    }
+    let tree = minuend_settle::fills_root_elements(&batch.fills);
+    let unit_of = |l: &str| -> Option<usize> {
+        let id = l.strip_prefix("f:")?.get(..64)?;
+        unit_hexes.iter().position(|x| x == id)
+    };
+    let mine = tree
+        .iter()
+        .filter(|l| l.starts_with(&format!("f:{u}:")))
+        .count();
+    let ri = match mine {
+        0 => tree
+            .iter()
+            .position(|l| l.starts_with("n:") || unit_of(l).is_some_and(|j| j > k))?,
+        1 => {
+            tree.iter()
+                .position(|l| l.starts_with(&format!("f:{u}:0:")))?
+                + 1
+        }
+        _ => return None,
+    };
+    let right = tree.get(ri)?;
+    let mut data = serde_json::json!({
+        "fills_root": batch.checkpoint.fills_root,
+        "units_root": batch.checkpoint.units_root,
+        "unit": format!("Z{u}"),
+        "units_proof": proof_json(&unit_hexes, k),
+        "pre_meta": meta,
+        "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+        "fright": right,
+        "fright_proof": proof_json(&tree, ri),
+    });
+    let obj = data.as_object_mut()?;
+    let mut allowed = vec![op.get(2..66)?.to_string()];
+    if o[0] == "L" {
+        allowed.push(op.get(67..131)?.to_string());
+    }
+    if ri > 0 {
+        obj.insert("fill".into(), tree[ri - 1].clone().into());
+        obj.insert("fill_proof".into(), proof_json(&tree, ri - 1));
+    }
+    if mine == 1 {
+        allowed.push(tree[ri - 1].get(134..198)?.to_string());
+        allowed.push(CLAW_ZERO.to_string());
+    } else {
+        if ri > 0 {
+            let j = unit_of(&tree[ri - 1]).filter(|j| *j < k)?;
+            obj.insert("fill_up".into(), proof_json(&unit_hexes, j));
+        }
+        if !right.starts_with("n:") {
+            obj.insert("fright_up".into(), proof_json(&unit_hexes, unit_of(right)?));
+        }
+    }
+    Some((allowed, data))
+}
+
+/// R4-A-3 mirror of the binding AA's P-frame: at a unit whose op is
+/// `c:`/`d:`/`w:`/`D:`/`W:` (well-formed), a `pos:`/`ord:` leaf of the PRE
+/// tree missing from the POSTED post tree (except the order a `c:` of its
+/// owner cancels), or a posted `pos:`/`ord:` leaf missing from the pre
+/// tree. Emitted only when the honest replay's post tree agrees with the
+/// pre tree on that leaf (the engine never moves them under these ops).
+/// R6-C2: at a zero- / single-fill `p:` / `L:` unit on a regular market,
+/// the same for every `acct:` / `pos:` / `ord:` leaf of an account outside
+/// `pl_frame_scope`'s set.
+fn frame_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let o: Vec<&str> = op.split(':').collect();
+    let t = *o.first()?;
+    let shape = match t {
+        "c" => o.len() == 3,
+        "d" | "D" => o.len() == 5,
+        "w" | "W" => o.len() == 4,
+        _ => false,
+    };
+    let pl = if shape {
+        None
+    } else {
+        Some(pl_frame_scope(batch, k, op, pre_leaves)?)
+    };
+    let posted = batch.leaf_trace.get(k)?;
+    // R7b-N2: the R5-A-1 / R6-C2 `acct:` arm moved to P-xframe
+    // (`xframe_proof`), which compares the account's pre/post pair.
+    let framed = |l: &str| {
+        let n = l.split(':').count();
+        let is_pos = l.starts_with("pos:") && n == 7;
+        let is_ord = l.starts_with("ord:") && n == 10;
+        match &pl {
+            None => is_pos || is_ord,
+            Some((allowed, _)) => {
+                let owner = if is_pos { l.get(4..68) } else { None };
+                (is_pos || is_ord)
+                    && !allowed.iter().any(|a| {
+                        owner == Some(a.as_str()) || (is_ord && l.contains(&format!(":{a}:")))
+                    })
+            }
+        }
+    };
+    let cancelled = |l: &str| {
+        let q: Vec<&str> = l.split(':').collect();
+        t == "c" && q[0] == "ord" && q.get(1) == o.get(2) && q.get(7) == o.get(1)
+    };
+    let base = |leaf: &str, ins: bool, src: &[String]| -> Option<serde_json::Value> {
+        let mut data = serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "ops_root": batch.checkpoint.ops_root,
+            "k": k,
+            "op": op,
+            "ops_proof": proof_json(&batch.ops, k),
+            "post_wit": batch.trace.get(k)?.clone(),
+            "post_proof": proof_json(&batch.trace, k),
+            "leaf": leaf,
+            "leaf_proof": proof_json(src, index_of(src, leaf)?),
+            "ins": ins,
+        });
+        let obj = data.as_object_mut()?;
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        if let Some((_, ev)) = &pl {
+            obj.extend(ev.as_object()?.clone());
+        }
+        Some(data)
+    };
+    // Deletion / rewrite: a pre leaf the posted post tree dropped.
+    for l in pre_leaves.iter() {
+        if !framed(l) || cancelled(l) || posted.contains(l) || !post_leaves.contains(l) {
+            continue;
+        }
+        let mut data = base(l, false, pre_leaves)?;
+        data.as_object_mut()?.extend(
+            exact_absence(posted, l, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "frame".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    // Insertion / rewrite: a posted leaf the pre tree never held (R9-C1:
+    // the height-1 pre tree is the real genesis tree, never empty).
+    for l in posted.iter() {
+        if !framed(l) || pre_leaves.contains(l) || post_leaves.contains(l) {
+            continue;
+        }
+        let mut data = base(l, true, posted)?;
+        data.as_object_mut()?.extend(
+            exact_absence(pre_leaves, l, "left", "right")?
+                .as_object()?
+                .clone(),
+        );
+        return Some(BuiltProof {
+            pred: "frame".into(),
+            fill_aa: false,
+            bind_aa: true,
+            data,
+        });
+    }
+    None
+}
+
+/// R5-A-2: the P-fsane shape rule on a fill string (mirrors the book AA's
+/// `$bad`): not 14 fields, idx not "0" (round 7), qty not a positive integer, price / taker_post
+/// not integers, taker_post < 0, side not 0/1, kind not 0..3, or kind 2/3
+/// with taker_post != 0; R6-H1: qty >= 1e15.
+fn fsane_shape_bad(parts: &[&str]) -> bool {
+    if parts.len() != 14 {
+        return true;
+    }
+    // Round 7 (未修复项 19): one fill per unit, so the raw idx is "0"
+    // (the AA reads `substring(fill, 66, 3) == ':0:'` behind the units
+    // proof of F[1]).
+    if parts[2] != "0" {
+        return true;
+    }
+    let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
+    let Some(q) = int(parts[9]) else { return true };
+    // R6-H1: the engine never emits a qty at / above QTY_CAP (1e15).
+    if q <= 0.0 || q >= 1e15 || int(parts[8]).is_none() {
+        return true;
+    }
+    let Some(tp) = int(parts[13]) else {
+        return true;
+    };
+    if tp < 0.0 {
+        return true;
+    }
+    if oscript_eq(parts[11], "0") != Some(true) && oscript_eq(parts[11], "1") != Some(true) {
+        return true;
+    }
+    let Some(kd) = int(parts[12]).filter(|k| (0.0..=3.0).contains(k)) else {
+        return true;
+    };
+    kd >= 2.0 && tp != 0.0
+}
+
+/// R5-A-2 P-fsane proof for one posted fill of unit `k` (see the book AA).
+fn fsane_proof(
+    batch: &Batch,
+    k: usize,
+    f: &str,
+    pre_leaves: &[String],
+    fills_tree: &[String],
+    unit_hexes: &[String],
+) -> Option<BuiltProof> {
+    // Round 7b: the honest length sentinel is never judged (the AA bounces).
+    if *f == format!("n:{}", batch.checkpoint.fill_count) {
+        return None;
+    }
+    let parts: Vec<&str> = f.split(':').collect();
+    let idx = index_of(&batch.fills, f)?;
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(fills_tree, idx),
+    });
+    let built = |data: serde_json::Value| BuiltProof {
+        pred: "fsane".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    };
+    if fsane_shape_bad(&parts) {
+        if parts.len() == 14 {
+            data.as_object_mut()?
+                .insert("units_proof".into(), proof_json(unit_hexes, k));
+        }
+        return Some(built(data));
+    }
+    if unit_hexes.get(k).map(String::as_str) != Some(parts[1]) {
+        return None;
+    }
+    data.as_object_mut()?
+        .insert("units_proof".into(), proof_json(unit_hexes, k));
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    let kind = parts[12];
+    // Kind vs market (usd_per_unit != 0 = funding-rate market).
+    if let Some(meta) = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{}:", parts[7])))
+    {
+        let m: Vec<&str> = meta.split(':').collect();
+        if let Some(usd) = m
+            .get(9)
+            .and_then(|v| v.parse::<i128>().ok())
+            .filter(|_| m.len() == 11)
+        {
+            let fund = usd != 0;
+            if (kind == "0" && fund) || (kind == "1" && !fund) || (kind == "3" && fund) {
+                let mut d = data.clone();
+                let o = d.as_object_mut()?;
+                o.insert("pre_meta".into(), meta.clone().into());
+                o.insert(
+                    "pre_meta_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+                );
+                return Some(built(d));
+            }
+        }
+    }
+    // Rejected direct Place: cross with margin != 0, or isolated with a
+    // margin > 0 above the op account's pre collateral.
+    let op = batch.ops.get(k)?;
+    let o: Vec<&str> = op.split(':').collect();
+    if o.len() == 10 && o[0] == "p" {
+        if let Ok(margin) = o[7].parse::<i128>() {
+            let mut d = data.clone();
+            {
+                let obj = d.as_object_mut()?;
+                obj.insert("op".into(), op.clone().into());
+                obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
+            }
+            if o[6] == "0" && margin != 0 {
+                return Some(built(d));
+            }
+            if o[6] == "1" && margin > 0 {
+                let key = format!("acct:{}:", op.get(2..66)?);
+                if let Some(acct) = pre_leaves.iter().find(|l| l.starts_with(&key)) {
+                    let col = acct.split(':').nth(2).and_then(|c| c.parse::<i128>().ok());
+                    if col.is_some_and(|c| margin > c) && acct.split(':').count() == 5 {
+                        let obj = d.as_object_mut()?;
+                        obj.insert("pre_acct".into(), acct.clone().into());
+                        obj.insert(
+                            "pre_acct_proof".into(),
+                            proof_json(pre_leaves, index_of(pre_leaves, acct)?),
+                        );
+                        return Some(built(d));
+                    }
+                }
+            }
+        }
+    }
+    // Absent fill party.
+    for (who, hexs) in [("taker", parts[3]), ("maker", parts[4])] {
+        if hexs.bytes().all(|b| b.is_ascii_digit()) {
+            continue; // Oscript would read it as a number
+        }
+        if let Some(abs) = prefix_absence(pre_leaves, &format!("acct:{hexs}:")) {
+            let mut d = data.clone();
+            let obj = d.as_object_mut()?;
+            obj.insert("who".into(), who.into());
+            obj.extend(abs.as_object()?.clone());
+            return Some(built(d));
+        }
+    }
+    None
+}
+
+/// Round 7 P-opbind (mirror of `minuend_dispute.aa`, pred `opbind`): the
+/// ops leaf at `k` differs from the descriptor of the unit whose id is the
+/// `units_root` leaf at `k`. The unit id is `sha256(unit_text)`
+/// (`minuend_dag::unit_text`); the proof carries the text split at its
+/// second `|` (`u_pre` = `"mnu3|" hex "|"`, `u_op` = descriptor or `x`).
+/// `None` when the DA unit does not hash to the committed id (a DA
+/// mismatch, not provable on-chain) or the leaf is honest.
+fn opbind_proof(batch: &Batch, k: usize, unit_hexes: &[String]) -> Option<BuiltProof> {
+    let unit = batch.units.get(k)?;
+    let unit_hex = unit_hexes.get(k)?;
+    if hex::encode(minuend_dag::unit_id(unit).0) != *unit_hex {
+        return None;
+    }
+    let u_pre = minuend_dag::unit_text_prefix(unit);
+    let u_op = minuend_dag::op_descriptor(&unit.op).unwrap_or_else(|| "x".to_string());
+    let want = if u_op == "x" {
+        format!("x:{unit_hex}")
+    } else {
+        u_op.clone()
+    };
+    let op = batch.ops.get(k)?;
+    // Oscript caps a concatenated string at 4096 characters.
+    if *op == want || u_pre.len() + u_op.len() > 4096 {
+        return None;
+    }
+    Some(BuiltProof {
+        pred: "opbind".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data: serde_json::json!({
+            "ops_root": batch.checkpoint.ops_root,
+            "units_root": batch.checkpoint.units_root,
+            "k": k,
+            "op": op,
+            "ops_proof": proof_json(&batch.ops, k),
+            "units_proof": proof_json(unit_hexes, k),
+            "u_pre": u_pre,
+            "u_op": u_op,
+        }),
+    })
+}
+
+/// Exact Obyte-merkle proof depth of a `c`-leaf tree: `ceil(log2(c))`
+/// (odd levels duplicate their last node). Every dispute AA requires it
+/// since round 7b (R7-C1: an internal node posing as a leaf has fewer
+/// siblings).
+pub fn tree_depth(c: usize) -> usize {
+    if c <= 1 {
+        0
+    } else {
+        (usize::BITS - (c - 1).leading_zeros()) as usize
+    }
+}
+
+/// Mirror of the AA depth gate `2^s >= c AND 2^s < 2c` (`c == 1` skips:
+/// a one-leaf tree has no internal node and its proof is unsendable).
+pub fn depth_ok(siblings: usize, c: usize) -> bool {
+    c <= 1 || siblings == tree_depth(c)
+}
+
+/// Round 7b P-tsize (x-frame AA): a committed ops / units / trace / fills
+/// tree whose exact proof depth differs from the depth of its committed
+/// count (`unit_count`, `fill_count + 1`). Proven with a leaf-shaped
+/// element (ops / fills: holds ':'; units: 64 chars; trace: 44 chars).
+fn tsize_proof(batch: &Batch) -> Option<BuiltProof> {
+    let c = &batch.checkpoint;
+    let units: Vec<String> = c.unit_ids.iter().map(|id| hex::encode(id.0)).collect();
+    let fills_tree = minuend_settle::fills_root_elements(&batch.fills);
+    let n = c.unit_count as usize;
+    let nf = c.fill_count as usize + 1;
+    let trees: [(&str, &[String], usize, &str); 4] = [
+        ("ops", &batch.ops, n, &c.ops_root),
+        ("units", &units, n, &c.units_root),
+        ("trace", &batch.trace, n, &c.trace_root),
+        ("fills", &fills_tree, nf, &c.fills_root),
+    ];
+    for (name, tree, count, root) in trees {
+        if tree.len() < 2 || tree_depth(tree.len()) == tree_depth(count) {
+            continue;
+        }
+        if obyte_merkle::root(tree) != *root {
+            continue;
+        }
+        let leafy = |e: &str| match name {
+            "ops" | "fills" => e.contains(':'),
+            "units" => e.len() == 64 && !e.contains(':'),
+            _ => e.len() == 44,
+        };
+        let i = tree.iter().position(|e| leafy(e))?;
+        return Some(BuiltProof {
+            pred: "tsize".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data: serde_json::json!({"tree": name, "el": tree[i], "el_proof": proof_json(tree, i)}),
+        });
+    }
+    None
+}
+
+/// Round 10 mirror of `minuend_dispute_wf.aa`: true when `leaf` is NOT
+/// exactly a layout the engine writes (`fills` = an element of the fills
+/// tree, else a witness leaf). Field classes: `h` = 64 chars, `x` =
+/// non-empty, `u` = canonical integer >= 0, `s` = canonical integer;
+/// canonical = no '+', '.', exponent, leading zero or "-0", <= 39 digits
+/// (the engine's i128 / u128 never exceed that).
+pub fn wf_malformed(leaf: &str, fills: bool) -> bool {
+    let parts: Vec<&str> = leaf.split(':').collect();
+    let tag = parts[0];
+    let spec = if fills {
+        match tag {
+            "f" => "huhhhhusuuuus",
+            "n" => "u",
+            _ => "",
+        }
+    } else {
+        match tag {
+            "acct" => "hsus",
+            "pos" => "hussus",
+            "ord" => "huusuuhus",
+            "obond" => "hu",
+            "band" => "uss",
+            "meta" => "usuuuuusuu",
+            "adr" => "xh",
+            "adrx" => "hx",
+            "dep" => "x",
+            "~" if leaf == minuend_state::WIT_MAX_SENTINEL => "x",
+            _ => "",
+        }
+    };
+    if spec.is_empty() || parts.len() != spec.len() + 1 {
+        return true;
+    }
+    // R11-L1: per-tag `x` classes (the AA also checks the address checksum;
+    // the watcher's charset test flags a subset, never a false proof).
+    let x_ok = match tag {
+        "adr" => minuend_types::valid_obyte_addr(parts[1]),
+        "adrx" => minuend_types::valid_obyte_addr(parts[2]),
+        "dep" => parts[1].len() == 44 && parts[1].ends_with('='),
+        _ => true,
+    };
+    !x_ok
+        || !spec
+            .chars()
+            .zip(parts[1..].iter())
+            .all(|(c, f)| wf_field_ok(f, c))
+}
+
+fn wf_field_ok(f: &str, c: char) -> bool {
+    match c {
+        // R11-L1: 64 lowercase hex chars.
+        'h' => {
+            f.len() == 64
+                && f.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        'x' => !f.is_empty(),
+        _ => {
+            let neg = c == 's' && f.starts_with('-');
+            let d = if neg { &f[1..] } else { f };
+            !d.is_empty()
+                && d.len() <= 39
+                && d.bytes().all(|b| b.is_ascii_digit())
+                && (d == "0" || !d.starts_with('0'))
+                && !(neg && d == "0")
+        }
+    }
+}
+
+/// Round 10 P-wf: the first malformed posted witness leaf (a unit's post
+/// tree whose root is the committed trace entry) or fills-tree element.
+fn wf_proof(batch: &Batch, prev_final: Option<&[String]>) -> Option<BuiltProof> {
+    let c = &batch.checkpoint;
+    let genesis = if c.height == 1 {
+        minuend_state::wit_leaves(&minuend_state::ChainState::new())
+    } else {
+        Vec::new()
+    };
+    for (k, leaves) in batch.leaf_trace.iter().enumerate() {
+        let Some(post_wit) = batch.trace.get(k) else {
+            break;
+        };
+        if leaves.is_empty() || obyte_merkle::root(leaves) != *post_wit {
+            continue;
+        }
+        // R11-M1: unit k's PRE tree (k == 0: the committed tree of h - 1 or
+        // the genesis tree at h == 1); only a leaf absent from it is judged.
+        let pre: &[String] = if k > 0 {
+            match batch.leaf_trace.get(k - 1) {
+                Some(p)
+                    if batch
+                        .trace
+                        .get(k - 1)
+                        .is_some_and(|r| obyte_merkle::root(p) == *r) =>
+                {
+                    p
+                }
+                _ => continue,
+            }
+        } else if c.height == 1 {
+            &genesis
+        } else {
+            match prev_final {
+                Some(p) => p,
+                None => continue,
+            }
+        };
+        let end = index_of(leaves, minuend_state::WIT_MAX_SENTINEL);
+        for (i, l) in leaves.iter().enumerate() {
+            // A ':'-less element needs the sentinel's proof (same depth).
+            if !wf_malformed(l, false) || (!l.contains(':') && end.is_none()) {
+                continue;
+            }
+            let Some(absent) = wf_absence(pre, l) else {
+                continue; // carried over from pre: finalized state (R11-M1)
+            };
+            let mut data = serde_json::json!({
+                "k": k,
+                "trace_root": c.trace_root,
+                "post_wit": post_wit,
+                "post_proof": proof_json(&batch.trace, k),
+                "leaf": l,
+                "leaf_proof": proof_json(leaves, i),
+            });
+            if let Some(e) = end {
+                data["end_proof"] = proof_json(leaves, e);
+            }
+            for (key, v) in absent {
+                data[key] = v;
+            }
+            if k > 0 {
+                data["pre_wit"] = batch.trace[k - 1].clone().into();
+                data["pre_proof"] = proof_json(&batch.trace, k - 1);
+                if data.get("pright").is_none() && batch.counts.get(k - 1).is_some() {
+                    data["pre_count"] = batch.counts[k - 1].parse::<u64>().ok()?.into();
+                    data["pre_count_proof"] = proof_json(&batch.counts, k - 1);
+                }
+            }
+            return Some(BuiltProof {
+                pred: "wf".into(),
+                fill_aa: false,
+                bind_aa: false,
+                data,
+            });
+        }
+    }
+    let tree = minuend_settle::fills_root_elements(&batch.fills);
+    if obyte_merkle::root(&tree) == c.fills_root {
+        if let Some(i) = tree.iter().position(|l| wf_malformed(l, true)) {
+            return Some(BuiltProof {
+                pred: "wf".into(),
+                fill_aa: false,
+                bind_aa: false,
+                data: serde_json::json!({
+                    "fills_root": c.fills_root,
+                    "leaf": tree[i],
+                    "leaf_proof": proof_json(&tree, i),
+                }),
+            });
+        }
+    }
+    None
+}
+
+/// R11-M1: proof that `leaf` is NOT in the sorted `pre` tree: the adjacent
+/// straddle (`pleft` < leaf < `pright`), before-min (`pleft` at index 0) or
+/// after-max (`pleft` = the last leaf; the AA pins its index by the pre
+/// leaf count). `None` when the leaf is in `pre` (carried over).
+fn wf_absence(pre: &[String], leaf: &str) -> Option<Vec<(&'static str, serde_json::Value)>> {
+    if pre.is_empty() || pre.iter().any(|p| p == leaf) {
+        return None;
+    }
+    let j = pre.iter().position(|p| p.as_str() > leaf);
+    Some(match j {
+        Some(0) => vec![
+            ("pleft", pre[0].clone().into()),
+            ("pleft_proof", proof_json(pre, 0)),
+        ],
+        Some(j) => vec![
+            ("pleft", pre[j - 1].clone().into()),
+            ("pleft_proof", proof_json(pre, j - 1)),
+            ("pright", pre[j].clone().into()),
+            ("pright_proof", proof_json(pre, j)),
+        ],
+        None => vec![
+            ("pleft", pre[pre.len() - 1].clone().into()),
+            ("pleft_proof", proof_json(pre, pre.len() - 1)),
+        ],
+    })
+}
+
+/// R11-C2: the first committed element no dispute AA can read — longer
+/// than [`minuend_types::MAX_ELEMENT_LEN`] or not of its tree's shape (unit
+/// id 64 chars, witness root 44, every other element ':'-bearing) — as an
+/// open-element challenge for the wf AA (`{open:1, tree, k, index, ...}`,
+/// paid with the bond). The operator cannot answer it with a readable
+/// element, so it expires into a fraud verdict.
+pub fn open_proof(batch: &Batch) -> Option<BuiltProof> {
+    let cap = minuend_types::MAX_ELEMENT_LEN;
+    let c = &batch.checkpoint;
+    let bad = |e: &str, tree: &str| match tree {
+        "units" => e.len() != 64,
+        "trace" => e.len() != 44,
+        _ => e.len() > cap || !e.contains(':'),
+    };
+    let mk = |tree: &str, k: usize, index: usize, extra: serde_json::Value| {
+        let mut data = serde_json::json!({"open": 1, "tree": tree, "k": k, "index": index});
+        if let (Some(o), Some(e)) = (data.as_object_mut(), extra.as_object()) {
+            for (key, v) in e {
+                o.insert(key.clone(), v.clone());
+            }
+        }
+        BuiltProof {
+            pred: "open".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data,
+        }
+    };
+    if obyte_merkle::root(&batch.ops) == c.ops_root {
+        if let Some(i) = batch.ops.iter().position(|e| bad(e, "ops")) {
+            return Some(mk("ops", 0, i, serde_json::json!({})));
+        }
+    }
+    if obyte_merkle::root(&batch.trace) == c.trace_root {
+        if let Some(i) = batch.trace.iter().position(|e| bad(e, "trace")) {
+            return Some(mk("trace", 0, i, serde_json::json!({})));
+        }
+    }
+    let fills = minuend_settle::fills_root_elements(&batch.fills);
+    if obyte_merkle::root(&fills) == c.fills_root {
+        if let Some(i) = fills.iter().position(|e| bad(e, "fills")) {
+            return Some(mk("fills", 0, i, serde_json::json!({})));
+        }
+    }
+    for (k, leaves) in batch.leaf_trace.iter().enumerate() {
+        let (Some(post_wit), Some(cnt)) = (batch.trace.get(k), batch.counts.get(k)) else {
+            break;
+        };
+        if leaves.is_empty()
+            || obyte_merkle::root(leaves) != *post_wit
+            || cnt.parse::<usize>().ok() != Some(leaves.len())
+        {
+            continue;
+        }
+        if let Some(i) = leaves.iter().position(|e| bad(e, "wit")) {
+            return Some(mk(
+                "wit",
+                k,
+                i,
+                serde_json::json!({
+                    "post_wit": post_wit,
+                    "post_proof": proof_json(&batch.trace, k),
+                    "count": leaves.len(),
+                    "count_proof": proof_json(&batch.counts, k),
+                }),
+            ));
+        }
+    }
+    None
+}
+
+/// R11-C2: the answer to an open-element challenge on an honest batch:
+/// `{answer:1, tree, k, index, element: 'Z' || element, proof}` (the 'Z'
+/// keeps a digit-only unit id a string in trigger.data). `None` when the
+/// named element is not a readable element of this batch's trees.
+pub fn open_answer(batch: &Batch, tree: &str, k: usize, index: usize) -> Option<serde_json::Value> {
+    let c = &batch.checkpoint;
+    let unit_hexes: Vec<String> = c.unit_ids.iter().map(|id| hex::encode(id.0)).collect();
+    let fills = minuend_settle::fills_root_elements(&batch.fills);
+    let elems: &[String] = match tree {
+        "ops" => &batch.ops,
+        "units" => &unit_hexes,
+        "trace" => &batch.trace,
+        "fills" => &fills,
+        "wit" => batch.leaf_trace.get(k)?,
+        _ => return None,
+    };
+    let e = elems.get(index)?;
+    if e.len() > minuend_types::MAX_ELEMENT_LEN {
+        return None;
+    }
+    Some(serde_json::json!({
+        "answer": 1,
+        "tree": tree,
+        "k": if tree == "wit" { k } else { 0 },
+        "index": index,
+        "element": format!("Z{e}"),
+        "proof": proof_json(elems, index),
+    }))
+}
+
+/// R7-L1 P-fsane: two adjacent idx-0 fills of unit `k` in the fills tree.
+fn fsane_dup_proof(
+    batch: &Batch,
+    k: usize,
+    unit_hex: &str,
+    pre_leaves: &[String],
+    fills_tree: &[String],
+    unit_hexes: &[String],
+) -> Option<BuiltProof> {
+    let pfx = format!("f:{unit_hex}:0:");
+    let i = (1..batch.fills.len())
+        .find(|&i| batch.fills[i].starts_with(&pfx) && batch.fills[i - 1].starts_with(&pfx))?;
+    let f = &batch.fills[i];
+    if f.split(':').count() != 14 || unit_hexes.get(k).map(String::as_str) != Some(unit_hex) {
+        return None;
+    }
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(fills_tree, i),
+        "units_proof": proof_json(unit_hexes, k),
+        "prev": batch.fills[i - 1],
+        "prev_proof": proof_json(fills_tree, i - 1),
+    });
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    Some(BuiltProof {
+        pred: "fsane".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    })
+}
+
+/// Op tag and op account of an `x:` unit, read from its unit-text prefix
+/// exactly as `minuend_dispute_xframe.aa` does: `'mnu3|'` + 8 hex domain
+/// chars + the parent count byte + 64 hex per parent, then the tag byte
+/// and the first 32-byte account; a Reveal (`13`) yields its inner tag
+/// (64 bytes further: account + commit_ref).
+pub fn xframe_tag(u_pre: &str) -> Option<(String, String)> {
+    let tq = xframe_tq(u_pre)?;
+    Some((
+        u_pre.get(tq..tq + 2)?.to_string(),
+        u_pre.get(tq + 2..tq + 66)?.to_string(),
+    ))
+}
+
+/// Hex offset of the (inner, for a Reveal) op tag inside `u_pre`, as the
+/// x-frame / m-frame AAs compute `$tq`.
+pub fn xframe_tq(u_pre: &str) -> Option<usize> {
+    let np = u_pre.get(13..15)?;
+    let tp = 15
+        + match np {
+            "00" => 0,
+            "01" => 64,
+            "02" => 128,
+            _ => return None,
+        };
+    Some(if u_pre.get(tp..tp + 2)? == "13" {
+        tp + 130
+    } else {
+        tp
+    })
+}
+
+/// R8-C6 / R8-H1: the market id (u32 LE right after the op account) of a
+/// ReportPrice / UpdateExternalPrice unit text.
+pub fn u_pre_market(u_pre: &str) -> Option<u32> {
+    let tq = xframe_tq(u_pre)?;
+    let h = u_pre.get(tq + 66..tq + 74)?;
+    let b = hex::decode(h).ok()?;
+    Some(u32::from_le_bytes(b.try_into().ok()?))
+}
+
+/// R8 (mirrors the AAs' `is_integer(json_parse(s))` guard): a JSON integer
+/// literal (no leading zeros, optional '-').
+fn json_int(s: &str) -> Option<i128> {
+    let d = s.strip_prefix('-').unwrap_or(s);
+    if d.is_empty() || !d.bytes().all(|c| c.is_ascii_digit()) || (d.len() > 1 && d.starts_with('0'))
+    {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// Columns (collateral, PERP, W) of an `acct:{X}:{col}:{perp}:{W}` leaf as
+/// the AA reads them (raw substrings after offset 70).
+fn acct_cols(leaf: &str) -> Option<(String, String, String)> {
+    let t = leaf.get(70..)?;
+    let mut it = t.splitn(3, ':');
+    Some((
+        it.next()?.to_string(),
+        it.next()?.to_string(),
+        it.next()?.to_string(),
+    ))
+}
+
+/// Mirror of the P-xframe acct arm: `pre` = the account's pre leaf
+/// (`None` = absent: 0:0:0), `has_pos` = the account holds a position in
+/// the pre tree. `Some(true)` = fraud.
+pub fn xframe_acct_bad(
+    tag: &str,
+    oa: &str,
+    k: usize,
+    pre: Option<&str>,
+    post: &str,
+    has_pos: bool,
+) -> Option<bool> {
+    frame_acct_bad(tag, oa, None, k, pre, post, has_pos)
+}
+
+/// R7b-N2: the AA's `$p1 == $p0 + 50000` (with `length($p0) <= 14`): the
+/// post PERP column is the pre column plus exactly ORACLE_BOND_PERP.
+pub fn bond_release(p0: &str, p1: &str) -> bool {
+    let bond = minuend_types::ORACLE_BOND_PERP as i128;
+    p0.len() <= 14
+        && matches!((p0.parse::<i128>(), p1.parse::<i128>()), (Ok(a), Ok(b)) if b == a + bond)
+}
+
+/// Mirror of the P-xframe acct arm for any op. `nonx` = `Some((op tag
+/// letter, exempt accounts))` for a c:/d:/D:/w:/W:/p:/L: unit (R7b-N2,
+/// moved from P-frame): exempt[0] is the op account (its W is P-wpin's,
+/// its PERP moves under D:/W: only); the exempt accounts' collateral is
+/// judged elsewhere. `None` = an `x:` unit (tag / oa from its text).
+/// `has_pos` = the 06 / 11 funding allowance holds (no disqualifier);
+/// the k == 0 bond allowance is assumed (see [`frame_acct_bad_ev`]).
+pub fn frame_acct_bad(
+    tag: &str,
+    oa: &str,
+    nonx: Option<(&str, &[String])>,
+    k: usize,
+    pre: Option<&str>,
+    post: &str,
+    has_pos: bool,
+) -> Option<bool> {
+    frame_acct_bad_ev(tag, oa, nonx, k, pre, post, has_pos, true)
+}
+
+/// Round 8 P-xframe acct arm. `fund_ok` = the 06 / 11 funding allowance
+/// holds (the challenger has no disqualifier: X holds a position in the
+/// op's market, the 06 oracle is bonded, the market pays funding under the
+/// op — R8-C6); `bond_ok` = at k == 0 X may get ORACLE_BOND_PERP back (the
+/// challenger cannot show X had no expiring `obond:` leaf — R8-H2). An `x:`
+/// op moves its own account's PERP only by its exact engine amount (R8-C4).
+#[allow(clippy::too_many_arguments)]
+pub fn frame_acct_bad_ev(
+    tag: &str,
+    oa: &str,
+    nonx: Option<(&str, &[String])>,
+    k: usize,
+    pre: Option<&str>,
+    post: &str,
+    fund_ok: bool,
+    bond_ok: bool,
+) -> Option<bool> {
+    let x = post.get(5..69)?;
+    let (c1, p1, w1) = acct_cols(post)?;
+    let (c0, p0, w0) = match pre {
+        Some(l) => acct_cols(l)?,
+        None => ("0".into(), "0".into(), "0".into()),
+    };
+    let fund = nonx.is_none() && (tag == "06" || tag == "11");
+    let (zx, w_free, p_free) = match nonx {
+        None => (false, false, false),
+        Some((zt, ex)) => {
+            let own = ex.first().is_some_and(|a| a == x);
+            (
+                ex.iter().any(|a| a == x),
+                own,
+                own && (zt == "D" || zt == "W"),
+            )
+        }
+    };
+    let cb = c0 != c1 && !zx && !(fund && fund_ok);
+    let wb = w0 != w1 && !w_free;
+    let t: i128 = if nonx.is_none() && x == oa {
+        match tag {
+            "0e" => -(minuend_types::ORACLE_BOND_PERP as i128),
+            "0a" => -(minuend_types::CREATE_MARKET_FEE_PERP as i128),
+            "10" => {
+                let b = minuend_types::ORACLE_BOND_PERP as i128;
+                b - b * minuend_types::SLASH_REWARD_BPS as i128 / 10_000
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let bnd: i128 = if k == 0 && bond_ok {
+        minuend_types::ORACLE_BOND_PERP as i128
+    } else {
+        0
+    };
+    let allowed = p0.len() <= 14
+        && json_int(&p0).is_some_and(|a| {
+            [a + t, a + bnd, a + t + bnd]
+                .iter()
+                .any(|v| v.to_string() == p1)
+        });
+    let pb = p0 != p1 && !p_free && !allowed;
+    Some(cb || wb || pb)
+}
+
+/// The x: unit's text fields for the x-frame AA, when the DA unit hashes
+/// to the committed id and its ops leaf is `x:{id}`.
+fn xframe_unit_fields(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+) -> Option<(serde_json::Value, String, String)> {
+    let unit = batch.units.get(k)?;
+    let uh = unit_hexes.get(k)?;
+    if hex::encode(minuend_dag::unit_id(unit).0) != *uh
+        || op != format!("x:{uh}")
+        || minuend_dag::op_descriptor(&unit.op).is_some()
+    {
+        return None;
+    }
+    let u_pre = minuend_dag::unit_text_prefix(unit);
+    if u_pre.len() + 1 > 4096 {
+        return None;
+    }
+    let (tag, oa) = xframe_tag(&u_pre)?;
+    Some((
+        serde_json::json!({
+            "unit": format!("Z{uh}"),
+            "units_proof": proof_json(unit_hexes, k),
+            "u_pre": u_pre,
+        }),
+        tag,
+        oa,
+    ))
+}
+
+fn xframe_base(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+) -> Option<serde_json::Value> {
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+        "post_wit": batch.trace.get(k)?.clone(),
+        "post_proof": proof_json(&batch.trace, k),
+    });
+    data.as_object_mut()?
+        .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+    Some(data)
+}
+
+fn xf_built(pred: &str, data: serde_json::Value) -> BuiltProof {
+    BuiltProof {
+        pred: pred.into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    }
+}
+
+fn merge(data: &mut serde_json::Value, more: serde_json::Value) -> Option<()> {
+    data.as_object_mut()?.extend(more.as_object()?.clone());
+    Some(())
+}
+
+/// Round 7b P-xframe (R7-C3): an `x:` unit changed a bystander's position /
+/// order (any change) or account (W, collateral outside funding, PERP of
+/// anyone but the op account) in the POSTED post tree, where the honest
+/// replay did not.
+fn xframe_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let isx = op.starts_with("x:");
+    let posted = batch.leaf_trace.get(k)?;
+    let mut base = xframe_base(batch, k, op, pre_leaves)?;
+    // R7b-N2: c:/d:/D:/w:/W:/p:/L: units get the acct arm only (P-frame's
+    // acct: part moved here), with the op's exempt accounts.
+    let o: Vec<&str> = op.split(':').collect();
+    let zt = o.first().copied().unwrap_or("");
+    let mut u_pre = String::new();
+    let (tag, oa, exempt) = if isx {
+        let (ufields, tag, oa) = xframe_unit_fields(batch, k, op, unit_hexes)?;
+        u_pre = ufields.get("u_pre")?.as_str()?.to_string();
+        merge(&mut base, ufields)?;
+        (tag, oa, Vec::new())
+    } else {
+        let shape = match zt {
+            "c" => o.len() == 3,
+            "d" | "D" => o.len() == 5,
+            "w" | "W" => o.len() == 4,
+            _ => false,
+        };
+        if shape {
+            (
+                String::new(),
+                String::new(),
+                vec![op.get(2..66)?.to_string()],
+            )
+        } else {
+            let (allowed, ev) = pl_frame_scope(batch, k, op, pre_leaves)?;
+            merge(&mut base, ev)?;
+            (String::new(), String::new(), allowed)
+        }
+    };
+    let nonx = if isx {
+        None
+    } else {
+        Some((zt, exempt.as_slice()))
+    };
+    let framed = |l: &str| {
+        let n = l.split(':').count();
+        isx && ((l.starts_with("pos:") && n == 7) || (l.starts_with("ord:") && n == 10))
+    };
+    for l in pre_leaves.iter() {
+        if framed(l) && !posted.contains(l) && post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": false, "leaf_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?;
+            merge(&mut d, exact_absence(posted, l, "left", "right")?)?;
+            return Some(xf_built("xframe", d));
+        }
+    }
+    for l in posted.iter() {
+        if framed(l) && !pre_leaves.contains(l) && !post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
+            )?;
+            merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
+            return Some(xf_built("xframe", d));
+        }
+    }
+    for a1 in posted.iter() {
+        let is_acct = a1.starts_with("acct:")
+            && a1.split(':').count() == 5
+            && a1.as_bytes().get(69) == Some(&b':');
+        if !is_acct || post_leaves.contains(a1) {
+            continue;
+        }
+        let x = a1.get(5..69)?;
+        let key = format!("acct:{x}:");
+        let a0 = pre_leaves.iter().find(|l| l.starts_with(&key));
+        let (c0, _, _) = match a0 {
+            Some(l) => acct_cols(l)?,
+            None => ("0".into(), String::new(), String::new()),
+        };
+        let (c1, _, _) = acct_cols(a1)?;
+        let h = batch.checkpoint.height;
+        // R8-H2: X's bond leaf in pre (at most one) decides the k == 0
+        // allowance; when it does not hold, the evidence is that leaf or
+        // the prefix absence.
+        let okey = format!("obond:{x}:");
+        let ob = pre_leaves.iter().find(|l| l.starts_with(&okey));
+        let bond_ok = ob.is_some_and(|l| {
+            let u = &l[okey.len()..];
+            u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
+        });
+        // R8-C6: a 06 / 11 funding disqualifier for X, with its evidence.
+        let mut fund_ev: Option<serde_json::Value> = None;
+        if isx && (tag == "06" || tag == "11") && c0 != c1 {
+            let m = u_pre_market(&u_pre);
+            if let Some(m) = m {
+                let pk = format!("pos:{x}:{m}:");
+                if let Some(abs) = prefix_absence(pre_leaves, &pk) {
+                    let o = abs.as_object()?;
+                    let mut e = serde_json::json!({"fmkt": m, "pleft": o.get("left")?, "pleft_proof": o.get("left_proof")?});
+                    if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
+                        merge(&mut e, serde_json::json!({"pright": r, "pright_proof": rp}))?;
+                    }
+                    // The AA's pos straddle is the two-sided shape only.
+                    if o.get("right").is_some() {
+                        fund_ev = Some(e);
+                    }
+                }
+                if fund_ev.is_none() {
+                    let mk = format!("meta:{m}:");
+                    if let Some(meta) = pre_leaves.iter().find(|l| l.starts_with(&mk)) {
+                        let q: Vec<&str> = meta.split(':').collect();
+                        if q.len() == 11 && (q[3] == "10000" || (tag == "11" && q[9] == "0")) {
+                            fund_ev = Some(serde_json::json!({
+                                "fmkt": m, "fmeta": meta,
+                                "fmeta_proof": proof_json(pre_leaves, index_of(pre_leaves, meta)?),
+                            }));
+                        }
+                    }
+                }
+            }
+            if fund_ev.is_none() && tag == "06" {
+                if let Some(abs) = prefix_absence(pre_leaves, &format!("obond:{oa}:")) {
+                    let o = abs.as_object()?;
+                    let mut e = serde_json::json!({"bleft": o.get("left")?, "bleft_proof": o.get("left_proof")?});
+                    if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
+                        merge(&mut e, serde_json::json!({"bright": r, "bright_proof": rp}))?;
+                    }
+                    fund_ev = Some(e);
+                }
+            }
+        }
+        if frame_acct_bad_ev(
+            &tag,
+            &oa,
+            nonx,
+            k,
+            a0.map(String::as_str),
+            a1,
+            fund_ev.is_none(),
+            bond_ok,
+        ) != Some(true)
+        {
+            continue;
+        }
+        let mut d = base.clone();
+        merge(
+            &mut d,
+            serde_json::json!({"post_acct": a1, "post_acct_proof": proof_json(posted, index_of(posted, a1)?)}),
+        )?;
+        match a0 {
+            Some(l) => merge(
+                &mut d,
+                serde_json::json!({"pre_acct": l, "pre_acct_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?,
+            None => merge(&mut d, prefix_absence(pre_leaves, &key)?)?,
+        }
+        if let Some(e) = fund_ev {
+            merge(&mut d, e)?;
+        }
+        if k == 0 && !bond_ok {
+            match ob {
+                Some(l) => merge(
+                    &mut d,
+                    serde_json::json!({"obond": l, "obond_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+                )?,
+                None => {
+                    let abs = prefix_absence(pre_leaves, &okey)?;
+                    let o = abs.as_object()?;
+                    let mut e = serde_json::json!({"oleft": o.get("left")?, "oleft_proof": o.get("left_proof")?});
+                    if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
+                        merge(&mut e, serde_json::json!({"oright": r, "oright_proof": rp}))?;
+                    }
+                    merge(&mut d, e)?;
+                }
+            }
+        }
+        return Some(xf_built("xframe", d));
+    }
+    None
+}
+
+/// What the m-frame AA knows about the unit besides the two meta leaves.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MetaCtx<'a> {
+    /// The ops leaf.
+    pub op: &'a str,
+    /// The `x:` op tag ('' otherwise).
+    pub tag: &'a str,
+    /// The unit text prefix ('' for a non-`x:` op).
+    pub u_pre: &'a str,
+    /// The unit id (hex) of unit k.
+    pub unit: &'a str,
+    /// The unit's committed fill (`f:{unit}:0:...`), if it has one.
+    pub fill: Option<&'a str>,
+    /// The op account holds an `obond:` leaf in pre (06 accepted).
+    pub bonded: bool,
+}
+
+/// Mirror of the round-8 P-mframe meta pair rule: `Some(true)` = fraud.
+/// Parameters change only under a FinalizeProposal (0d) of ONE key to a
+/// risk_params_ok set or a delist (R8-C5, interim); the mark only in the
+/// op's market — a p: / L: to its unit's fill price, an accepted 06
+/// (bonded oracle, regular non-spot market) — and on regular markets by at
+/// most 10 % (R8-H1).
+pub fn mframe_meta_bad(c: &MetaCtx, m0: &str, m1: &str) -> Option<bool> {
+    let a: Vec<&str> = m0.split(':').collect();
+    let b: Vec<&str> = m1.split(':').collect();
+    if a.len() != 11 || b.len() != 11 || a[0] != "meta" || b[0] != "meta" || a[1] != b[1] {
+        return None;
+    }
+    if m0 == m1 {
+        return Some(false);
+    }
+    let d: Vec<bool> = (3..=7).map(|i| a[i] != b[i]).collect();
+    let pc = d.iter().any(|x| *x) || a[2] != b[2] || a[9] != b[9] || a[10] != b[10];
+    if pc {
+        let n = |i: usize| json_int(b[i]);
+        let legal = (|| {
+            let (im, mm, fee, kp, cap) = (n(3)?, n(4)?, n(5)?, n(6)?, n(10)?);
+            let fee0 = json_int(a[5])?;
+            Some(
+                (1..=200).contains(&fee)
+                    && kp >= 1
+                    && im > mm
+                    && if im == 10_000 {
+                        mm >= 500 && kp <= 500 && cap == 0 && fee <= fee0
+                    } else {
+                        im <= 5000
+                            && if cap == 0 {
+                                mm >= 500 && kp <= 500 && im >= 500
+                            } else {
+                                mm >= 50
+                                    && im >= 100
+                                    && cap <= 500
+                                    && im >= 10 * cap
+                                    && kp * 10 <= im
+                            }
+                    },
+            )
+        })()
+        .unwrap_or(false);
+        let ok = c.tag == "0d"
+            && a[8] == b[8]
+            && a[2] == b[2]
+            && a[9] == b[9]
+            && a[10] == b[10]
+            && d.iter().filter(|x| **x).count() == 1
+            && if d[4] {
+                a[7] == "0" && b[7] == "1"
+            } else {
+                legal
+            }
+            // R9-L1: the spot class (im 10000 <=> spot_only, the
+            // risk_params_ok invariant) is read from the PRE meta and kept.
+            && ((a[3] == "10000") == (n(3) == Some(10_000)));
+        return Some(!ok);
+    }
+    // R9-H2: |mark| < MARK_CAP (1e15) on both sides, then +-10 %; a longer
+    // (or unparsable) mark is out of band.
+    let cap = i128::from(minuend_types::MARK_CAP);
+    let (o8, n8) = (json_int(a[8]), json_int(b[8]));
+    let band = matches!((o8, n8), (Some(o), Some(n)) if o.abs() < cap && n.abs() < cap
+        && (o == 0 || 10 * (n - o).abs() <= o.abs() + 10));
+    // R9-L2: a funding-rate market's mark steps by the engine rule (the
+    // rate trunc((mark - 1e12) / 1e4) bps moves <= max(|old| / 10, 1); a
+    // first mark is index-anchored and not witnessed).
+    let fstep = matches!((o8, n8), (Some(o), Some(n)) if o == 0 || {
+        let r = |p: i128| (p - i128::from(minuend_types::FUNDING_PRICE_OFFSET)) / i128::from(minuend_types::FUNDING_BPS_UNIT);
+        (r(n) - r(o)).abs() <= (r(o).abs() / 10).max(1)
+    });
+    let z: Vec<&str> = c.op.split(':').collect();
+    let plm = (z.first() == Some(&"p") && z.len() == 10 && z[2] == a[1])
+        || (z.first() == Some(&"L") && z.len() == 4 && z[3] == a[1]);
+    let okp =
+        plm && c.fill.is_some_and(|f| {
+            let q: Vec<&str> = f.split(':').collect();
+            q.len() == 14
+                && q[0] == "f"
+                && q[1] == c.unit
+                && q[2] == "0"
+                && q[7] == a[1]
+                && q[8] == b[8]
+        }) && if a[9] != "0" { fstep } else { band };
+    let ok6 = c.tag == "06"
+        && c.bonded
+        && a[9] == "0"
+        && a[3] != "10000"
+        && band
+        && json_int(a[1]).is_some_and(|m| u_pre_market(c.u_pre).map(i128::from) == Some(m));
+    Some(!(okp || ok6))
+}
+
+/// The fill evidence the m-frame AA REQUIRES for a p: / L: mark move: the
+/// unit's committed fill, or the proof that unit k has none.
+fn unit_fill_evidence(batch: &Batch, k: usize) -> Option<(Option<String>, serde_json::Value)> {
+    let unit_hexes: Vec<String> = batch
+        .checkpoint
+        .unit_ids
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
+    let u = unit_hexes.get(k)?;
+    let mut data = serde_json::json!({
+        "fills_root": batch.checkpoint.fills_root,
+        "unit": format!("Z{u}"),
+        "units_proof": proof_json(&unit_hexes, k),
+    });
+    let tree = minuend_settle::fills_root_elements(&batch.fills);
+    if let Some(i) = tree
+        .iter()
+        .position(|l| l.starts_with(&format!("f:{u}:0:")))
+    {
+        merge(
+            &mut data,
+            serde_json::json!({"fill": tree[i], "fill_proof": proof_json(&tree, i)}),
+        )?;
+        return Some((Some(tree[i].clone()), data));
+    }
+    if batch.checkpoint.fill_count == 0 && batch.fills.is_empty() {
+        return Some((None, data));
+    }
+    let unit_of = |l: &str| -> Option<usize> {
+        let id = l.strip_prefix("f:")?.get(..64)?;
+        unit_hexes.iter().position(|x| x == id)
+    };
+    let ri = tree
+        .iter()
+        .position(|l| l.starts_with("n:") || unit_of(l).is_some_and(|j| j > k))?;
+    merge(
+        &mut data,
+        serde_json::json!({"fright": tree[ri], "fright_proof": proof_json(&tree, ri)}),
+    )?;
+    if let Some(j) = unit_of(&tree[ri]) {
+        merge(
+            &mut data,
+            serde_json::json!({"fright_up": proof_json(&unit_hexes, j)}),
+        )?;
+    }
+    if ri > 0 {
+        let j = unit_of(&tree[ri - 1])?;
+        merge(
+            &mut data,
+            serde_json::json!({
+                "fprev": tree[ri - 1], "fprev_proof": proof_json(&tree, ri - 1),
+                "fprev_up": proof_json(&unit_hexes, j),
+            }),
+        )?;
+    }
+    Some((None, data))
+}
+
+fn renamed(v: serde_json::Value, l: &str, r: &str) -> Option<serde_json::Value> {
+    let o = v.as_object()?;
+    let mut m = serde_json::Map::new();
+    m.insert(l.into(), o.get("left")?.clone());
+    m.insert(format!("{l}_proof"), o.get("left_proof")?.clone());
+    if let (Some(x), Some(xp)) = (o.get("right"), o.get("right_proof")) {
+        m.insert(r.into(), x.clone());
+        m.insert(format!("{r}_proof"), xp.clone());
+    }
+    Some(serde_json::Value::Object(m))
+}
+
+/// Mirror of the m-frame AA's `obond:` leaf frame (R8-H2) for an
+/// inserted (`ins`) or removed leaf, before disqualifiers: `true` = the
+/// AA's allowance applies.
+pub fn obond_frame_ok(
+    leaf: &str,
+    ins: bool,
+    tag: &str,
+    oa: &str,
+    target: &str,
+    k: usize,
+    h: u64,
+) -> bool {
+    let q: Vec<&str> = leaf.split(':').collect();
+    if q.len() != 3 || q[0] != "obond" || q[1].len() != 64 {
+        return false;
+    }
+    let u = q[2];
+    let exp = k == 0
+        && u.len() <= 15
+        && !u.starts_with('0')
+        && json_int(u).is_some_and(|v| v < h as i128);
+    if ins {
+        q[1] == oa
+            && ((tag == "0e" && u == "0")
+                || (tag == "0f" && u == (h + minuend_types::ORACLE_UNBOND_HEIGHTS - 1).to_string()))
+    } else {
+        (q[1] == oa && tag == "0f" && u == "0") || (tag == "10" && q[1] == target) || exp
+    }
+}
+
+/// Round 7b P-mframe (R7-H2) + round 8 (R8-C1/C5/H1/H2): a band: leaf
+/// deleted / rewritten / created outside CreateMarket, an `obond:` leaf
+/// outside its frame, or a meta: leaf changed outside its allowed ops, in
+/// the POSTED post tree where the honest replay did not.
+fn mframe_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    unit_hexes: &[String],
+    pre_leaves: &[String],
+    post_leaves: &[String],
+) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    let mut base = xframe_base(batch, k, op, pre_leaves)?;
+    let h = batch.checkpoint.height;
+    let (mut tag, mut oa, mut u_pre) = (String::new(), String::new(), String::new());
+    if op.starts_with("x:") {
+        // R8-C1: the AA judges an `x:` op only with its unit text.
+        let (uf, t, a) = xframe_unit_fields(batch, k, op, unit_hexes)?;
+        u_pre = uf.get("u_pre")?.as_str()?.to_string();
+        merge(&mut base, uf)?;
+        tag = t;
+        oa = a;
+    }
+    let bkey = format!("obond:{oa}:");
+    let pob = pre_leaves
+        .iter()
+        .find(|l| !oa.is_empty() && l.starts_with(&bkey));
+    let nobond_ev = if !oa.is_empty() && pob.is_none() {
+        prefix_absence(pre_leaves, &bkey).and_then(|v| renamed(v, "bleft", "bright"))
+    } else {
+        None
+    };
+    let target = xframe_tq(&u_pre)
+        .and_then(|tq| u_pre.get(tq + 66..tq + 130))
+        .unwrap_or("")
+        .to_string();
+    let is_band = |l: &str| l.starts_with("band:") && l.split(':').count() == 4;
+    let is_ob = |l: &str| {
+        let q: Vec<&str> = l.split(':').collect();
+        q.len() == 3 && q[0] == "obond" && q[1].len() == 64
+    };
+    // Removed leaves (band: always; obond: outside its frame).
+    for l in pre_leaves.iter() {
+        let framed =
+            is_band(l) || (is_ob(l) && !obond_frame_ok(l, false, &tag, &oa, &target, k, h));
+        if framed && !posted.contains(l) && post_leaves.contains(l) {
+            let mut d = base.clone();
+            merge(
+                &mut d,
+                serde_json::json!({"leaf": l, "ins": false, "leaf_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?)}),
+            )?;
+            merge(&mut d, exact_absence(posted, l, "left", "right")?)?;
+            return Some(xf_built("mframe", d));
+        }
+    }
+    // R8-H2 keep: an expired bond still in unit 0's post tree.
+    if k == 0 {
+        for l in pre_leaves.iter() {
+            if is_ob(l)
+                && obond_frame_ok(l, false, "", "", "", 0, h)
+                && posted.contains(l)
+                && !post_leaves.contains(l)
+            {
+                let mut d = base.clone();
+                merge(
+                    &mut d,
+                    serde_json::json!({
+                        "leaf": l, "keep": true,
+                        "leaf_proof": proof_json(pre_leaves, index_of(pre_leaves, l)?),
+                        "keep_proof": proof_json(posted, index_of(posted, l)?),
+                    }),
+                )?;
+                return Some(xf_built("mframe", d));
+            }
+        }
+    }
+    // Inserted leaves. R9-H1: an `obond:` leaf the honest replay also
+    // inserts is still judged by its disqualifier evidence — a 0e that kept
+    // the +50000 refund instead of paying the bond posts the same leaf but a
+    // different PERP (the evidence never exists for the honest tree).
+    for l in posted.iter() {
+        let honest_has = post_leaves.contains(l);
+        if pre_leaves.contains(l) || (honest_has && !is_ob(l)) {
+            continue;
+        }
+        let mut extra = serde_json::json!({});
+        if is_band(l) {
+            if tag == "0a" {
+                continue;
+            }
+        } else if is_ob(l) {
+            if !obond_frame_ok(l, true, &tag, &oa, &target, k, h) && honest_has {
+                continue;
+            }
+            if obond_frame_ok(l, true, &tag, &oa, &target, k, h) {
+                // Allowed unless a disqualifier is provable.
+                let ev = if tag == "0e" {
+                    // R9-H1: at k == 0 an expired leaf of oa was released at
+                    // the commit of h - 1: it neither rejects the 0e nor
+                    // proves "not debited" by equal PERP (the refund paid
+                    // the debit); only +ORACLE_BOND_PERP does.
+                    let expired = pob.is_some_and(|pb| {
+                        let u = &pb[bkey.len()..];
+                        k == 0
+                            && u.len() <= 15
+                            && !u.starts_with('0')
+                            && json_int(u).is_some_and(|v| v < h as i128)
+                    });
+                    match pob {
+                        Some(pb) if !expired => Some(
+                            serde_json::json!({"pob": pb, "pob_proof": proof_json(pre_leaves, index_of(pre_leaves, pb)?)}),
+                        ),
+                        _ => {
+                            let ak = format!("acct:{oa}:");
+                            let a0 = pre_leaves.iter().find(|x| x.starts_with(&ak));
+                            let a1 = posted.iter().find(|x| x.starts_with(&ak));
+                            match (a0, a1) {
+                                (Some(x0), Some(x1))
+                                    if x0.split(':').count() == 5 && x1.split(':').count() == 5 =>
+                                {
+                                    let (s0, s1) = (x0.split(':').nth(3)?, x1.split(':').nth(3)?);
+                                    let pa = serde_json::json!({
+                                        "pa0": x0, "pa0_proof": proof_json(pre_leaves, index_of(pre_leaves, x0)?),
+                                        "pa1": x1, "pa1_proof": proof_json(posted, index_of(posted, x1)?),
+                                    });
+                                    let refund_kept = k == 0
+                                        && s0.len() <= 14
+                                        && matches!((json_int(s0), json_int(s1)), (Some(p0), Some(p1)) if p1 == p0 + minuend_types::ORACLE_BOND_PERP as i128);
+                                    if (s0 == s1 && k > 0) || refund_kept {
+                                        Some(pa)
+                                    } else if s0 == s1 && pob.is_none() {
+                                        // k == 0: equal PERP is "not debited"
+                                        // only with oa shown bond-less.
+                                        nobond_ev
+                                            .clone()
+                                            .and_then(|mut e| merge(&mut e, pa).map(|_| e))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                (None, _) => prefix_absence(pre_leaves, &ak)
+                                    .and_then(|v| renamed(v, "aleft", "aright")),
+                                _ => None,
+                            }
+                        }
+                    }
+                } else if let Some(pb) = pob {
+                    (*pb != format!("{bkey}0")).then(|| {
+                        serde_json::json!({"pob": pb, "pob_proof": proof_json(pre_leaves, index_of(pre_leaves, pb).unwrap_or(0))})
+                    })
+                } else {
+                    nobond_ev.clone()
+                };
+                match ev {
+                    Some(e) => extra = e,
+                    None => continue,
+                }
+            }
+        } else {
+            continue;
+        }
+        let mut d = base.clone();
+        merge(
+            &mut d,
+            serde_json::json!({"leaf": l, "ins": true, "leaf_proof": proof_json(posted, index_of(posted, l)?)}),
+        )?;
+        merge(&mut d, extra)?;
+        merge(&mut d, exact_absence(pre_leaves, l, "left", "right")?)?;
+        return Some(xf_built("mframe", d));
+    }
+    let meta_of = |tree: &[String], m: &str| {
+        let key = format!("meta:{m}:");
+        tree.iter().find(|l| l.starts_with(&key)).cloned()
+    };
+    let markets: std::collections::BTreeSet<String> = pre_leaves
+        .iter()
+        .chain(posted.iter())
+        .filter(|l| l.starts_with("meta:") && l.split(':').count() == 11)
+        .filter_map(|l| l.split(':').nth(1).map(String::from))
+        .collect();
+    for m in markets {
+        let m0 = meta_of(pre_leaves, &m);
+        let m1 = meta_of(posted, &m);
+        let honest = meta_of(post_leaves, &m);
+        if m1 == honest {
+            continue;
+        }
+        let key = format!("meta:{m}:");
+        let mut d = base.clone();
+        match (&m0, &m1) {
+            (Some(a), Some(b)) => {
+                let z: Vec<&str> = op.split(':').collect();
+                let plm = (z.first() == Some(&"p") && z.len() == 10 && z[2] == m)
+                    || (z.first() == Some(&"L") && z.len() == 4 && z[3] == m);
+                let qa: Vec<&str> = a.split(':').collect();
+                let qb: Vec<&str> = b.split(':').collect();
+                let mark_only = qa.len() == 11
+                    && qb.len() == 11
+                    && qa[8] != qb[8]
+                    && (0..11).all(|i| i == 8 || qa[i] == qb[i]);
+                let (fill, fev) = if plm && mark_only {
+                    unit_fill_evidence(batch, k)?
+                } else {
+                    (None, serde_json::json!({}))
+                };
+                let ctx = MetaCtx {
+                    op,
+                    tag: &tag,
+                    u_pre: &u_pre,
+                    unit: unit_hexes.get(k).map(String::as_str).unwrap_or(""),
+                    fill: fill.as_deref(),
+                    bonded: pob.is_some(),
+                };
+                if mframe_meta_bad(&ctx, a, b) != Some(true) {
+                    continue;
+                }
+                merge(&mut d, fev)?;
+                if tag == "06" && pob.is_none() {
+                    if let Some(e) = nobond_ev.clone() {
+                        merge(&mut d, e)?;
+                    }
+                }
+                merge(
+                    &mut d,
+                    serde_json::json!({
+                        "pre_meta": a, "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, a)?),
+                        "post_meta": b, "post_meta_proof": proof_json(posted, index_of(posted, b)?),
+                    }),
+                )?;
+            }
+            (Some(a), None) => {
+                merge(
+                    &mut d,
+                    serde_json::json!({"pre_meta": a, "pre_meta_proof": proof_json(pre_leaves, index_of(pre_leaves, a)?)}),
+                )?;
+                merge(&mut d, prefix_absence(posted, &key)?)?;
+            }
+            (None, Some(b)) => {
+                if tag == "0a" {
+                    continue;
+                }
+                merge(
+                    &mut d,
+                    serde_json::json!({"post_meta": b, "post_meta_proof": proof_json(posted, index_of(posted, b)?)}),
+                )?;
+                merge(&mut d, prefix_absence(pre_leaves, &key)?)?;
+            }
+            (None, None) => continue,
+        }
+        return Some(xf_built("mframe", d));
+    }
+    None
+}
+
+/// Round 7b P-noband (R7-H2): a market's meta: leaf in the POSTED post tree
+/// without its band: leaf (the honest replay always has both).
+fn noband_proof(batch: &Batch, k: usize, op: &str, post_leaves: &[String]) -> Option<BuiltProof> {
+    let posted = batch.leaf_trace.get(k)?;
+    for meta in posted.iter() {
+        let q: Vec<&str> = meta.split(':').collect();
+        if q.len() != 11 || q[0] != "meta" {
+            continue;
+        }
+        let key = format!("band:{}:", q[1]);
+        if posted.iter().any(|l| l.starts_with(&key))
+            || !post_leaves.iter().any(|l| l.starts_with(&key))
+        {
+            continue;
+        }
+        // Round 9: P-noband lives on the claw AA, whose header also
+        // stale-checks fills_root.
+        let mut d = serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "ops_root": batch.checkpoint.ops_root,
+            "units_root": batch.checkpoint.units_root,
+            "fills_root": batch.checkpoint.fills_root,
+            "k": k,
+            "op": op,
+            "post_wit": batch.trace.get(k)?.clone(),
+            "post_proof": proof_json(&batch.trace, k),
+            "meta": meta,
+            "meta_proof": proof_json(posted, index_of(posted, meta)?),
+        });
+        merge(&mut d, prefix_absence(posted, &key)?)?;
+        return Some(xf_built("noband", d));
+    }
+    None
+}
+
+/// R2-A-1 P-tip: the committed wit_root is not the trace's last element.
+fn tip_proof(batch: &Batch) -> Option<BuiltProof> {
+    let n = batch.checkpoint.unit_count as usize;
+    let tip = batch.trace.get(n.checked_sub(1)?)?;
+    if *tip == batch.checkpoint.wit_root {
+        return None;
+    }
+    Some(BuiltProof {
+        pred: "tip".into(),
+        fill_aa: false,
+        bind_aa: true,
+        data: serde_json::json!({"tip": tip, "tip_proof": proof_json(&batch.trace, n - 1)}),
+    })
+}
+
+/// #47 A2: P-wpin / P-adr proof for unit `k`, emitted only when the POSTED
+/// post tree breaks the binding AA's rule and the honest replay does not
+/// (a rule the honest engine itself broke would be a model bug — stay
+/// silent rather than challenge an honest batch).
+fn binding_proof(
+    batch: &Batch,
+    k: usize,
+    op: &str,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+    backing: &Backing,
+) -> Option<BuiltProof> {
+    let posted_post = batch.leaf_trace.get(k)?;
+    let liar = posted_post.iter().find(|l| {
+        binding_violation(op, pre_leaves, l, Some(backing)).is_some()
+            && !post_leaves.iter().any(|h| h == *l)
+    })?;
+    if post_leaves
+        .iter()
+        // The honest replay binds only on a credited, evidence-backed
+        // deposit: judge its leaves without the offline backing lookup.
+        .any(|l| binding_violation(op, pre_leaves, l, None).is_some())
+    {
+        return None;
+    }
+    let wpin = liar.starts_with("acct:");
+    let key = if wpin {
+        format!("acct:{}:", liar.split(':').nth(1)?)
+    } else {
+        format!("adr:{}:", liar.split(':').nth(1)?)
+    };
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "k": k,
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+        "post_wit": batch.trace.get(k)?.clone(),
+        "post_proof": proof_json(&batch.trace, k),
+        "post_leaf": liar,
+        "post_leaf_proof": proof_json(posted_post, index_of(posted_post, liar)?),
+    });
+    let pre_fields = pre_wit_fields(batch, k, pre_leaves);
+    let obj = data.as_object_mut()?;
+    obj.extend(pre_fields.as_object()?.clone());
+    match pre_leaves.iter().position(|l| l.starts_with(&key)) {
+        Some(i) => {
+            obj.insert("pre_leaf".into(), pre_leaves[i].clone().into());
+            obj.insert("pre_leaf_proof".into(), proof_json(pre_leaves, i));
+        }
+        None => {
+            let absent = prefix_absence(pre_leaves, &key)?;
+            obj.extend(absent.as_object()?.clone());
+            // R2-A-8: a new binding of an already-bound account.
+            if !wpin {
+                let xkey = format!("adrx:{}:", liar.split(':').nth(2)?);
+                if let Some(i) = pre_leaves.iter().position(|l| l.starts_with(&xkey)) {
+                    obj.insert("xleaf".into(), pre_leaves[i].clone().into());
+                    obj.insert("xleaf_proof".into(), proof_json(pre_leaves, i));
+                }
+            }
+        }
+    }
+    Some(BuiltProof {
+        pred: if wpin { "wpin".into() } else { "adr".into() },
+        fill_aa: false,
+        bind_aa: true,
+        data,
+    })
 }
 
 fn trace_roots(batch: &Batch) -> serde_json::Value {
@@ -120,8 +2427,10 @@ fn deposit_proof(
     op: &str,
     pre_leaves: &[String],
     is_deposit: bool,
+    vault: &VaultLedger,
 ) -> Option<BuiltProof> {
-    // Parse op: d:{acct}:{amount} (3 parts) or w:{acct}:{amount}:{nonce}.
+    // Parse op: d:/D:{acct}:{amount}:{addr}:{aa_unit_b64} (round 2/3),
+    // w:/W:{acct}:{amount}:{nonce}.
     let parts: Vec<&str> = op.split(':').collect();
     if parts.len() < 3 {
         return None;
@@ -200,16 +2509,115 @@ fn deposit_proof(
         .clone();
     let liar_col: i128 = liar_leaf.split(':').nth(2)?.parse().ok()?;
     let liar_perp: i128 = liar_leaf.split(':').nth(3)?.parse().ok()?;
+    // R7b-N2 (mirrors the AA's `$bk`): at k == 0 an oracle bond returned at
+    // the batch boundary (+ORACLE_BOND_PERP) may sit on top of a gov move.
+    let bond = minuend_types::ORACLE_BOND_PERP as i128;
+    let dperp = liar_perp - pre_perp as i128;
+    // R8-H2 residue (mirrors the AA's `$nob`): the allowance needs an
+    // EXPIRING bond of the op account in pre (`obond:X:{u}`, 0 < u <= h - 1);
+    // otherwise the proof carries that leaf or the prefix absence.
+    let okey = format!("obond:{acct_hex}:");
+    let ob = pre_leaves.iter().find(|l| l.starts_with(&okey));
+    let h = batch.checkpoint.height;
+    let bond_ok = ob.is_some_and(|l| {
+        let u = &l[okey.len()..];
+        u.len() <= 15 && json_int(u).is_some_and(|v| v > 0 && v < h as i128)
+    });
+    let bk = if is_gov
+        && k == 0
+        && bond_ok
+        && pre_hit.is_some()
+        && liar_perp.to_string().len() <= 14
+        && parts[2].len() <= 14
+        && !(is_deposit && dperp == amount)
+        && (dperp == bond || dperp == bond + if is_deposit { amount } else { -amount })
+    {
+        bond
+    } else {
+        0
+    };
     let (liar_val, col_pinned) = if is_gov {
-        (liar_perp, Some(liar_col))
+        (liar_perp - bk, Some(liar_col))
     } else {
         (liar_col, None)
     };
-    if liar_val == expected
-        && col_pinned
-            .map(|c| Some(c) == gov_col_must_match)
-            .unwrap_or(true)
-    {
+    // R4-A-6 (mirrors the AA): the PERP column is judged by arithmetic only
+    // within 14 digits (engine PERP_SUPPLY_MAX < 1e14); a longer pre column
+    // is not judged at all, a longer post column / amount only as unchanged.
+    if is_gov && pre_hit.is_some() && pre_perp.to_string().len() > 14 {
+        return None;
+    }
+    let pnum = !is_gov || (liar_perp.to_string().len() <= 14 && parts[2].len() <= 14);
+    let liar_val_is_expected = pnum && liar_val == expected;
+    // R8-C3 (mirrors the AA's `$gcr`; was #47 B6): every PERP holder has
+    // an acct leaf now, so a credited `D:` on a pre-absent account posts
+    // `acct:X:0:{amount}:0` (credited: backing judged). Any other posted
+    // leaf for a pre-absent account under a gov op is fraud.
+    let gov_fresh_ok = is_gov
+        && pre_hit.is_none()
+        && is_deposit
+        && liar_col == 0
+        && parts[2].len() <= 14
+        && liar_perp == amount;
+    let gov_fresh = is_gov && pre_hit.is_none() && !gov_fresh_ok;
+    // #47 (cross-PR, mirrors the AA): a REJECTED op leaves the moving
+    // column unchanged (fresh non-gov account: absent or col 0). Rejected
+    // units are committed like applied ones, so "unchanged" is an honest
+    // outcome the AA bounces — never build a proof for it.
+    let unchanged = match &pre_hit {
+        Some(_) => {
+            let pre_val = if is_gov { pre_perp as i128 } else { pre_col };
+            liar_val == pre_val
+        }
+        None => !is_gov && liar_col == 0,
+    };
+    let col_ok = col_pinned
+        .map(|c| Some(c) == gov_col_must_match)
+        .unwrap_or(true);
+    // R3-A-1 (mirrors the AA): an ACCEPTED withdrawal never leaves the
+    // moving column negative, and a pre-absent account can only have its
+    // withdrawal REJECTED (col 0).
+    let wd_ok = is_deposit
+        || unchanged
+        || (pre_hit.is_some() && (if is_gov { liar_perp } else { liar_val }) >= 0);
+    // R2-A-3 (mirrors the AA's credit arm): a credited collateral deposit
+    // (R3-A-7: or PERP `D:` deposit) is also judged on its anchor marker
+    // `dep:{aa_unit}` — already in the pre tree (re-credit) or missing from
+    // the posted post tree — and (R3-A-4) on the binding
+    // `adr:{addr}:{acct}`, which must be in the posted post tree. The
+    // vault-ledger backing (dep_/depp_<unit> = payer:amount:account) is
+    // on-chain state: the AA checks it on every deposit challenge, and
+    // (R5 integration) this builder judges it only from a hub read in
+    // `vault` ([`deposit_unbacked_by_ledger`]) — never from batch
+    // evidence, because a PERP deposit the vault bounced at its
+    // `pperp_total` cap still yields a verifying evidence.
+    let credited = is_deposit
+        && amount > 0
+        && liar_val_is_expected
+        && !unchanged
+        && (!is_gov || (pre_hit.is_some() && col_ok) || gov_fresh_ok);
+    let mut dep_extra = serde_json::Map::new();
+    if credited {
+        if let Some(u) = parts.get(4) {
+            let mk = format!("dep:{u}");
+            if let Some(i) = index_of(pre_leaves, &mk) {
+                dep_extra.insert("dep_pre_proof".into(), proof_json(pre_leaves, i));
+            } else if let Some(a) = exact_absence(&posted_post, &mk, "dleft", "dright") {
+                dep_extra.extend(a.as_object()?.clone());
+            }
+        }
+        if dep_extra.is_empty() {
+            if let Some(addr) = parts.get(3) {
+                let ak = format!("adr:{addr}:{acct_hex}");
+                if let Some(a) = exact_absence(&posted_post, &ak, "aleft", "aright") {
+                    dep_extra.extend(a.as_object()?.clone());
+                }
+            }
+        }
+        if dep_extra.is_empty() && !deposit_unbacked_by_ledger(vault, is_gov, &parts) {
+            return None; // credited, marker + binding fine, backing not known bad — honest leg
+        }
+    } else if !gov_fresh && (liar_val_is_expected || unchanged) && col_ok && wd_ok {
         return None; // honest leg — keep scanning
     }
     let mut roots = trace_roots(batch);
@@ -237,6 +2645,29 @@ fn deposit_proof(
     obj.insert("post_proof".into(), post_proof);
     obj.insert("post_leaf".into(), liar_leaf.into());
     obj.insert("post_leaf_proof".into(), post_leaf_proof);
+    obj.extend(dep_extra);
+    if is_gov && k == 0 && pre_hit.is_some() && !bond_ok {
+        match ob {
+            Some(l) => {
+                obj.insert("obond".into(), l.clone().into());
+                obj.insert(
+                    "obond_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, l)?),
+                );
+            }
+            None => {
+                if let Some(abs) = prefix_absence(pre_leaves, &okey) {
+                    let o = abs.as_object()?;
+                    obj.insert("oleft".into(), o.get("left")?.clone());
+                    obj.insert("oleft_proof".into(), o.get("left_proof")?.clone());
+                    if let (Some(r), Some(rp)) = (o.get("right"), o.get("right_proof")) {
+                        obj.insert("oright".into(), r.clone());
+                        obj.insert("oright_proof".into(), rp.clone());
+                    }
+                }
+            }
+        }
+    }
     if let Some(pre_leaf) = pre_hit {
         let pre_idx = index_of(pre_leaves, &pre_leaf)?;
         obj.insert("pre_leaf".into(), pre_leaf.into());
@@ -252,8 +2683,41 @@ fn deposit_proof(
             "withdraw".into()
         },
         fill_aa: false,
+        bind_aa: false,
         data,
     })
+}
+
+/// R5 integration (vault `pperp_total` cap, R5-A-5): `true` only when the
+/// hub-read vault ledger CERTAINLY fails the deposit AA's `$backed` test
+/// for a credited `d:`/`D:` op `parts` = `[d|D, acct, amount, addr,
+/// anchor_b64]`: record known absent, not `payer:amount:account`, payer !=
+/// op address, account != op account (exact strings, like the AA), or
+/// op amount > recorded amount (both <= 15 digits). Unknown record or an
+/// uncertain number = `false` (no proof the AA might bounce). Batch
+/// evidence is NOT consulted: a PERP deposit bounced at the vault's cap
+/// leaves no `depp_` record although its joint still verifies.
+fn deposit_unbacked_by_ledger(vault: &VaultLedger, is_gov: bool, parts: &[&str]) -> bool {
+    if parts.len() != 5 {
+        return false;
+    }
+    let key = format!("{}{}", if is_gov { "depp_" } else { "dep_" }, parts[4]);
+    match vault.get(&key) {
+        None => false,
+        Some(None) => true,
+        Some(Some(rec)) => {
+            let r: Vec<&str> = rec.split(':').collect();
+            if r.len() != 3 || r[0] != parts[3] || r[2] != parts[1] {
+                return true;
+            }
+            let num = |s: &str| -> Option<u64> {
+                (!s.is_empty() && s.len() <= 15 && s.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| s.parse().ok())
+                    .flatten()
+            };
+            matches!((num(parts[2]), num(r[1])), (Some(a), Some(b)) if a > b)
+        }
+    }
 }
 
 fn omit_proof(batch: &Batch, unit_hexes: &[String], id: &str) -> Option<BuiltProof> {
@@ -283,6 +2747,7 @@ fn omit_proof(batch: &Batch, unit_hexes: &[String], id: &str) -> Option<BuiltPro
     Some(BuiltProof {
         pred: "omit".into(),
         fill_aa: false,
+        bind_aa: false,
         data,
     })
 }
@@ -318,19 +2783,6 @@ fn range_straddle(
     None
 }
 
-fn acct_pos_range(
-    tree: &[String],
-    acct_hex: &str,
-    allow_last: bool,
-) -> Option<(usize, Option<usize>)> {
-    range_straddle(
-        tree,
-        &format!("pos:{acct_hex}:"),
-        &format!("pos:{acct_hex};"),
-        allow_last,
-    )
-}
-
 fn mkt_pos_range(
     tree: &[String],
     acct_hex: &str,
@@ -345,38 +2797,201 @@ fn mkt_pos_range(
     )
 }
 
-/// Mirror of the fill-math AA's per-leg verdict for one candidate tree
-/// (honest replay or committed post): true = the AA would reach the fee
-/// gate (verdict) on this tree. Callers emit only when the honest tree is
-/// silent AND the committed tree fires — no false positives on replay.
-///
-/// `iso_taker` = `(taker_order_hex, taker_post, post_back)` for a kind 0/1
-/// taker whose unit op is an isolated Place; the collateral expectation
-/// becomes `exp_fill - taker_post - still + post_back` with `still` the
-/// taker order's own post ord leaf (membership, or 0 behind provable
-/// absence). A wrong-account leaf, an unparseable margin_left or an
-/// unprovable absence bounces the AA before any verdict — mirrored here as
-/// `false` (silent).
-#[allow(clippy::too_many_arguments)]
-fn aa_fill_verdict(
-    tree: &[String],
-    acct_hex: &str,
-    market: &str,
+/// What the fill AA derives for a kind 0/1 TAKER leg from the unit's own
+/// Place op (#47 A3): the committed `taker_post`, whether the unfilled
+/// remainder rests (Limit + Gtc + qty left) and, if so, the exact fields
+/// its post ord leaf (id = the fill's `taker_order`) must carry.
+struct TakerPlace<'a> {
+    tord: &'a str,
+    tpost: i128,
+    pback: i128,
+    rest: bool,
+    /// margin_left the resting order keeps (`margin - taker_post`, 0 cross).
+    tml: i128,
+    side: &'a str,
+    price: &'a str,
+    remaining: i128,
+    /// R5-A-2: the AA compares the resting order's remaining to within
+    /// floor(op qty / 1e12) (0 below 1e12); this mirror allows twice that.
+    remaining_tol: i128,
+    iso: &'a str,
+}
+
+/// Kind 2/3 leg on the Liquidate order-book path (#47 B1/B2): for the
+/// taker (= liquidation target), the keeper reward seized after the fill.
+/// (The positive-counterparty gate lives on [`Leg::counterparty`].)
+struct LiqLeg {
+    reward: Option<i128>,
+}
+
+/// One challenged leg, fully pre-computed from the PRE leaves, the fill
+/// string and the op — everything the AA recomputes before it looks at a
+/// post tree.
+struct Leg<'a> {
+    acct_hex: &'a str,
+    market: &'a str,
     exp_qty: i64,
     exp_entry: i64,
-    exp_fill: i128,
     exp_absent: bool,
-    iso_taker: Option<(&str, i128, i128)>,
-    kind: u8,
-    who_taker: bool,
-    keeper: Option<&(String, i128, i128)>,
+    /// Some((expected post bucket, mirror tolerance)) when the AA checks it.
+    exp_bucket: Option<(i128, i128)>,
+    exp_fill: i128,
+    taker_place: Option<TakerPlace<'a>>,
+    liq: Option<LiqLeg>,
     allow_last: bool,
-    pre_perp_w: Option<(&str, &str)>,
+    /// The other fill party (claw guard: its proven post collateral must be
+    /// > 0 before a collateral mismatch on THIS leg is fraud).
+    counterparty: &'a str,
+    /// R5-A-2 claw range: may a proven positive counterparty rule out a
+    /// payment by THIS leg? False for a kind 0/1 maker leg whose taker
+    /// Place is not a known cross one (an isolated taker's refund lands
+    /// after the claw) and for a kind 2/3 leg whose keeper may be the
+    /// maker (a keeper credit can lift a clawed maker above 0).
+    claw_checkable: bool,
+    /// R5-A-2: the AA's rounding tolerance, 6 + S / 1e12 over the proven
+    /// magnitudes (exact here).
+    tol: i128,
+    /// R2-A-7: kind 1 — the collateral leg is never judged.
+    col_skip: bool,
+    /// R5-A-2: keeper reward a kind 2/3 maker that may be the keeper can
+    /// additionally hold (0 otherwise).
+    kx: i128,
+    /// R5-A-2: a kind 0/1 taker under a non-`p:` descriptor (Reveal{Place}
+    /// is `x:`): Some(max(pre collateral, 0)) — the cross identity is only a
+    /// ceiling, fill-stage = ceiling - that floor, no lower bound.
+    xt_floor: Option<i128>,
+    /// R5-A-2: an ADL take larger than the leg's pre position (fraud).
+    adl_over: bool,
+    /// R4-A-5: price / entry / qty at or above 1e14 — the AA skips the
+    /// position leg's numeric qty/entry compare (the leaf must still exist
+    /// or be proven absent as expected).
+    pos_big: bool,
+}
+
+/// R3-A-3: the fill AA checks the collateral identity to a tolerance of
+/// FILL_TOL + S / 1e12 (ocore Oscript arithmetic keeps 15 significant
+/// digits; R5-A-2 replaced the old 1e14 skip gates with that relative
+/// slack). This mirror builds a proof only when the AA's verdict is certain
+/// whatever its rounding: it widens every band by three AA tolerances.
+const FILL_TOL: i128 = 6;
+const FILL_MAX: i128 = 100_000_000_000_000;
+const FILL_MARGIN: i128 = 16;
+const FILL_LIM: i128 = FILL_MAX - FILL_MARGIN;
+const FILL_REL: i128 = 1_000_000_000_000;
+
+/// R5-A-6: how Oscript reads a numeric-looking `split()` field — ocore
+/// `string_utils.toNumber` (`^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$`, then
+/// parseFloat, finite only) into a 15-digit Decimal; anything else stays a
+/// string (None).
+fn oscript_num(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let digits = |i: &mut usize| {
+        let st = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i > st
+    };
+    if !digits(&mut i) {
+        return None;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        if !digits(&mut i) {
+            return None;
+        }
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        if !digits(&mut i) {
+            return None;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    let f: f64 = s.parse().ok()?;
+    if !f.is_finite() {
+        return None;
+    }
+    Some(if f == 0.0 { 0.0 } else { f })
+}
+
+/// R5-A-6: Oscript `a == b` on two `split()` fields, when certain: numbers
+/// compare numerically (exact below 1e15), strings as strings, a number
+/// never equals a string. None = 15-digit rounding could go either way.
+fn oscript_eq(a: &str, b: &str) -> Option<bool> {
+    match (oscript_num(a), oscript_num(b)) {
+        (Some(x), Some(y)) => {
+            let exact = x.abs() < 1e15 && y.abs() < 1e15 && x.fract() == 0.0 && y.fract() == 0.0;
+            if x == y {
+                Some(true)
+            } else if exact || (x - y).abs() > 1e-12 * x.abs().max(y.abs()) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        (None, None) => Some(a == b),
+        _ => Some(false),
+    }
+}
+
+/// R5-A-3: the AA's `!is_integer(q) OR q <= 0 OR q > remaining` on a fill
+/// qty field against an honest remaining, when certain.
+fn oscript_qty_bad(q: &str, rem: &str) -> Option<bool> {
+    let r = oscript_num(rem)?;
+    let Some(x) = oscript_num(q) else {
+        return Some(true); // a string: is_integer() is false
+    };
+    if x.fract() != 0.0 || x <= 0.0 {
+        return Some(true);
+    }
+    if x.abs() < 1e15 && r.abs() < 1e15 {
+        Some(x > r)
+    } else if x > r * (1.0 + 1e-12) {
+        Some(true)
+    } else if x < r * (1.0 - 1e-12) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn acct_col(tree: &[String], acct_hex: &str) -> Option<i128> {
+    tree.iter()
+        .find(|l| l.starts_with(&format!("acct:{acct_hex}:")))
+        .and_then(|l| l.split(':').nth(2))
+        .and_then(|c| c.parse().ok())
+}
+
+/// Mirror of the fill-math AA's per-leg verdict for one candidate tree
+/// (honest replay or committed post): true = the AA would reach the fee
+/// gate (verdict) on this tree. Evaluated in the AA's own order: every
+/// bounce (missing leaf, kind 2/3 counterparty gate, negative expected
+/// collateral) returns false BEFORE any fraud term is considered.
+///
+/// `op_lie` = the committed fill disagrees with its own Place op (taker
+/// account / market / side / qty / taker_post) — fraud on its own, folded
+/// in after the bounces like the AA's `$op_ok`. `pre_perp_w` enables the
+/// #37-17 perp/W pin (committed tree only).
+fn aa_fill_verdict(
+    tree: &[String],
+    leg: &Leg,
+    op_lie: bool,
+    pre_perp_w: Option<(&str, &str, bool)>,
 ) -> bool {
     // Missing post acct leaf bounces the AA prelude — no verdict at all.
     let post_acct = match tree
         .iter()
-        .find(|l| l.starts_with(&format!("acct:{acct_hex}:")))
+        .find(|l| l.starts_with(&format!("acct:{}:", leg.acct_hex)))
     {
         Some(a) => a,
         None => return false,
@@ -385,28 +3000,35 @@ fn aa_fill_verdict(
         Some(c) => c,
         None => return false,
     };
-    // #37-17: the AA pins post.perp == pre.perp and post.W == pre.W —
-    // a drifted committed leaf verdicts even when collateral matches.
-    if let Some((pp, pw)) = pre_perp_w {
-        let mut it = post_acct.split(':');
-        if it.nth(3) != Some(pp) || it.next() != Some(pw) {
-            return true;
+    // #37-17 pin: post.perp == pre.perp and post.W == pre.W. R7b-N2: at
+    // k == 0 (third tuple field) the PERP column may also carry an oracle
+    // bond returned at the batch boundary (+ORACLE_BOND_PERP).
+    let pin_ok = match pre_perp_w {
+        Some((pp, pw, k0)) => {
+            let mut it = post_acct.split(':');
+            let p1 = it.nth(3);
+            let w1 = it.next();
+            (p1 == Some(pp) || (k0 && bond_release(pp, p1.unwrap_or("")))) && w1 == Some(pw)
         }
-    }
+        None => true,
+    };
+    // #47 claw guard: a proven POSITIVE counterparty post leaf rules out a
+    // payment by this leg (R5-A-2: a range bound, never a bounce).
+    let cp_pos = matches!(acct_col(tree, leg.counterparty), Some(c) if c > 0);
     // Position leg.
     let pos_leaf = tree.iter().find(|l| {
         l.starts_with("pos:") && {
             let o: Vec<&str> = l.split(':').collect();
-            o.len() == 7 && o[1] == acct_hex && o[2] == market
+            o.len() == 7 && o[1] == leg.acct_hex && o[2] == leg.market
         }
     });
-    let (pos_ok, pos_bail) = if exp_absent {
+    let (pos_ok, pos_bail) = if leg.exp_absent {
         if pos_leaf.is_some() {
             (false, false) // surviving leaf where the engine removed it
-        } else if acct_pos_range(tree, acct_hex, allow_last).is_some() {
-            (true, false)
         } else {
-            match mkt_pos_range(tree, acct_hex, market, allow_last) {
+            // R5-A-2: the AA proves absence by the market-range straddle
+            // only (the acct-wide arm was dropped for ops budget).
+            match mkt_pos_range(tree, leg.acct_hex, leg.market, leg.allow_last) {
                 Some(_) => (true, false),
                 None => (false, true),
             }
@@ -415,85 +3037,97 @@ fn aa_fill_verdict(
         match pos_leaf {
             Some(p) => {
                 let o: Vec<&str> = p.split(':').collect();
-                let ok = o[3].parse::<i64>().ok() == Some(exp_qty)
-                    && o[4]
-                        .parse::<i64>()
-                        .map(|e| (e - exp_entry).abs() <= 1)
-                        .unwrap_or(false);
+                let ok = (leg.pos_big
+                    || (o[3].parse::<i64>().ok() == Some(leg.exp_qty)
+                        && o[4]
+                            .parse::<i64>()
+                            .map(|e| (e - leg.exp_entry).abs() <= 1)
+                            .unwrap_or(false)))
+                    && leg
+                        .exp_bucket
+                        .map(|(b, btol)| {
+                            o[6].parse::<i128>()
+                                .map(|x| (x - b).abs() <= btol)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(true);
                 (ok, false)
             }
             None => (false, true),
         }
     };
-    // Collateral leg.
-    let acct_empty = acct_pos_range(tree, acct_hex, allow_last).is_some();
-    let expected = match iso_taker {
-        Some((tord, tpost, pback)) => {
-            let key = format!("ord:{tord}:");
-            match tree.iter().find(|l| l.starts_with(&key)) {
-                Some(l) => {
-                    let o: Vec<&str> = l.split(':').collect();
-                    if o.len() != 10 || o[7] != acct_hex {
-                        return false; // AA: 'bad ord proof'
-                    }
-                    match o[9].parse::<i128>() {
-                        Ok(still) => exp_fill - tpost - still + pback,
-                        Err(_) => return false, // AA: coercion bounce
-                    }
-                }
-                None => {
-                    if range_straddle(tree, &key, &format!("ord:{tord};"), allow_last).is_none() {
-                        return false; // AA: absence unprovable → bounce
-                    }
-                    exp_fill - tpost + pback
+    // Collateral leg (+ the resting-order leg of a kind 0/1 taker).
+    // `mid` = fill-stage collateral the engine's claw sees (before an
+    // isolated taker's unrested escrow refund).
+    let (expected, mid, ord_ok, ord_bail) = if let Some(liq) = &leg.liq {
+        match liq.reward {
+            // Liquidation target: fill-stage minus the keeper reward
+            // seized from its own non-negative collateral.
+            Some(reward) => {
+                let kpay = if leg.exp_fill > 0 {
+                    reward.min(leg.exp_fill)
+                } else {
+                    0
+                };
+                let e = leg.exp_fill - kpay;
+                (e, e, true, true)
+            }
+            None => (leg.exp_fill, leg.exp_fill, true, true),
+        }
+    } else if let Some(tp) = &leg.taker_place {
+        let still = if tp.rest { tp.tml } else { 0 };
+        let key = format!("ord:{}:", tp.tord);
+        let (ord_ok, ord_bail) = match tree.iter().find(|l| l.starts_with(&key)) {
+            Some(l) => {
+                let o: Vec<&str> = l.split(':').collect();
+                let ok = tp.rest
+                    && o.len() == 10
+                    && o[2] == leg.market
+                    && o[3] == tp.side
+                    && o[4] == tp.price
+                    && o[6]
+                        .parse::<i128>()
+                        .is_ok_and(|r| (r - tp.remaining).abs() <= tp.remaining_tol)
+                    && o[7] == leg.acct_hex
+                    && o[8] == tp.iso
+                    && o[9].parse::<i128>().ok() == Some(tp.tml);
+                (ok, false)
+            }
+            None => {
+                // The AA proves absence by straddle or before-min only.
+                if range_straddle(tree, &key, &format!("ord:{};", tp.tord), false).is_some() {
+                    (!tp.rest, false)
+                } else {
+                    (true, true)
                 }
             }
-        }
-        None => exp_fill,
-    };
-    let (col_ok, col_bail) = if kind == 3 && who_taker {
-        if !acct_empty {
-            (false, true)
-        } else {
-            match keeper {
-                Some((kh, kpre, reward)) => {
-                    let kcol: Option<i128> = tree
-                        .iter()
-                        .find(|l| l.starts_with(&format!("acct:{kh}:")))
-                        .and_then(|l| l.split(':').nth(2))
-                        .and_then(|c| c.parse().ok());
-                    match kcol {
-                        Some(kcol) => {
-                            let bal = exp_fill.max(0);
-                            let pay = (*reward).min(bal);
-                            (post_col == bal - pay && kcol == *kpre + pay, false)
-                        }
-                        None => (false, true), // AA: missing keeper proof bails
-                    }
-                }
-                None => (false, true),
-            }
-        }
+        };
+        // exp_fill already carries release + pnl - fee; the escrow
+        // identity adds -(taker_post + still) + post_back.
+        let e = leg.exp_fill - tp.tpost - still + tp.pback;
+        (e, e - tp.tml + still, ord_ok, ord_bail)
+    } else if let Some(floor) = leg.xt_floor {
+        // x: taker: cross identity as the ceiling, fill-stage below it.
+        (leg.exp_fill, leg.exp_fill - floor, true, true)
     } else {
-        // Negative expected post: the engine claws a fill's hole back
-        // from the winner (zero-sum, insurance untouched) and any
-        // remainder the winner cannot cover stays as negative collateral
-        // — the AA bounces with no verdict for that shape (empty range
-        // or not), so stay silent instead of expecting post_col == 0.
-        if expected < 0 {
-            return false;
-        }
-        // Exact identity for both range shapes (a non-negative expected
-        // equals max(expected, 0)), never a direction range — a larger
-        // committed post is the inflation the plan hunts.
-        (post_col == expected, false)
+        (leg.exp_fill, leg.exp_fill, true, true)
     };
-    // Verdict only when a leg is verified wrong; a bail silences its own
-    // leg (mirrors the AA's $fraud term).
-    if !pos_bail && !pos_ok {
-        return true;
-    }
-    !col_bail && !col_ok
+    // R5-A-2 claw range (mirrors the AA): pays at most max(mid, 0) — none
+    // when a positive counterparty rules the claw out — and receives at
+    // most max(-mid, 0) (+ a keeper reward on a maybe-keeper maker). Every
+    // band is widened by three AA tolerances so a verdict here is certain.
+    let slack = 3 * leg.tol + 2;
+    let d = post_col - expected;
+    let lo = if leg.xt_floor.is_some() {
+        i128::MIN
+    } else if cp_pos && leg.claw_checkable {
+        -slack
+    } else {
+        -(mid.max(0) + slack)
+    };
+    let hi = (-mid).max(0) + leg.kx + slack;
+    let col_ok = leg.col_skip || (d >= lo && d <= hi);
+    (!pos_bail && !pos_ok) || !col_ok || !pin_ok || op_lie || leg.adl_over || (!ord_bail && !ord_ok)
 }
 
 fn fill_proof(
@@ -502,6 +3136,7 @@ fn fill_proof(
     unit_hex: &str,
     pre_leaves: &[String],
     post_leaves: &[String],
+    honest_fills: &[String],
 ) -> Option<BuiltProof> {
     // Reconstruct this unit's fills from the batch fills list (prefix match).
     let prefix = format!("f:{unit_hex}:");
@@ -539,6 +3174,11 @@ fn fill_proof(
         // Prefix-range ghost: fraud iff NO pre leaf carries this order id.
         // Any same-id leaf sits inside [$lo,$hi) and breaks every AA
         // straddle, so only emit then.
+        // R2-A-6: ADL fills (kind 2) have no maker order (zero id) — the
+        // AA bounces them; never build a ghost proof for one.
+        if parts[12] == "2" || maker_order_hex.bytes().all(|b| b == b'0') {
+            continue;
+        }
         let ord_prefix = format!("ord:{maker_order_hex}:");
         let ghost_hit = !pre_leaves.iter().any(|l| l.starts_with(&ord_prefix));
         if ghost_hit {
@@ -600,146 +3240,209 @@ fn fill_proof(
             return Some(BuiltProof {
                 pred: "ghost".into(),
                 fill_aa: false,
+                bind_aa: false,
                 data,
             });
         }
     }
+    // R4-A-1 P-mbind (book dispute AA): a book fill (kind 0/1/3, any idx)
+    // must match its maker order's PRE leaf — owner, market, opposite side,
+    // price — and fit its remaining qty. R5-A-3 / R5-A-6: mirrors the AA's
+    // NUMERIC reading of split() fields (`1e13` equals `10000000000000`,
+    // `1e30` / `-5` / `0` are bad quantities); built only when the AA's
+    // outcome is certain. Gated on the fill not being a replay fill (an
+    // honest fill always matches).
+    for f in &unit_fills {
+        if honest_fills.iter().any(|h| h == *f) {
+            continue;
+        }
+        let parts: Vec<&str> = f.split(':').collect();
+        if parts.len() != 14 || (parts[11] != "0" && parts[11] != "1") {
+            continue;
+        }
+        if parts[12] == "2" || parts[6].bytes().all(|b| b == b'0') {
+            continue;
+        }
+        let key = format!("ord:{}:", parts[6]);
+        let Some(mo_leaf) = pre_leaves.iter().find(|l| l.starts_with(&key)) else {
+            continue;
+        };
+        let mo: Vec<&str> = mo_leaf.split(':').collect();
+        if mo.len() != 10 {
+            continue;
+        }
+        let opp = if parts[11] == "0" { "1" } else { "0" };
+        let eqs = [
+            oscript_eq(mo[7], parts[4]),
+            oscript_eq(mo[2], parts[7]),
+            oscript_eq(mo[3], opp),
+            oscript_eq(mo[4], parts[8]),
+            oscript_qty_bad(parts[9], mo[6]).map(|b| !b),
+        ];
+        // Any uncertain comparison: stay silent; all bound: no fraud.
+        if eqs.iter().any(|e| e.is_none()) || eqs.iter().all(|e| *e == Some(true)) {
+            continue;
+        }
+        let idx = index_of(&batch.fills, f)?;
+        let mut data = serde_json::json!({
+            "trace_root": batch.checkpoint.trace_root,
+            "fills_root": batch.checkpoint.fills_root,
+            "units_root": batch.checkpoint.units_root,
+            "k": k,
+            "fill": f,
+            "fill_proof": proof_json(&fills_tree, idx),
+            "units_proof": proof_json(&unit_hexes, k),
+            "maker_ord": mo_leaf,
+            "maker_ord_proof": proof_json(pre_leaves, index_of(pre_leaves, mo_leaf)?),
+        });
+        data.as_object_mut()?
+            .extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        return Some(BuiltProof {
+            pred: "mbind".into(),
+            fill_aa: false,
+            bind_aa: false,
+            data,
+        });
+    }
+    // R5-A-2 P-fsane (book dispute AA): a posted fill the engine can never
+    // emit — bad shape, kind vs market, a fill in a unit whose direct Place
+    // is rejected before matching, or a fill party absent from the pre
+    // tree. Only for fills the honest replay did not produce.
+    for f in &unit_fills {
+        if honest_fills.iter().any(|h| h == *f) {
+            continue;
+        }
+        if let Some(p) = fsane_proof(batch, k, f, pre_leaves, &fills_tree, &unit_hexes) {
+            return Some(p);
+        }
+    }
+    // R7-L1: two adjacent idx-0 fills of this unit (even copies of the
+    // honest one) — P-fsane with the left neighbour.
+    if let Some(p) = fsane_dup_proof(batch, k, unit_hex, pre_leaves, &fills_tree, &unit_hexes) {
+        return Some(p);
+    }
     // Skip: another live order strictly better than the filled maker.
-    // #37-9: single-fill units only (mirrors the AA's completeness gate —
-    // an earlier same-unit fill may already have consumed the candidate),
-    // and the candidate must belong to NEITHER fill party (self-trade
-    // rules skip own orders by design; waving them verdicts honest fills).
-    // Multi-fill units fall through to fill_math below.
-    if unit_fills.len() == 1 {
-        for f in &unit_fills {
-            let parts: Vec<&str> = f.split(':').collect();
-            if parts.len() != 14 {
+    // #37-9 / #47 B3: only the unit's FIRST fill (idx 0) — pre_wit is the
+    // book matching started from, so its priority is checkable even in a
+    // multi-fill unit; later fills may have lost their candidate to an
+    // earlier same-unit fill. Owner gate (#47 B7, mirrors the AA): the
+    // taker's own CROSS order is skipped by design (cancel-maker-continue);
+    // the taker's own ESCROWED order on a Place fill (kind 0/1) would have
+    // rejected the whole Place (SelfTrade::Reject), so crossing past it is
+    // fraud. Liquidation fills (kind 2/3) keep the full exemption.
+    for f in &unit_fills {
+        let parts: Vec<&str> = f.split(':').collect();
+        if parts.len() != 14 {
+            continue;
+        }
+        if parts[2] != "0" {
+            continue;
+        }
+        let taker_hex = parts[3].to_string();
+        let maker_order_hex = parts[6].to_string();
+        let market = parts[7].to_string();
+        let price: i64 = match parts[8].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let side = parts[11];
+        let place_fill = parts[12] == "0" || parts[12] == "1";
+        let maker_ord = match pre_leaves.iter().find(|l| {
+            l.starts_with("ord:") && {
+                let o: Vec<&str> = l.split(':').collect();
+                o.len() == 10 && o[1] == maker_order_hex && o[2] == market
+            }
+        }) {
+            Some(m) => m.clone(),
+            None => continue,
+        };
+        let mo: Vec<&str> = maker_ord.split(':').collect();
+        let (mo_price, mo_seq): (i64, u64) = match (mo[4].parse(), mo[5].parse()) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => continue,
+        };
+        for cand in pre_leaves.iter().filter(|l| l.starts_with("ord:")) {
+            let o: Vec<&str> = cand.split(':').collect();
+            if o.len() != 10 || o[2] != market {
                 continue;
             }
-            if parts[2] != "0" {
+            if o[1] == maker_order_hex {
                 continue;
             }
-            let taker_hex = parts[3].to_string();
-            let maker_order_hex = parts[6].to_string();
-            let market = parts[7].to_string();
-            let price: i64 = parts[8].parse().ok()?;
-            let side = parts[11];
-            let maker_ord = pre_leaves
-                .iter()
-                .find(|l| {
-                    l.starts_with("ord:") && {
-                        let o: Vec<&str> = l.split(':').collect();
-                        o.len() == 10 && o[1] == maker_order_hex && o[2] == market
-                    }
-                })?
-                .clone();
-            let mo: Vec<&str> = maker_ord.split(':').collect();
-            let (_mo_side, mo_price, mo_seq): (u8, i64, u64) = (
-                mo[3].parse().ok()?,
-                mo[4].parse().ok()?,
-                mo[5].parse().ok()?,
-            );
-            for cand in pre_leaves.iter().filter(|l| l.starts_with("ord:")) {
-                let o: Vec<&str> = cand.split(':').collect();
-                if o.len() != 10 || o[2] != market {
+            if o[7] == taker_hex {
+                let escrowed = o[9].parse::<i128>().map(|m| m > 0).unwrap_or(false);
+                if !(escrowed && place_fill) {
                     continue;
                 }
-                if o[1] == maker_order_hex {
-                    continue;
-                }
-                // #37-9 owner gate (mirrors the AA): the candidate must not
-                // be the TAKER's own order — own better-priced orders can
-                // never fill against themselves. A skipped MAKER-owned
-                // better order is still real fraud.
-                if o[7] == taker_hex {
-                    continue;
-                }
-                let (c_side, c_price, c_seq): (u8, i64, u64) =
-                    match (o[3].parse(), o[4].parse(), o[5].parse()) {
-                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                        _ => continue,
-                    };
-                let c_rem: u64 = o[6].parse().unwrap_or(0);
-                if c_rem == 0 {
-                    continue;
-                }
-                let better = if side == "0" {
-                    c_side == 1
-                        && (c_price < mo_price || (c_price == mo_price && c_seq < mo_seq))
-                        && c_price <= price
-                } else if side == "1" {
-                    c_side == 0
-                        && (c_price > mo_price || (c_price == mo_price && c_seq < mo_seq))
-                        && c_price >= price
-                } else {
-                    false
+            }
+            let (c_side, c_price, c_seq): (u8, i64, u64) =
+                match (o[3].parse(), o[4].parse(), o[5].parse()) {
+                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                    _ => continue,
                 };
-                if better {
-                    let idx = index_of(&batch.fills, f)?;
-                    // #37-9 completeness mirror: the right neighbor must sit
-                    // outside this unit's fill prefix (the AA gates on it).
-                    let prefix = format!("f:{unit_hex}:");
-                    let right = fills_tree.get(idx + 1)?;
-                    if right.starts_with(&prefix) {
-                        continue;
-                    }
-                    let mut data = serde_json::json!({
-                        "trace_root": batch.checkpoint.trace_root,
-                        "fills_root": batch.checkpoint.fills_root,
-                        "ops_root": batch.checkpoint.ops_root,
-                        "units_root": batch.checkpoint.units_root,
-                        "k": k,
-                        "fill": f,
-                        "fill_proof": proof_json(&fills_tree, idx),
-                        "right": right,
-                        "right_proof": proof_json(&fills_tree, idx + 1),
-                        "units_proof": proof_json(&unit_hexes, k),
-                        "maker_ord": maker_ord,
-                        "better_ord": cand,
-                    });
-                    let pre_fields = pre_wit_fields(batch, k, pre_leaves);
-                    data.as_object_mut()?
-                        .extend(pre_fields.as_object()?.clone());
-                    // Membership proofs for both orders in pre_wit.
-                    let mi = index_of(pre_leaves, &maker_ord)?;
-                    let bi = index_of(pre_leaves, cand)?;
-                    let obj = data.as_object_mut()?;
-                    obj.insert("maker_proof".into(), {
-                    let p = obyte_merkle::proof(pre_leaves, mi);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
+            let c_rem: u64 = o[6].parse().unwrap_or(0);
+            if c_rem == 0 {
+                continue;
+            }
+            let better = if side == "0" {
+                c_side == 1
+                    && (c_price < mo_price || (c_price == mo_price && c_seq < mo_seq))
+                    && c_price <= price
+            } else if side == "1" {
+                c_side == 0
+                    && (c_price > mo_price || (c_price == mo_price && c_seq < mo_seq))
+                    && c_price >= price
+            } else {
+                false
+            };
+            if better {
+                let idx = index_of(&batch.fills, f)?;
+                let mut data = serde_json::json!({
+                    "trace_root": batch.checkpoint.trace_root,
+                    "fills_root": batch.checkpoint.fills_root,
+                    "ops_root": batch.checkpoint.ops_root,
+                    "units_root": batch.checkpoint.units_root,
+                    "k": k,
+                    "fill": f,
+                    "fill_proof": proof_json(&fills_tree, idx),
+                    "units_proof": proof_json(&unit_hexes, k),
+                    "maker_ord": maker_ord,
+                    "better_ord": cand,
                 });
-                    obj.insert("better_proof".into(), {
-                    let p = obyte_merkle::proof(pre_leaves, bi);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
+                let pre_fields = pre_wit_fields(batch, k, pre_leaves);
+                data.as_object_mut()?
+                    .extend(pre_fields.as_object()?.clone());
+                // Membership proofs for both orders in pre_wit.
+                let mi = index_of(pre_leaves, &maker_ord)?;
+                let bi = index_of(pre_leaves, cand)?;
+                let obj = data.as_object_mut()?;
+                obj.insert("maker_proof".into(), proof_json(pre_leaves, mi));
+                obj.insert("better_proof".into(), proof_json(pre_leaves, bi));
+                return Some(BuiltProof {
+                    pred: "skip".into(),
+                    fill_aa: false,
+                    bind_aa: false,
+                    data,
                 });
-                    return Some(BuiltProof {
-                        pred: "skip".into(),
-                        fill_aa: false,
-                        data,
-                    });
-                }
             }
         }
     }
     // fill_math: mirror the AA's collateral identity — kind fee/pnl,
-    // isolated release, maker pro-rata refund, keeper seize, claw regime —
-    // and emit only when the AA would verdict on the posted legs while
-    // staying silent on the honest replay.
-    let liquidate_caller: Option<String> = match batch.units.get(k)?.op {
-        minuend_dag::Op::Liquidate { caller, .. } => Some(hex::encode(caller.0)),
-        _ => None,
-    };
-    // The unit's op descriptor. The AA's taker leg requires a well-formed
-    // p: Place (its escrow is what the collateral identity models) and
-    // reads the op's isolated flag to pick that identity; kind 3 keeps its
-    // own keeper branch before the op gate.
+    // isolated release, maker pro-rata refund, keeper seize, claw gates,
+    // op binding — and emit only when the AA would verdict on the posted
+    // legs while staying silent on the honest replay.
+    //
+    // The unit's op descriptor, as committed (the AA reads the posted
+    // op). Kind 0/1 taker legs need a well-formed 10-part `p:` Place
+    // (#47 A3); kind 2/3 legs need `L:{caller}:{target}:{market}` (#47 B1).
     let op_str = batch.ops.get(k)?.clone();
     let op_parts: Vec<&str> = op_str.split(':').collect();
-    let op_place = op_parts.len() == 9
+    let op_place = op_parts.len() == 10
         && op_parts[0] == "p"
         && (op_parts[6] == "0" || op_parts[6] == "1")
+        && op_parts[5].parse::<i128>().is_ok()
         && op_parts[7].parse::<i128>().is_ok();
-    let op_iso = op_place && op_parts[6] == "1";
+    let op_liq = op_parts.len() == 4 && op_parts[0] == "L";
     for f in &unit_fills {
         let parts: Vec<&str> = f.split(':').collect();
         if parts.len() != 14 {
@@ -791,6 +3494,10 @@ fn fill_proof(
             continue;
         }
         let maker_side = if taker_side == "0" { "1" } else { "0" };
+        // R5-A-2: on a regular market every kind 2/3 fill is the book-path
+        // Liquidate of its taker; the op only tells whether the keeper is
+        // known to differ from the maker (`kc` = it may be the maker).
+        let kc = kind >= 2 && !(op_liq && op_parts[1] != maker_hex);
         let pre_meta = match pre_leaves
             .iter()
             .find(|l| l.starts_with(&format!("meta:{market}:")))
@@ -810,33 +3517,35 @@ fn fill_proof(
             Ok(v) => v,
             Err(_) => continue,
         };
+        // usd_per_unit: != 0 marks a funding-rate market, where kind 2 is
+        // the off-book ADL the AA bounces (R5-A-2).
         let usd: i128 = match mparts[9].parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        // Kind fee, mirroring the engine's i128 trunc chains: funding
-        // markets price off the multiplier, regular ones off the price.
-        // #37-10/#37-16: kind 2 (ADL transfer) pays no taker fee.
-        let (fee, price_notional): (i128, i128) = if kind == 2 {
-            let t1 = i128::from(qty) * i128::from(price) / 100_000_000;
-            (0, t1 * 1_000_000 / 100_000_000)
-        } else if kind == 1 {
-            let fnot = i128::from(qty) * usd * 1_000_000 / 100_000_000;
-            (fnot * fee_bps / 10_000, 0)
+        if kind >= 2 && usd != 0 {
+            continue;
+        }
+        // Price notional (engine notional_usd, i128 trunc chain): fee base
+        // of kind 0/3, keeper base of kind 2/3. Funding markets (kind 1)
+        // price the fee off the multiplier. Kind 2 (ADL) pays no fee.
+        let t2 = i128::from(qty) * i128::from(price) / 100_000_000 * 1_000_000 / 100_000_000;
+        // R2-A-7 (mirrors the AA): kind 1 may settle the funding peg inside
+        // the fill — its collateral leg is never judged, fee/PnL modelled 0.
+        let fee: i128 = if kind == 2 || kind == 1 {
+            0
         } else {
-            let t1 = i128::from(qty) * i128::from(price) / 100_000_000;
-            let t2 = t1 * 1_000_000 / 100_000_000;
-            (t2.abs() * fee_bps / 10_000, t2)
+            t2.abs() * fee_bps / 10_000
         };
-        let reward = price_notional.abs() * keeper_bps / 10_000;
+        let reward = t2.abs() * keeper_bps / 10_000;
         // Posted post legs: the commitments the AA checks proofs against.
         let posted_post: Vec<String> = batch
             .leaf_trace
             .get(k)
             .cloned()
             .unwrap_or_else(|| post_leaves.to_vec());
-        let allow_last =
-            k + 1 == batch.units.len() && posted_post.len() == batch.checkpoint.wit_count as usize;
+        // Round 2: the AA has no after-max arm any more (`~:end` sentinel).
+        let allow_last = false;
         let sides = [
             ("taker", taker_hex.as_str(), taker_side),
             ("maker", maker_hex.as_str(), maker_side),
@@ -846,9 +3555,9 @@ fn fill_proof(
                 continue; // AA bails on the insurance account's own leaf
             }
             let who_taker = who == "taker";
-            if who_taker && kind != 3 && !op_place {
-                continue; // AA bounces the taker leg on a non-place op
-            }
+            // R5-A-2: a kind 0/1 taker under a non-`p:` descriptor (x:) gets
+            // the position leg and a collateral ceiling only.
+            let xt = who_taker && kind <= 1 && !op_place;
             let delta: i64 = if side_acct == "0" {
                 qty as i64
             } else {
@@ -889,9 +3598,16 @@ fn fill_proof(
                     }
                 }
             };
-            // The AA requires the maker's PRE ord leaf whenever the maker
-            // position is isolated (pro-rata escrow refund identity).
-            let maker_ord = if !who_taker && iso {
+            // #47 B1: an isolated liquidation TARGET may get STP escrow
+            // refunds in-unit — the AA bounces that leg.
+            if who_taker && kind >= 2 && iso {
+                continue;
+            }
+            // R5-A-2: the AA reads the maker's PRE ord leaf on every
+            // order-book leg — a taker leg whenever supplied (always here)
+            // and necessarily at price / qty >= 1e14 — except for ADL
+            // (kind 2: no maker order, no escrow).
+            let maker_ord = if kind != 2 {
                 pre_leaves
                     .iter()
                     .find(|l| l.starts_with(&format!("ord:{}:", parts[6])))
@@ -899,16 +3615,64 @@ fn fill_proof(
             } else {
                 None
             };
-            if !who_taker && iso && maker_ord.is_none() {
+            // A taker leg may omit it only below 1e14 price / qty.
+            if kind != 2
+                && maker_ord.is_none()
+                && (!who_taker
+                    || i128::from(price).abs() >= FILL_MAX
+                    || i128::from(qty) >= FILL_MAX)
+            {
                 continue;
             }
+            // The AA bounces ('bad maker ord') a fill whose maker order is
+            // not the maker's, or whose price / qty leave the order: those
+            // lies are P-mbind's (R4-A-1 / R5-A-3).
+            if let Some(l) = &maker_ord {
+                let o: Vec<&str> = l.split(':').collect();
+                if o.len() != 10
+                    || o[7] != maker_hex
+                    || oscript_eq(o[4], parts[8]) != Some(true)
+                    || oscript_qty_bad(parts[9], o[6]) != Some(false)
+                {
+                    continue;
+                }
+            }
+            let mo_iso = !who_taker
+                && maker_ord
+                    .as_ref()
+                    .map(|l| l.split(':').nth(8) == Some("1"))
+                    .unwrap_or(false);
+            // R3-A-3: the AA's $mml (maker order margin_left; 0 otherwise).
+            let mml: i128 = maker_ord
+                .as_ref()
+                .and_then(|l| l.split(':').nth(9).and_then(|v| v.parse().ok()))
+                .unwrap_or(0);
+            let mpost_any: i128 = match maker_ord.as_ref().map(|l| l.split(':').collect::<Vec<_>>())
+            {
+                Some(o) if o.len() == 10 => {
+                    let ml: i128 = o[9].parse().unwrap_or(0);
+                    let rem: i128 = o[6].parse().unwrap_or(0);
+                    if i128::from(qty) >= rem {
+                        ml
+                    } else {
+                        ml * i128::from(qty) / rem
+                    }
+                }
+                _ => 0,
+            };
+            let post_any = if who_taker { taker_post } else { mpost_any };
+            let mpost_any = if who_taker { 0 } else { mpost_any };
             let tfee = if who_taker { fee } else { 0 };
             // Fill-stage collateral by kind: pre + release + pnl - taker fee
             // (+ maker pro-rata refund). Exact — the AA recomputes it.
             let abs_old = old_qty.unsigned_abs() as i128;
+            // R6-H1: the AA bounces at / above QTY_CAP (1e15).
+            if abs_old >= QTY_CAP_I || i128::from(qty) >= QTY_CAP_I {
+                continue;
+            }
             let abs_delta = delta.unsigned_abs() as i128;
             let same = old_qty == 0 || (old_qty > 0 && delta > 0) || (old_qty < 0 && delta < 0);
-            let (exp_qty, exp_entry, exp_fill, exp_absent, pback) = if same {
+            let (exp_qty, exp_entry, exp_fill, exp_absent, pback, exp_bucket, pnl_v) = if same {
                 let eq = old_qty + delta;
                 let ee = if old_qty == 0 {
                     price
@@ -917,9 +3681,9 @@ fn fill_proof(
                         / (abs_old + i128::from(qty))) as i64
                 };
                 let ec = if who_taker { old_col - tfee } else { old_col };
-                // Same-sign fills always produce open qty: the taker's post
-                // escrows into the bucket, never back to collateral.
-                (eq, ee, ec, false, 0)
+                // Same-sign fills always produce open qty: the post escrows
+                // into the bucket, never back to collateral.
+                (eq, ee, ec, false, 0, bucket + post_any, 0i128)
             } else {
                 let close = abs_old.min(abs_delta);
                 // Isolated release: engine releases bucket*close/old (whole
@@ -934,15 +3698,10 @@ fn fill_proof(
                     0
                 };
                 // kind 1 = funding rate cash (rate diff UNCLAMPED, matching
-                // engine apply_fill); kind 0/3 = price-diff realize. Both
+                // engine apply_fill); kind 0/2/3 = price-diff realize. Both
                 // truncate toward zero at each division like Rust i128.
                 let pnl: i128 = if kind == 1 {
-                    let bpp = (price - 10_000_000_000_000) / 10_000;
-                    let bpe = (old_entry - 10_000_000_000_000) / 10_000;
-                    let sq: i128 = if old_qty > 0 { close } else { -close };
-                    let x = sq * i128::from(bpp - bpe) * usd * 1_000_000;
-                    let c1 = x / 100_000_000;
-                    c1 / 10_000
+                    0
                 } else {
                     let signed: i128 = if old_qty > 0 {
                         price as i128 - old_entry as i128
@@ -966,20 +3725,7 @@ fn fill_proof(
                 // Maker escrow returns only when the fill produces no new
                 // open qty (flip fills escrow the post into the bucket).
                 let mpost = if !who_taker && (leftover > 0 || open == 0) {
-                    match maker_ord.as_ref().map(|l| l.split(':').collect::<Vec<_>>()) {
-                        Some(o) if o.len() == 10 => {
-                            let ml: i128 = o[9].parse().unwrap_or(0);
-                            let rem: i128 = o[6].parse().unwrap_or(0);
-                            if rem <= 0 {
-                                0
-                            } else if i128::from(qty) >= rem {
-                                ml
-                            } else {
-                                ml * i128::from(qty) / rem
-                            }
-                        }
-                        _ => 0,
-                    }
+                    mpost_any
                 } else {
                     0
                 };
@@ -988,8 +3734,13 @@ fn fill_proof(
                 } else {
                     old_col + release + pnl + mpost
                 };
+                let eb = if leftover == 0 {
+                    post_any
+                } else {
+                    bucket - release
+                };
                 if leftover == 0 && open == 0 {
-                    (0, 0, ec, true, pback)
+                    (0, 0, ec, true, pback, eb, pnl)
                 } else {
                     let q = if leftover == 0 {
                         if delta > 0 {
@@ -1003,66 +3754,140 @@ fn fill_proof(
                         -(leftover as i64)
                     };
                     let e = if leftover == 0 { price } else { old_entry };
-                    (q, e, ec, false, pback)
+                    (q, e, ec, false, pback, eb, pnl)
                 }
             };
-            // Keeper leaves for kind 3 taker legs: the caller's pre/post
-            // collateral must show exactly the seized reward.
-            let keeper = if kind == 3 && who_taker {
-                let kh = liquidate_caller.clone()?;
-                let kleaf = pre_leaves
-                    .iter()
-                    .find(|l| l.starts_with(&format!("acct:{kh}:")))?
-                    .clone();
-                let kpre: i128 = kleaf.split(':').nth(2)?.parse().ok()?;
-                Some((kh, kpre, reward))
+            // #47 A3: the bucket is checked where its inflow is known —
+            // an isolated taker Place (kind 0/1) or an isolated maker
+            // pre position.
+            // R5-A-2 (mirrors the AA): never skipped; the AA's tolerance is
+            // 1 + (bucket + escrow share) / 1e12, doubled here (+2).
+            let chk_b = if who_taker {
+                kind <= 1 && !xt && op_parts.get(6) == Some(&"1")
+            } else {
+                iso || mo_iso
+            };
+            let btol = 4 + 2 * ((bucket + post_any).max(0) / FILL_REL);
+            // #47 A3: kind 0/1 taker — bind the fill to its own Place op and
+            // derive the resting escrow from typ/tif instead of F[5]'s leaf.
+            let (taker_place, op_lie) = if who_taker && kind <= 1 && !xt {
+                let oqty: i128 = op_parts[5].parse().unwrap_or(0);
+                let margin: i128 = op_parts[7].parse().unwrap_or(0);
+                let op_iso = op_parts[6] == "1";
+                let q = i128::from(qty);
+                let tpost_exp = if !op_iso {
+                    0
+                } else if q >= oqty {
+                    margin
+                } else {
+                    margin * q / oqty
+                };
+                // R5-A-2: the AA's share tolerance is 1 + margin / 1e12
+                // (no skip); a certain lie is beyond twice that (+2).
+                let op_ok = op_parts[1] == taker_hex
+                    && op_parts[2] == market
+                    && op_parts[3] == taker_side
+                    && q <= oqty
+                    && taker_post >= 0
+                    && (taker_post - tpost_exp).abs() <= 4 + 2 * (margin.max(0) / FILL_REL)
+                    && (op_iso || taker_post == 0);
+                let rest = op_parts[9] == "0" && op_parts[8] == "0" && q < oqty;
+                let tml = if op_iso { margin - taker_post } else { 0 };
+                (
+                    Some(TakerPlace {
+                        tord: parts[5],
+                        tpost: taker_post,
+                        pback,
+                        rest,
+                        tml,
+                        side: taker_side,
+                        price: op_parts[4],
+                        remaining: oqty - q,
+                        remaining_tol: 2 * (oqty.max(0) / FILL_REL),
+                        iso: op_parts[6],
+                    }),
+                    !op_ok,
+                )
+            } else {
+                (None, false)
+            };
+            let liq = if kind >= 2 {
+                Some(LiqLeg {
+                    reward: if who_taker { Some(reward) } else { None },
+                })
             } else {
                 None
             };
-            // Isolated-taker escrow identity: the AA proves the taker's
-            // post ord leaf for `still`; cross takers and kind 3 keep
-            // exp_fill as-is.
-            let iso_taker = if who_taker && kind != 3 && op_iso {
-                Some((parts[5], taker_post, pback))
+            // R5-A-2: the AA's tolerance 6 + S / 1e12 over proven magnitudes
+            // (old collateral, notional, pnl, bucket, maker margin_left, the
+            // op margin of a `p:` taker, old entry notional).
+            let sx: i128 = if who_taker && kind <= 1 && !xt {
+                op_parts[7].parse::<i128>().unwrap_or(0).abs()
             } else {
-                None
+                0
             };
-            // AA verdict mirror: silent unless the honest replay passes
-            // every leg and the committed legs fail one of them. The #37-17
-            // pin compares the committed post leaf against the PRE leaf's
-            // perp/W (fill moves neither); the honest tree is checked with
-            // no pin (it defines the baseline).
-            if aa_fill_verdict(
-                post_leaves,
+            let s_mag = old_col.abs()
+                + t2.abs()
+                + pnl_v.abs()
+                + bucket.abs()
+                + mml.abs()
+                + sx
+                + abs_old * i128::from(old_entry).abs() / 10_000_000_000;
+            let tol = FILL_TOL + s_mag / FILL_REL;
+            let tord_hex = taker_place.as_ref().map(|t| t.tord.to_string());
+            let leg = Leg {
                 acct_hex,
-                &market,
+                market: &market,
                 exp_qty,
                 exp_entry,
-                exp_fill,
                 exp_absent,
-                iso_taker,
-                kind as u8,
-                who_taker,
-                keeper.as_ref(),
+                exp_bucket: if chk_b {
+                    Some((exp_bucket, btol))
+                } else {
+                    None
+                },
+                exp_fill,
+                taker_place,
+                liq,
                 allow_last,
-                None,
-            ) {
+                counterparty: if who_taker {
+                    maker_hex.as_str()
+                } else {
+                    taker_hex.as_str()
+                },
+                claw_checkable: !kc
+                    && (who_taker
+                        || kind >= 2
+                        || (op_parts.len() == 10 && op_parts.get(6) == Some(&"0"))),
+                tol,
+                // R2-A-7: never for kind 1 (funding peg may move collateral).
+                col_skip: kind == 1,
+                kx: if !who_taker && kc { reward } else { 0 },
+                xt_floor: if xt { Some(old_col.max(0)) } else { None },
+                adl_over: kind == 2 && i128::from(qty) > abs_old,
+                // R5-A-4: magnitudes (negative prices round the same).
+                pos_big: i128::from(price).abs() >= FILL_LIM
+                    || i128::from(old_entry).abs() >= FILL_LIM
+                    || abs_old >= FILL_LIM
+                    || i128::from(qty) >= FILL_LIM,
+            };
+            // AA verdict mirror: silent unless the honest replay passes
+            // every leg and the committed legs fail one of them. A fill
+            // string that contradicts its own op (`op_lie`) is fraud on
+            // committed data alone, and so is any posted fill string that
+            // the replay did not produce: the honest-replay gate is skipped
+            // then because that tree was built from the TRUE fills.
+            // The #37-17 pin compares the committed post leaf against the
+            // PRE leaf's perp/W; the honest tree is checked with no pin.
+            let fill_lie = op_lie || !honest_fills.iter().any(|h| h == *f);
+            if !fill_lie && aa_fill_verdict(post_leaves, &leg, false, None) {
                 continue;
             }
             if !aa_fill_verdict(
                 &posted_post,
-                acct_hex,
-                &market,
-                exp_qty,
-                exp_entry,
-                exp_fill,
-                exp_absent,
-                iso_taker,
-                kind as u8,
-                who_taker,
-                keeper.as_ref(),
-                allow_last,
-                Some((pre_parts[3], pre_parts[4])),
+                &leg,
+                op_lie,
+                Some((pre_parts[3], pre_parts[4], k == 0)),
             ) {
                 continue;
             }
@@ -1112,15 +3937,21 @@ fn fill_proof(
             // (the trailing fill's neighbor is `n:{len}`).
             obj.insert("right".into(), right.clone().into());
             obj.insert("right_proof".into(), proof_json(&fills_tree, gidx + 1));
-            if who_taker {
-                // Taker-leg op gate: prove the unit op is this place.
-                obj.insert("op".into(), op_str.clone().into());
-                obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
+            // Op gate: every leg proves the unit op (Place or Liquidate).
+            obj.insert("op".into(), op_str.clone().into());
+            obj.insert("ops_proof".into(), proof_json(&batch.ops, k));
+            // #47 claw guard: the counterparty's post collateral (tightens
+            // the claw range's lower bound when positive).
+            let cp = if who_taker { &maker_hex } else { &taker_hex };
+            let key = format!("acct:{cp}:");
+            if let Some(ci) = posted_post.iter().position(|l| l.starts_with(&key)) {
+                obj.insert("cp_acct".into(), posted_post[ci].clone().into());
+                obj.insert("cp_acct_proof".into(), proof_json(&posted_post, ci));
             }
-            if let Some((tord, _, _)) = iso_taker {
-                // `still`: the taker order's own post ord leaf, or prefix
-                // non-membership over post_wit (straddle / before-min /
-                // final-tree after-max — the AA's three-way).
+            if let Some(tord) = &tord_hex {
+                // Resting-order leg: the taker order's own post ord leaf, or
+                // prefix non-membership over post_wit (straddle / before-min;
+                // the AA has no after-max arm — it bails then).
                 let key = format!("ord:{tord}:");
                 match posted_post.iter().position(|l| l.starts_with(&key)) {
                     Some(li) => {
@@ -1142,12 +3973,6 @@ fn fill_proof(
                         } else if pos == 0 && !sorted.is_empty() {
                             obj.insert("oleft".into(), sorted[0].clone().into());
                             obj.insert("oleft_proof".into(), proof_json(&sorted, 0));
-                        } else if allow_last && !sorted.is_empty() {
-                            let last = sorted.len() - 1;
-                            obj.insert("oleft".into(), sorted[last].clone().into());
-                            obj.insert("oleft_proof".into(), proof_json(&sorted, last));
-                        } else {
-                            continue; // AA cannot verify absence: no emit
                         }
                     }
                 }
@@ -1215,23 +4040,8 @@ fn fill_proof(
                     });
                 }
             }
-            // Regime proofs: the acct-wide pos range empty on the posted
-            // tree backs the strict max(exp, 0) identity; the market-range
-            // straddle backs a claimed-absent post pos.
-            if let Some((li, rj)) = acct_pos_range(&posted_post, acct_hex, allow_last) {
-                obj.insert("eleft".into(), posted_post[li].clone().into());
-                obj.insert("eleft_proof".into(), {
-                    let p = obyte_merkle::proof(&posted_post, li);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                });
-                if let Some(rj) = rj {
-                    obj.insert("eright".into(), posted_post[rj].clone().into());
-                    obj.insert("eright_proof".into(), {
-                        let p = obyte_merkle::proof(&posted_post, rj);
-                        serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                    });
-                }
-            }
+            // The market-range straddle backs a claimed-absent post pos
+            // (R5-A-2: the AA's acct-wide arm is gone).
             if exp_absent && posted_pos_opt.is_none() {
                 if let Some((li, rj)) = mkt_pos_range(&posted_post, acct_hex, &market, allow_last) {
                     obj.insert("post_pleft".into(), posted_post[li].clone().into());
@@ -1256,29 +4066,10 @@ fn fill_proof(
                     serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
                 });
             }
-            if let Some((kh, _, _)) = &keeper {
-                let pl = pre_leaves
-                    .iter()
-                    .find(|l| l.starts_with(&format!("acct:{kh}:")))?;
-                let pi = index_of(pre_leaves, pl)?;
-                obj.insert("pre_keeper".into(), pl.clone().into());
-                obj.insert("pre_keeper_proof".into(), {
-                    let p = obyte_merkle::proof(pre_leaves, pi);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                });
-                let tl = posted_post
-                    .iter()
-                    .find(|l| l.starts_with(&format!("acct:{kh}:")))?;
-                let ti = index_of(&posted_post, tl)?;
-                obj.insert("post_keeper".into(), tl.clone().into());
-                obj.insert("post_keeper_proof".into(), {
-                    let p = obyte_merkle::proof(&posted_post, ti);
-                    serde_json::json!({"root": p.root, "siblings": p.siblings, "index": p.index})
-                });
-            }
             return Some(BuiltProof {
                 pred: "fill_math".into(),
                 fill_aa: true,
+                bind_aa: false,
                 data,
             });
         }
@@ -1286,9 +4077,538 @@ fn fill_proof(
     None
 }
 
+/// Round 6 P-claw (`minuend_dispute_claw.aa`): one fill party's PRE state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClawPre {
+    col: i128,
+    qty: i128,
+    entry: i128,
+    iso: bool,
+    bucket: i128,
+}
+
+/// Realized pieces of one party's `Account::apply_fill` (minuend-account):
+/// isolated release, price-diff PnL and the escrow share returned to
+/// collateral on a pure reduce (`share` = the fill's post for this party).
+fn claw_leg(pre: &ClawPre, delta: i128, price: i128, share: i128) -> (i128, i128, i128) {
+    let same = pre.qty == 0 || (pre.qty > 0 && delta > 0) || (pre.qty < 0 && delta < 0);
+    if same {
+        return (0, 0, 0);
+    }
+    let aq = pre.qty.abs();
+    let close = aq.min(delta.abs());
+    let rel = if !pre.iso {
+        0
+    } else if close == aq {
+        pre.bucket
+    } else {
+        pre.bucket * close / aq
+    };
+    let signed = if pre.qty > 0 {
+        price - pre.entry
+    } else {
+        pre.entry - price
+    };
+    let pnl = signed * close * 1_000_000 / 100_000_000 / 100_000_000;
+    let back = if close == aq && delta.abs() > close {
+        0
+    } else {
+        share
+    };
+    (rel, pnl, back)
+}
+
+/// The claw AA's verdict inputs for one fill, recomputed exactly (i128,
+/// truncating like the engine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClawOut {
+    /// post_t - expected_t
+    dt: i128,
+    /// post_m - expected_m
+    dm: i128,
+    /// The AA's rounding slack (4 x (16 + S / 1e12)).
+    slack: i128,
+    /// Claw moved to the taker (negative: to the maker).
+    x: i128,
+    /// Keeper reward seized from the target.
+    kpay: i128,
+    /// R6-H1 (`$fr1`): the fill lifts a position to >= QTY_CAP.
+    over_cap: bool,
+    /// R6-C2 (`x_who`): (who, post - pre - expected, slack) of the
+    /// Liquidate caller ('c', when neither fill party) and the insurance
+    /// account ('i'), when their posted post leaf exists.
+    extra: [Option<(char, i128, i128)>; 2],
+}
+
+const CLAW_ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const QTY_CAP_I: i128 = minuend_types::QTY_CAP as i128;
+
+/// R6-C1 mirror of the claw AA's `$bad` for the FIRST fill of a unit and
+/// the unit's committed op: `Some(true)` = the AA verdicts from these two
+/// strings alone, `Some(false)` = it goes on, `None` = it bounces before
+/// (malformed fill) or an Oscript comparison could go either way.
+fn claw_shape_bad(fill: &str, op: &str) -> Option<bool> {
+    let f: Vec<&str> = fill.split(':').collect();
+    if f.len() != 14 || f[0] != "f" || f[2] != "0" {
+        return None;
+    }
+    let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if ![1, 3, 4, 5, 6].iter().all(|&i| hex64(f[i])) || !matches!(f[11], "0" | "1") {
+        return None;
+    }
+    let int = |s: &str| oscript_num(s).filter(|x| x.fract() == 0.0);
+    let qty = int(f[9]).filter(|q| *q > 0.0)?;
+    if qty >= 1e15 {
+        return Some(true);
+    }
+    let kind = oscript_num(f[12]);
+    let kind_in = |ks: &[f64]| kind.is_some_and(|k| ks.contains(&k));
+    let (tk, mk, market) = (f[3], f[4], f[7]);
+    let o: Vec<&str> = op.split(':').collect();
+    let at = |i: usize| op.as_bytes().get(i) == Some(&b':');
+    if op.starts_with("p:") {
+        if o.len() != 10 || op.get(2..66) != Some(tk) || !at(66) {
+            return Some(true);
+        }
+        if !oscript_eq(o[2], market)? || !oscript_eq(o[3], f[11])? || !matches!(o[6], "0" | "1") {
+            return Some(true);
+        }
+        let Some(oq) = int(o[5]) else {
+            return Some(true);
+        };
+        let Some(om) = int(o[7]) else {
+            return Some(true);
+        };
+        Some(oq >= 1e15 || qty > oq || om < 0.0 || !kind_in(&[0.0, 1.0]))
+    } else if op.starts_with("L:") {
+        if o.len() != 4 || !at(66) || !at(131) {
+            return Some(true);
+        }
+        let (caller, tg) = (op.get(2..66)?, op.get(67..131)?);
+        Some(
+            !oscript_eq(o[3], market)?
+                || (tg != tk && tg != mk)
+                || caller == tg
+                || caller == CLAW_ZERO
+                || !kind_in(&[2.0, 3.0]),
+        )
+    } else {
+        Some(true)
+    }
+}
+
+/// `None` = the AA bounces before judging (a gate or a missing / malformed
+/// leaf), or a value sits where Oscript's 15-digit comparisons are not
+/// exact (the mirror then stays silent). Assumes `claw_shape_bad` is
+/// `Some(false)` and the regular-market rule (`claw_regular_rule`) holds.
+fn claw_eval(fill: &str, op: &str, pre: &[String], post: &[String]) -> Option<ClawOut> {
+    let f: Vec<&str> = fill.split(':').collect();
+    if claw_shape_bad(fill, op) != Some(false) {
+        return None;
+    }
+    let (tk, mk, mo, market, side) = (f[3], f[4], f[6], f[7], f[11]);
+    let kind: i64 = f[12].parse().ok()?;
+    if !matches!(kind, 0 | 2 | 3) || tk == mk || tk == CLAW_ZERO || mk == CLAW_ZERO {
+        return None;
+    }
+    let price: i128 = f[8].parse().ok()?;
+    let qty: i128 = f[9].parse().ok()?;
+    if qty <= 0 || qty >= QTY_CAP_I || price.abs() >= QTY_CAP_I {
+        return None;
+    }
+    let meta = pre
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{market}:")))?;
+    let m: Vec<&str> = meta.split(':').collect();
+    if m.len() != 11 || m[9].parse::<i128>().ok()? != 0 {
+        return None;
+    }
+    let fee_bps: i128 = m[5].parse().ok()?;
+    let keeper_bps: i128 = m[6].parse().ok()?;
+    let o: Vec<&str> = op.split(':').collect();
+    let (margin, tp, refund, keeper_m) = if kind == 0 {
+        if o[0] != "p" {
+            return None;
+        }
+        let oqty: i128 = o[5].parse().ok()?;
+        let om: i128 = o[7].parse().ok()?;
+        if om >= QTY_CAP_I {
+            return None;
+        }
+        let margin = if o[6] == "1" { om } else { 0 };
+        let tp = if qty >= oqty {
+            margin
+        } else {
+            margin * qty / oqty
+        };
+        let rests = o[9] == "0" && o[8] == "0" && qty < oqty;
+        (margin, tp, if rests { 0 } else { margin - tp }, false)
+    } else {
+        if o[0] != "L" || o[2] != tk {
+            return None;
+        }
+        (0, 0, 0, o[1] == mk)
+    };
+    let (mml, mp) = if kind != 2 {
+        let mord = pre.iter().find(|l| l.starts_with(&format!("ord:{mo}:")))?;
+        let mo_: Vec<&str> = mord.split(':').collect();
+        if mo_.len() != 10 || mo == mk || mo_[7] != mk {
+            return None;
+        }
+        let mprice: i128 = mo_[4].parse().ok()?;
+        let mrem: i128 = mo_[6].parse().ok()?;
+        let mml: i128 = mo_[9].parse().ok()?;
+        if mprice != price || qty > mrem || mrem >= QTY_CAP_I {
+            return None;
+        }
+        (mml, if qty >= mrem { mml } else { mml * qty / mrem })
+    } else {
+        (0, 0)
+    };
+    let t2 = (qty * price / 100_000_000 * 1_000_000 / 100_000_000).abs();
+    let fee = if kind == 2 { 0 } else { t2 * fee_bps / 10_000 };
+    let reward = if kind == 0 {
+        0
+    } else {
+        t2 * keeper_bps / 10_000
+    };
+    let col_of = |tree: &[String], a: &str| -> Option<i128> {
+        tree.iter()
+            .find(|l| l.starts_with(&format!("acct:{a}:")))?
+            .split(':')
+            .nth(2)?
+            .parse()
+            .ok()
+    };
+    let pre_of = |a: &str| -> Option<ClawPre> {
+        let col = col_of(pre, a)?;
+        match pre
+            .iter()
+            .find(|l| l.starts_with(&format!("pos:{a}:{market}:")))
+        {
+            None => Some(ClawPre {
+                col,
+                ..Default::default()
+            }),
+            Some(p) => {
+                let q: Vec<&str> = p.split(':').collect();
+                if q.len() != 7 || (q[5] != "0" && q[5] != "1") {
+                    return None;
+                }
+                Some(ClawPre {
+                    col,
+                    qty: q[3].parse().ok()?,
+                    entry: q[4].parse().ok()?,
+                    iso: q[5] == "1",
+                    bucket: q[6].parse().ok()?,
+                })
+            }
+        }
+    };
+    let t = pre_of(tk)?;
+    let mm_ = pre_of(mk)?;
+    if kind != 0 && t.iso {
+        return None;
+    }
+    // R6-H1: a pre position at / above the cap is not judged.
+    if t.qty.abs() >= QTY_CAP_I || mm_.qty.abs() >= QTY_CAP_I {
+        return None;
+    }
+    let td = if side == "0" { qty } else { -qty };
+    let over_cap = (t.qty + td).abs() >= QTY_CAP_I || (mm_.qty - td).abs() >= QTY_CAP_I;
+    let (trel, tpnl, tback) = claw_leg(&t, td, price, tp);
+    let (mrel, mpnl, mback) = claw_leg(&mm_, -td, price, mp);
+    // Fill stages, then the engine's claw (taker first, then maker).
+    let mt = t.col - margin + trel + tpnl + tback - fee;
+    let mm = mm_.col + mrel + mpnl + mback;
+    let x = if mt < 0 {
+        (-mt).min(mm.max(0))
+    } else if mm < 0 {
+        -((-mm).min(mt.max(0)))
+    } else {
+        0
+    };
+    let kpay = reward.min((mt + x).max(0));
+    let et = mt + x + refund - kpay;
+    let em = mm - x + if keeper_m { kpay } else { 0 };
+    let s = t.col.abs()
+        + mm_.col.abs()
+        + 2 * t2
+        + tpnl.abs()
+        + mpnl.abs()
+        + t.bucket
+        + mm_.bucket
+        + mml
+        + margin
+        + (t.qty.abs() * t.entry.abs() + mm_.qty.abs() * mm_.entry.abs()) / 10_000_000_000;
+    let slack = 4 * (16 + s / FILL_REL);
+    // R6-C2: the caller (a third party) and the insurance account.
+    let extra_of = |who: char, a: &str, exp: i128| -> Option<(char, i128, i128)> {
+        let c1 = col_of(post, a)?;
+        let c0 = col_of(pre, a).unwrap_or(0);
+        Some((who, c1 - c0 - exp, slack + 4 * (c0.abs() / FILL_REL)))
+    };
+    let caller = if kind != 0 && !keeper_m {
+        extra_of('c', o[1], kpay)
+    } else {
+        None
+    };
+    Some(ClawOut {
+        dt: col_of(post, tk)? - et,
+        dm: col_of(post, mk)? - em,
+        slack,
+        x,
+        kpay,
+        over_cap,
+        extra: [caller, extra_of('i', CLAW_ZERO, fee)],
+    })
+}
+
+/// R6-C1 regular-market rule (`$fr0`): after the funding gate a kind-1
+/// fill, or a Liquidate whose target is not the taker, is fraud.
+/// Round 7 (未修复项 28) mirror of P-claw's `$badp`: a kind-2 ADL fill's
+/// price is not `clamp(pre mark, band)` (floor first, then ceiling; 0 =
+/// unbounded, as `minuend_exec::clamp_to_band`). `None` when a value is
+/// not an exact Oscript integer (|x| >= 1e15) — no proof then.
+fn adl_price_bad(fill: &str, meta: &str, band: &str) -> Option<bool> {
+    let exact = |s: &str| {
+        s.parse::<i128>()
+            .ok()
+            .filter(|v| v.unsigned_abs() < 1_000_000_000_000_000)
+    };
+    let f: Vec<&str> = fill.split(':').collect();
+    let m: Vec<&str> = meta.split(':').collect();
+    let b: Vec<&str> = band.split(':').collect();
+    if f.len() != 14 || m.len() != 11 || b.len() != 4 {
+        return None;
+    }
+    let (price, mark) = (exact(f[8])?, exact(m[8])?);
+    let (lo, hi) = (exact(b[2])?, exact(b[3])?);
+    let mut ex = mark;
+    if lo != 0 && ex < lo {
+        ex = lo;
+    }
+    if hi != 0 && ex > hi {
+        ex = hi;
+    }
+    Some(price != ex)
+}
+
+fn claw_regular_rule(fill: &str, op: &str) -> bool {
+    let f: Vec<&str> = fill.split(':').collect();
+    oscript_num(f.get(12).copied().unwrap_or("")) == Some(1.0)
+        || (op.starts_with("L:") && op.get(67..131) != f.get(3).copied())
+}
+
+/// Round 6 P-claw builder: the unit's FIRST fill against its op (R6-C1:
+/// any mismatch is fraud), then — for the unit's ONLY fill on a regular
+/// market — both legs at once (the claw one party paid must be the claw
+/// the other received, the keeper seize and the isolated refund on top),
+/// the caller / insurance credit (R6-C2) and the position cap (R6-H1).
+/// Emitted only when the AA's verdict is certain (a deviation beyond twice
+/// its slack) and — for the honest fill + op — the honest tree passes the
+/// same model.
+fn claw_proof(
+    batch: &Batch,
+    k: usize,
+    unit_hex: &str,
+    expected_op: &str,
+    pre_leaves: &[String],
+    post_leaves: &[String],
+    honest_fills: &[String],
+) -> Option<BuiltProof> {
+    let prefix = format!("f:{unit_hex}:");
+    let fills_tree = minuend_settle::fills_root_elements(&batch.fills);
+    let gidx = batch
+        .fills
+        .iter()
+        .position(|f| f.starts_with(&format!("f:{unit_hex}:0:")))?;
+    let f = batch.fills[gidx].clone();
+    let op = batch.ops.get(k)?.clone();
+    let honest_pair = honest_fills.contains(&f) && op == expected_op;
+    let unit_hexes: Vec<String> = batch
+        .checkpoint
+        .unit_ids
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
+    let mut data = serde_json::json!({
+        "trace_root": batch.checkpoint.trace_root,
+        "fills_root": batch.checkpoint.fills_root,
+        "ops_root": batch.checkpoint.ops_root,
+        "units_root": batch.checkpoint.units_root,
+        "k": k,
+        "fill": f,
+        "fill_proof": proof_json(&fills_tree, gidx),
+        "units_proof": proof_json(&unit_hexes, k),
+        "op": op,
+        "ops_proof": proof_json(&batch.ops, k),
+    });
+    let built = |data: serde_json::Value| BuiltProof {
+        pred: "claw".into(),
+        fill_aa: false,
+        bind_aa: false,
+        data,
+    };
+    // R6-C1: the first fill is not its op's (any fill count / market).
+    match claw_shape_bad(&f, &op)? {
+        true if !honest_pair => return Some(built(data)),
+        true => return None,
+        false => {}
+    }
+    let right = fills_tree.get(gidx + 1)?;
+    if right.starts_with(&prefix) {
+        return None; // multi-fill unit: not judged (未修复项 19)
+    }
+    let posted: Vec<String> = batch
+        .leaf_trace
+        .get(k)
+        .cloned()
+        .unwrap_or_else(|| post_leaves.to_vec());
+    let parts: Vec<&str> = f.split(':').collect();
+    let (tk, mk, market, kind) = (parts[3], parts[4], parts[7], parts[12]);
+    let meta = pre_leaves
+        .iter()
+        .find(|l| l.starts_with(&format!("meta:{market}:")))?
+        .clone();
+    if meta.split(':').nth(9).and_then(oscript_num) != Some(0.0) {
+        return None; // funding-rate market
+    }
+    {
+        let obj = data.as_object_mut()?;
+        obj.insert("right".into(), right.clone().into());
+        obj.insert("right_proof".into(), proof_json(&fills_tree, gidx + 1));
+        obj.insert("post_wit".into(), batch.trace.get(k)?.clone().into());
+        obj.insert("post_proof".into(), proof_json(&batch.trace, k));
+        obj.extend(pre_wit_fields(batch, k, pre_leaves).as_object()?.clone());
+        obj.insert("pre_meta".into(), meta.clone().into());
+        obj.insert(
+            "pre_meta_proof".into(),
+            proof_json(pre_leaves, index_of(pre_leaves, &meta)?),
+        );
+    }
+    if parts[3] == parts[4] || tk == CLAW_ZERO || mk == CLAW_ZERO {
+        return None;
+    }
+    // R6-C1 (`$fr0`): kind 1 / a foreign Liquidate target on a regular market.
+    if claw_regular_rule(&f, &op) {
+        return (!honest_pair).then(|| built(data));
+    }
+    // Round 7 (未修复项 28, `$badp`): a kind-2 ADL off clamp(mark, band).
+    if kind == "2" {
+        if let Some(band) = pre_leaves
+            .iter()
+            .find(|l| l.starts_with(&format!("band:{market}:")))
+        {
+            if adl_price_bad(&f, &meta, band) == Some(true) {
+                if honest_pair {
+                    return None; // the model disagrees with the replay
+                }
+                let obj = data.as_object_mut()?;
+                obj.insert("band".into(), band.clone().into());
+                obj.insert(
+                    "band_proof".into(),
+                    proof_json(pre_leaves, index_of(pre_leaves, band)?),
+                );
+                return Some(built(data));
+            }
+        }
+    }
+    let c = claw_eval(&f, &op, pre_leaves, &posted)?;
+    let leg_bad = c.dt.abs() > 2 * c.slack || c.dm.abs() > 2 * c.slack;
+    let extra_bad = c
+        .extra
+        .iter()
+        .flatten()
+        .find(|(_, d, sl)| d.abs() > 2 * sl)
+        .copied();
+    if !leg_bad && extra_bad.is_none() && !c.over_cap {
+        return None;
+    }
+    if honest_fills.contains(&f) {
+        match claw_eval(&f, &op, pre_leaves, post_leaves) {
+            Some(h)
+                if h.dt.abs() <= h.slack
+                    && h.dm.abs() <= h.slack
+                    && !h.over_cap
+                    && h.extra.iter().flatten().all(|(_, d, sl)| d.abs() <= *sl) => {}
+            _ => return None, // the model does not reproduce the replay
+        }
+    }
+    let x_who = if !leg_bad && !c.over_cap {
+        Some(extra_bad?.0)
+    } else {
+        None
+    };
+    let obj = data.as_object_mut()?;
+    if let Some(w) = x_who {
+        obj.insert("x_who".into(), w.to_string().into());
+    }
+    let mut put = |key: &str, tree: &[String], leaf: &String| -> Option<()> {
+        let i = index_of(tree, leaf)?;
+        obj.insert(key.into(), leaf.clone().into());
+        obj.insert(format!("{key}_proof"), proof_json(tree, i));
+        Some(())
+    };
+    if kind != "2" {
+        let mord = pre_leaves
+            .iter()
+            .find(|l| l.starts_with(&format!("ord:{}:", parts[6])))?;
+        put("maker_ord", pre_leaves, mord)?;
+    }
+    for (x, a) in [("t", tk), ("m", mk)] {
+        let key = format!("acct:{a}:");
+        let pre_acct = pre_leaves.iter().find(|l| l.starts_with(&key))?;
+        put(&format!("{x}_pre_acct"), pre_leaves, pre_acct)?;
+        let post_acct = posted.iter().find(|l| l.starts_with(&key))?;
+        put(&format!("{x}_post_acct"), &posted, post_acct)?;
+        let pkey = format!("pos:{a}:{market}:");
+        match pre_leaves.iter().find(|l| l.starts_with(&pkey)) {
+            Some(pp) => put(&format!("{x}_pre_pos"), pre_leaves, pp)?,
+            None => {
+                // The AA proves absence by an adjacent straddle only (a
+                // meta: leaf sorts before any pos:, `~:end` after it).
+                let (li, rj) = mkt_pos_range(pre_leaves, a, market, false)?;
+                let rj = rj?;
+                put(&format!("{x}_pleft"), pre_leaves, &pre_leaves[li])?;
+                put(&format!("{x}_pright"), pre_leaves, &pre_leaves[rj])?;
+            }
+        }
+    }
+    if let Some(who) = x_who {
+        let a = if who == 'c' {
+            op.get(2..66)?.to_string()
+        } else {
+            CLAW_ZERO.to_string()
+        };
+        let key = format!("acct:{a}:");
+        let post_acct = posted.iter().find(|l| l.starts_with(&key))?;
+        put("x_post_acct", &posted, post_acct)?;
+        match pre_leaves.iter().find(|l| l.starts_with(&key)) {
+            Some(l) => put("x_pre_acct", pre_leaves, l)?,
+            None => {
+                let i = pre_leaves.iter().position(|l| l.as_str() > key.as_str())?;
+                if i == 0 {
+                    return None; // the AA's absence arm is a straddle only
+                }
+                put("x_pleft", pre_leaves, &pre_leaves[i - 1])?;
+                put("x_pright", pre_leaves, &pre_leaves[i])?;
+            }
+        }
+    }
+    Some(built(data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_backing(ledger: &VaultLedger) -> Backing<'_> {
+        Backing {
+            ledger,
+            evs: Vec::new(),
+        }
+    }
     use ed25519_dalek::SigningKey;
     use minuend_dag::{genesis_id, sign_unit, unit_id, Op};
     use minuend_types::{account_id_from_pubkey, AccountId};
@@ -1327,12 +4647,13 @@ mod tests {
         let prev = minuend_state::ChainState::new();
         let mut eng2 = eng.clone();
         let mut batch = Batch::from_applied(&prev, &mut eng2, &[id]).expect("batch");
-        // Tamper the posted post leaf: col stays 0 despite +100 deposit.
+        // Tamper the posted post leaf: col 50 despite a +100 deposit (col 0
+        // would be the "rejected deposit" shape, which is honest — #47).
         if let Some(leaves) = batch.leaf_trace.get_mut(0) {
             for l in leaves.iter_mut() {
                 if l.starts_with(&format!("acct:{}:", hex::encode(acct.0))) {
                     let parts: Vec<&str> = l.split(':').collect();
-                    *l = format!("acct:{}:0:{}:{}", parts[1], parts[3], parts[4]);
+                    *l = format!("acct:{}:50:{}:{}", parts[1], parts[3], parts[4]);
                 }
             }
         }
@@ -1340,6 +4661,400 @@ mod tests {
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
         assert_eq!(proof.pred, "deposit");
         assert!(!proof.fill_aa);
+    }
+
+    /// R5 integration (vault `pperp_total` cap): a credited deposit whose
+    /// marker and binding are fine is still fraud when the hub-read vault
+    /// ledger shows no backing record (e.g. a PERP deposit the vault
+    /// bounced at its cap: the joint still verifies as evidence). Unknown
+    /// record = silent; a matching record = silent.
+    #[test]
+    fn r5_credited_deposit_unbacked_by_vault_ledger_builds_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(u).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let batch = Batch::from_applied(&prev, &mut eng, &[id]).expect("batch");
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(aa);
+        let key = format!("dep_{b64}");
+        let a = hex::encode(acct.0);
+        let run = |ledger: &VaultLedger| {
+            let mut replay = Engine::new();
+            replay.state.deposits_allowed.insert((aa, false));
+            build_proof_with_vault(&batch, &mut replay, &[], 0, ledger)
+        };
+        // Unknown record: honest as far as the watcher knows.
+        assert!(run(&VaultLedger::new()).is_none());
+        // Matching record (amount >= op amount): honest.
+        let mut l = VaultLedger::new();
+        l.insert(key.clone(), Some(format!("{}:100:{a}", test_addr())));
+        assert!(run(&l).is_none());
+        l.insert(key.clone(), Some(format!("{}:250:{a}", test_addr())));
+        assert!(run(&l).is_none());
+        // Known absent (cap-bounced / never paid): P-deposit.
+        l.insert(key.clone(), None);
+        let p = run(&l).expect("unbacked credit");
+        assert_eq!(p.pred, "deposit");
+        assert!(p.data.get("dleft").is_none() && p.data.get("aleft").is_none());
+        // Record for another payer / account / a smaller amount: P-deposit.
+        for rec in [
+            format!("{}:100:{a}", "Z".repeat(32)),
+            format!("{}:100:{}", test_addr(), "ab".repeat(32)),
+            format!("{}:99:{a}", test_addr()),
+        ] {
+            l.insert(key.clone(), Some(rec.clone()));
+            assert_eq!(run(&l).expect(&rec).pred, "deposit", "{rec}");
+        }
+        // Uncertain number in the record: silent.
+        l.insert(key.clone(), Some(format!("{}:1e3:{a}", test_addr())));
+        assert!(run(&l).is_none());
+    }
+
+    /// #47 (cross-PR): rejected units are committed like applied ones. An
+    /// honestly REJECTED withdraw (insufficient balance — or, since #49,
+    /// the spot reserve / gov-nonce rules) leaves the leaf unchanged; that
+    /// must never become a withdraw proof (the AA bounces it too).
+    #[test]
+    fn rejected_withdraw_in_honest_batch_builds_no_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let g = genesis_id();
+        let aa = [9u8; 32];
+        let dep = sign_unit(
+            vec![g],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let d_id = unit_id(&dep);
+        let wd = sign_unit(
+            vec![d_id],
+            Op::Withdraw {
+                account: acct,
+                amount: 1_000,
+                nonce: 1,
+            },
+            &secret,
+        );
+        let w_id = unit_id(&wd);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(dep).unwrap();
+        let evs = eng.ingest(wd).unwrap();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, minuend_exec::ExecEvent::Rejected { .. })));
+        let prev = minuend_state::ChainState::new();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[d_id, w_id]).expect("batch");
+        assert_eq!(batch.ops.len(), 2, "the rejected withdraw is committed");
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    /// R3-A-1: the honestly REJECTED overdraft (balance 100, withdraw 1000)
+    /// posted as ACCEPTED — W += 1000, collateral -900 — must be a proof
+    /// (pre-fix both the withdraw and the wpin mirrors accepted it).
+    #[test]
+    fn overdraft_withdraw_posted_as_accepted_builds_proof() {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let dep = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let d_id = unit_id(&dep);
+        let wd = sign_unit(
+            vec![d_id],
+            Op::Withdraw {
+                account: acct,
+                amount: 1_000,
+                nonce: 1,
+            },
+            &secret,
+        );
+        let w_id = unit_id(&wd);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(dep).unwrap();
+        eng.ingest(wd).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let mut eng2 = eng.clone();
+        let mut batch = Batch::from_applied(&prev, &mut eng2, &[d_id, w_id]).expect("batch");
+        let key = format!("acct:{}:", hex::encode(acct.0));
+        for l in batch.leaf_trace[1].iter_mut() {
+            if l.starts_with(&key) {
+                *l = format!("acct:{}:-900:0:1000", hex::encode(acct.0));
+            }
+        }
+        batch.leaf_trace[1].sort();
+        batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
+        batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+        batch.checkpoint.wit_root = batch.trace[1].clone();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "withdraw");
+        // The binding AA mirror rejects the same leaf on its own.
+        let pre = vec![format!("acct:{}:100:0:0", hex::encode(acct.0))];
+        assert!(binding_violation(
+            &format!("w:{}:1000:1", hex::encode(acct.0)),
+            &pre,
+            &format!("acct:{}:-900:0:1000", hex::encode(acct.0)),
+            Some(&no_backing(&VaultLedger::new()))
+        )
+        .is_some());
+        assert!(binding_violation(
+            &format!("w:{}:100:1", hex::encode(acct.0)),
+            &pre,
+            &format!("acct:{}:0:0:100", hex::encode(acct.0)),
+            Some(&no_backing(&VaultLedger::new()))
+        )
+        .is_none());
+    }
+
+    /// R3-A-6: an account leaf vanishing from the posted post tree is a
+    /// P-keep proof over the account's prefix range.
+    #[test]
+    fn dropped_account_leaf_builds_keep_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        // A second (non-deposit) unit would be ideal; dropping the account
+        // in the deposit unit's own post tree is caught by P-deposit first,
+        // so judge keep_mirror_proof directly on a synthetic pre/post pair.
+        let key = format!("acct:{}:", hex::encode(acct.0));
+        let pre: Vec<String> = batch.leaf_trace[0].clone();
+        let honest_post = pre.clone();
+        let mut posted = pre.clone();
+        posted.retain(|l| !l.starts_with(&key));
+        batch.leaf_trace[0] = posted;
+        let _ = aa;
+        let p = keep_mirror_proof(&batch, 0, &pre, &honest_post).expect("keep proof");
+        assert_eq!(p.pred, "keep");
+        assert!(p.data["leaf"].as_str().unwrap().starts_with(&key));
+        assert!(p.data.get("left").is_some());
+        // Honest (account kept) → nothing.
+        batch.leaf_trace[0] = pre.clone();
+        assert!(keep_mirror_proof(&batch, 0, &pre, &honest_post).is_none());
+    }
+
+    fn honest_deposit_batch() -> (Batch, AccountId, [u8; 32]) {
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let aa = [9u8; 32];
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct,
+                addr: test_addr(),
+                amount: 100,
+                aa_unit: aa,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut eng = Engine::new();
+        eng.state.deposits_allowed.insert((aa, false));
+        eng.ingest(u).unwrap();
+        let prev = minuend_state::ChainState::new();
+        let batch = Batch::from_applied(&prev, &mut eng, &[id]).expect("batch");
+        (batch, acct, aa)
+    }
+
+    /// #47 A2: W moved without the account's own withdraw → P-wpin on the
+    /// binding dispute AA (the deposit leg itself is honest).
+    #[test]
+    fn forged_withdrawn_builds_wpin_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        for l in batch.leaf_trace[0].iter_mut() {
+            if l.starts_with(&format!("acct:{}:", hex::encode(acct.0))) {
+                *l = format!("acct:{}:100:0:777", hex::encode(acct.0));
+            }
+        }
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "wpin");
+        assert_eq!(proof.target(), "bind");
+        assert!(
+            proof.data.get("left").is_some(),
+            "fresh account: pre absence"
+        );
+    }
+
+    /// R2-A-1: every transition clean but the committed wit_root is not
+    /// the trace tip → P-tip on the binding dispute AA.
+    #[test]
+    fn r2_forged_wit_root_builds_tip_proof() {
+        let (mut batch, _acct, aa) = honest_deposit_batch();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        batch.checkpoint.wit_root = obyte_merkle::hash("forged-tree");
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("tip proof");
+        assert_eq!(p.pred, "tip");
+        assert_eq!(p.target(), "bind");
+        assert_eq!(p.data["tip"], serde_json::json!(batch.trace[0]));
+        assert_eq!(p.data["tip_proof"]["index"], serde_json::json!(0));
+    }
+
+    /// R2-A-2 / R2-A-8 mirror of the binding AA: W and collateral are
+    /// judged jointly; a second binding of a bound account is refused.
+    #[test]
+    fn r2_binding_violation_is_joint() {
+        let a = "aa".repeat(32);
+        let pre = vec![format!("acct:{a}:1000:0:0")];
+        let op = format!("w:{a}:100:1");
+        let empty = VaultLedger::new();
+        let nb = no_backing(&empty);
+        let v = |leaf: String| binding_violation(&op, &pre, &leaf, Some(&nb));
+        assert!(v(format!("acct:{a}:900:0:100")).is_none(), "accepted");
+        assert!(v(format!("acct:{a}:1000:0:0")).is_none(), "rejected");
+        assert!(
+            v(format!("acct:{a}:1000:0:100")).is_some(),
+            "W without debit"
+        );
+        assert!(v(format!("acct:{a}:900:0:0")).is_some(), "debit without W");
+        let f = "99".repeat(32);
+        assert!(
+            binding_violation(
+                &format!("w:{f}:100:1"),
+                &pre,
+                &format!("acct:{f}:0:0:100"),
+                Some(&nb)
+            )
+            .is_some(),
+            "W minted on a rejected (fresh) withdraw"
+        );
+        let addr = "Q".repeat(32);
+        let d = format!("d:{a}:5:{addr}:{}", "A".repeat(44));
+        let ev = |is_perp: bool, payer: &str, account: &str| minuend_settle::DepositEvidence {
+            aa_unit: "00".repeat(32),
+            is_perp,
+            amount: "5".into(),
+            vault_address: String::new(),
+            payer: payer.into(),
+            account: account.into(),
+            joint: serde_json::Value::Null,
+        };
+        // anchor "A"*43 + "=" is 32 zero bytes.
+        let d = d.replace(&"A".repeat(44), &format!("{}=", "A".repeat(43)));
+        let bk = |ledger: &VaultLedger, evs: &[minuend_settle::DepositEvidence]| {
+            binding_violation(
+                &d,
+                &[],
+                &format!("adr:{addr}:{a}"),
+                Some(&Backing {
+                    ledger,
+                    evs: evs.iter().collect(),
+                }),
+            )
+        };
+        let good = [ev(false, &addr, &a)];
+        let bound = vec![format!("adrx:{a}:{}", "R".repeat(32))];
+        let good_b = Backing {
+            ledger: &empty,
+            evs: good.iter().collect(),
+        };
+        assert!(binding_violation(&d, &bound, &format!("adr:{addr}:{a}"), Some(&good_b)).is_some());
+        assert!(bk(&empty, &good).is_none());
+        // R4-A-4: the vault record is UNKNOWN (no verified evidence for the
+        // anchor, hub not read) → no verdict, no proof the AA might bounce.
+        assert!(bk(&empty, &[]).is_none());
+        // Known absent (hub read: no dep_ record) → fraud.
+        let key = vault_key_of_op(&d).unwrap();
+        let absent: VaultLedger = [(key.clone(), None)].into_iter().collect();
+        assert!(bk(&absent, &[]).is_some());
+        // Hub record names another payer / another account → fraud; the
+        // exact record → accepted.
+        let other = "bb".repeat(32);
+        let rec = |r: String| -> VaultLedger { [(key.clone(), Some(r))].into_iter().collect() };
+        assert!(bk(&rec(format!("{}:5:{a}", "P".repeat(32))), &[]).is_some());
+        assert!(bk(&rec(format!("{addr}:5:{other}")), &[]).is_some());
+        assert!(bk(&rec(format!("{addr}:5:{a}")), &[]).is_none());
+        // Verified evidence for that anchor: other account → fraud; other
+        // asset kind → the vault wrote only depp_, so dep_ is absent → fraud.
+        assert!(bk(&empty, &[ev(false, &addr, &other)]).is_some());
+        assert!(bk(&empty, &[ev(true, &addr, &a)]).is_some());
+        // round-2 d: carries the anchor: the old 4-part shape is refused
+        let d4 = format!("d:{a}:5:{addr}");
+        assert!(binding_violation(&d4, &[], &format!("adr:{addr}:{a}"), Some(&good_b)).is_some());
+    }
+
+    /// R2-A-8: a posted binding without its adrx: mirror → P-mirror.
+    #[test]
+    fn r2_dropped_binding_mirror_builds_mirror_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let x = format!("adrx:{}:{}", hex::encode(acct.0), test_addr());
+        assert!(batch.leaf_trace[0].contains(&x), "engine writes adrx:");
+        assert!(
+            batch.leaf_trace[0].iter().any(|l| l.starts_with("dep:")),
+            "engine writes the consumed-deposit marker"
+        );
+        assert_eq!(
+            batch.leaf_trace[0].last().map(String::as_str),
+            Some("~:end")
+        );
+        batch.leaf_trace[0].retain(|l| *l != x);
+        retrace(&mut batch, 0);
+        batch.checkpoint.wit_root = batch.trace[0].clone();
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("mirror proof");
+        assert_eq!(p.pred, "mirror");
+        assert!(p.data.get("left").is_some() && p.data.get("right").is_some());
+    }
+
+    /// #47 A2: an address binding re-pointed to another account → P-adr.
+    #[test]
+    fn forged_address_binding_builds_adr_proof() {
+        let (mut batch, acct, aa) = honest_deposit_batch();
+        let adr = format!("adr:{}:{}", test_addr(), hex::encode(acct.0));
+        assert!(
+            batch.leaf_trace[0].contains(&adr),
+            "deposit binds the address in the witness tree"
+        );
+        for l in batch.leaf_trace[0].iter_mut() {
+            if *l == adr {
+                *l = format!("adr:{}:{}", test_addr(), "ee".repeat(32));
+            }
+        }
+        let mut replay = Engine::new();
+        replay.state.deposits_allowed.insert((aa, false));
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        // R3-A-4: the credited deposit's own binding adr:{addr}:{acct} is
+        // missing from the posted post tree — P-deposit fires first (the
+        // re-pointed leaf would also fail P-adr).
+        assert_eq!(proof.pred, "deposit");
+        assert!(proof.data.get("aleft").is_some());
+        assert!(!proof.bind_aa && !proof.fill_aa);
     }
 
     #[test]
@@ -1604,7 +5319,9 @@ mod tests {
     fn fill_math_isolated_taker_emits_op_and_ord_proofs() {
         // Bob rests a cross ask; alice crosses it with an ISOLATED bid that
         // fully fills (her taker order leaves no post ord leaf). The liar
-        // inflates alice's posted collateral by 1 unit. The payload must
+        // inflates alice's posted collateral by 1000 units (R3-A-3: a
+        // +-FILL_TOL rounding band is never a verdict, and the mirror needs
+        // > 2*FILL_TOL to be certain). The payload must
         // carry the p: op proof (isolated flag) plus the taker-ord absence
         // straddle; as the batch's only fill its right neighbor is the
         // fills_root length sentinel.
@@ -1672,19 +5389,33 @@ mod tests {
         let mut batch = Batch::from_applied(&prev, &mut eng2, &[id1, id2]).expect("batch");
         assert_eq!(batch.fills.len(), 1, "one fill, the batch's last element");
         assert_eq!(batch.checkpoint.fill_count, 1);
-        // Liar: alice's posted collateral inflated by 1 USD unit.
         let alice_hex = hex::encode(alice_id.0);
-        if let Some(leaves) = batch.leaf_trace.get_mut(1) {
-            for l in leaves.iter_mut() {
-                if l.starts_with(&format!("acct:{alice_hex}:")) {
-                    let p: Vec<&str> = l.split(':').collect();
-                    let col: i128 = p[2].parse().unwrap();
-                    *l = format!("acct:{}:{}:{}:{}", p[1], col + 1, p[3], p[4]);
+        let bump = |batch: &mut Batch, by: i128| {
+            if let Some(leaves) = batch.leaf_trace.get_mut(1) {
+                for l in leaves.iter_mut() {
+                    if l.starts_with(&format!("acct:{alice_hex}:")) {
+                        let p: Vec<&str> = l.split(':').collect();
+                        let col: i128 = p[2].parse().unwrap();
+                        *l = format!("acct:{}:{}:{}:{}", p[1], col + by, p[3], p[4]);
+                    }
                 }
             }
-        }
-        batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
-        batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+            batch.trace[1] = obyte_merkle::root(&batch.leaf_trace[1]);
+            batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+            batch.checkpoint.wit_root = batch.trace[1].clone();
+        };
+        // R3-A-3: inside the rounding band (+1 .. +2*FILL_TOL) — the AA may
+        // read it as its own rounding, so the mirror stays silent.
+        let mut near = batch.clone();
+        bump(&mut near, 2 * FILL_TOL);
+        let mut replay = Engine::new();
+        fund(&mut replay);
+        assert!(
+            build_proof(&near, &mut replay, &[], 0).is_none(),
+            "a sub-tolerance collateral drift is never a certain verdict"
+        );
+        // Liar: alice's posted collateral inflated by 1000 units.
+        bump(&mut batch, 1_000);
         let mut replay = Engine::new();
         fund(&mut replay);
         let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
@@ -1747,5 +5478,3369 @@ mod tests {
         // replays honestly, no divergence.
         replay.state.deposits_allowed.insert((aa, false));
         assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    // ---- #47 helpers ----
+    fn retrace(batch: &mut Batch, k: usize) {
+        batch.leaf_trace[k].sort();
+        batch.trace[k] = obyte_merkle::root(&batch.leaf_trace[k]);
+        batch.checkpoint.trace_root = obyte_merkle::root(&batch.trace);
+    }
+    fn refill(batch: &mut Batch) {
+        batch.checkpoint.fills_root =
+            obyte_merkle::root(&minuend_settle::fills_root_elements(&batch.fills));
+    }
+    fn bump_col(batch: &mut Batch, k: usize, acct_hex: &str, by: i128) {
+        for l in batch.leaf_trace[k].iter_mut() {
+            if l.starts_with(&format!("acct:{acct_hex}:")) {
+                let p: Vec<&str> = l.split(':').collect();
+                let col: i128 = p[2].parse().unwrap();
+                *l = format!("acct:{}:{}:{}:{}", p[1], col + by, p[3], p[4]);
+            }
+        }
+        retrace(batch, k);
+    }
+    fn set_fill_field(batch: &mut Batch, i: usize, field: usize, v: &str) {
+        let mut p: Vec<String> = batch.fills[i].split(':').map(String::from).collect();
+        p[field] = v.to_string();
+        batch.fills[i] = p.join(":");
+        refill(batch);
+    }
+
+    /// Bob rests a cross ask of `ask_q`; alice crosses it with an ISOLATED
+    /// Limit/Gtc bid of `bid_q` @ the same price (escrow `margin`).
+    /// Returns (prev state, batch, alice hex, fund closure input ids).
+    fn iso_taker_batch(ask_q: u64, bid_q: u64, margin: u64) -> (Batch, AccountId, AccountId) {
+        use minuend_types::{OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE, USD_SCALE};
+        let alice = sk(1);
+        let bob = sk(2);
+        let alice_id = acct_of(&alice);
+        let bob_id = acct_of(&bob);
+        let mut eng = Engine::new();
+        for id in [alice_id, bob_id] {
+            eng.state
+                .account_mut(id)
+                .credit(10_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let prev = eng.state.clone();
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask = sign_unit(
+            vec![genesis_id()],
+            Op::Place {
+                account: bob_id,
+                market: BTC_USD,
+                side: Side::Ask,
+                typ: OrderType::Limit,
+                tif: TimeInForce::Gtc,
+                price: px,
+                qty: ask_q,
+                client_seq: 1,
+                isolated: false,
+                margin: 0,
+            },
+            &bob,
+        );
+        let id1 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        let bid = sign_unit(
+            vec![id1],
+            Op::Place {
+                account: alice_id,
+                market: BTC_USD,
+                side: Side::Bid,
+                typ: OrderType::Limit,
+                tif: TimeInForce::Gtc,
+                price: px,
+                qty: bid_q,
+                client_seq: 1,
+                isolated: true,
+                margin,
+            },
+            &alice,
+        );
+        let id2 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[id1, id2]).expect("batch");
+        (batch, alice_id, bob_id)
+    }
+    fn funded_replay(ids: &[AccountId]) -> Engine {
+        let mut replay = Engine::new();
+        for id in ids {
+            replay
+                .state
+                .account_mut(*id)
+                .credit(10_000 * minuend_types::USD_SCALE as i128)
+                .unwrap();
+        }
+        replay
+    }
+
+    /// Round 10 P-wf mirror: every leaf / fill the engine writes is
+    /// well-formed (extreme integer values included); the R10 PoC fields
+    /// ('1e400', 'x', '01', '1e3', '-0', ...) are malformed.
+    #[test]
+    fn r10_wf_engine_leaves_are_well_formed_and_garbage_is_not() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (b1, _, _) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let (b2, _, _) = honest_deposit_batch();
+        let mut all: Vec<String> = minuend_state::wit_leaves(&minuend_state::ChainState::new());
+        for b in [&b1, &b2] {
+            for t in &b.leaf_trace {
+                all.extend(t.iter().cloned());
+            }
+            for f in minuend_settle::fills_root_elements(&b.fills) {
+                assert!(!wf_malformed(&f, true), "{f}");
+                assert!(wf_malformed(&f, false), "fill tag in the witness tree: {f}");
+            }
+        }
+        assert!(
+            all.iter().any(|l| l.starts_with("ord:")) && all.iter().any(|l| l.starts_with("pos:"))
+        );
+        let h = "ab".repeat(32);
+        all.push(format!(
+            "acct:{h}:{}:{}:{}",
+            i128::MIN,
+            u128::MAX,
+            i128::MAX
+        ));
+        all.push(format!(
+            "pos:{h}:{}:{}:{}:1:{}",
+            u32::MAX,
+            i64::MIN,
+            i64::MAX,
+            i128::MIN
+        ));
+        all.push(format!(
+            "ord:{h}:1:1:{}:{}:{}:{h}:1:{}",
+            i64::MIN,
+            u64::MAX,
+            u64::MAX,
+            i128::MIN
+        ));
+        all.push(format!(
+            "meta:1:1:10000:500:5:100:1:{}:{}:500",
+            -(minuend_types::MARK_CAP - 1),
+            u64::MAX
+        ));
+        all.push(format!("obond:{h}:{}", u64::MAX));
+        for l in &all {
+            assert!(!wf_malformed(l, false), "honest leaf judged malformed: {l}");
+            assert!(wf_malformed(l, true), "witness tag in the fills tree: {l}");
+        }
+        for bad in [
+            format!("acct:{h}:x:0:0"),
+            format!("acct:{h}:1e400:0:0"),
+            format!("acct:{h}:01:0:0"),
+            format!("acct:{h}:1e3:0:0"),
+            format!("acct:{h}:1.0:0:0"),
+            format!("acct:{h}:+1:0:0"),
+            format!("acct:{h}:-0:0:0"),
+            format!("acct:{h}:0:-1:0"),
+            format!("acct:{h}:0:0"),
+            format!("acct:{h}:0:0:0:0"),
+            format!("acct:{h}:1{}:0:0", "0".repeat(39)),
+            "acct:abc:0:0:0".to_string(),
+            "meta:1:1:1e400:500:10:50:0:9000000000000000000:0:0".to_string(),
+            format!("obond:{h}:1e400"),
+            format!("obond:{h}:07"),
+            "~:foo".to_string(),
+            "zzz:1".to_string(),
+            "acct;zzz".to_string(),
+        ] {
+            assert!(wf_malformed(&bad, false), "{bad}");
+        }
+        assert!(wf_malformed("n:x", true));
+        assert!(wf_malformed(
+            &format!("f:{h}:0:{h}:{h}:{h}:{h}:1:9e12:1:1:0:0:0"),
+            true
+        ));
+    }
+
+    /// Round 10 P-wf proofs: a counterparty's collateral written as 'x'
+    /// (R10-H2) and a fill price written as '9e12' are proven by P-wf.
+    #[test]
+    fn r10_wf_proof_for_malformed_post_leaf_and_fill() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (mut batch, a, b) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let bob = hex::encode(b.0);
+        for l in batch.leaf_trace[1].iter_mut() {
+            if l.starts_with(&format!("acct:{bob}:")) {
+                let p: Vec<&str> = l.split(':').collect();
+                *l = format!("acct:{}:x:{}:{}", p[1], p[3], p[4]);
+            }
+        }
+        retrace(&mut batch, 1);
+        batch.checkpoint.wit_root = batch.trace[1].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(p.pred, "wf");
+        assert_eq!(p.target(), "wf");
+        assert_eq!(p.data["k"], 1);
+        assert_eq!(p.data["leaf"], format!("acct:{bob}:x:0:0"));
+        assert!(p.data.get("end_proof").is_some());
+        // R11-M1: the payload proves the leaf absent from unit 0's tree.
+        assert!(p.data.get("pleft").is_some());
+        assert_eq!(p.data["pre_wit"], batch.trace[0]);
+        let (mut batch2, a2, b2) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        set_fill_field(&mut batch2, 0, 8, "9e12");
+        let mut replay2 = funded_replay(&[a2, b2]);
+        let p2 = build_proof(&batch2, &mut replay2, &[], 0).expect("proof");
+        assert_eq!(p2.pred, "wf");
+        assert!(p2.data["leaf"].as_str().unwrap().contains(":9e12:"));
+        assert_eq!(p2.data["fills_root"], batch2.checkpoint.fills_root);
+    }
+
+    /// Round 11: P-wf newness (M1), field classes (L1), the open-element
+    /// challenge (C2) and the ingest caps.
+    #[test]
+    fn r11_wf_newness_classes_open_challenge_and_caps() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let h = "d".repeat(64);
+        // L1: uppercase / non-hex ids, bad dep anchors and addresses.
+        for bad in [
+            format!("acct:{}:0:0:0", "D".repeat(64)),
+            format!("acct:{}:0:0:0", "g".repeat(64)),
+            "dep:Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0".to_string(),
+            format!("adr:mxmekgn37h5qo2awht7xrg6lhjvvtawu:{h}"),
+            format!("adrx:{h}:SHORT"),
+        ] {
+            assert!(wf_malformed(&bad, false), "{bad}");
+        }
+        for ok in [
+            format!("acct:{}:0:0:0", "1".repeat(64)),
+            "dep:Lhz6grA1wmy7va5jLOoHBRTri3c/YWqur2aOLwvo8Q0=".to_string(),
+            format!("adr:MXMEKGN37H5QO2AWHT7XRG6LHJVVTAWU:{h}"),
+        ] {
+            assert!(!wf_malformed(&ok, false), "{ok}");
+        }
+        // M1: a malformed leaf carried over from unit 0 is not judged at 1.
+        let (mut batch, _a, b) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let bob = hex::encode(b.0);
+        for k in 0..2 {
+            for l in batch.leaf_trace[k].iter_mut() {
+                if l.starts_with(&format!("acct:{bob}:")) {
+                    let p: Vec<&str> = l.split(':').collect();
+                    *l = format!("acct:{}:x:{}:{}", p[1], p[3], p[4]);
+                }
+            }
+            retrace(&mut batch, k);
+        }
+        // (unit 0 wrote it: judged at k == 0 at most; never again at k == 1)
+        assert!(wf_proof(&batch, None).is_none_or(|p| p.data["k"] == 0));
+        let carried = batch.leaf_trace[1]
+            .iter()
+            .find(|l| l.starts_with(&format!("acct:{bob}:x:")))
+            .expect("bob leaf")
+            .clone();
+        if batch.leaf_trace[0].contains(&carried) {
+            assert!(wf_absence(&batch.leaf_trace[0], &carried).is_none());
+        }
+        // C2: an oversized ops element is opened (wf AA, tree ops, index 1).
+        let (honest, a2, b2) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        let mut big = honest.clone();
+        big.ops[1] = format!("x:{}", "0".repeat(minuend_types::MAX_ELEMENT_LEN + 1));
+        big.checkpoint.ops_root = obyte_merkle::root(&big.ops);
+        let mut replay = funded_replay(&[a2, b2]);
+        let p = build_proof(&big, &mut replay, &[], 0).expect("open");
+        assert_eq!(p.pred, "open");
+        assert_eq!(p.target(), "wf");
+        assert_eq!(p.data["tree"], "ops");
+        assert_eq!(p.data["index"], 1);
+        assert!(
+            open_answer(&big, "ops", 0, 1).is_none(),
+            "oversized: unanswerable"
+        );
+        // An honest batch answers every open, digit-free or not.
+        assert!(open_proof(&honest).is_none());
+        for (tree, k, i) in [
+            ("ops", 0, 1),
+            ("units", 0, 0),
+            ("trace", 0, 1),
+            ("fills", 0, 0),
+            ("wit", 1, 0),
+        ] {
+            let ans = open_answer(&honest, tree, k, i).expect(tree);
+            let el = ans["element"].as_str().unwrap();
+            assert!(el.starts_with('Z') && el.len() <= minuend_types::MAX_ELEMENT_LEN + 1);
+            assert_eq!(ans["proof"]["index"], i);
+        }
+        let ans = open_answer(&honest, "ops", 0, 1).unwrap();
+        assert_eq!(ans["proof"]["root"], honest.checkpoint.ops_root);
+        // R11b: the watcher's planner answers every honest open against the
+        // root it recorded, and never answers one recorded against another
+        // submission's root.
+        for (tree, k, i) in [
+            ("ops", 0, 1),
+            ("units", 0, 0),
+            ("trace", 0, 1),
+            ("fills", 0, 0),
+            ("wit", 1, 0),
+        ] {
+            let ans = open_answer(&honest, tree, k, i).expect(tree);
+            let rec = crate::OpenRecord {
+                key: crate::open_state_key("R", 1, tree, k, i),
+                height: 1,
+                tree: tree.into(),
+                k,
+                index: i,
+                challenger: "C".into(),
+                expires_at: 10_000,
+                root: ans["proof"]["root"].as_str().unwrap().to_string(),
+                submitted_at: 1,
+            };
+            assert_eq!(
+                crate::plan_open(&rec, 5_000, Some(&ans)),
+                crate::OpenAction::Answer(ans.clone()),
+                "{tree}"
+            );
+            let stale = crate::OpenRecord {
+                root: "X".repeat(44),
+                ..rec.clone()
+            };
+            assert_eq!(
+                crate::plan_open(&stale, 5_000, Some(&ans)),
+                crate::OpenAction::Wait
+            );
+        }
+        // Ingest refuses a unit whose text breaks the caps (a 3000-char
+        // deposit address would be an unreadable ops element).
+        let secret = sk(7);
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&secret),
+                addr: "A".repeat(3000),
+                amount: 1,
+                aa_unit: [3u8; 32],
+            },
+            &secret,
+        );
+        assert!(!minuend_exec::unit_text_within_caps(&u));
+        assert!(matches!(
+            Engine::new().ingest(u),
+            Err(minuend_exec::ExecError::TooLong)
+        ));
+    }
+
+    #[test]
+    fn place_op_commits_order_type() {
+        // #47 A3: p: ops carry tif AND typ (10 parts) so the AA can tell
+        // whether an unfilled remainder rests.
+        let (batch, _, _) = iso_taker_batch(
+            minuend_types::QTY_SCALE / 1000,
+            minuend_types::QTY_SCALE / 500,
+            40 * minuend_types::USD_SCALE,
+        );
+        let op = &batch.ops[1];
+        let p: Vec<&str> = op.split(':').collect();
+        assert_eq!(p.len(), 10, "{op}");
+        assert_eq!(p[8], "0", "tif Gtc");
+        assert_eq!(p[9], "0", "typ Limit");
+    }
+
+    #[test]
+    fn honest_isolated_partial_fill_that_rests_builds_no_proof() {
+        // The remainder rests: `still` = margin - taker_post is derived
+        // from the op (typ/tif), and the taker's post ord leaf matches.
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (batch, a, b) = iso_taker_batch(q, 2 * q, 40 * minuend_types::USD_SCALE);
+        assert_eq!(batch.fills.len(), 1);
+        let mut replay = funded_replay(&[a, b]);
+        assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    #[test]
+    fn honest_isolated_full_fill_builds_no_proof() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (batch, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        let mut replay = funded_replay(&[a, b]);
+        assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    #[test]
+    fn forged_taker_post_is_fill_math_fraud() {
+        // #47 A3: the liar writes a wrong taker_post into the fill and moves
+        // alice's collateral by the same amount — the old identity (which
+        // trusted F[13]) balanced; the op-bound one does not. (R5-A-2: a
+        // NEGATIVE taker_post is now P-fsane's shape lie, so the forged
+        // share here is an inflated positive one.)
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (mut batch, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        let honest_tpost: i128 = batch.fills[0].split(':').nth(13).unwrap().parse().unwrap();
+        let forged = honest_tpost + 1_000_000_000;
+        set_fill_field(&mut batch, 0, 13, &forged.to_string());
+        let alice_hex = hex::encode(a.0);
+        bump_col(&mut batch, 1, &alice_hex, honest_tpost - forged);
+        let mut replay = funded_replay(&[a, b]);
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "fill_math");
+        assert_eq!(proof.data["who"].as_str(), Some("taker"));
+        assert!(proof.data.get("ops_proof").is_some());
+    }
+
+    #[test]
+    fn fake_taker_order_id_on_resting_order_is_fraud() {
+        // #47 A3: the remainder rests, but the liar points F[5] at a
+        // non-existent order id and books the resting escrow back into
+        // collateral (old identity: still = 0 behind the absence proof).
+        let q = minuend_types::QTY_SCALE / 1000;
+        let margin = 40 * minuend_types::USD_SCALE;
+        let (mut batch, a, b) = iso_taker_batch(q, 2 * q, margin);
+        let tpost: i128 = batch.fills[0].split(':').nth(13).unwrap().parse().unwrap();
+        set_fill_field(&mut batch, 0, 5, &"ee".repeat(32));
+        let alice_hex = hex::encode(a.0);
+        bump_col(&mut batch, 1, &alice_hex, margin as i128 - tpost);
+        let mut replay = funded_replay(&[a, b]);
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "fill_math");
+        assert_eq!(proof.data["who"].as_str(), Some("taker"));
+    }
+
+    #[test]
+    fn inflated_isolated_bucket_is_fraud() {
+        // #47 A3: the pos leg now checks the post bucket (old_bucket +
+        // taker_post on an open) — a padded bucket would later release
+        // into collateral unchallenged.
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (mut batch, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        let alice_hex = hex::encode(a.0);
+        for l in batch.leaf_trace[1].iter_mut() {
+            if l.starts_with(&format!("pos:{alice_hex}:")) {
+                let mut p: Vec<String> = l.split(':').map(String::from).collect();
+                let bk: i128 = p[6].parse().unwrap();
+                p[6] = (bk + 5_000_000).to_string();
+                *l = p.join(":");
+            }
+        }
+        retrace(&mut batch, 1);
+        let mut replay = funded_replay(&[a, b]);
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "fill_math");
+    }
+
+    #[test]
+    fn gov_withdraw_perp_only_holder_has_an_acct_leaf() {
+        // R8-C3 (was #47 B6): a PERP-only holder (no `accounts` entry) has
+        // an acct leaf, so its gov withdrawal is judged on the leaf pair.
+        let secret = sk(7);
+        let acct = acct_of(&secret);
+        let mut eng = Engine::new();
+        eng.state.perp_balances.insert(acct, 1_000);
+        eng.state.perp_supply = 1_000;
+        let prev = eng.state.clone();
+        let hexa = hex::encode(acct.0);
+        assert!(
+            minuend_state::wit_leaves(&prev).contains(&format!("acct:{hexa}:0:1000:0")),
+            "PERP-only holder has its acct leaf"
+        );
+        let u = sign_unit(
+            vec![genesis_id()],
+            Op::GovWithdraw {
+                account: acct,
+                amount: 100,
+                nonce: 1,
+            },
+            &secret,
+        );
+        let id = unit_id(&u);
+        let mut replay = eng.clone();
+        eng.ingest(u).unwrap();
+        let mut eng2 = eng.clone();
+        let mut batch = Batch::from_applied(&prev, &mut eng2, &[id]).expect("batch");
+        assert!(
+            batch.leaf_trace[0].contains(&format!("acct:{hexa}:0:900:0")),
+            "honest gov withdrawal moves the leaf's PERP column"
+        );
+        // Honest: nothing to prove.
+        let mut r0 = replay.clone();
+        assert!(build_proof(&batch, &mut r0, &[], 0).is_none());
+        // Liar: withdraw less PERP than the op says.
+        for l in batch.leaf_trace[0].iter_mut() {
+            if l.starts_with(&format!("acct:{hexa}:")) {
+                *l = format!("acct:{hexa}:0:950:0");
+            }
+        }
+        batch.leaf_trace[0].sort();
+        retrace(&mut batch, 0);
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "withdraw");
+        assert!(proof.data["pre_absent"].is_null());
+    }
+
+    #[test]
+    fn r8_c3_gov_deposit_to_a_fresh_account_is_credited_not_fraud() {
+        // R8-C3: a credited D: on an account with no leaf creates
+        // `acct:X:0:{amount}:0`; the AA judges it as credited (backing),
+        // and the watcher builds no proof for the honest leaf.
+        let mut w = minuend_types::AccountId([0u8; 32]);
+        w.0[0] = 0x42;
+        let mut st = minuend_state::ChainState::new();
+        st.perp_balances.insert(w, 7_000);
+        let hexa = hex::encode(w.0);
+        let leaves = minuend_state::wit_leaves(&st);
+        assert!(leaves.contains(&format!("acct:{hexa}:0:7000:0")));
+        // A holder with W only also gets a leaf.
+        let mut st2 = minuend_state::ChainState::new();
+        st2.withdrawn_total.insert(w, 5);
+        assert!(minuend_state::wit_leaves(&st2).contains(&format!("acct:{hexa}:0:0:5")));
+    }
+
+    /// k0 alice rests an ask @100k (isolated iff `alice_iso`), k1 bob rests
+    /// an ask @101k, k2 alice bids 1 @101k (cross).
+    fn self_trade_batch(alice_iso: bool) -> (Batch, Engine, [AccountId; 2], Vec<String>) {
+        use minuend_types::{
+            OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE, QTY_SCALE, USD_SCALE,
+        };
+        let alice = sk(1);
+        let bob = sk(2);
+        let ids = [acct_of(&alice), acct_of(&bob)];
+        let mut eng = Engine::new();
+        for id in ids {
+            eng.state
+                .account_mut(id)
+                .credit(10_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let prev = eng.state.clone();
+        let replay = eng.clone();
+        let q = QTY_SCALE / 1000;
+        let mk = |parents, secret: &[u8; 32], account, side, price, seq, iso: bool| {
+            sign_unit(
+                parents,
+                Op::Place {
+                    account,
+                    market: BTC_USD,
+                    side,
+                    typ: OrderType::Limit,
+                    tif: TimeInForce::Gtc,
+                    price,
+                    qty: q,
+                    client_seq: seq,
+                    isolated: iso,
+                    margin: if iso { 40 * USD_SCALE } else { 0 },
+                },
+                secret,
+            )
+        };
+        let p100 = 100_000 * PRICE_SCALE as i64;
+        let p101 = 101_000 * PRICE_SCALE as i64;
+        // alice's resting order is an ASK; a later alice BID on the same
+        // market must share its mode, so the bid uses alice_iso too.
+        let u0 = mk(
+            vec![genesis_id()],
+            &alice,
+            ids[0],
+            Side::Ask,
+            p100,
+            1,
+            alice_iso,
+        );
+        let i0 = unit_id(&u0);
+        eng.ingest(u0).unwrap();
+        let u1 = mk(vec![i0], &bob, ids[1], Side::Ask, p101, 1, false);
+        let i1 = unit_id(&u1);
+        eng.ingest(u1).unwrap();
+        let u2 = mk(vec![i1], &alice, ids[0], Side::Bid, p101, 2, alice_iso);
+        let i2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[i0, i1, i2]).expect("batch");
+        let hexes = vec![hex::encode(i2.0)];
+        (batch, replay, ids, hexes)
+    }
+
+    #[test]
+    fn skip_taker_own_cross_order_stays_exempt() {
+        // Cross own maker: cancel-maker-continue, then alice fills bob.
+        let (batch, mut replay, _, _) = self_trade_batch(false);
+        assert_eq!(
+            batch.fills.len(),
+            1,
+            "alice fills bob after cancelling her own ask"
+        );
+        assert!(build_proof(&batch, &mut replay, &[], 0).is_none());
+    }
+
+    #[test]
+    fn skip_past_taker_own_escrowed_order_is_fraud() {
+        // #47 B7: alice's own ESCROWED ask @100k rejects her Place
+        // (SelfTrade::Reject) — honest batch has no fill at k2. The liar
+        // fabricates "alice took bob @101k": crossing past her own escrowed
+        // better order is provable skip fraud.
+        let (mut batch, mut replay, ids, hexes) = self_trade_batch(true);
+        assert!(
+            batch.fills.is_empty(),
+            "escrowed own maker rejects the place"
+        );
+        let bob_order = minuend_types::order_id(ids[1], minuend_types::BTC_USD, 1);
+        let alice_order = minuend_types::order_id(ids[0], minuend_types::BTC_USD, 2);
+        batch.fills.push(format!(
+            "f:{}:0:{}:{}:{}:{}:{}:{}:{}:{}:0:0:0",
+            hexes[0],
+            hex::encode(ids[0].0),
+            hex::encode(ids[1].0),
+            hex::encode(alice_order.0),
+            hex::encode(bob_order.0),
+            minuend_types::BTC_USD.0,
+            101_000 * minuend_types::PRICE_SCALE as i64,
+            minuend_types::QTY_SCALE / 1000,
+            3
+        ));
+        // Round 7b: the liar commits a matching fill_count (else P-tsize).
+        batch.checkpoint.fill_count += 1;
+        refill(&mut batch);
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "skip");
+        let better = proof.data["better_ord"].as_str().unwrap();
+        assert!(better.contains(&hex::encode(ids[0].0)), "alice's own order");
+    }
+
+    #[test]
+    fn skip_on_first_fill_of_multi_fill_unit_builds_proof() {
+        // #47 B3: carol @100k is better than bob @101k. Round 7: a unit
+        // carries at most one fill (alice's bid @101k takes carol only);
+        // the liar swaps fill idx 0's maker to bob — still challengeable.
+        use minuend_types::{
+            OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE, QTY_SCALE, USD_SCALE,
+        };
+        let (alice, bob, carol) = (sk(1), sk(2), sk(3));
+        let ids = [acct_of(&alice), acct_of(&bob), acct_of(&carol)];
+        let mut eng = Engine::new();
+        for id in ids {
+            eng.state
+                .account_mut(id)
+                .credit(10_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let prev = eng.state.clone();
+        let mut replay = eng.clone();
+        let q = QTY_SCALE / 1000;
+        let mk = |parents, secret: &[u8; 32], account, side, price, qty| {
+            sign_unit(
+                parents,
+                Op::Place {
+                    account,
+                    market: BTC_USD,
+                    side,
+                    typ: OrderType::Limit,
+                    tif: TimeInForce::Gtc,
+                    price,
+                    qty,
+                    client_seq: 1,
+                    isolated: false,
+                    margin: 0,
+                },
+                secret,
+            )
+        };
+        let p100 = 100_000 * PRICE_SCALE as i64;
+        let p101 = 101_000 * PRICE_SCALE as i64;
+        let u0 = mk(vec![genesis_id()], &bob, ids[1], Side::Ask, p101, q);
+        let i0 = unit_id(&u0);
+        eng.ingest(u0).unwrap();
+        let u1 = mk(vec![i0], &carol, ids[2], Side::Ask, p100, q);
+        let i1 = unit_id(&u1);
+        eng.ingest(u1).unwrap();
+        let u2 = mk(vec![i1], &alice, ids[0], Side::Bid, p101, q);
+        let i2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let mut eng2 = eng.clone();
+        let mut batch = Batch::from_applied(&prev, &mut eng2, &[i0, i1, i2]).expect("batch");
+        assert_eq!(batch.fills.len(), 1);
+        // Honest: no proof.
+        let mut r0 = replay.clone();
+        assert!(build_proof(&batch, &mut r0, &[], 0).is_none());
+        // Liar: idx 0 claims bob's worse order.
+        let bob_order = minuend_types::order_id(ids[1], BTC_USD, 1);
+        set_fill_field(&mut batch, 0, 4, &hex::encode(ids[1].0));
+        set_fill_field(&mut batch, 0, 6, &hex::encode(bob_order.0));
+        set_fill_field(&mut batch, 0, 8, &p101.to_string());
+        let proof = build_proof(&batch, &mut replay, &[], 0).expect("proof");
+        assert_eq!(proof.pred, "skip");
+        assert_eq!(proof.data["fill"].as_str(), Some(batch.fills[0].as_str()));
+    }
+
+    fn liq_leg<'a>(acct: &'a str, cp: &'a str, taker: bool, exp_fill: i128) -> Leg<'a> {
+        Leg {
+            acct_hex: acct,
+            market: "1",
+            exp_qty: 0,
+            exp_entry: 0,
+            exp_absent: true,
+            exp_bucket: None,
+            exp_fill,
+            taker_place: None,
+            liq: Some(LiqLeg {
+                reward: if taker { Some(30) } else { None },
+            }),
+            allow_last: false,
+            counterparty: cp,
+            claw_checkable: true,
+            tol: FILL_TOL,
+            col_skip: false,
+            kx: 0,
+            xt_floor: None,
+            adl_over: false,
+            pos_big: false,
+        }
+    }
+
+    fn place_leg<'a>(acct: &'a str, cp: &'a str, exp_fill: i128, cross_taker: bool) -> Leg<'a> {
+        Leg {
+            acct_hex: acct,
+            market: "1",
+            exp_qty: 0,
+            exp_entry: 0,
+            exp_absent: true,
+            exp_bucket: None,
+            exp_fill,
+            taker_place: None,
+            liq: None,
+            allow_last: false,
+            counterparty: cp,
+            claw_checkable: cross_taker,
+            tol: FILL_TOL,
+            col_skip: false,
+            kx: 0,
+            xt_floor: None,
+            adl_over: false,
+            pos_big: false,
+        }
+    }
+
+    /// R4-A-1: a fill that disagrees with its maker order's PRE leaf
+    /// (price, owner, qty beyond remaining, same side) → P-mbind proof for
+    /// the book dispute AA; the honest fill builds nothing.
+    #[test]
+    fn r4a1_fill_off_its_maker_order_builds_mbind_proof() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        let mut r0 = funded_replay(&[a, b]);
+        assert!(build_proof(&honest, &mut r0, &[], 0).is_none());
+        let px: i64 = honest.fills[0].split(':').nth(8).unwrap().parse().unwrap();
+        let cases: Vec<(usize, String)> = vec![
+            (8, (px * 10).to_string()), // price != maker price
+            (4, hex::encode(a.0)),      // maker != order owner
+            (9, (2 * q).to_string()),   // qty > remaining
+            (11, "1".to_string()),      // taker on the maker's side
+        ];
+        for (field, v) in cases {
+            let mut batch = honest.clone();
+            set_fill_field(&mut batch, 0, field, &v);
+            let mut replay = funded_replay(&[a, b]);
+            let proof = build_proof(&batch, &mut replay, &[], 0)
+                .unwrap_or_else(|| panic!("field {field}: no proof"));
+            assert_eq!(proof.pred, "mbind", "field {field}");
+            assert_eq!(proof.target(), "book");
+            assert!(proof.data["maker_ord"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!(
+                    "ord:{}:",
+                    batch.fills[0].split(':').nth(6).unwrap()
+                )));
+            assert!(proof.data.get("maker_ord_proof").is_some());
+            assert!(proof.data.get("units_proof").is_some());
+        }
+    }
+
+    /// R5-A-3 / R5-A-6: P-mbind compares numerically, like the AA reads
+    /// split() fields — `1e30`, a negative and a zero qty are fraud; a
+    /// price written `1e13` that equals the maker's `10000000000000` is not
+    /// a P-mbind lie (the AA would bounce it).
+    #[test]
+    fn r5a3_mbind_numeric_qty_and_price() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        // Round 10: a non-canonical / negative qty is malformed (P-wf, which
+        // runs first); a canonical zero qty is still a P-mbind lie.
+        for (v, pred) in [
+            ("1e30", "wf"),
+            ("1e21", "wf"),
+            ("-50000000", "wf"),
+            ("0", "mbind"),
+        ] {
+            let mut batch = honest.clone();
+            set_fill_field(&mut batch, 0, 9, v);
+            let mut replay = funded_replay(&[a, b]);
+            let proof = build_proof(&batch, &mut replay, &[], 0)
+                .unwrap_or_else(|| panic!("qty {v}: no proof"));
+            assert_eq!(proof.pred, pred, "qty {v}");
+        }
+        let px: i64 = honest.fills[0].split(':').nth(8).unwrap().parse().unwrap();
+        assert_eq!(px, 10_000_000_000_000, "test assumes px = 1e13");
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 8, "1e13");
+        let mut replay = funded_replay(&[a, b]);
+        if let Some(p) = build_proof(&batch, &mut replay, &[], 0) {
+            assert_ne!(p.pred, "mbind", "numerically equal price is not P-mbind");
+        }
+        assert_eq!(oscript_eq("1e13", "10000000000000"), Some(true));
+        assert_eq!(oscript_eq("007", "7"), Some(true));
+        assert_eq!(oscript_eq("abc", "abc"), Some(true));
+        assert_eq!(oscript_eq("abc", "0"), Some(false));
+        assert_eq!(oscript_qty_bad("1e30", "100000"), Some(true));
+        assert_eq!(oscript_qty_bad("100000", "100000"), Some(false));
+        assert_eq!(oscript_qty_bad("1.5", "100000"), Some(true));
+    }
+
+    /// R5-A-2 P-fsane: kind 2/3 with taker_post != 0, a kind 0 fill tagged
+    /// kind 1 on a regular market, and a fill under a Place whose isolated
+    /// margin exceeds the pre collateral are fraud on proven values alone.
+    #[test]
+    fn r5a2_fsane_rules() {
+        let q = minuend_types::QTY_SCALE / 1000;
+        let (honest, a, b) = iso_taker_batch(q, q, 40 * minuend_types::USD_SCALE);
+        // kind 1 on BTC_USD (usd_per_unit 0).
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 12, "1");
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("fsane kind proof");
+        assert_eq!(p.pred, "fsane");
+        assert_eq!(p.target(), "book");
+        assert!(p.data.get("pre_meta").is_some());
+        // kind 3 with a non-zero taker_post.
+        let mut batch = honest.clone();
+        set_fill_field(&mut batch, 0, 12, "3");
+        set_fill_field(&mut batch, 0, 13, "5");
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("fsane shape proof");
+        assert_eq!(p.pred, "fsane");
+        assert!(p.data.get("pre_meta").is_none());
+        // Shape helper.
+        let f = "f:u:0:t:m:to:mo:1:5:7:1:0:0:0";
+        let parts: Vec<&str> = f.split(':').collect();
+        assert!(!fsane_shape_bad(&parts));
+        for (i, v) in [
+            (9, "0"),
+            (9, "1.5"),
+            (8, "x"),
+            (13, "-1"),
+            (11, "2"),
+            (12, "4"),
+        ] {
+            let mut p2 = parts.clone();
+            p2[i] = v;
+            assert!(fsane_shape_bad(&p2), "field {i} = {v}");
+        }
+        // Isolated Place with margin > pre collateral (alice had 10 000 USD;
+        // rewrite the op's margin to 20 000 USD, fill untouched).
+        let mut batch = honest.clone();
+        let k = batch
+            .ops
+            .iter()
+            .position(|o| o.starts_with("p:") && o.split(':').nth(6) == Some("1"))
+            .expect("iso place op");
+        let mut o: Vec<String> = batch.ops[k].split(':').map(String::from).collect();
+        o[7] = (20_000 * minuend_types::USD_SCALE).to_string();
+        batch.ops[k] = o.join(":");
+        batch.checkpoint.ops_root = obyte_merkle::root(&batch.ops);
+        let pre = batch.leaf_trace[k - 1].clone();
+        let unit_hexes: Vec<String> = batch
+            .checkpoint
+            .unit_ids
+            .iter()
+            .map(|id| hex::encode(id.0))
+            .collect();
+        let tree = minuend_settle::fills_root_elements(&batch.fills);
+        let f0 = batch.fills[0].clone();
+        let p = fsane_proof(&batch, k, &f0, &pre, &tree, &unit_hexes).expect("fsane op proof");
+        assert!(p.data.get("pre_acct").is_some());
+        assert!(p.data.get("op").is_some());
+    }
+
+    /// Alice rests an isolated bid that bob's ask partly fills, then
+    /// cancels the rest (unit 2, a `c:` unit) — three units, honest.
+    fn cancel_batch() -> (Batch, AccountId, AccountId, String) {
+        use minuend_types::{OrderType, Side, TimeInForce, BTC_USD, PRICE_SCALE, USD_SCALE};
+        let alice = sk(1);
+        let bob = sk(2);
+        let (alice_id, bob_id) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        for id in [alice_id, bob_id] {
+            eng.state
+                .account_mut(id)
+                .credit(10_000 * USD_SCALE as i128)
+                .unwrap();
+        }
+        let prev = eng.state.clone();
+        let px = 100_000 * PRICE_SCALE as i64;
+        let q = minuend_types::QTY_SCALE / 1000;
+        let place = |parents, acct, side, qty, iso, margin, secret: &[u8; 32]| {
+            sign_unit(
+                parents,
+                Op::Place {
+                    account: acct,
+                    market: BTC_USD,
+                    side,
+                    typ: OrderType::Limit,
+                    tif: TimeInForce::Gtc,
+                    price: px,
+                    qty,
+                    client_seq: 1,
+                    isolated: iso,
+                    margin,
+                },
+                secret,
+            )
+        };
+        let u0 = place(vec![genesis_id()], bob_id, Side::Ask, q, false, 0, &bob);
+        let i0 = unit_id(&u0);
+        eng.ingest(u0).unwrap();
+        let u1 = place(
+            vec![i0],
+            alice_id,
+            Side::Bid,
+            2 * q,
+            true,
+            40 * USD_SCALE,
+            &alice,
+        );
+        let i1 = unit_id(&u1);
+        eng.ingest(u1).unwrap();
+        let oid = minuend_types::order_id(alice_id, BTC_USD, 1);
+        let u2 = sign_unit(
+            vec![i1],
+            Op::Cancel {
+                account: alice_id,
+                order_id: oid,
+            },
+            &alice,
+        );
+        let i2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[i0, i1, i2]).expect("batch");
+        (batch, alice_id, bob_id, hex::encode(oid.0))
+    }
+
+    /// R4-A-3: under a `c:` unit, a rewritten position (entry inflated),
+    /// an inserted order leaf, or a dropped position → P-frame proof on the
+    /// bind AA; the honest cancel (its own order removed) builds nothing.
+    #[test]
+    fn r4a3_frame_change_in_cancel_unit_builds_frame_proof() {
+        let (honest, a, b, oid) = cancel_batch();
+        assert!(honest.ops[2].starts_with("c:"), "{}", honest.ops[2]);
+        let alice_hex = hex::encode(a.0);
+        assert!(
+            honest.leaf_trace[1]
+                .iter()
+                .any(|l| l.starts_with(&format!("ord:{oid}:"))),
+            "the remainder rests before the cancel"
+        );
+        assert!(
+            !honest.leaf_trace[2]
+                .iter()
+                .any(|l| l.starts_with(&format!("ord:{oid}:"))),
+            "the cancel removes it"
+        );
+        let mut r0 = funded_replay(&[a, b]);
+        assert!(build_proof(&honest, &mut r0, &[], 0).is_none());
+        // (a) entry rewritten → the pre leaf is gone (deletion arm).
+        let mut batch = honest.clone();
+        for l in batch.leaf_trace[2].iter_mut() {
+            if l.starts_with(&format!("pos:{alice_hex}:")) {
+                let mut p: Vec<String> = l.split(':').map(String::from).collect();
+                let e: i64 = p[4].parse().unwrap();
+                p[4] = (e * 100).to_string();
+                *l = p.join(":");
+            }
+        }
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame proof");
+        assert_eq!(p.pred, "frame");
+        assert_eq!(p.target(), "bind");
+        assert_eq!(p.data["ins"], serde_json::json!(false));
+        assert!(p.data["leaf"].as_str().unwrap().starts_with("pos:"));
+        assert!(p.data.get("left").is_some());
+        // (b) a fake order of bob's inserted (insertion arm).
+        let mut batch = honest.clone();
+        let fake = format!("ord:{}:1:0:1:9:5:{}:0:0", "ab".repeat(32), hex::encode(b.0));
+        batch.leaf_trace[2].push(fake.clone());
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame ins proof");
+        assert_eq!(p.pred, "frame");
+        assert_eq!(p.data["ins"], serde_json::json!(true));
+        assert_eq!(p.data["leaf"].as_str(), Some(fake.as_str()));
+        // (c) the position dropped outright.
+        let mut batch = honest.clone();
+        batch.leaf_trace[2].retain(|l| !l.starts_with(&format!("pos:{alice_hex}:")));
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame drop proof");
+        assert_eq!(p.pred, "frame");
+        assert_eq!(p.data["ins"], serde_json::json!(false));
+    }
+
+    /// R5-A-1: a foreign account's acct leaf rewritten (or dropped, or a
+    /// fake one inserted) in a c: unit is P-frame fraud; the cancelling
+    /// account's own leaf is not framed.
+    #[test]
+    fn r5a1_foreign_acct_change_in_cancel_unit_builds_frame_proof() {
+        let (honest, a, b, _oid) = cancel_batch();
+        assert!(honest.ops[2].starts_with("c:"), "{}", honest.ops[2]);
+        let canceller = honest.ops[2][2..66].to_string();
+        let other = if canceller == hex::encode(a.0) {
+            hex::encode(b.0)
+        } else {
+            hex::encode(a.0)
+        };
+        // (a) the other account's collateral zeroed (rewrite).
+        let mut batch = honest.clone();
+        let mut hit = false;
+        for l in batch.leaf_trace[2].iter_mut() {
+            if l.starts_with(&format!("acct:{other}:")) {
+                let mut p: Vec<String> = l.split(':').map(String::from).collect();
+                p[2] = "0".into();
+                *l = p.join(":");
+                hit = true;
+            }
+        }
+        assert!(hit, "other account has an acct leaf");
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct proof");
+        // R7b-N2: the acct: arm is P-xframe's now (pre/post pair).
+        assert_eq!(p.pred, "xframe");
+        assert_eq!(p.target(), "xframe");
+        assert!(p.data["post_acct"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("acct:{other}:")));
+        assert!(p.data["pre_acct"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("acct:{other}:")));
+        // (b) a fake acct leaf inserted.
+        let mut batch = honest.clone();
+        let fake = format!("acct:{}:777:0:0", "ab".repeat(32));
+        batch.leaf_trace[2].push(fake.clone());
+        batch.leaf_trace[2].sort();
+        retrace(&mut batch, 2);
+        batch.checkpoint.wit_root = batch.trace[2].clone();
+        let mut replay = funded_replay(&[a, b]);
+        let p = build_proof(&batch, &mut replay, &[], 0).expect("frame acct ins proof");
+        assert_eq!(p.pred, "xframe");
+        assert_eq!(p.data["post_acct"].as_str(), Some(fake.as_str()));
+        assert!(p.data.get("pre_acct").is_none());
+        assert!(p.data.get("left").is_some(), "pre absence straddle");
+        // (c) the frame closure itself never frames the op account.
+        let pre = &honest.leaf_trace[1];
+        let post = &honest.leaf_trace[2];
+        assert!(frame_proof(&honest, 2, &honest.ops[2], pre, post).is_none());
+    }
+
+    /// R4-A-5: the size/near-zero gate silences only the collateral leg —
+    /// a surviving position where the engine closed it is still fraud.
+    #[test]
+    fn r4a5_size_gate_keeps_position_leg() {
+        let a = "aa".repeat(32);
+        let c = "cc".repeat(32);
+        let mut leg = place_leg(&a, &c, 1_000, true);
+        leg.col_skip = true;
+        let mut t = vec![
+            format!("acct:{a}:600:0:0"),
+            format!("acct:{c}:5:0:0"),
+            format!("pos:{a}:1:5:100:0:0"),
+        ];
+        t.sort();
+        assert!(
+            aa_fill_verdict(&t, &leg, false, None),
+            "position lie judged"
+        );
+        t.retain(|l| !l.starts_with("pos:"));
+        assert!(
+            !aa_fill_verdict(&t, &leg, false, None),
+            "collateral skipped"
+        );
+    }
+
+    #[test]
+    fn kind0_winner_leg_clawed_by_negative_counterparty_is_not_fraud() {
+        // #47 (owner item "claw false-verdict in ordinary fills"): the
+        // maker ended the fill negative and was clawed back to 0 from the
+        // taker (fill-stage 1000 -> 600). The honest taker leaf 600 must
+        // not be judged; with a provably positive counterparty the same
+        // numbers ARE fraud (no claw can have happened).
+        let a = "aa".repeat(32);
+        let c = "cc".repeat(32);
+        let tree = |acol: i128, ccol: i128| -> Vec<String> {
+            let mut t = vec![
+                format!("acct:{a}:{acol}:0:0"),
+                format!("acct:{c}:{ccol}:0:0"),
+            ];
+            t.sort();
+            t
+        };
+        let leg = place_leg(&a, &c, 1_000, true);
+        assert!(!aa_fill_verdict(&tree(600, 0), &leg, false, None));
+        assert!(!aa_fill_verdict(&tree(600, -5), &leg, false, None));
+        assert!(aa_fill_verdict(&tree(600, 5), &leg, false, None));
+        assert!(!aa_fill_verdict(&tree(1_000, 5), &leg, false, None));
+        // Kind 0/1 maker leg against an ISOLATED taker Place: the taker's
+        // unrested escrow refund lands after the claw, so a positive taker
+        // leaf proves nothing — never a collateral verdict.
+        let iso = place_leg(&a, &c, 1_000, false);
+        assert!(!aa_fill_verdict(&tree(600, 5), &iso, false, None));
+        // R5-A-2: a claw can lift a leg at most to 0 from a NEGATIVE fill
+        // stage; a positive fill stage can never receive — minting above
+        // the identity is fraud whatever the counterparty shows.
+        assert!(aa_fill_verdict(&tree(1_500, 0), &leg, false, None));
+        assert!(aa_fill_verdict(&tree(1_500, -5), &iso, false, None));
+        // Negative fill stage (-300): honest post anywhere in [-300, 0].
+        let neg = place_leg(&a, &c, -300, true);
+        assert!(!aa_fill_verdict(&tree(0, 5), &neg, false, None));
+        assert!(!aa_fill_verdict(&tree(-300, 5), &neg, false, None));
+        assert!(aa_fill_verdict(
+            &tree(1_000_000_000_000, 5),
+            &neg,
+            false,
+            None
+        ));
+        // x: taker: ceiling max(cross identity, pre floor), no lower bound.
+        let mut xt = place_leg(&a, &c, 100, true);
+        xt.xt_floor = Some(400);
+        assert!(!aa_fill_verdict(&tree(400, 5), &xt, false, None));
+        assert!(!aa_fill_verdict(&tree(-9_000, 5), &xt, false, None));
+        assert!(aa_fill_verdict(&tree(5_000, 5), &xt, false, None));
+    }
+
+    #[test]
+    fn kind2_legs_judged_as_claw_range() {
+        // #47 B1: a counterparty at <= 0 may mean the claw moved this leg's
+        // collateral (a payment of at most its fill stage) — silent then.
+        // R5-A-2: no longer a bounce: a post ABOVE the identity is fraud.
+        let a = "aa".repeat(32);
+        let c = "cc".repeat(32);
+        let tree = |acol: i128, ccol: i128| -> Vec<String> {
+            let mut t = vec![
+                format!("acct:{a}:{acol}:0:0"),
+                format!("acct:{c}:{ccol}:0:0"),
+            ];
+            t.sort();
+            t
+        };
+        let maker = liq_leg(&a, &c, false, 1_000);
+        // Claw shape: target at 0, maker paid 400 of the hole → 600.
+        assert!(!aa_fill_verdict(&tree(600, 0), &maker, false, None));
+        // Same numbers with a provably positive target: real fraud.
+        assert!(aa_fill_verdict(&tree(600, 5), &maker, false, None));
+        // Honest maker leg: exact fill-stage.
+        assert!(!aa_fill_verdict(&tree(1_000, 5), &maker, false, None));
+        // R5-A-2: minted above the identity with the counterparty at 0.
+        assert!(aa_fill_verdict(&tree(5_000, 0), &maker, false, None));
+        // A maker that may be the keeper holds up to the reward on top.
+        let mut keeper = liq_leg(&a, &c, false, 1_000);
+        keeper.kx = 30;
+        keeper.claw_checkable = false;
+        assert!(!aa_fill_verdict(&tree(1_030, 5), &keeper, false, None));
+        assert!(aa_fill_verdict(&tree(1_100, 5), &keeper, false, None));
+        // An ADL take past the pre position is fraud on its own.
+        let mut over = liq_leg(&a, &c, false, 1_000);
+        over.adl_over = true;
+        assert!(aa_fill_verdict(&tree(1_000, 5), &over, false, None));
+    }
+
+    #[test]
+    fn kind2_target_leg_models_keeper_seize() {
+        // #47 B2: target post = fill-stage - min(reward, fill-stage).
+        let a = "aa".repeat(32);
+        let c = "cc".repeat(32);
+        let mut t = vec![format!("acct:{a}:970:0:0"), format!("acct:{c}:5:0:0")];
+        t.sort();
+        let taker = liq_leg(&a, &c, true, 1_000);
+        assert!(
+            !aa_fill_verdict(&t, &taker, false, None),
+            "honest keeper seize"
+        );
+        let mut t2 = vec![format!("acct:{a}:1000:0:0"), format!("acct:{c}:5:0:0")];
+        t2.sort();
+        assert!(
+            aa_fill_verdict(&t2, &taker, false, None),
+            "skipped keeper seize"
+        );
+        // Reward larger than the balance: seize stops at the balance.
+        let small = liq_leg(&a, &c, true, 20);
+        let mut t3 = vec![format!("acct:{a}:0:0:0"), format!("acct:{c}:5:0:0")];
+        t3.sort();
+        assert!(!aa_fill_verdict(&t3, &small, false, None));
+    }
+
+    // ---- Round 6: P-claw (both legs of one fill) ------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn claw_place(
+        parents: Vec<minuend_types::UnitId>,
+        secret: &[u8; 32],
+        side: minuend_types::Side,
+        tif: minuend_types::TimeInForce,
+        price: i64,
+        qty: u64,
+        client_seq: u64,
+        margin: Option<u64>,
+    ) -> minuend_dag::Unit {
+        sign_unit(
+            parents,
+            Op::Place {
+                account: acct_of(secret),
+                market: minuend_types::BTC_USD,
+                side,
+                typ: minuend_types::OrderType::Limit,
+                tif,
+                price,
+                qty,
+                client_seq,
+                isolated: margin.is_some(),
+                margin: margin.unwrap_or(0),
+            },
+            secret,
+        )
+    }
+
+    fn claw_set_pos(eng: &mut Engine, id: AccountId, qty: i64, entry: i64) {
+        eng.state.account_mut(id).positions.insert(
+            minuend_types::BTC_USD,
+            minuend_account::Position {
+                market: minuend_types::BTC_USD,
+                qty,
+                entry_price: entry,
+                isolated: false,
+            },
+        );
+    }
+
+    fn claw_set_col(eng: &mut Engine, id: AccountId, usd: i128) {
+        eng.state.account_mut(id).collateral = usd * minuend_types::USD_SCALE as i128;
+    }
+
+    /// Batch the single unit `u` on top of `eng`; returns the batch and a
+    /// replay engine at the batch's prev state.
+    fn claw_batch(eng: &mut Engine, u: minuend_dag::Unit) -> (Batch, Engine) {
+        let prev = eng.state.clone();
+        let replay = eng.clone();
+        let id = unit_id(&u);
+        eng.ingest(u).unwrap();
+        let mut eng2 = eng.clone();
+        let batch = Batch::from_applied(&prev, &mut eng2, &[id]).expect("batch");
+        (batch, replay)
+    }
+
+    /// The honest batch: one fill, the model reproduces BOTH legs exactly,
+    /// no proof. Then "credit the receiver without debiting the payer"
+    /// (the R5 money print) and "debit the payer without crediting the
+    /// receiver" both build a P-claw proof that fill_math does not.
+    fn claw_check(batch: &Batch, replay: &Engine, kind: &str) -> ClawOut {
+        assert_eq!(batch.fills.len(), 1, "single-fill unit: {:?}", batch.fills);
+        assert_eq!(batch.fills[0].split(':').nth(12), Some(kind));
+        let pre = minuend_state::wit_leaves(&replay.state);
+        // Round 7: an honest ADL print is clamp(pre mark, band).
+        if kind == "2" {
+            let mk = batch.fills[0].split(':').nth(7).unwrap();
+            let meta = pre
+                .iter()
+                .find(|l| l.starts_with(&format!("meta:{mk}:")))
+                .unwrap();
+            let band = pre
+                .iter()
+                .find(|l| l.starts_with(&format!("band:{mk}:")))
+                .unwrap();
+            assert_eq!(adl_price_bad(&batch.fills[0], meta, band), Some(false));
+        }
+        let c = claw_eval(&batch.fills[0], &batch.ops[0], &pre, &batch.leaf_trace[0])
+            .expect("P-claw judges this shape");
+        assert_eq!((c.dt, c.dm), (0, 0), "model == engine on both legs: {c:?}");
+        assert!(build_proof(batch, &mut replay.clone(), &[], 0).is_none());
+        c
+    }
+
+    fn claw_forgeries(batch: &Batch, replay: &Engine, c: &ClawOut) {
+        assert_ne!(c.x, 0, "fixture must claw");
+        let p: Vec<&str> = batch.fills[0].split(':').collect();
+        let (payer, receiver) = if c.x > 0 { (p[4], p[3]) } else { (p[3], p[4]) };
+        let amt = c.x.abs();
+        // Money print: the receiver keeps the claw, the payer is not debited.
+        let mut print = batch.clone();
+        bump_col(&mut print, 0, payer, amt);
+        let proof = build_proof(&print, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw", "fill_math alone cannot see it");
+        assert_eq!(proof.target(), "claw");
+        for key in [
+            "t_pre_acct",
+            "t_post_acct",
+            "m_pre_acct",
+            "m_post_acct",
+            "pre_meta",
+            "op",
+            "right",
+        ] {
+            assert!(proof.data.get(key).is_some(), "missing {key}");
+        }
+        // Burn: the payer pays, the receiver is not credited.
+        let mut burn = batch.clone();
+        bump_col(&mut burn, 0, receiver, -amt);
+        let proof = build_proof(&burn, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+    }
+
+    #[test]
+    fn r6_claw_maker_hole_clawed_from_cross_taker() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        // bob's 10k loss now exceeds his collateral: the claw covers 9k.
+        claw_set_col(&mut eng, b, 1_000);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(
+            c.x,
+            -(9_000 * USD_SCALE as i128),
+            "maker received 9k from the taker"
+        );
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_taker_hole_clawed_from_maker() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(
+            &mut eng,
+            a,
+            -(QTY_SCALE as i64),
+            90_000 * PRICE_SCALE as i64,
+        );
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 90_000 * PRICE_SCALE as i64);
+        let px = 100_000 * PRICE_SCALE as i64;
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, a, 1_000);
+        // alice buys back her short 10k higher: her hole is clawed from bob.
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Ioc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        let c = claw_check(&batch, &replay, "0");
+        assert!(c.x > 0, "taker received from the maker: {c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_isolated_taker_refund_lands_after_the_claw() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, b, 1_000);
+        // Isolated IOC for 2: one fills (escrow share 10k to the bucket),
+        // the unfilled half's 10k escrow returns AFTER the claw.
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Ioc,
+            px,
+            2 * QTY_SCALE,
+            1,
+            Some(20_000 * USD_SCALE),
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        assert!(batch.ops[0].starts_with("p:") && batch.ops[0].contains(":1:20000000000:1:0"));
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(c.x, -(9_000 * USD_SCALE as i128));
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_adl_target_hole_clawed_from_counterparty() {
+        use minuend_types::{PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 1_000_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(
+            &mut eng,
+            b,
+            -(QTY_SCALE as i64),
+            100_000 * PRICE_SCALE as i64,
+        );
+        // Mark crash, empty book: the remainder is ADL'd at the mark.
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![genesis_id()],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "2");
+        assert!(c.x > 0 && c.kpay == 0, "{c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_adl_keeper_reward_to_maker_caller() {
+        use minuend_types::{PRICE_SCALE, QTY_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 1_000_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        claw_set_pos(
+            &mut eng,
+            b,
+            -(QTY_SCALE as i64),
+            100_000 * PRICE_SCALE as i64,
+        );
+        // 14k under water with 15k collateral: liquidatable, no claw; the
+        // ADL counterparty is also the keeper and gets the reward.
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 86_000 * PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![genesis_id()],
+            Op::Liquidate {
+                caller: b,
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &bob,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "2");
+        assert_eq!(c.x, 0);
+        assert!(c.kpay > 0, "keeper reward paid: {c:?}");
+        // The keeper credit withheld from the maker-caller.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &hex::encode(b.0), -c.kpay);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+    }
+
+    #[test]
+    fn r6_claw_liquidation_book_fill_partial_claw() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE, USD_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "3");
+        // bob pays everything he has (50k) into alice's ~85k hole.
+        assert_eq!(c.x, 50_000 * USD_SCALE as i128, "{c:?}");
+        claw_forgeries(&batch, &replay, &c);
+    }
+
+    #[test]
+    fn r6_claw_eval_gates_bounce() {
+        // Funding market / kind 1 / self-fill / insurance party / an op
+        // that is not the fill's: no judgement (the AA bounces).
+        let t = "aa".repeat(32);
+        let m = "cc".repeat(32);
+        let u = "11".repeat(32);
+        let ord = "33".repeat(32);
+        let fill = |tk: &str, mk: &str, kind: &str| {
+            format!(
+                "f:{u}:0:{tk}:{mk}:{}:{ord}:1:100:5:9:0:{kind}:0",
+                "77".repeat(32)
+            )
+        };
+        let mut pre = vec![
+            format!("acct:{t}:1000:0:0"),
+            format!("acct:{m}:1000:0:0"),
+            "meta:1:1:1000:500:5:100:0:100:0:0".to_string(),
+            format!("ord:{ord}:1:1:100:3:5:{m}:0:0"),
+            "~:end".to_string(),
+        ];
+        pre.sort();
+        let op = format!("p:{t}:1:0:100:5:0:0:0:0");
+        assert!(claw_eval(&fill(&t, &m, "0"), &op, &pre, &pre).is_some());
+        assert!(claw_eval(&fill(&t, &m, "1"), &op, &pre, &pre).is_none());
+        assert!(claw_eval(&fill(&t, &t, "0"), &op, &pre, &pre).is_none());
+        let zero = "0".repeat(64);
+        assert!(claw_eval(&fill(&t, &zero, "0"), &op, &pre, &pre).is_none());
+        let other = format!("p:{m}:1:0:100:5:0:0:0:0");
+        assert!(claw_eval(&fill(&t, &m, "0"), &other, &pre, &pre).is_none());
+        let mut fpre = pre.clone();
+        fpre.retain(|l| !l.starts_with("meta:"));
+        fpre.push("meta:1:1:1000:500:5:100:0:100:7:0".to_string());
+        fpre.sort();
+        assert!(claw_eval(&fill(&t, &m, "0"), &op, &fpre, &fpre).is_none());
+        // Kind 2/3 need `L:{caller}:{taker}:{market}`.
+        assert!(claw_eval(&fill(&t, &m, "3"), &op, &pre, &pre).is_none());
+        let liq = format!("L:{}:{t}:1", "dd".repeat(32));
+        assert!(claw_eval(&fill(&t, &m, "3"), &liq, &pre, &pre).is_some());
+    }
+
+    // ---- Round 6b: R6-C1 / R6-C2 / R6-H1 --------------------------------
+
+    fn set_op(batch: &mut Batch, k: usize, op: &str) {
+        batch.ops[k] = op.to_string();
+        batch.checkpoint.ops_root = obyte_merkle::root(&batch.ops);
+    }
+
+    /// P-claw's builder alone on unit 0 of a forged copy of `batch`.
+    fn direct_claw(lie: &Batch, batch: &Batch, replay: &Engine) -> Option<BuiltProof> {
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let mut r = replay.clone();
+        r.ingest(batch.units[0].clone()).unwrap();
+        let post = minuend_state::wit_leaves(&r.state);
+        let u = hex::encode(batch.checkpoint.unit_ids[0].0);
+        claw_proof(lie, 0, &u, &batch.ops[0], &pre, &post, &batch.fills)
+    }
+
+    /// r6_claw_maker_hole's honest single-fill kind-0 batch (bob's 9k hole
+    /// clawed from alice), with a bystander carol holding 7k.
+    fn r6b_place_fixture() -> (Batch, Engine, [AccountId; 3]) {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, carol) = (sk(1), sk(2), sk(4));
+        let (a, b, c) = (acct_of(&alice), acct_of(&bob), acct_of(&carol));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 50_000);
+        claw_set_col(&mut eng, b, 20_000);
+        claw_set_col(&mut eng, c, 7_000);
+        claw_set_pos(&mut eng, b, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&ask);
+        eng.ingest(ask).unwrap();
+        claw_set_col(&mut eng, b, 1_000);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        (batch, replay, [a, b, c])
+    }
+
+    #[test]
+    fn r6b_c1_kind_relabel_and_x_op_are_fraud() {
+        let (batch, replay, [a, _, _]) = r6b_place_fixture();
+        let c = claw_check(&batch, &replay, "0");
+        let alice = hex::encode(a.0);
+        let p: Vec<&str> = batch.fills[0].split(':').collect();
+        assert_eq!(p[3], alice);
+        // (A) kind 0 -> 3 under the `p:` op + money print (alice is not
+        // debited the claw): the claw AA used to bounce on the op shape.
+        // (fill_math happens to see this one too; P-claw's builder must
+        // emit the shape-only proof on its own.)
+        let mut lie = batch.clone();
+        set_fill_field(&mut lie, 0, 12, "3");
+        bump_col(&mut lie, 0, &alice, -c.x);
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+        assert!(claw_shape_bad(&lie.fills[0], &lie.ops[0]) == Some(true));
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let mut r = replay.clone();
+        r.ingest(batch.units[0].clone()).unwrap();
+        let post = minuend_state::wit_leaves(&r.state);
+        let u = hex::encode(lie.checkpoint.unit_ids[0].0);
+        let proof =
+            claw_proof(&lie, 0, &u, &batch.ops[0], &pre, &post, &batch.fills).expect("shape proof");
+        assert_eq!(proof.pred, "claw");
+        assert!(
+            proof.data.get("right").is_none(),
+            "shape verdict needs no state"
+        );
+        // The honest pair builds nothing.
+        assert!(claw_proof(&batch, 0, &u, &batch.ops[0], &pre, &post, &batch.fills).is_none());
+        // (C) the Place op relabelled `x:{unit}` (only Place / Liquidate
+        // emit fills).
+        let mut lie = batch.clone();
+        let u = hex::encode(lie.checkpoint.unit_ids[0].0);
+        set_op(&mut lie, 0, &format!("x:{u}"));
+        bump_col(&mut lie, 0, &alice, -c.x);
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+        let proof = direct_claw(&lie, &batch, &replay).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        // A foreign `p:` (another account's Place) under the same fill.
+        let mut lie = batch.clone();
+        let other = batch.ops[0].replacen(&alice, &"ab".repeat(32), 1);
+        set_op(&mut lie, 0, &other);
+        assert_eq!(claw_shape_bad(&lie.fills[0], &lie.ops[0]), Some(true));
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+        let proof = direct_claw(&lie, &batch, &replay).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        // Honest Place + fill: the shape holds.
+        assert_eq!(claw_shape_bad(&batch.fills[0], &batch.ops[0]), Some(false));
+    }
+
+    #[test]
+    fn r6b_c1_kind3_to_kind0_on_a_liquidation_is_fraud() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: acct_of(&keeper),
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        let c = claw_check(&batch, &replay, "3");
+        assert_eq!(claw_shape_bad(&batch.fills[0], &batch.ops[0]), Some(false));
+        // (B) kind 3 -> 0 + bob not debited the claw.
+        let mut lie = batch.clone();
+        set_fill_field(&mut lie, 0, 12, "0");
+        bump_col(&mut lie, 0, &hex::encode(b.0), c.x);
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+        let proof = direct_claw(&lie, &batch, &replay).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        assert!(proof.data.get("right").is_none());
+        // A Liquidate whose fill names neither fill party as the target.
+        let mut lie = batch.clone();
+        let caller = hex::encode(acct_of(&keeper).0);
+        set_op(&mut lie, 0, &format!("L:{caller}:{}:1", "ab".repeat(32)));
+        assert_eq!(claw_shape_bad(&lie.fills[0], &lie.ops[0]), Some(true));
+        // caller == target, caller == insurance: the engine refuses both.
+        let t = hex::encode(a.0);
+        assert_eq!(
+            claw_shape_bad(&batch.fills[0], &format!("L:{t}:{t}:1")),
+            Some(true)
+        );
+        assert_eq!(
+            claw_shape_bad(&batch.fills[0], &format!("L:{CLAW_ZERO}:{t}:1")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn r6b_c1_shape_rules_on_strings() {
+        let (t, m, c) = ("aa".repeat(32), "cc".repeat(32), "dd".repeat(32));
+        let u = "11".repeat(32);
+        let fill = |tk: &str, mk: &str, kind: &str, qty: &str| {
+            format!(
+                "f:{u}:0:{tk}:{mk}:{}:{}:1:100:{qty}:9:0:{kind}:0",
+                "77".repeat(32),
+                "33".repeat(32)
+            )
+        };
+        let p = format!("p:{t}:1:0:100:5:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &p), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "1", "5"), &p), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "2", "5"), &p), Some(true));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "6"), &p), Some(true));
+        // R6-H1: qty / order qty at the cap.
+        let big = format!("p:{t}:1:0:100:1000000000000000:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &big), Some(true));
+        let ok = format!("p:{t}:1:0:100:999999999999999:0:0:0:0");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &ok), Some(false));
+        assert_eq!(
+            claw_shape_bad(&fill(&t, &m, "0", "1000000000000000"), &ok),
+            Some(true)
+        );
+        // Funding-rate off-book ADL: the target is the MAKER (taker = the
+        // counterparty) — honest, not a shape lie.
+        let l = format!("L:{c}:{m}:1");
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "2", "5"), &l), Some(false));
+        assert_eq!(claw_shape_bad(&fill(&t, &m, "0", "5"), &l), Some(true));
+        // ...but on a regular market the target must be the taker.
+        assert!(claw_regular_rule(&fill(&t, &m, "2", "5"), &l));
+        assert!(!claw_regular_rule(&fill(&m, &t, "2", "5"), &l));
+        assert!(claw_regular_rule(&fill(&t, &m, "1", "5"), &p));
+        // Any other op under a fill.
+        assert_eq!(
+            claw_shape_bad(&fill(&t, &m, "0", "5"), &format!("x:{u}")),
+            Some(true)
+        );
+        assert_eq!(
+            claw_shape_bad(
+                &fill(&t, &m, "0", "5"),
+                &format!("c:{t}:{}", "44".repeat(32))
+            ),
+            Some(true)
+        );
+        // P-fsane mirror: qty at the cap is never emitted.
+        let f = fill(&t, &m, "0", "1000000000000000");
+        assert!(fsane_shape_bad(&f.split(':').collect::<Vec<_>>()));
+        let f = fill(&t, &m, "0", "999999999999999");
+        assert!(!fsane_shape_bad(&f.split(':').collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn r6b_c2_third_party_credit_in_place_units_is_frame_fraud() {
+        let (batch, replay, [_, _, c]) = r6b_place_fixture();
+        let carol = hex::encode(c.0);
+        // Single-fill Place: carol is neither fill party.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &carol, 1_000_000_000_000);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
+        // R7b-N2: the acct: arm moved from P-frame to P-xframe.
+        assert_eq!(proof.pred, "xframe");
+        assert!(!proof.bind_aa);
+        assert_eq!(proof.target(), "xframe");
+        for key in [
+            "unit",
+            "pre_meta",
+            "fright",
+            "fill",
+            "units_proof",
+            "post_acct",
+            "pre_acct",
+            "fills_root",
+        ] {
+            assert!(proof.data.get(key).is_some(), "missing {key}");
+        }
+        assert!(proof.data["fill"].as_str().unwrap().contains(":0:"));
+        // Zero-fill Place (a resting bid nobody hits): only alice may move.
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, carol_sk) = (sk(1), sk(4));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, acct_of(&alice), 50_000);
+        claw_set_col(&mut eng, acct_of(&carol_sk), 7_000);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &alice,
+            Side::Bid,
+            TimeInForce::Gtc,
+            90_000 * PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            Some(10_000 * minuend_types::USD_SCALE),
+        );
+        let (zb, zr) = claw_batch(&mut eng, bid);
+        assert!(zb.fills.is_empty());
+        assert!(build_proof(&zb, &mut zr.clone(), &[], 0).is_none());
+        let mut lie = zb.clone();
+        bump_col(&mut lie, 0, &carol, 5);
+        let proof = build_proof(&lie, &mut zr.clone(), &[], 0).expect("frame proof");
+        assert_eq!(proof.pred, "xframe");
+        // fill_count 0: the AA reads it from the rollup, no fills leaves.
+        assert!(proof.data.get("fright").is_none());
+        assert!(proof.data.get("fill").is_none());
+        // The op account's own escrow move is not P-frame's business.
+        let mut own = zb.clone();
+        bump_col(&mut own, 0, &hex::encode(acct_of(&alice).0), 5);
+        let p = build_proof(&own, &mut zr.clone(), &[], 0);
+        assert!(
+            p.as_ref()
+                .is_none_or(|p| p.pred != "frame" && p.pred != "xframe"),
+            "{p:?}"
+        );
+    }
+
+    /// Book-path liquidation of alice (long 1 @ 100k, 15k) at mark 86k into
+    /// bob's bid @ 90k: no claw, keeper (a third party, no account yet) is
+    /// paid 1% of 90k from alice; insurance gets the 5 bps fee.
+    fn r6b_keeper_fixture() -> (Batch, Engine, [AccountId; 3]) {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (alice, bob, keeper) = (sk(1), sk(2), sk(3));
+        let (a, b, kp) = (acct_of(&alice), acct_of(&bob), acct_of(&keeper));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 15_000);
+        claw_set_col(&mut eng, b, 50_000);
+        claw_set_pos(&mut eng, a, QTY_SCALE as i64, 100_000 * PRICE_SCALE as i64);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let bid = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Bid,
+            TimeInForce::Gtc,
+            90_000 * PRICE_SCALE as i64,
+            QTY_SCALE,
+            1,
+            None,
+        );
+        let i0 = unit_id(&bid);
+        eng.ingest(bid).unwrap();
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 86_000 * PRICE_SCALE as i64);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: kp,
+                target: a,
+                market: minuend_types::BTC_USD,
+            },
+            &keeper,
+        );
+        let (batch, replay) = claw_batch(&mut eng, liq);
+        (batch, replay, [a, b, kp])
+    }
+
+    #[test]
+    fn r6b_c2_keeper_and_insurance_credit_are_pinned() {
+        let (batch, replay, [_, _, kp]) = r6b_keeper_fixture();
+        let c = claw_check(&batch, &replay, "3");
+        assert!(c.kpay > 0, "{c:?}");
+        let keeper = hex::encode(kp.0);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        assert!(!pre
+            .iter()
+            .any(|l| l.starts_with(&format!("acct:{keeper}:"))));
+        // Keeper credited 10x its reward (the target still pays kpay once).
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &keeper, 9 * c.kpay);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        assert_eq!(proof.data["x_who"], "c");
+        assert!(proof.data.get("x_pleft").is_some() && proof.data.get("x_pre_acct").is_none());
+        // Insurance inflated (the fill's fee is 45 USD).
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, CLAW_ZERO, 1_000_000_000_000);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("claw proof");
+        assert_eq!(proof.pred, "claw");
+        assert_eq!(proof.data["x_who"], "i");
+        assert!(proof.data.get("x_pre_acct").is_some());
+        // A bystander credited in the liquidation unit: P-frame.
+        let mut lie = batch.clone();
+        let ghost = "5e".repeat(32);
+        lie.leaf_trace[0].push(format!("acct:{ghost}:1000000000000:0:0"));
+        retrace(&mut lie, 0);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("frame proof");
+        assert_eq!(proof.pred, "xframe");
+        assert!(proof.data["post_acct"].as_str().unwrap().contains(&ghost));
+        assert!(proof.data.get("pre_acct").is_none());
+    }
+
+    #[test]
+    fn r6b_h1_honest_flip_near_the_cap_is_not_fraud() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, USD_SCALE};
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 100_000_000);
+        claw_set_col(&mut eng, b, 100_000_000);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, PRICE_SCALE as i64);
+        let px = PRICE_SCALE as i64;
+        let held: i64 = 400_000_000_000_000;
+        let q = held as u64 + 1;
+        // bob rests an isolated ask of 4e14 + 1 while flat (an opening
+        // order), then holds 4e14 long: |pos| + live remaining = 8e14 + 1,
+        // inside the cap.
+        let ask = claw_place(
+            vec![genesis_id()],
+            &bob,
+            Side::Ask,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+            Some(500_000 * USD_SCALE),
+        );
+        let i0 = unit_id(&ask);
+        let ev = eng.ingest(ask).unwrap();
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, minuend_exec::ExecEvent::Rejected { .. })),
+            "{ev:?}"
+        );
+        eng.state.account_mut(b).positions.insert(
+            minuend_types::BTC_USD,
+            minuend_account::Position {
+                market: minuend_types::BTC_USD,
+                qty: held,
+                entry_price: PRICE_SCALE as i64,
+                isolated: true,
+            },
+        );
+        eng.state
+            .account_mut(b)
+            .isolated_margin
+            .insert(minuend_types::BTC_USD, 500_000 * USD_SCALE as i128);
+        let bid = claw_place(
+            vec![i0],
+            &alice,
+            Side::Bid,
+            TimeInForce::Ioc,
+            px,
+            q,
+            1,
+            None,
+        );
+        let (batch, replay) = claw_batch(&mut eng, bid);
+        // bob closes 4e14 and opens 1 short: his escrow share goes to the
+        // new bucket, not back to collateral — exact below the cap.
+        let c = claw_check(&batch, &replay, "0");
+        assert_eq!(c.x, 0);
+        let post = &batch.leaf_trace[0];
+        let bob_pos = post
+            .iter()
+            .find(|l| l.starts_with(&format!("pos:{}:", hex::encode(b.0))))
+            .expect("bob flipped");
+        assert_eq!(bob_pos.split(':').nth(3), Some("-1"), "{bob_pos}");
+        // The pre-cap model (escrow share back to collateral) is fraud.
+        let mut lie = batch.clone();
+        bump_col(&mut lie, 0, &hex::encode(b.0), 500_000 * USD_SCALE as i128);
+        let proof = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert!(
+            matches!(proof.pred.as_str(), "claw" | "fill_math"),
+            "{}",
+            proof.pred
+        );
+    }
+
+    // ---- Round 7: P-opbind (未修复项 10) and one fill per unit (19) -------
+
+    /// Rust mirror of `minuend_dispute.aa` pred `opbind`: `Some(true)` =
+    /// verdict, `Some(false)` = 'no fraud', `None` = any other bounce.
+    fn opbind_aa(d: &serde_json::Value, units: &[String], ops: &[String]) -> Option<bool> {
+        use sha2::Digest as _;
+        let k = d["k"].as_u64()? as usize;
+        let op = d["op"].as_str()?;
+        if ops.get(k).map(String::as_str) != Some(op)
+            || d["ops_proof"]["index"].as_u64()? as usize != k
+            || d["ops_proof"]["root"].as_str()? != obyte_merkle::root(ops)
+        {
+            return None;
+        }
+        let pre = d["u_pre"].as_str()?;
+        let e = d["u_op"].as_str()?;
+        if e.is_empty()
+            || !pre.starts_with("mnu3|")
+            || !pre.ends_with('|')
+            || pre.split('|').count() != 3
+        {
+            return None;
+        }
+        let id = hex::encode(sha2::Sha256::digest(format!("{pre}{e}").as_bytes()));
+        if units.get(k) != Some(&id) || d["units_proof"]["index"].as_u64()? as usize != k {
+            return None;
+        }
+        // Round 7b (R7-C1): exact proof depth of both unit_count-leaf trees.
+        let so = d["ops_proof"]["siblings"].as_array()?.len();
+        let su = d["units_proof"]["siblings"].as_array()?.len();
+        if units.len() > 1 && (!depth_ok(so, units.len()) || su != so) {
+            return None;
+        }
+        let want = if e == "x" {
+            format!("x:{id}")
+        } else {
+            e.to_string()
+        };
+        Some(op != want)
+    }
+
+    fn hexes(batch: &Batch) -> Vec<String> {
+        batch
+            .checkpoint
+            .unit_ids
+            .iter()
+            .map(|id| hex::encode(id.0))
+            .collect()
+    }
+
+    #[test]
+    fn r7_opbind_proves_a_rewritten_ops_leaf() {
+        let (batch, replay, [a, _, _]) = r6b_place_fixture();
+        let units = hexes(&batch);
+        assert!(opbind_proof(&batch, 0, &units).is_none(), "honest leaf");
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        let u = units[0].clone();
+        // (a) the Place committed as `x:{unit}` (10 (a)), (b) its margin /
+        // isolated / tif fields rewritten (R6-M1), (c) another account's p:.
+        let mut o: Vec<String> = batch.ops[0].split(':').map(String::from).collect();
+        o[6] = "1".into();
+        o[7] = (50_000 * minuend_types::USD_SCALE).to_string();
+        let forged_margin = o.join(":");
+        let other = batch.ops[0].replacen(&hex::encode(a.0), &"ab".repeat(32), 1);
+        for fake in [format!("x:{u}"), forged_margin, other] {
+            let mut lie = batch.clone();
+            set_op(&mut lie, 0, &fake);
+            let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+            assert_eq!(p.pred, "opbind", "{fake}");
+            assert_eq!(p.target(), "main");
+            assert_eq!(p.data["u_op"], batch.ops[0]);
+            assert_eq!(opbind_aa(&p.data, &units, &lie.ops), Some(true), "{fake}");
+            // The same payload against the honest leaves is 'no fraud'.
+            let mut honest = p.data.clone();
+            honest["op"] = batch.ops[0].clone().into();
+            honest["ops_proof"] = proof_json(&batch.ops, 0);
+            assert_eq!(opbind_aa(&honest, &units, &batch.ops), Some(false));
+        }
+    }
+
+    /// An `x:` op (no descriptor) is bound too: its leaf must be exactly
+    /// `x:{unit}`; and a descriptor containing `|` cannot be re-split by a
+    /// challenger to frame the honest leaf.
+    #[test]
+    fn r7_opbind_x_ops_and_split_rule() {
+        let s = sk(5);
+        let stake = sign_unit(
+            vec![genesis_id()],
+            Op::StakeOracle {
+                account: acct_of(&s),
+            },
+            &s,
+        );
+        let id = hex::encode(unit_id(&stake).0);
+        let pre = minuend_dag::unit_text_prefix(&stake);
+        let units = vec![id.clone()];
+        let mk = |op: &str, e: &str, pre: &str| {
+            let ops = vec![op.to_string()];
+            let d = serde_json::json!({
+                "k": 0, "op": op, "ops_proof": proof_json(&ops, 0),
+                "units_proof": proof_json(&units, 0), "u_pre": pre, "u_op": e,
+            });
+            (d, ops)
+        };
+        let (d, ops) = mk(&format!("x:{id}"), "x", &pre);
+        assert_eq!(opbind_aa(&d, &units, &ops), Some(false));
+        let fake = format!("p:{}:1:0:1:1:0:0:0:0", hex::encode(acct_of(&s).0));
+        let (d, ops) = mk(&fake, "x", &pre);
+        assert_eq!(opbind_aa(&d, &units, &ops), Some(true));
+        // Deposit with an odd address "A|B": honest leaf = full descriptor.
+        let dep = sign_unit(
+            vec![genesis_id()],
+            Op::Deposit {
+                account: acct_of(&s),
+                addr: "A|B".into(),
+                amount: 5,
+                aa_unit: [7u8; 32],
+            },
+            &s,
+        );
+        let units = vec![hex::encode(unit_id(&dep).0)];
+        let desc = minuend_dag::op_descriptor(&dep.op).unwrap();
+        let pre = minuend_dag::unit_text_prefix(&dep);
+        let ops = vec![desc.clone()];
+        let honest = serde_json::json!({
+            "k": 0, "op": desc, "ops_proof": proof_json(&ops, 0),
+            "units_proof": proof_json(&units, 0), "u_pre": pre, "u_op": desc,
+        });
+        assert_eq!(opbind_aa(&honest, &units, &ops), Some(false));
+        // Re-split at the address's '|': same hash, but the prefix now has
+        // three '|' → bounce, never a verdict.
+        let cut = desc.find('|').unwrap() + 1;
+        let mut evil = honest.clone();
+        evil["u_pre"] = format!("{pre}{}", &desc[..cut]).into();
+        evil["u_op"] = desc[cut..].to_string().into();
+        assert_eq!(opbind_aa(&evil, &units, &ops), None);
+    }
+
+    /// Round 7 (未修复项 19): the engine never emits a second fill in a
+    /// unit, so a fabricated one (here: the real fill copied with idx 1,
+    /// the "turn a single-fill unit into multi-fill" escape) is P-fsane
+    /// fraud from the fill string alone.
+    #[test]
+    fn r7_fabricated_second_fill_is_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let mut lie = batch.clone();
+        let mut p: Vec<String> = lie.fills[0].split(':').map(String::from).collect();
+        p[2] = "1".into();
+        p[9] = "1".into();
+        let f1 = p.join(":");
+        lie.fills.push(f1.clone());
+        refill(&mut lie);
+        assert!(fsane_shape_bad(&f1.split(':').collect::<Vec<_>>()));
+        assert!(!fsane_shape_bad(
+            &lie.fills[0].split(':').collect::<Vec<_>>()
+        ));
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&lie.fills);
+        let units = hexes(&lie);
+        let pr = fsane_proof(&lie, 0, &f1, &pre, &tree, &units).expect("fsane proof");
+        assert_eq!(pr.pred, "fsane");
+        assert!(pr.data.get("units_proof").is_some());
+        assert!(build_proof(&lie, &mut replay.clone(), &[], 0).is_some());
+    }
+
+    /// Round 7 (未修复项 28): the ADL print is bound to clamp(mark, band).
+    #[test]
+    fn r7_adl_price_is_bound_to_mark_and_band() {
+        let f = |px: &str| {
+            format!(
+                "f:{}:0:{}:{}:{}:{}:1:{px}:100:9:1:2:0",
+                "11".repeat(32),
+                "22".repeat(32),
+                "33".repeat(32),
+                "44".repeat(32),
+                "0".repeat(64)
+            )
+        };
+        let meta = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:0"), Some(false));
+        assert_eq!(adl_price_bad(&f("9000"), meta, "band:1:0:0"), Some(true));
+        // Ceiling 8000 < mark: the honest print is 8000.
+        assert_eq!(
+            adl_price_bad(&f("8000"), meta, "band:1:0:8000"),
+            Some(false)
+        );
+        assert_eq!(adl_price_bad(&f("8600"), meta, "band:1:0:8000"), Some(true));
+        // Floor 9000 > mark (negative grid allowed).
+        assert_eq!(
+            adl_price_bad(&f("9000"), meta, "band:1:9000:0"),
+            Some(false)
+        );
+        assert_eq!(adl_price_bad(&f("-5"), meta, "band:1:-10:0"), Some(true));
+        assert_eq!(
+            adl_price_bad(&f("1000000000000000"), meta, "band:1:0:0"),
+            None
+        );
+        // The genesis market carries its band leaf.
+        let leaves = minuend_state::wit_leaves(&Engine::new().state);
+        assert!(leaves.iter().any(|l| l.starts_with("band:1:")));
+    }
+
+    // ===================== Round 7b =====================================
+
+    /// Ocore-exact proof check (merkle.js verifyMerkleProof): it walks
+    /// `siblings` by index parity and never checks the depth — the
+    /// node-as-leaf gap of R7-C1 / R7-C2.
+    fn ocore_verify(el: &str, d: &serde_json::Value) -> bool {
+        let mut idx = d["index"].as_u64().unwrap();
+        let mut h = obyte_merkle::hash(el);
+        for s in d["siblings"].as_array().unwrap() {
+            let s = s.as_str().unwrap();
+            h = if idx % 2 == 0 {
+                obyte_merkle::hash(&format!("{h}{s}"))
+            } else {
+                obyte_merkle::hash(&format!("{s}{h}"))
+            };
+            idx /= 2;
+        }
+        h == d["root"].as_str().unwrap()
+    }
+
+    #[test]
+    fn r7b_tree_depth_matches_obyte_proofs() {
+        for c in 1..=33usize {
+            let t: Vec<String> = (0..c).map(|i| format!("l:{i}")).collect();
+            for i in [0, c / 2, c - 1] {
+                let p = proof_json(&t, i);
+                assert_eq!(
+                    p["siblings"].as_array().unwrap().len(),
+                    tree_depth(c),
+                    "c={c} i={i}"
+                );
+                assert!(depth_ok(tree_depth(c), c));
+                assert!(ocore_verify(&t[i], &p));
+            }
+        }
+        assert_eq!(tree_depth(4), 2);
+        assert_eq!(tree_depth(5), 3);
+        assert!(!depth_ok(1, 4));
+    }
+
+    /// R7-C1 PoC (work/r7-review-oscr): the level-1 node H(ops[0])||H(ops[1])
+    /// passes ocore with one sibling fewer and used to verdict an honest
+    /// batch in P-opbind; the exact-depth rule bounces it.
+    #[test]
+    fn r7b_node_as_leaf_no_longer_frames_opbind() {
+        use sha2::Digest as _;
+        let pres: Vec<String> = (0..4)
+            .map(|i| format!("mnu3|{}|", hex::encode([i as u8 + 1; 40])))
+            .collect();
+        let units: Vec<String> = pres
+            .iter()
+            .map(|p| hex::encode(sha2::Sha256::digest(format!("{p}x").as_bytes())))
+            .collect();
+        let ops: Vec<String> = units.iter().map(|u| format!("x:{u}")).collect();
+        let honest = serde_json::json!({
+            "k": 1, "op": ops[1], "ops_proof": proof_json(&ops, 1),
+            "units_proof": proof_json(&units, 1), "u_pre": pres[1], "u_op": "x",
+        });
+        assert_eq!(opbind_aa(&honest, &units, &ops), Some(false));
+        let full = proof_json(&ops, 0);
+        let node = format!(
+            "{}{}",
+            obyte_merkle::hash(&ops[0]),
+            obyte_merkle::hash(&ops[1])
+        );
+        assert_eq!(node.len(), 88);
+        assert!(!node.contains(':'));
+        let short = serde_json::json!({
+            "root": full["root"], "index": 0,
+            "siblings": full["siblings"].as_array().unwrap()[1..].to_vec(),
+        });
+        assert!(ocore_verify(&node, &short), "the PoC proof passes ocore");
+        // The mirror's ops-leaf membership is checked by index only, so
+        // feed it the node tree the attacker would claim.
+        let attack = serde_json::json!({
+            "k": 0, "op": node, "ops_proof": short,
+            "units_proof": proof_json(&units, 0), "u_pre": pres[0], "u_op": "x",
+        });
+        let mut claimed = ops.clone();
+        claimed[0] = node.clone();
+        assert_eq!(
+            opbind_aa(&attack, &units, &claimed),
+            None,
+            "depth gate bounces"
+        );
+        // P-tsize: an honest tree is never "the wrong size"; the node is
+        // not leaf-shaped anyway.
+        assert!(tree_depth(ops.len()) == full["siblings"].as_array().unwrap().len());
+    }
+
+    /// P-tsize: a committed tree larger than its count is provable; an
+    /// honest batch never yields it.
+    #[test]
+    fn r7b_tsize_proves_a_tree_larger_than_its_count() {
+        let (batch, replay, _) = r6b_place_fixture();
+        assert!(tsize_proof(&batch).is_none());
+        let mut lie = batch.clone();
+        lie.ops.push("x:".to_string() + &"ee".repeat(32));
+        lie.checkpoint.ops_root = obyte_merkle::root(&lie.ops);
+        let p = tsize_proof(&lie).expect("tsize");
+        assert_eq!(p.pred, "tsize");
+        assert_eq!(p.target(), "xframe");
+        assert_eq!(p.data["tree"], "ops");
+        assert!(p.data["el"].as_str().unwrap().contains(':'));
+        assert_ne!(
+            p.data["el_proof"]["siblings"].as_array().unwrap().len(),
+            tree_depth(lie.checkpoint.unit_count as usize)
+        );
+        let b = build_proof(&lie, &mut replay.clone(), &[], 0).expect("proof");
+        assert_eq!(b.pred, "tsize");
+    }
+
+    /// The fills sentinel `n:{fill_count}` is never a P-fsane fill.
+    #[test]
+    fn r7b_fills_sentinel_is_not_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&batch.fills);
+        let units = hexes(&batch);
+        let sentinel = tree.last().unwrap().clone();
+        assert_eq!(sentinel, format!("n:{}", batch.checkpoint.fill_count));
+        assert!(fsane_proof(&batch, 0, &sentinel, &pre, &tree, &units).is_none());
+    }
+
+    /// R7-L1: a duplicated idx-0 fill is P-fsane fraud via its neighbour.
+    #[test]
+    fn r7b_duplicate_idx0_fill_is_fsane_fraud() {
+        let (batch, replay, _) = r6b_place_fixture();
+        let mut lie = batch.clone();
+        let f0 = lie.fills[0].clone();
+        lie.fills.insert(1, f0.clone());
+        lie.checkpoint.fill_count += 1;
+        refill(&mut lie);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let tree = minuend_settle::fills_root_elements(&lie.fills);
+        let units = hexes(&lie);
+        let u = units[0].clone();
+        let p = fsane_dup_proof(&lie, 0, &u, &pre, &tree, &units).expect("dup proof");
+        assert_eq!(p.pred, "fsane");
+        assert_eq!(p.data["prev"], f0);
+        assert_eq!(p.data["fill_proof"]["index"], 1);
+        assert!(fsane_dup_proof(
+            &batch,
+            0,
+            &u,
+            &pre,
+            &minuend_settle::fills_root_elements(&batch.fills),
+            &hexes(&batch)
+        )
+        .is_none());
+    }
+
+    /// The x-frame AA reads the op tag and account from the unit text.
+    #[test]
+    fn r7b_xframe_tag_reads_the_unit_text() {
+        let s = sk(5);
+        let a = acct_of(&s);
+        let stake = sign_unit(vec![genesis_id()], Op::StakeOracle { account: a }, &s);
+        let (t, oa) = xframe_tag(&minuend_dag::unit_text_prefix(&stake)).unwrap();
+        assert_eq!((t.as_str(), oa.as_str()), ("0e", hex::encode(a.0).as_str()));
+        let rev = sign_unit(
+            vec![genesis_id()],
+            Op::Reveal {
+                account: a,
+                commit_ref: [3; 32],
+                op: Box::new(Op::ReportPrice {
+                    oracle: a,
+                    market: minuend_types::BTC_USD,
+                    price: 5,
+                }),
+                salt: [4; 32],
+            },
+            &s,
+        );
+        assert_eq!(minuend_dag::op_descriptor(&rev.op), None);
+        let (t, oa) = xframe_tag(&minuend_dag::unit_text_prefix(&rev)).unwrap();
+        assert_eq!((t.as_str(), oa.as_str()), ("06", hex::encode(a.0).as_str()));
+        // Two parents shift the tag by 64 bytes.
+        let p2 = vec![genesis_id(), minuend_types::UnitId([9; 32])];
+        let mut p2s = p2.clone();
+        p2s.sort();
+        let vote = sign_unit(
+            p2s,
+            Op::Vote {
+                voter: a,
+                proposal_id: 1,
+                approve: true,
+            },
+            &s,
+        );
+        assert_eq!(
+            xframe_tag(&minuend_dag::unit_text_prefix(&vote)).unwrap().0,
+            "0c"
+        );
+        // A revealed Cancel now commits `c:` (ASSERTION_VERSION 5).
+        let rc = Op::Reveal {
+            account: a,
+            commit_ref: [3; 32],
+            op: Box::new(Op::Cancel {
+                account: a,
+                order_id: minuend_types::OrderId([1; 32]),
+            }),
+            salt: [4; 32],
+        };
+        assert!(minuend_dag::op_descriptor(&rc).unwrap().starts_with("c:"));
+    }
+
+    #[test]
+    fn r7b_xframe_acct_rule() {
+        let x = "11".repeat(32);
+        let oa = "22".repeat(32);
+        let l = |a: &str, c: &str, p: &str, w: &str| format!("acct:{a}:{c}:{p}:{w}");
+        let pre = l(&x, "100", "5", "0");
+        // Bystander credit / W / PERP: fraud.
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "101", "5", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "5", "1"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &l(&x, "100", "6", "0"), false),
+            Some(true)
+        );
+        // Unchanged: honest. R8-C4: the op account's own PERP moves only by
+        // the op's exact amount (0e: -ORACLE_BOND_PERP).
+        assert_eq!(
+            xframe_acct_bad("0e", &oa, 3, Some(&pre), &pre, false),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("0e", &x, 3, Some(&pre), &l(&x, "100", "1", "0"), false),
+            Some(true)
+        );
+        let rich = l(&x, "100", "60000", "0");
+        assert_eq!(
+            xframe_acct_bad("0e", &x, 3, Some(&rich), &l(&x, "100", "10000", "0"), false),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("12", &x, 3, Some(&rich), &l(&x, "100", "10000", "0"), false),
+            Some(true)
+        );
+        // Bond release at the batch boundary (k == 0, +ORACLE_BOND_PERP).
+        let rel = l(
+            &x,
+            "100",
+            &(5 + minuend_types::ORACLE_BOND_PERP).to_string(),
+            "0",
+        );
+        assert_eq!(
+            xframe_acct_bad("12", &oa, 0, Some(&pre), &rel, false),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("12", &oa, 1, Some(&pre), &rel, false),
+            Some(true)
+        );
+        // Funding (06 / 11): only position holders' collateral may move.
+        assert_eq!(
+            xframe_acct_bad("06", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), true),
+            Some(false)
+        );
+        assert_eq!(
+            xframe_acct_bad("11", &oa, 3, Some(&pre), &l(&x, "90", "5", "0"), false),
+            Some(true)
+        );
+        // A new account with cash in an x: unit.
+        assert_eq!(
+            xframe_acct_bad("0c", &oa, 3, None, &l(&x, "7", "0", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            xframe_acct_bad("0c", &oa, 3, None, &l(&x, "0", "0", "0"), false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn r8_mframe_meta_rule() {
+        let m0 = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        let mark = "meta:1:1:1000:500:5:100:0:8700:0:0";
+        let far = "meta:1:1:1000:500:5:100:0:9600:0:0";
+        let parm = "meta:1:1:1000:600:5:100:0:8600:0:0";
+        let two = "meta:1:1:1000:600:6:100:0:8600:0:0";
+        let tick = "meta:1:2:1000:500:5:100:0:8600:0:0";
+        let delist = "meta:1:1:1000:500:5:100:1:8600:0:0";
+        let kp_hi = "meta:1:1:1000:500:5:10000:0:8600:0:0";
+        let ctx = |op: &'static str, tag: &'static str| MetaCtx {
+            op,
+            tag,
+            ..Default::default()
+        };
+        assert_eq!(mframe_meta_bad(&ctx("c:x:y", ""), m0, m0), Some(false));
+        assert_eq!(mframe_meta_bad(&ctx("c:x:y", ""), m0, mark), Some(true));
+        // R8-C5 (interim): one key to a legal set, or a delist.
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), m0, parm), Some(false));
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), m0, delist), Some(false));
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), m0, two), Some(true));
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), m0, tick), Some(true));
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), m0, kp_hi), Some(true));
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "06"), m0, parm), Some(true));
+        // R8-H1: a p: moves the mark of its own market to its fill price.
+        let a = "11".repeat(32);
+        let u = "ab".repeat(32);
+        let op = format!("p:{a}:1:0:8700:1:0:0:1:1");
+        let fill = format!("f:{u}:0:{a}:{a}:{a}:{a}:1:8700:1:1:0:0:0");
+        let c = MetaCtx {
+            op: &op,
+            unit: &u,
+            fill: Some(&fill),
+            ..Default::default()
+        };
+        assert_eq!(mframe_meta_bad(&c, m0, mark), Some(false));
+        assert_eq!(mframe_meta_bad(&c, m0, far), Some(true));
+        let nofill = MetaCtx { fill: None, ..c };
+        assert_eq!(mframe_meta_bad(&nofill, m0, mark), Some(true));
+        let op2 = format!("p:{a}:2:0:8700:1:0:0:1:1");
+        let other = MetaCtx { op: &op2, ..c };
+        assert_eq!(mframe_meta_bad(&other, m0, mark), Some(true));
+        // An accepted 06 of this market (bonded oracle) within 10 %.
+        let oracle = "22".repeat(32);
+        let u_pre = format!(
+            "mnu3|4f44583100{}{}01000000{}|",
+            "06",
+            oracle,
+            "00".repeat(8)
+        );
+        assert_eq!(u_pre_market(&u_pre), Some(1));
+        let r = MetaCtx {
+            op: "x:u",
+            tag: "06",
+            u_pre: &u_pre,
+            bonded: true,
+            ..Default::default()
+        };
+        assert_eq!(mframe_meta_bad(&r, m0, mark), Some(false));
+        assert_eq!(mframe_meta_bad(&r, m0, far), Some(true));
+        assert_eq!(
+            mframe_meta_bad(&MetaCtx { bonded: false, ..r }, m0, mark),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&MetaCtx { tag: "11", ..r }, m0, mark),
+            Some(true)
+        );
+    }
+
+    /// R9-H2 / R9-L1 / R9-L2 mirrors of the m-frame AA's meta rule.
+    #[test]
+    fn r9_mframe_meta_rule() {
+        let ctx = |op: &'static str, tag: &'static str| MetaCtx {
+            op,
+            tag,
+            ..Default::default()
+        };
+        // R9-L1: a 0d never flips the spot class (im 10000 <=> spot).
+        let reg = "meta:1:1:1000:500:5:100:0:8600:0:0";
+        let reg2 = "meta:1:1:2000:500:5:100:0:8600:0:0";
+        let reg_spot = "meta:1:1:10000:500:5:100:0:8600:0:0";
+        let spot = "meta:2:1:10000:500:5:100:0:8600:0:0";
+        let spot_lev = "meta:2:1:1000:500:5:100:0:8600:0:0";
+        assert_eq!(mframe_meta_bad(&ctx("x:u", "0d"), reg, reg2), Some(false));
+        assert_eq!(
+            mframe_meta_bad(&ctx("x:u", "0d"), reg, reg_spot),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&ctx("x:u", "0d"), spot, spot_lev),
+            Some(true)
+        );
+        // R9-H2: a mark of 16+ digits is out of band (was: always in band).
+        let oracle = "22".repeat(32);
+        let u_pre = format!(
+            "mnu3|4f44583100{}{}01000000{}|",
+            "06",
+            oracle,
+            "00".repeat(8)
+        );
+        let r = MetaCtx {
+            op: "x:u",
+            tag: "06",
+            u_pre: &u_pre,
+            bonded: true,
+            ..Default::default()
+        };
+        let m = |mark: &str| format!("meta:1:1:1000:500:5:100:0:{mark}:0:0");
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("105000000")),
+            Some(false)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("1000000000000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("9000000000000000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("1000000000000000"), &m("100000000")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("100000000"), &m("1e400")),
+            Some(true)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("-100000000"), &m("-105000000")),
+            Some(false)
+        );
+        assert_eq!(
+            mframe_meta_bad(&r, &m("999999999999999"), &m("909999999999999")),
+            Some(false)
+        );
+        // R9-L2: a funding-rate market's p: mark steps by the rate rule.
+        let a = "11".repeat(32);
+        let u = "ab".repeat(32);
+        let fm = |mark: &str| format!("meta:1:1:1000:500:10:50:0:{mark}:100:100");
+        let pc = |px: &str, old: &str| {
+            let op = format!("p:{a}:1:0:{px}:1:0:0:1:1");
+            let fill = format!("f:{u}:0:{a}:{a}:{a}:{a}:1:{px}:1:1:0:0:0");
+            let c = MetaCtx {
+                op: &op,
+                unit: &u,
+                fill: Some(&fill),
+                ..Default::default()
+            };
+            mframe_meta_bad(&c, &fm(old), &fm(px))
+        };
+        assert_eq!(pc("1000000550000", "1000000500000"), Some(false));
+        assert_eq!(pc("1000000560000", "1000000500000"), Some(true));
+        assert_eq!(pc("999999450000", "999999500000"), Some(false));
+        assert_eq!(pc("1000000040000", "1000000030000"), Some(false));
+        assert_eq!(pc("1000000050000", "1000000030000"), Some(true));
+        assert_eq!(pc("1000000990000", "0"), Some(false));
+        assert_eq!(pc("1000000559999", "1000000505000"), Some(false));
+    }
+
+    #[test]
+    fn r8_obond_frame_rule() {
+        let o = "11".repeat(32);
+        let v = "22".repeat(32);
+        let ob = |a: &str, u: &str| format!("obond:{a}:{u}");
+        // h = 10: execution height 9, unlock 9 + 256 = 265.
+        assert!(obond_frame_ok(&ob(&o, "0"), true, "0e", &o, "", 3, 10));
+        assert!(!obond_frame_ok(&ob(&o, "0"), true, "0c", &o, "", 3, 10));
+        assert!(!obond_frame_ok(&ob(&v, "0"), true, "0e", &o, "", 3, 10));
+        assert!(obond_frame_ok(&ob(&o, "265"), true, "0f", &o, "", 3, 10));
+        assert!(!obond_frame_ok(&ob(&o, "266"), true, "0f", &o, "", 3, 10));
+        assert!(obond_frame_ok(&ob(&o, "0"), false, "0f", &o, "", 3, 10));
+        assert!(obond_frame_ok(&ob(&v, "0"), false, "10", &o, &v, 3, 10));
+        assert!(!obond_frame_ok(&ob(&v, "0"), false, "0c", &o, "", 3, 10));
+        // Batch boundary: unlock <= h - 1 at k == 0 only.
+        assert!(obond_frame_ok(&ob(&v, "9"), false, "", "", "", 0, 10));
+        assert!(!obond_frame_ok(&ob(&v, "10"), false, "", "", "", 0, 10));
+        assert!(!obond_frame_ok(&ob(&v, "9"), false, "", "", "", 1, 10));
+    }
+
+    /// Commit (x:) unit batch: a bystander credited in the posted post tree
+    /// is P-xframe fraud; band / meta / band-less markets are P-mframe /
+    /// P-noband fraud; the honest batch builds nothing.
+    #[test]
+    fn r7b_xframe_mframe_noband_from_a_batch() {
+        let (alice, bob) = (sk(1), sk(2));
+        let (a, b) = (acct_of(&alice), acct_of(&bob));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 1_000);
+        claw_set_col(&mut eng, b, 2_000);
+        let ttl = eng.state.height + 1;
+        let commit = sign_unit(
+            vec![genesis_id()],
+            Op::Commit {
+                account: a,
+                commit: [7; 32],
+                ttl_height: ttl,
+            },
+            &alice,
+        );
+        let (batch, replay) = claw_batch(&mut eng, commit);
+        assert!(batch.ops[0].starts_with("x:"));
+        assert!(
+            build_proof(&batch, &mut replay.clone(), &[], 0).is_none(),
+            "honest"
+        );
+        // (a) bob credited 1e6 USD inside alice's Commit.
+        let mut lie = batch.clone();
+        bump_col(
+            &mut lie,
+            0,
+            &hex::encode(b.0),
+            1_000_000 * minuend_types::USD_SCALE as i128,
+        );
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("xframe");
+        assert_eq!((p.pred.as_str(), p.target()), ("xframe", "xframe"));
+        assert_eq!(
+            p.data["u_pre"],
+            minuend_dag::unit_text_prefix(&batch.units[0])
+        );
+        assert!(p.data["post_acct"]
+            .as_str()
+            .unwrap()
+            .contains(&hex::encode(b.0)));
+        // (b) the band rewritten.
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with("band:1:") {
+                *l = "band:1:0:5".into();
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("mframe band");
+        assert_eq!(p.pred, "mframe");
+        assert_eq!(p.data["ins"], false);
+        // (c) the band deleted (noband needs the meta still there).
+        let mut lie = batch.clone();
+        lie.leaf_trace[0].retain(|l| !l.starts_with("band:1:"));
+        retrace(&mut lie, 0);
+        let pre = minuend_state::wit_leaves(&replay.state);
+        let mut r = replay.clone();
+        r.ingest(batch.units[0].clone()).unwrap();
+        let post = minuend_state::wit_leaves(&r.state);
+        let p = noband_proof(&lie, 0, &lie.ops[0], &post).expect("noband");
+        assert_eq!((p.pred.as_str(), p.target()), ("noband", "claw"));
+        assert_eq!(p.data["fills_root"], lie.checkpoint.fills_root);
+        assert!(p.data["meta"].as_str().unwrap().starts_with("meta:1:"));
+        // (d) the mark moved by a Commit.
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with("meta:1:") {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[8] = "12345".into();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = mframe_proof(&lie, 0, &lie.ops[0], &hexes(&lie), &pre, &post).expect("meta");
+        assert_eq!(p.pred, "mframe");
+        assert!(p.data.get("pre_meta").is_some() && p.data.get("post_meta").is_some());
+        // Honest: nothing from any of the three builders.
+        let u = hexes(&batch);
+        assert!(xframe_proof(&batch, 0, &batch.ops[0], &u, &pre, &post).is_none());
+        assert!(mframe_proof(&batch, 0, &batch.ops[0], &u, &pre, &post).is_none());
+        assert!(noband_proof(&batch, 0, &batch.ops[0], &post).is_none());
+    }
+
+    /// R7-H1: a dust order at the top of the book no longer absorbs a
+    /// liquidation — the ADL path runs in the same unit.
+    #[test]
+    fn r7b_dust_maker_does_not_stall_liquidation() {
+        use minuend_types::{Side, TimeInForce, PRICE_SCALE, QTY_SCALE};
+        let (t, m, d, k) = (sk(1), sk(2), sk(3), sk(4));
+        let (ta, ma, da, ka) = (acct_of(&t), acct_of(&m), acct_of(&d), acct_of(&k));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, ta, 600);
+        claw_set_col(&mut eng, ma, 1_000_000);
+        claw_set_col(&mut eng, da, 1_000_000);
+        claw_set_col(&mut eng, ka, 10);
+        let px = 100_000 * PRICE_SCALE as i64;
+        eng.state.marks.insert(minuend_types::BTC_USD, px);
+        claw_set_pos(&mut eng, ta, QTY_SCALE as i64, px);
+        claw_set_pos(&mut eng, ma, -(QTY_SCALE as i64), px);
+        // The dust bid: 1 lot at the best price.
+        let dust = claw_place(
+            vec![genesis_id()],
+            &d,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            1,
+            1,
+            None,
+        );
+        let i0 = unit_id(&dust);
+        eng.ingest(dust).unwrap();
+        // Mark falls 10%: T (600 USD on 1 BTC long) is liquidatable.
+        eng.state.marks.insert(minuend_types::BTC_USD, px / 10 * 9);
+        let liq = sign_unit(
+            vec![i0],
+            Op::Liquidate {
+                caller: ka,
+                target: ta,
+                market: minuend_types::BTC_USD,
+            },
+            &k,
+        );
+        let evs = eng.ingest(liq).unwrap();
+        let fills: Vec<_> = evs
+            .iter()
+            .filter_map(|e| match e {
+                minuend_exec::ExecEvent::Applied { fills, .. } => Some(fills.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(fills.len(), 1, "{evs:?}");
+        assert_eq!(fills[0].kind, 2, "ADL, not the dust book fill");
+        assert_eq!(fills[0].qty, QTY_SCALE);
+        // The dust bid is untouched.
+        assert!(eng.state.books[&minuend_types::BTC_USD]
+            .best_bid()
+            .is_some());
+    }
+
+    /// R7b-N2: P-frame's acct: arm, moved into P-xframe, for the non-`x:`
+    /// ops — exempt accounts, the D:/W: PERP move, and the k == 0 bond.
+    #[test]
+    fn r7c_frame_acct_rule_non_x() {
+        let x = "11".repeat(32);
+        let op = "22".repeat(32);
+        let mk = "33".repeat(32);
+        let l = |a: &str, c: &str, p: &str, w: &str| format!("acct:{a}:{c}:{p}:{w}");
+        let bond = minuend_types::ORACLE_BOND_PERP;
+        let ex = vec![op.clone()];
+        let nx = |t: &'static str| Some((t, ex.as_slice()));
+        let pre = l(&x, "100", "5", "0");
+        // Bystander collateral / PERP / W under c: d: w: p: → fraud.
+        for t in ["c", "d", "w", "p", "L", "D", "W"] {
+            for post in [
+                l(&x, "101", "5", "0"),
+                l(&x, "100", "6", "0"),
+                l(&x, "100", "5", "1"),
+            ] {
+                assert_eq!(
+                    frame_acct_bad("", "", nx(t), 2, Some(&pre), &post, false),
+                    Some(true),
+                    "{t} {post}"
+                );
+            }
+            // Bond returned at the batch boundary: honest at k == 0 only.
+            let rel = l(&x, "100", &(5 + bond).to_string(), "0");
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel, false),
+                Some(false),
+                "{t}"
+            );
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 1, Some(&pre), &rel, false),
+                Some(true),
+                "{t}"
+            );
+            // ... on top of nothing else.
+            let rel2 = l(&x, "101", &(5 + bond).to_string(), "0");
+            assert_eq!(
+                frame_acct_bad("", "", nx(t), 0, Some(&pre), &rel2, false),
+                Some(true),
+                "{t}"
+            );
+        }
+        // The op account: collateral and W free (judged elsewhere), PERP
+        // only under D: / W: (or the k == 0 bond).
+        let opre = l(&op, "100", "5", "0");
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("w"),
+                2,
+                Some(&opre),
+                &l(&op, "90", "5", "10"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("d"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "9", "0"),
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("D"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "9", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("W"),
+                2,
+                Some(&opre),
+                &l(&op, "100", "1", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                nx("c"),
+                0,
+                Some(&opre),
+                &l(&op, "100", &(5 + bond).to_string(), "0"),
+                false
+            ),
+            Some(false)
+        );
+        // A single-fill p: exempts its maker's collateral, not its PERP / W.
+        let ex2 = vec![op.clone(), mk.clone(), CLAW_ZERO.to_string()];
+        let mpre = l(&mk, "100", "5", "0");
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "50", "5", "0"),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "100", "6", "0"),
+                false
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad(
+                "",
+                "",
+                Some(("p", ex2.as_slice())),
+                2,
+                Some(&mpre),
+                &l(&mk, "100", "5", "3"),
+                false
+            ),
+            Some(true)
+        );
+        // A fresh account with cash under c: → fraud; empty → honest.
+        assert_eq!(
+            frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "7", "0", "0"), false),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad("", "", nx("c"), 2, None, &l(&x, "0", "0", "0"), false),
+            Some(false)
+        );
+        // bond_release is the AA's `$p1 == $p0 + 50000` (length($p0) <= 14).
+        assert!(bond_release("7", &(7 + bond).to_string()));
+        assert!(!bond_release("7", "8"));
+        assert!(!bond_release("123456789012345", "123456789062345"));
+    }
+
+    /// R7b-N2 end to end: an oracle bond whose unbonding ends at batch 1's
+    /// commit is returned by `prune_oracle_unbonding` AFTER batch 1's last
+    /// trace leaf, so it first shows in batch 2's unit 0 post tree (judged
+    /// against wit_root_1). Unit 0 is a Place of another account: every
+    /// acct: leaf passes the moved frame arm, the bind AA's P-frame no
+    /// longer frames acct: leaves, and the honest batch builds no proof.
+    #[test]
+    fn r7c_n2_bond_returned_at_batch_boundary_is_not_frame_fraud() {
+        use minuend_types::{Side, TimeInForce, ORACLE_BOND_PERP, PRICE_SCALE, QTY_SCALE};
+        let a = sk(1);
+        let aa = acct_of(&a);
+        let o = acct_of(&sk(9));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, aa, 50_000);
+        claw_set_col(&mut eng, o, 5);
+        eng.state.perp_balances.insert(o, 7);
+        eng.state.oracle_bonds.insert(o, ORACLE_BOND_PERP);
+        eng.state.oracle_unbonding.insert(o, 1);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let q = QTY_SCALE / 1000;
+        let u1 = claw_place(
+            vec![genesis_id()],
+            &a,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+            None,
+        );
+        let id1 = unit_id(&u1);
+        let prev1 = eng.state.clone();
+        eng.ingest(u1).unwrap();
+        let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
+        assert_eq!(
+            eng.state.perp_balances[&o],
+            7 + ORACLE_BOND_PERP,
+            "bond returned at commit"
+        );
+        let replay = eng.clone();
+        let prev2 = eng.state.clone();
+        let u2 = claw_place(vec![id1], &a, Side::Bid, TimeInForce::Gtc, px, q, 2, None);
+        let id2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let b2 = Batch::from_applied(&prev2, &mut eng, &[id2]).expect("batch 2");
+        assert!(b2.ops[0].starts_with("p:"), "{}", b2.ops[0]);
+        assert!(b2.fills.is_empty());
+        // The challenger's (h2, k = 0) pair: pre = wit_root_1's leaves.
+        let pre = b1.leaf_trace.last().unwrap().clone();
+        assert_eq!(obyte_merkle::root(&pre), b1.checkpoint.wit_root);
+        let post = &b2.leaf_trace[0];
+        let ok = format!("acct:{}:", hex::encode(o.0));
+        let o_pre = pre.iter().find(|l| l.starts_with(&ok)).unwrap();
+        let o_post = post.iter().find(|l| l.starts_with(&ok)).unwrap();
+        assert_ne!(o_pre, o_post, "the release lands in h2 unit 0");
+        let exempt = vec![hex::encode(aa.0)];
+        let nx = Some(("p", exempt.as_slice()));
+        for l in post.iter().filter(|l| l.starts_with("acct:")) {
+            let x = &l[5..69];
+            let p0 = pre.iter().find(|q| q.starts_with(&format!("acct:{x}:")));
+            assert_eq!(
+                frame_acct_bad("", "", nx, 0, p0.map(String::as_str), l, false),
+                Some(false),
+                "{l}"
+            );
+        }
+        // Sensitivity: the same delta at k > 0, or one unit more, is fraud.
+        assert_eq!(
+            frame_acct_bad("", "", nx, 1, Some(o_pre), o_post, false),
+            Some(true)
+        );
+        let over = o_post.replace(
+            &format!(":{}:", 7 + ORACLE_BOND_PERP),
+            &format!(":{}:", 8 + ORACLE_BOND_PERP),
+        );
+        assert_ne!(&over, o_post);
+        assert_eq!(
+            frame_acct_bad("", "", nx, 0, Some(o_pre), &over, false),
+            Some(true)
+        );
+        // P-frame (bind) frames pos:/ord: only now.
+        assert!(frame_proof(&b2, 0, &b2.ops[0], &pre, post).is_none());
+        // And the honest batch replays clean.
+        assert!(build_proof(&b2, &mut replay.clone(), &[], 0).is_none());
+    }
+
+    /// R8-H2: the committed pre tree (wit_root_{h-1}) carries the
+    /// unbonding oracle's `obond:` leaf; unit 0's post tree has dropped it
+    /// and credited the bond. The release is allowed (bond_ok from that
+    /// leaf, and the m-frame deletion is in frame); the same +50000 for an
+    /// account without an expiring bond is fraud.
+    #[test]
+    fn r8_h2_bond_release_needs_an_expiring_obond_leaf() {
+        use minuend_types::{Side, TimeInForce, ORACLE_BOND_PERP, PRICE_SCALE, QTY_SCALE};
+        let a = sk(1);
+        let aa = acct_of(&a);
+        let o = acct_of(&sk(9));
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, aa, 50_000);
+        claw_set_col(&mut eng, o, 5);
+        eng.state.perp_balances.insert(o, 7);
+        eng.state.oracle_bonds.insert(o, ORACLE_BOND_PERP);
+        eng.state.oracle_unbonding.insert(o, 1);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let q = QTY_SCALE / 1000;
+        let u1 = claw_place(
+            vec![genesis_id()],
+            &a,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            q,
+            1,
+            None,
+        );
+        let id1 = unit_id(&u1);
+        let prev1 = eng.state.clone();
+        eng.ingest(u1).unwrap();
+        let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
+        let prev2 = eng.state.clone();
+        let u2 = claw_place(vec![id1], &a, Side::Bid, TimeInForce::Gtc, px, q, 2, None);
+        let id2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let b2 = Batch::from_applied(&prev2, &mut eng, &[id2]).expect("batch 2");
+        let h = b2.checkpoint.height;
+        let pre = b1.leaf_trace.last().unwrap().clone();
+        let post = &b2.leaf_trace[0];
+        let ob = format!("obond:{}:1", hex::encode(o.0));
+        assert!(pre.contains(&ob), "the unbonding oracle has its obond leaf");
+        assert!(!post.contains(&ob), "released at the batch boundary");
+        assert!(obond_frame_ok(&ob, false, "", "", "", 0, h));
+        assert!(!obond_frame_ok(&ob, false, "", "", "", 1, h));
+        let ok = format!("acct:{}:", hex::encode(o.0));
+        let o_pre = pre.iter().find(|l| l.starts_with(&ok)).unwrap();
+        let o_post = post.iter().find(|l| l.starts_with(&ok)).unwrap();
+        let exempt = vec![hex::encode(aa.0)];
+        let nx = Some(("p", exempt.as_slice()));
+        assert_eq!(
+            frame_acct_bad_ev("", "", nx, 0, Some(o_pre), o_post, false, true),
+            Some(false)
+        );
+        // A bystander (no bond leaf) credited the same +50000: fraud once
+        // the challenger shows the missing bond (bond_ok = false).
+        let ka = format!("acct:{}:", hex::encode(aa.0));
+        let a_pre = pre.iter().find(|l| l.starts_with(&ka)).unwrap();
+        let cols = acct_cols(a_pre).unwrap();
+        let p1 = json_int(&cols.1).unwrap() + ORACLE_BOND_PERP as i128;
+        let a_lie = format!("acct:{}:{}:{}:{}", hex::encode(aa.0), cols.0, p1, cols.2);
+        let other = vec!["ff".repeat(32)];
+        let nx2 = Some(("p", other.as_slice()));
+        assert_eq!(
+            frame_acct_bad_ev("", "", nx2, 0, Some(a_pre), &a_lie, false, false),
+            Some(true)
+        );
+        assert_eq!(
+            frame_acct_bad_ev("", "", nx2, 0, Some(a_pre), &a_lie, false, true),
+            Some(false)
+        );
+    }
+
+    /// R9-H1 + R9-M1: oracle `o` whose unbond expires at the commit of
+    /// h - 1 re-stakes in unit 0 of h (refund +50000, Stake -50000: PERP net
+    /// 0, `obond:o:1` -> `obond:o:0`). The honest batch builds NOTHING —
+    /// neither the expired leaf (`pob`) nor equal PERP (`pa0`/`pa1`) is
+    /// evidence at k == 0 — while "Stake not debited" (+50000 kept) is
+    /// P-mframe fraud. Through `build_proof_with_prev` the k == 0 pre tree is
+    /// the committed (pre-prune) tail of h - 1, i.e. `wit_root_{h-1}`; the
+    /// replay engine's own (post-prune) tree would bounce 'bad pre wit'.
+    #[test]
+    fn r9_restake_after_own_bond_release_is_honest_and_prev_final_pre() {
+        use minuend_types::{Side, TimeInForce, ORACLE_BOND_PERP, PRICE_SCALE, QTY_SCALE};
+        let a = sk(1);
+        let aa = acct_of(&a);
+        let os = sk(9);
+        let o = acct_of(&os);
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, aa, 50_000);
+        claw_set_col(&mut eng, o, 5);
+        eng.state.perp_balances.insert(o, 7);
+        eng.state.oracle_bonds.insert(o, ORACLE_BOND_PERP);
+        eng.state.oracle_unbonding.insert(o, 1);
+        eng.state
+            .marks
+            .insert(minuend_types::BTC_USD, 100_000 * PRICE_SCALE as i64);
+        let px = 90_000 * PRICE_SCALE as i64;
+        let u1 = claw_place(
+            vec![genesis_id()],
+            &a,
+            Side::Bid,
+            TimeInForce::Gtc,
+            px,
+            QTY_SCALE / 1000,
+            1,
+            None,
+        );
+        let id1 = unit_id(&u1);
+        let prev1 = eng.state.clone();
+        eng.ingest(u1).unwrap();
+        let b1 = Batch::from_applied(&prev1, &mut eng, &[id1]).expect("batch 1");
+        let replay = eng.clone();
+        let prev2 = eng.state.clone();
+        let u2 = sign_unit(vec![id1], Op::StakeOracle { account: o }, &os);
+        let id2 = unit_id(&u2);
+        eng.ingest(u2).unwrap();
+        let b2 = Batch::from_applied(&prev2, &mut eng, &[id2]).expect("batch 2");
+        let pre = b1.leaf_trace.last().unwrap().clone();
+        let post = b2.leaf_trace[0].clone();
+        let oh = hex::encode(o.0);
+        assert!(pre.contains(&format!("obond:{oh}:1")));
+        assert!(
+            post.contains(&format!("obond:{oh}:0")),
+            "re-staked: {post:?}"
+        );
+        let ak = format!("acct:{oh}:");
+        let p0 = pre.iter().find(|l| l.starts_with(&ak)).unwrap();
+        let p1 = post.iter().find(|l| l.starts_with(&ak)).unwrap();
+        assert_eq!(p0.split(':').nth(3), p1.split(':').nth(3), "PERP net 0");
+        let u = hexes(&b2);
+        assert!(
+            mframe_proof(&b2, 0, &b2.ops[0], &u, &pre, &post).is_none(),
+            "R9-H1: honest re-stake"
+        );
+        let vault = VaultLedger::new();
+        assert!(
+            build_proof_with_prev(&b2, &mut replay.clone(), &[], 0, &vault, Some(&pre)).is_none(),
+            "honest batch"
+        );
+        // "Stake not debited": the refund kept (+50000), still bonded.
+        let mut lie = b2.clone();
+        let p_lie = json_int(p1.split(':').nth(3).unwrap()).unwrap() + ORACLE_BOND_PERP as i128;
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with(&ak) {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[3] = p_lie.to_string();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = mframe_proof(&lie, 0, &lie.ops[0], &u, &pre, &post).expect("not debited");
+        assert_eq!(p.target(), "mframe");
+        assert!(p.data.get("pob").is_none());
+        assert_eq!(
+            p.data["pa1"].as_str().unwrap().split(':').nth(3),
+            Some(p_lie.to_string().as_str())
+        );
+        // R9-M1: with prev_final the k == 0 pre_wit is wit_root_{h-1} (the
+        // committed tail of h - 1); the replay's post-prune tree differs.
+        let wit_prev = obyte_merkle::root(&pre);
+        assert_eq!(&wit_prev, b1.trace.last().unwrap());
+        assert_ne!(
+            wit_prev,
+            obyte_merkle::root(&minuend_state::wit_leaves(&replay.state))
+        );
+        let p = build_proof_with_prev(&lie, &mut replay.clone(), &[], 0, &vault, Some(&pre))
+            .expect("fraud through build_proof_with_prev");
+        assert_eq!(p.data["pre_wit"].as_str(), Some(wit_prev.as_str()));
+        let q = build_proof_with_vault(&lie, &mut replay.clone(), &[], 0, &vault);
+        assert!(!matches!(q, Some(q) if q.data["pre_wit"].as_str() == Some(wit_prev.as_str())));
+    }
+
+    /// R8-C4: inside an `x:` op the op account's own PERP moves only by the
+    /// op's exact amount; a Commit that mints its signer's PERP is P-xframe
+    /// fraud (the honest Commit batch builds nothing).
+    #[test]
+    fn r8_c4_commit_minting_its_signer_perp_is_xframe_fraud() {
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 1_000);
+        let ttl = eng.state.height + 1;
+        let commit = sign_unit(
+            vec![genesis_id()],
+            Op::Commit {
+                account: a,
+                commit: [7; 32],
+                ttl_height: ttl,
+            },
+            &alice,
+        );
+        let (batch, replay) = claw_batch(&mut eng, commit);
+        assert!(build_proof(&batch, &mut replay.clone(), &[], 0).is_none());
+        let ah = hex::encode(a.0);
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with(&format!("acct:{ah}:")) {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[3] = "1000000000000".into();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("xframe");
+        assert_eq!((p.pred.as_str(), p.target()), ("xframe", "xframe"));
+        assert!(p.data["post_acct"].as_str().unwrap().contains(&ah));
+    }
+
+    /// R8-C1: an `x:` mframe proof always carries the unit text; R8-H1: the
+    /// m-frame target is the seventh AA.
+    #[test]
+    fn r8_mframe_proof_carries_the_unit_text_and_targets_mframe() {
+        let alice = sk(1);
+        let a = acct_of(&alice);
+        let mut eng = Engine::new();
+        claw_set_col(&mut eng, a, 1_000);
+        let ttl = eng.state.height + 1;
+        let commit = sign_unit(
+            vec![genesis_id()],
+            Op::Commit {
+                account: a,
+                commit: [8; 32],
+                ttl_height: ttl,
+            },
+            &alice,
+        );
+        let (batch, replay) = claw_batch(&mut eng, commit);
+        let mut lie = batch.clone();
+        for l in lie.leaf_trace[0].iter_mut() {
+            if l.starts_with("meta:1:") {
+                let mut q: Vec<String> = l.split(':').map(String::from).collect();
+                q[8] = "12345".into();
+                *l = q.join(":");
+            }
+        }
+        retrace(&mut lie, 0);
+        let p = build_proof(&lie, &mut replay.clone(), &[], 0).expect("mframe");
+        assert_eq!((p.pred.as_str(), p.target()), ("mframe", "mframe"));
+        assert_eq!(
+            p.data["u_pre"],
+            minuend_dag::unit_text_prefix(&batch.units[0])
+        );
     }
 }

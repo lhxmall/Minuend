@@ -27,4 +27,5 @@ thiserror = "2"
 
 [dev-dependencies]
 ed25519-dalek = "3"
+minuend-account = { path = "../minuend-account" }
 minuend-types = { path = "../minuend-types" }

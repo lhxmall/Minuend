@@ -1,4 +1,5 @@
 mod amount;
+pub mod env_compat;
 mod ids;
 mod order;
 
@@ -14,8 +15,86 @@ use serde::{Deserialize, Serialize};
 pub const PRICE_SCALE: u64 = 100_000_000;
 pub const QTY_SCALE: u64 = 100_000_000;
 pub const USD_SCALE: u64 = 1_000_000;
+/// R4-A-6 (round 4 of #47): ceiling on the sidechain PERP supply (and so
+/// on every account's PERP balance, which never exceeds the supply). The
+/// PERP asset is capless on Obyte, but the dispute AAs judge the PERP
+/// column of `acct:` witness leaves with Oscript arithmetic, which is exact
+/// only to 15 significant digits: keeping every supply/balance below 1e14
+/// (<= 14 digits) keeps `balance ± amount` exact there. A GovDeposit that
+/// would lift the supply past this is rejected (`RejectReason::Risk`).
+pub const PERP_SUPPLY_MAX: u128 = 99_999_999_999_999;
+/// R6-H1 (round 6b of #47): every order quantity and every position stays
+/// below 1e15 (<= 15 digits), the range in which Oscript's 15-significant-
+/// digit arithmetic compares `qty` and `|position|` exactly — the dispute
+/// AAs' flip / close decisions (`qty > |pos|`) would otherwise round a
+/// "close and open 1" into a "pure close" and judge an honest fill as
+/// fraud. Enforced at `place` as an invariant per (account, market):
+/// `|position| + Σ remaining of its live orders + qty < QTY_CAP`. A fill
+/// moves at most its qty from an order's remaining into the position, an
+/// STP cancel or a cancel only lowers the sum, and liquidation / ADL only
+/// shrink positions, so no fill can ever lift a position to `QTY_CAP`.
+/// A Place breaking it is rejected (`RejectReason::Risk`).
+pub const QTY_CAP: u64 = 1_000_000_000_000_000;
+/// R9-H2 (round 9 of #47): every mark stays below 1e15 in magnitude
+/// (<= 15 digits), the range in which the m-frame dispute AA compares old
+/// and new marks exactly (+-10 % band, funding-rate step). A ReportPrice
+/// median or a fill price at / above the cap never becomes the mark (the
+/// previous mark is kept), and the AA judges a mark at / above it as out of
+/// band.
+pub const MARK_CAP: i64 = 1_000_000_000_000_000;
 pub const CHAIN_ID: &str = "minuend-v2";
-pub const ASSERTION_VERSION: u32 = 1;
+/// Dispute-predicate / execution-rules version committed in every batch.
+/// Pinned by the rollup AA (`assertion_version != 5` bounces), so it can
+/// only change together with an AA redeploy.
+///
+/// History (docs/ROLLUP-UPGRADE.md §7):
+/// - 1: original rules.
+/// - 2 (#47, one coordinated chain reset with the rollup/dispute/vault AA
+///   redeploy): #39 Place rollback, #42 no taker fee on ADL, #44
+///   genesis/CHAIN_ID rename, #47 execution changes (spot worst-case
+///   reserve, ADL band clamp, gov-nonce watermark, fill-less liquidation
+///   no-op, unique address binding), the `p:` op `typ` field and the
+///   `d:`/`D:` op address field, and the `adr:` witness leaves.
+/// - 3 (#47 round 6/6b, with the P-claw rollup redeploy): a
+///   Reveal{Place|Liquidate} commits its INNER `p:` / `L:` descriptor in
+///   the ops leaf (was `x:{unit}`), and `place` enforces `QTY_CAP`
+///   (R6-H1) — old and new producers disagree on both.
+/// - 4 (#47 round 7): unit ids are `sha256("mnu3|" hex(canonical) "|" E)`
+///   with E the committed ops descriptor (`minuend_dag::unit_text`), so an
+///   ops leaf that differs from its unit is provable on-chain (P-opbind);
+///   the book emits at most one fill per unit and Place no longer
+///   force-sells in-unit (P-fsane judges any fill with `idx != 0`).
+/// - 5 (#47 round 7b, with the x-frame rollup redeploy): a Reveal{Cancel}
+///   commits its inner `c:` descriptor (was `x:{unit}`, which the new
+///   P-xframe would judge as an order vanishing in an `x:` unit), and a
+///   liquidation whose best book level covers less than
+///   1/`LIQ_MIN_BOOK_FILL_DIV` of the remaining position takes the ADL
+///   path in the same unit instead of a dust book fill (R7-H1).
+/// - 6 (#47 round 8, with the m-frame rollup redeploy): the witness gives
+///   every PERP / W holder an `acct:` leaf (R8-C3) and every bonded oracle
+///   an `obond:{acct}:{unlock}` leaf (R8-H2).
+/// - 9 (#47 round 11): every committed element (ops / fills / witness
+///   leaf / trace / unit id) is at most [`MAX_ELEMENT_LEN`] chars and a unit
+///   text at most [`MAX_UNIT_TEXT_LEN`] (longer units are refused at
+///   ingest); an element the operator does not reveal within the window is
+///   fraud via the open-element challenge (wf AA); ids are read raw.
+pub const ASSERTION_VERSION: u32 = 9;
+/// R11-C2: hard cap on any committed Merkle element (ops descriptor, fills
+/// element, witness leaf). ocore cannot read a `trigger.data` string above
+/// 4096 chars, so an element longer than that is unprovable; the engine
+/// never writes one above this cap and the wf AA's open-element challenge
+/// only accepts an answer of at most this length.
+pub const MAX_ELEMENT_LEN: usize = 1024;
+/// R11-C2: cap on a unit's text (`mnu3|hex(canonical)|descriptor`), the
+/// `u_pre` + descriptor every unit-bound predicate reads from trigger.data.
+pub const MAX_UNIT_TEXT_LEN: usize = 2048;
+/// R11-C2: open-element challenge parameters (wf AA): opens are accepted
+/// during the first `OPEN_WINDOW_SECS` of a height's challenge window with a
+/// bond of at least `OPEN_BOND`; an open unanswered for
+/// `OPEN_RESPONSE_SECS` expires into a fraud verdict.
+pub const OPEN_WINDOW_SECS: u64 = 1800;
+pub const OPEN_RESPONSE_SECS: u64 = 1200;
+pub const OPEN_BOND: u64 = 100_000;
 pub const OBYTE_MERKLE_ROOT_LEN: usize = 44;
 pub const WIT_EMPTY_ELEMENT: &str = "empty";
 pub const IM_RATE_BPS: u64 = 1000;
@@ -27,6 +106,12 @@ pub const MIN_OPEN_EQUITY: Usd = USD_SCALE as Usd;
 /// resting-order IM reservation loop and book bloat per account.
 pub const MAX_LIVE_ORDERS_PER_ACCOUNT: usize = 64;
 pub const LIQ_RATIO_BPS: u64 = 10_500;
+/// Round 7b (R7-H1, ASSERTION_VERSION 5): a liquidation whose first book
+/// fill would close less than 1/`LIQ_MIN_BOOK_FILL_DIV` of the target's
+/// position skips the book and takes the ADL path in the same unit (one
+/// counterparty, still one fill per unit), so dust resting orders cannot
+/// stall a liquidation one minimum lot per `Liquidate`.
+pub const LIQ_MIN_BOOK_FILL_DIV: u64 = 10;
 pub const REDUCE_ONLY_RATIO_BPS: u64 = 12_000;
 /// Taker fee (bps of notional), routed to the insurance fund so it has
 /// income to offset bad-debt absorption and keeper payouts.
@@ -59,8 +144,13 @@ pub fn encode_funding_price(rate_bps: i64) -> Price {
 }
 
 /// Inverse of [`encode_funding_price`]: recover the funding rate in bps.
+///
+/// R3-E-5: saturating, so an attacker-chosen price near `i64::MIN` cannot
+/// overflow the subtraction (debug panic / release wrap). Any price this
+/// saturates on decodes far outside the ±10 000 bps band and is refused by
+/// every caller's band check, exactly as the wrapped value was.
 pub fn funding_rate_bps(price: Price) -> i64 {
-    (price - FUNDING_PRICE_OFFSET) / FUNDING_BPS_UNIT
+    price.saturating_sub(FUNDING_PRICE_OFFSET) / FUNDING_BPS_UNIT
 }
 
 pub const CHALLENGE_SECS: u64 = 3600;
@@ -209,8 +299,9 @@ pub type Bps = u64;
 /// first qualifying fill forever. Leveraged equity there is then priced
 /// against a stale mark — the position can no longer be liquidated by the
 /// engine's margin math, and the holder withdraws collateral that unrealized
-/// losses have already consumed. Full collateral makes max loss at entry
-/// cover any move, keeping the vault solvent without an oracle.
+/// losses have already consumed. Solvency there comes from the band worst
+/// case reserved per position (`minuend_account::spot_requirement`, #47 C2);
+/// the keeper cap and MM floor of regular markets still apply (#47 M1).
 pub fn risk_params_ok(
     im_bps: Bps,
     mm_bps: Bps,
@@ -226,13 +317,19 @@ pub fn risk_params_ok(
         if funding_rate {
             return false;
         }
+        // #47 M1: only the IM rule differs from a regular market. The
+        // keeper cap (≤ 5%) and the MM floor (≥ 5%) still apply: an
+        // uncapped keeper rate would hand a liquidatee's whole collateral
+        // to the keeper, and its value is printed into the meta witness
+        // leaf, whose numeric fields the dispute AA reads with ~15
+        // significant digits.
         return im_bps == 10_000
-            && mm_bps != 0
-            && mm_bps <= 10_000
+            && (500..=10_000).contains(&mm_bps)
             && im_bps > mm_bps
             && taker_fee_bps != 0
             && taker_fee_bps <= 200
             && keeper_reward_bps != 0
+            && keeper_reward_bps <= 500
             && funding_cap_bps == 0;
     }
     let shared = im_bps != 0
@@ -261,6 +358,18 @@ pub fn risk_params_ok(
             && im_bps >= 10 * (FUNDING_CAP_BPS as u64)
             && funding_cap_bps == 0
     }
+}
+
+/// #47 C2: a `spot_only` market is tradeable only when it is
+/// full-collateral AND declares a strictly positive, two-sided price band
+/// (`0 < min_price < max_price`). Only then is the worst-case loss of every
+/// position finite and computable without an oracle (see
+/// `minuend_account::spot_requirement`). Listings made before these rules
+/// (leveraged, band-less, or with a floor at or below zero) fail this
+/// check: the engine refuses to trade or liquidate them instead of
+/// running them on a frozen mark. Non-spot markets always pass.
+pub fn spot_market_tradeable(p: &MarketParams) -> bool {
+    !p.spot_only || (p.im_bps == 10_000 && p.min_price > 0 && p.max_price > p.min_price)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -363,16 +472,18 @@ pub struct MarketParams {
     #[serde(default)]
     pub funding_cap_bps: u64,
     /// Lowest price this market may ever trade at (signed price grid).
-    /// `0` = unbounded below. For a `spot_only` market (no oracle, so the
-    /// mark freezes) the max loss of a long is `qty × (entry − min_price)`,
-    /// which can exceed the notional when prices may go negative; listing a
-    /// range bounds it. Fixed at creation. Old JSON parses as `0`.
+    /// `0` = unbounded below; each side of the band is independent (#47 L2),
+    /// so `[min, 0]` is a floor-only band. For a `spot_only` market (no
+    /// oracle, so the mark freezes) it must be strictly positive: a long's
+    /// worst case `qty × (entry − min_price)` is what its collateral
+    /// reserves (#47 C2). Fixed at creation. Old JSON parses as `0`.
     #[serde(default)]
     pub min_price: Price,
     /// Highest price this market may ever trade at (signed price grid).
-    /// `0` = unbounded above (a limit order may not exceed it: the range is
-    /// an admission gate, not a clamp). Fixed at creation. Old JSON parses
-    /// as `0`.
+    /// `0` = unbounded above. Limit orders above it are refused (admission
+    /// gate) and off-book ADL prints are clamped to it. Required on a
+    /// `spot_only` market, where a short reserves `qty × (max_price −
+    /// entry)`. Fixed at creation. Old JSON parses as `0`.
     #[serde(default)]
     pub max_price: Price,
 }
@@ -447,5 +558,44 @@ mod tests {
         for bps in [0i64, 1, 12, 20, 500, -50, -100_000, max_bps] {
             assert_eq!(funding_rate_bps(encode_funding_price(bps)), bps);
         }
+    }
+
+    /// #47 M1: the spot_only branch keeps the regular keeper cap (≤ 500)
+    /// and MM floor (≥ 500); only IM differs (== 10 000).
+    #[test]
+    fn spot_risk_params_keep_keeper_and_mm_bounds() {
+        let ok = |im, mm, keeper| risk_params_ok(im, mm, 5, keeper, false, 0, true);
+        assert!(ok(10_000, 500, 100));
+        assert!(ok(10_000, 500, 500));
+        assert!(!ok(10_000, 500, 501), "keeper above 5% accepted");
+        assert!(!ok(10_000, 500, u64::MAX), "unbounded keeper accepted");
+        assert!(!ok(10_000, 499, 100), "mm below 5% accepted");
+        assert!(!ok(10_000, 1, 100), "mm of 1 bps accepted");
+        assert!(!ok(9_999, 500, 100), "leveraged spot accepted");
+    }
+
+    /// #47 C2: tradeable spot listings need full collateral and a strictly
+    /// positive two-sided band; non-spot markets always pass.
+    #[test]
+    fn spot_market_tradeable_requires_positive_two_sided_band() {
+        let mut p = genesis_params();
+        assert!(spot_market_tradeable(&p));
+        p.spot_only = true;
+        p.im_bps = 10_000;
+        for (lo, hi, want) in [
+            (1i64, 2i64, true),
+            (0, 2, false),
+            (-5, 2, false),
+            (1, 0, false),
+            (2, 2, false),
+        ] {
+            p.min_price = lo;
+            p.max_price = hi;
+            assert_eq!(spot_market_tradeable(&p), want, "({lo},{hi})");
+        }
+        p.min_price = 1;
+        p.max_price = 2;
+        p.im_bps = 1_000;
+        assert!(!spot_market_tradeable(&p));
     }
 }

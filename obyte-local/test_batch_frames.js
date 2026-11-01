@@ -3,7 +3,13 @@
 const assert = require("assert");
 const crypto = require("crypto");
 const zlib = require("zlib");
-const { assertPackageSourceCap, packFrames } = require("./batch_frames");
+const {
+  MAX_COMMITTED_RAW_BYTES,
+  MAX_PACKAGE_RAW_BYTES,
+  assertPackageRawCaps,
+  assertPackageSourceCap,
+  packFrames,
+} = require("./batch_frames");
 
 const frames = [
   JSON.stringify({ u: { id: 1 }, t: "trace-α" }),
@@ -91,3 +97,30 @@ assert.throws(
 );
 
 console.log("batch frame compatibility, UTF-8, cap, empty, and oversize tests passed");
+
+// R3-R-1: highly compressible frames (each frame repeats the previous one's
+// leaf set) must be cut on RAW size, not only on the compressed source size,
+// so no package decompresses beyond the watcher's per-package cap.
+{
+  assert.strictEqual(MAX_PACKAGE_RAW_BYTES, 64 * 1024 * 1024, "must match minuend_settle");
+  assert.strictEqual(MAX_COMMITTED_RAW_BYTES, 1024 * 1024 * 1024, "must match minuend_settle");
+  const leaves = JSON.stringify(Array.from({ length: 40 }, (_, i) => `acct:${i}:100`));
+  const similar = Array.from({ length: 50 }, (_, i) => `{"u":${i},"l":${leaves}}`);
+  const rawCap = 4096;
+  const unbounded = packFrames(similar, { getJsonSourceString });
+  assert.strictEqual(unbounded.length, 1, "source cap alone keeps them in one package");
+  assert.ok(rawPackage(unbounded[0]).length > rawCap);
+  const bounded = packFrames(similar, { rawCap, getJsonSourceString });
+  assert.ok(bounded.length > 1);
+  for (const blob of bounded) assert.ok(rawPackage(blob).length <= rawCap);
+  assert.deepStrictEqual(
+    Buffer.concat(bounded.map(rawPackage)),
+    Buffer.from(similar.join("\n"), "utf8"),
+  );
+  assert.doesNotThrow(() => assertPackageRawCaps(bounded, { rawCap }));
+  assert.throws(() => assertPackageRawCaps(unbounded, { rawCap }), /exceeds watcher cap/);
+  assert.throws(
+    () => assertPackageRawCaps(bounded, { rawCap, totalRawCap: rawCap }),
+    /per-height cap/,
+  );
+}
