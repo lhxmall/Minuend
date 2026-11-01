@@ -237,6 +237,10 @@ pub const MAX_STATE_MARKETS: usize = 16;
 /// ring per market (~1.2 KB per (market, oracle) pair measured). A Stake by a new oracle at the cap is refused
 /// (STATE_CAP_CODE); upstream has no limit (pilot rule like the other caps).
 pub const MAX_STATE_ORACLES: usize = 32;
+/// Loop round 20 (R20-L1): oracles that may start unbonding at one height (= one expiry group of the stateless image,
+/// stateless::ora::SL_MAX_UNSTAKES); a further Unstake at that height is refused (STATE_CAP_CODE) in both images.
+/// The session's O(oracles) <= MAX_STATE_ORACLES scan.
+pub const MAX_UNSTAKES_PER_HEIGHT: usize = 16;
 /// Units that can create an account for their author (deposit; liquidate: the keeper reward
 /// credits the caller) are rejected (STATE_CAP_CODE) when the author is new and the session
 /// already holds `cap` accounts (the insurance account included).
@@ -277,6 +281,14 @@ pub fn state_cap_ok(s: &state::ChainState, op: &BatchOp, author: AccountId, cap:
         BatchOp::CreateMarket { .. } => s.markets.len() < MAX_STATE_MARKETS,
         // loop round 10 (R10-H1): bonded oracles (an already bonded id keeps upstream's AlreadyBonded)
         BatchOp::Stake { .. } => s.oracle_bonds.contains_key(&author) || s.oracle_bonds.len() < MAX_STATE_ORACLES,
+        // loop round 20 (R20-L1): at most MAX_UNSTAKES_PER_HEIGHT oracles start unbonding at one height -- the stateless
+        // image's bound on one height's eager expiry (R20-M2 / R20-M3), so both images agree (an Unstake that would not
+        // start an unbonding keeps upstream's NotBonded / Unbonding)
+        BatchOp::Unstake { .. } => {
+            !s.oracle_bonds.contains_key(&author)
+                || s.oracle_unbonding.contains_key(&author)
+                || s.oracle_unbonding.values().filter(|u| **u == s.height.saturating_add(types::ORACLE_UNBOND_HEIGHTS)).count() < MAX_UNSTAKES_PER_HEIGHT
+        }
         _ => true,
     }
 }

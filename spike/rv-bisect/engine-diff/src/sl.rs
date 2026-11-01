@@ -3252,6 +3252,22 @@ pub fn slpoc20() -> String {
         all_ok &= ok6;
         res.push(format!("{{\"case\":\"P5 migration bound (65 reporters in a market)\",\"ok\":{}}}", ok6));
     }
+    // ---- P7 R20-L1: the session image refuses the 17th unstake at one height too (state_cap_ok, code 19) ----
+    {
+        let mut s7 = s.clone();
+        for i in 0..nu {
+            s7.oracle_unbonding.insert(id(100 + i), h0 + mnpilot::types::ORACLE_UNBOND_HEIGHTS);
+        }
+        let op = mnpilot::BatchOp::Unstake { acct: 0 };
+        let full = !mnpilot::state_cap_ok(&s7, &op, id(100 + nu), 256);
+        s7.oracle_unbonding.remove(&id(100));
+        let room = mnpilot::state_cap_ok(&s7, &op, id(100 + nu), 256);
+        // an already unbonding / unbonded author is not counted (upstream's Unbonding / NotBonded)
+        let other = mnpilot::state_cap_ok(&s7, &op, id(101), 256) && mnpilot::state_cap_ok(&s7, &op, id(999), 256);
+        let ok7 = full && room && other;
+        all_ok &= ok7;
+        res.push(format!("{{\"case\":\"P7 R20-L1 session state_cap_ok: 17th unstake at one height refused, 16th allowed\",\"ok\":{}}}", ok7));
+    }
     // ---- P6: Slash (step 3): X deviates 8 % for 3 consecutive heights in market 1 and also reports in market 2 (sole
     // reporter: `oracled` flips), X is unbonding alone in the queue head (the group is unlinked); Y (honest) cannot be
     // slashed; the challenger is a fresh id (its acct: key is created by the reward)

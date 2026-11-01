@@ -37,7 +37,7 @@ pub const SL_MAX_ORACLE_MKTS: usize = 16;
 pub const SL_MAX_REPORTERS: usize = 64;
 const HIST_MAX: usize = 8;
 /// R20-M2 (stateless bound, code 19): oracles that may start unbonding at one height (= one expiry group)
-pub const SL_MAX_UNSTAKES: usize = 16;
+pub const SL_MAX_UNSTAKES: usize = crate::MAX_UNSTAKES_PER_HEIGHT;
 // R20-M3: the worst-case expiry of one height fits the per-segment record limits
 const _: () = assert!(SL_MAX_UNSTAKES * SL_MAX_ORACLE_MKTS <= SL_MAX_MARKETS && SL_MAX_UNSTAKES <= SL_MAX_ACCOUNTS);
 const OTW_MAX: usize = crate::types::ORACLE_TWAP_MAX as usize;
