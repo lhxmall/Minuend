@@ -2537,6 +2537,32 @@ pub fn slpoc18(big: u32) -> String {
             res.push(format!("{{\"case\":\"P2 finalize witness missing one exception holder\",\"ok\":{},\"status\":{},\"need\":\"{:?}\"}}", ok, o.status, o.need));
         }
     }
+    // ---- P4: R6-H2 (session state_cap_ok) evaluated statelessly: |snapshot| = 1, 65 zero-weight voters recorded ->
+    // a fresh zero-weight voter is refused (code 19), the snapshot holder still votes ----
+    {
+        let mut s = mk(1, 0, 100);
+        {
+            let p = s.proposals.get_mut(&1).unwrap();
+            for i in 0..(1 + mnpilot::MAX_ZERO_VOTERS as u32) {
+                p.voted.insert(id(1000 + i));
+            }
+        }
+        let _ = s.take_dirty();
+        let seg = seg_words(&[2000, 0], &[crate::gov::GB::w_vote(0, 1, true), crate::gov::GB::w_vote(1, 1, true)]);
+        let b = WitBuilder::new(&s);
+        let line = match operate(&b, &seg) {
+            Ok((_, _, o, ev, _)) => {
+                let ok = o.status == 0 && ev.len() == 2 && ev[0] == mnpilot::STATE_CAP_CODE && ev[1] & EV_APPLIED != 0;
+                all_ok &= ok;
+                format!("{{\"case\":\"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes\",\"ok\":{},\"status\":{},\"ev\":{:?}}}", ok, o.status, ev)
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"P4 R6-H2\",\"ok\":false,\"why\":\"{}\"}}", e)
+            }
+        };
+        res.push(line);
+    }
     // ---- P3: R18-M1 ----
     for v in [big.min(4000), 4097] {
         let s = mk(v, v, minuend_types::PROPOSAL_DURATION_SEQS + 5);

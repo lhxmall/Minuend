@@ -26,6 +26,13 @@ MUTS = [
             need_acct(sl, s, &author).map_err(Ok)?;
             need_gov(sl, None)?;""", """        CreateProposal { market, .. } => {
             need_acct(sl, s, &author).map_err(Ok)?;"""),
+  # vote-pexc-off alone is equivalent: the run loop's R6-H2 input check (Vote as the op or a Reveal's inner op) requires
+  # the voter's pexc: too -- both off must be killed
+  ('vote-pexc-both-off', [("""            need_gov(sl, Some(&author))?;
+        }
+        // finalize""", """            need_gov(sl, None)?;
+        }
+        // finalize"""), ("""                        need_gov(&sl, Some(&a))?;""", """                        need_gov(&sl, None)?;""")], None),
 ]
 sel = os.environ.get('MUTS')
 def run(cmd, t):
