@@ -2,6 +2,9 @@ English | [简体中文](README.zh-CN.md)
 
 # MINUEND — Optimistic DAG Sidechain Perpetual DEX settling to Obyte
 
+> **Primary repository is on [Radicle](https://app.radicle.xyz/nodes/iris.radicle.network/rad:zAs3weuZxWLfezSjKYcdsyXuEGKY):** `rad:zAs3weuZxWLfezSjKYcdsyXuEGKY` — issues, patches and CI live there; GitHub is a mirror.
+> Clone: `rad clone rad:zAs3weuZxWLfezSjKYcdsyXuEGKY`
+
 MINUEND is a research/MVP implementation of a **perpetual futures exchange** that
 executes trades on a high-throughput optimistic DAG sidechain and settles
 periodic state roots to the [Obyte](https://obyte.org) ledger through an
