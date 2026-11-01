@@ -1,0 +1,4 @@
+== slfuzz 20 150 perp (23:57:18)
+{"mode":"perp","batches":20,"ok":20,"bad_segments":0,"unsupported_segments":0,"segments":76,"units":3569,"witness_bytes":945208,"max_witness":24449,"leaves_verified":10619,"tree_nodes":10215,"sl_hashes":38767,"session_hashes":25295,"operator_iterations":3830,"first_bad":""}
+exit 0 (23:57:20)
+TDONE

@@ -1547,6 +1547,12 @@ impl Engine {
         // nothing; a remainder after a book fill waits for the next
         // `Liquidate`.
         if still && remaining_pos != 0 && fills.is_empty() {
+            // loop round 17 (stateless guest): the ADL remainder ranks every opposite holder of the market -- a partial
+            // state holds only the loaded ones, so the stateless run refuses any unit that gets here (UNSUPPORTED)
+            #[cfg(feature = "stateless")]
+            unsafe {
+                crate::stateless::SL_ADL_REACHED = true;
+            }
             // ADL remainder: the book did not finish the close, so the
             // still-liquidatable remainder is walked onto opposite-sign
             // positions at the current mark — insurance is never the

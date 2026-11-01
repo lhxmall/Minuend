@@ -1,0 +1,40 @@
+== sldbg 10 300 gen (00:33:34)
+
+exit 0 (00:33:37)
+== sldbg 10 300 wd (00:33:37)
+
+exit 0 (00:33:40)
+== slcaps (00:33:40)
+{"ok":true,"status":0,"units":["19", "applied/0", "applied/0", "applied/0", "applied/1"],"level_orders":4096,"needs":110,"iterations":101,"witness_bytes":187848,"leaves_verified":309}
+exit 0 (00:33:41)
+== slpoc15 (00:33:41)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":79,"iterations":73,"witness_bytes":27973},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":18,"iterations":13,"witness_bytes":8572},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6", "6"],"needs":20,"iterations":10,"witness_bytes":4200},
+{"case":"P6 single omissions from the P3 witness","ok":true,"runs":20,"refused":20,"wrong":0},
+{"case":"P7 R2-E-3: withdraw against pre-existing resting IM","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["9", "applied/0"],"needs":5,"iterations":2,"witness_bytes":2568},
+{"case":"P8a dup-nonce dust single omissions","ok":true,"honest":true,"runs":4,"wrong":0,"ev":[6]},
+{"case":"P8b resting IM single omissions","ok":true,"honest":true,"runs":5,"wrong":0,"ev":[9]},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]},
+{"case":"P5 R15-M1 lifted (round 16): levels of 4097 and 4096 orders both migrate","ok":true,"status_over":0,"status_at":0,"root_at_ok":true}]}
+exit 0 (00:33:42)
+== slfuzz 40 300 (00:33:42)
+{"mode":"gen","batches":40,"ok":40,"bad_segments":0,"unsupported_segments":0,"segments":330,"units":14768,"witness_bytes":12358659,"max_witness":101246,"leaves_verified":82481,"tree_nodes":131728,"sl_hashes":422844,"session_hashes":218580,"operator_iterations":19208,"first_bad":""}
+exit 0 (00:33:58)
+== slfuzz 30 300 wd (00:33:58)
+{"mode":"wd","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":0,"segments":247,"units":12468,"witness_bytes":9677610,"max_witness":106325,"leaves_verified":65985,"tree_nodes":101717,"sl_hashes":331007,"session_hashes":173530,"operator_iterations":14782,"first_bad":""}
+exit 0 (00:34:11)
+== slfuzz 30 300 perp (00:34:11)
+{"mode":"perp","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":0,"segments":206,"units":10314,"witness_bytes":3967982,"max_witness":39918,"leaves_verified":35440,"tree_nodes":43593,"sl_hashes":147787,"session_hashes":77328,"operator_iterations":11450,"first_bad":""}
+exit 0 (00:34:20)
+== slfuzz 30 200 adv (00:34:20)
+{"mode":"adv","batches":30,"ok":30,"bad_segments":0,"unsupported_segments":0,"segments":131,"units":6226,"witness_bytes":864904,"max_witness":14770,"leaves_verified":10975,"tree_nodes":8847,"sl_hashes":35737,"session_hashes":10747,"operator_iterations":2944,"first_bad":""}
+exit 0 (00:34:21)
+== sladv 8 200 (00:34:21)
+{"segments":50,"cases":7302,"sound":7302,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[40,40,0],"book:hide-level-in-trie":[40,40,0],"book:omit-best-level":[52,28,24],"book:reorder-fifo":[24,24,0],"duplicate:account":[50,50,0],"extra:valid":[50,0,50],"flip:records":[150,143,7],"flip:tree":[150,149,1],"forge:absent-via-leaf-key":[42,42,0],"forge:account":[42,42,0],"forge:self-consistent":[42,42,0],"forge:self-consistent:bound":[42,42,0],"honest":[50,0,50],"light:forged-collateral":[50,50,0],"light:forged-digest":[50,50,0],"light:user-account":[42,42,0],"limit:accounts":[50,50,0],"omit:account":[953,953,0],"omit:aord":[953,847,106],"omit:bmp":[911,534,377],"omit:level":[104,43,61],"omit:light":[50,50,0],"omit:market":[50,8,42],"omit:order":[1014,874,140],"omit:path":[45,17,28],"trailing":[50,50,0],"tree:leaf-as-opaque":[2072,1847,225],"truncate":[50,50,0],"wrong-root":[42,32,10],"wrong-root:bound":[42,42,0]},"unsound_first":[]}
+exit 0 (00:34:26)
+TDONE

@@ -1,0 +1,10 @@
+== slperpstat 30 300 (00:13:21)
+{"k1": {"ok": 788}, "k14": {"ok": 695, "r7": 174}, "k15": {"ok": 394, "r19": 29, "r6": 315, "r9": 108}, "k16": {"ok": 183, "r7": 43, "r9": 16}, "k2": {"ok": 2867, "r7": 692}, "k20": {"ok": 837, "r17": 220, "r19": 434}, "k21": {"ok": 199, "r17": 682, "r19": 3, "r2": 635, "r3": 115, "r6": 15, "r7": 18, "r9": 7}, "k3": {"ok": 34, "r10": 460}, "k6": {"ok": 329, "r6": 9, "r9": 13}}
+exit 0 (00:13:27)
+== slfuzz 300 300 perp (00:13:27)
+{"mode":"perp","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":2632,"units":102698,"witness_bytes":40136791,"max_witness":41822,"leaves_verified":335817,"tree_nodes":472629,"sl_hashes":1482724,"session_hashes":761246,"operator_iterations":110241,"first_bad":""}
+exit 0 (00:16:48)
+== slfuzz 60 1000 perp (00:16:48)
+{"mode":"perp","batches":60,"ok":60,"bad_segments":0,"unsupported_segments":0,"segments":1566,"units":66865,"witness_bytes":47697477,"max_witness":70945,"leaves_verified":323246,"tree_nodes":538643,"sl_hashes":1570643,"session_hashes":547417,"operator_iterations":76842,"first_bad":""}
+exit 0 (00:19:33)
+TDONE

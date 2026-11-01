@@ -43,6 +43,10 @@ pub const ST_SL_BADWIT: u32 = 12;
 pub const ST_SL_MISSING: u32 = 13;
 /// op kind / market kind / feature not covered by the prototype
 pub const ST_SL_UNSUPPORTED: u32 = 14;
+/// round 17: set by the engine when a liquidation enters its ADL remainder (engine.rs liquidate_book_path); cleared
+/// before every stateless unit, checked after it -- whatever the unit's result (an ADL fill, no candidate among the
+/// loaded holders, or an error of the ADL leg): the unit is unsupported (design §12.2)
+pub static mut SL_ADL_REACHED: bool = false;
 /// R14-H2 fix: the witness's claimed start root is not the chain's last good end root (main.rs keeps it in the carried
 /// memory: the rollup builds s0(h) on the final memory of h-1)
 pub const ST_SL_BADROOT: u32 = 15;
@@ -1754,9 +1758,84 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
                 return Err(Err(ST_SL_UNSUPPORTED));
             }
         }
+        // round 17: book-path liquidation; the target's reads are checked by liq_pre (needs the batch's account table)
+        Liquidate { .. } => need_acct(sl, s, &author).map_err(Ok)?,
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
     }
     Ok(())
+}
+
+/// round 17 (stateless liquidation, book path): the reads of `liquidate_inner` / `liquidate_book_path` for target `t`
+/// in market `m` -- the target's full record and its position markets (snapshot / isolated_risk), the market, its order
+/// set (the IOC's cancel-maker STP and refunds), the insurance light record (fee leg), and a proof of the R7-H1 dust
+/// check's input (`first_maker_qty`: the first live maker of another account on the opposite side, liq_first_maker).
+/// A funding-rate market (off-book close + ADL over all holders) is unsupported. The ADL remainder (book fills nothing)
+/// is detected after the unit (run loop): ADL picks over all holders of the market (global) -> unsupported.
+fn liq_pre(sl: &Sl, s: &ChainState, t: &AccountId, m: u32) -> Result<(), Result<Need, u32>> {
+    need_acct(sl, s, t).map_err(Ok)?;
+    match sl.markets.get(&m) {
+        None => return Err(Ok(Need::Market(m))),
+        Some(true) if s.markets.get(&MarketId(m)).is_some_and(|p| p.funding_rate) => return Err(Err(ST_SL_UNSUPPORTED)),
+        _ => {}
+    }
+    if !sl.accts.contains_key(&INSURANCE_ACCOUNT) {
+        return Err(Ok(Need::Light(INSURANCE_ACCOUNT)));
+    }
+    let Some(pos) = s.accounts.get(t).and_then(|a| a.positions.get(&MarketId(m))) else { return Ok(()) };
+    if pos.qty == 0 {
+        return Ok(());
+    }
+    need_aord_full(sl, t).map_err(Ok)?;
+    // resting_open_im-style reads are not made by the liquidation; the IOC walks the opposite side (walk check after
+    // the unit) and the dust check scans it from the best level skipping the target's own orders
+    let sd = if pos.qty > 0 { Side::Bid.as_u8() } else { Side::Ask.as_u8() };
+    liq_first_maker(sl, s.books.get(&MarketId(m)), m, sd, t).map_err(Ok)
+}
+/// round 17: prove the in-memory `first_maker_qty` scan of side `sd` equals the full book's: every level in price
+/// priority (trie as of unit start) up to the first one holding a live order of another account than `t` is known,
+/// and its start FIFO chain up to that order is loaded (skipped orders: gone or `t`'s own); orders created in the
+/// segment follow the start chain, as in memory
+fn liq_first_maker(sl: &Sl, bk: Option<&crate::book::OrderBook>, m: u32, sd: u8, t: &AccountId) -> Result<(), Need> {
+    fn go(sl: &Sl, bk: Option<&crate::book::OrderBook>, m: u32, sd: u8, d: u8, prefix: u64, t: &AccountId) -> Result<bool, Need> {
+        let map = bmp_get(sl, m, sd, d, prefix)?.map;
+        let order: &mut dyn Iterator<Item = u16> = if sd == 0 { &mut (0..256u16).rev() } else { &mut (0..256u16) };
+        for c in order {
+            let c = c as u8;
+            if !mbit(&map, c) {
+                continue;
+            }
+            let np = (prefix << 8) | c as u64;
+            if d < 7 {
+                if go(sl, bk, m, sd, d + 1, np, t)? {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let q = unbias(np);
+            if !sl.levels.contains_key(&(m, sd, q)) {
+                return Err(Need::Level(m, sd, q));
+            }
+            let Some(bk) = bk else { continue };
+            let other = |o: &OrderId| bk.get(*o).is_some_and(|z| z.remaining > 0 && z.account != *t);
+            let mut x = bk.sl.lv.get(&(sd, q)).and_then(|e| e.0);
+            while let Some(o) = x {
+                match bk.sl.lk.get(&o) {
+                    None => return Err(Need::Order(o)),
+                    Some(&(_, nx)) => {
+                        if other(&o) {
+                            return Ok(true);
+                        }
+                        x = nx;
+                    }
+                }
+            }
+            if bk.sl_mem_level(Side::from_u8(sd).unwrap(), q).iter().any(|id| !bk.sl.lk.contains_key(id) && other(id)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    go(sl, bk, m, sd, 0, 0, t).map(|_| ())
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1890,6 +1969,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     None => Ok(()),
                 })
                 .and_then(|_| match inner {
+                    // round 17: a revealed Liquidate has no target guard here (liq_pre runs on the op only)
+                    Some(crate::BatchOp::Liquidate { .. }) if runs => Err(Err(ST_SL_UNSUPPORTED)),
                     Some(io) if runs => pre(&sl, &eng.state, &io, a, None),
                     _ => Ok(()),
                 })
@@ -1900,6 +1981,17 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     }
                     Ok(())
                 });
+            // round 17: the liquidation target's reads (the target index is resolved like dispatch does)
+            let pr = pr.and_then(|_| match op {
+                crate::BatchOp::Liquidate { target, market, .. } => {
+                    let t = if target == crate::LIQ_TARGET_INSURANCE { Some(INSURANCE_ACCOUNT) } else { accts.get(target as usize).copied() };
+                    match t {
+                        Some(t) if t != a && t != INSURANCE_ACCOUNT => liq_pre(&sl, &eng.state, &t, market),
+                        _ => Ok(()),
+                    }
+                }
+                _ => Ok(()),
+            });
             if let Err(e) = pr {
                 match e {
                     Ok(n) => fin(&mut out, &sl, ST_SL_MISSING, Some(n)),
@@ -1959,6 +2051,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 let st = &eng.state;
                 match o {
                     crate::BatchOp::Deposit { .. } if !st.accounts.contains_key(&a) => keys.push(wit::acct_key(&a)),
+                    // round 17: a keeper reward may create the caller's acct: key (session wit_depth_ok)
+                    crate::BatchOp::Liquidate { .. } if !st.accounts.contains_key(&a) => keys.push(wit::acct_key(&a)),
                     crate::BatchOp::Place { market, client_seq, .. } => {
                         if !st.accounts.contains_key(&a) {
                             keys.push(wit::acct_key(&a));
@@ -1989,7 +2083,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 ev(crate::WIT_DEPTH_CODE);
                 continue;
             }
-        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::Bad) {
+        } else if !matches!(op, crate::BatchOp::Deposit { .. } | crate::BatchOp::Place { .. } | crate::BatchOp::Cancel { .. } | crate::BatchOp::Withdraw { .. } | crate::BatchOp::GovDeposit { .. } | crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Commit { .. } | crate::BatchOp::Reveal { .. } | crate::BatchOp::Liquidate { .. } | crate::BatchOp::Bad) {
             fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
             return out;
         }
@@ -1997,7 +2091,23 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             b.peeks.0.clear();
             b.sl.short = None;
         }
+        unsafe { SL_ADL_REACHED = false };
         let res = crate::dispatch(&mut eng, &op, &accts, crate::Uid { v2, at: uid_base + i * 8 }, seq, &ext, rd, false);
+        // round 17: a liquidation that reached the ADL remainder picked -- or failed to find, or failed to apply -- its
+        // counterparty among the LOADED holders only; the session ranks every opposite holder of the market (design
+        // §12.2) -> unsupported, never a status-0 result. Flag from the engine (any result) + the outcome forms
+        // (Ok with no fill: the remainder ran; an ADL fill of kind 2) as defence in depth
+        let adl = unsafe { SL_ADL_REACHED };
+        if adl {
+            fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
+            return out;
+        }
+        if let (crate::BatchOp::Liquidate { .. }, Ok(f)) = (&op, &res) {
+            if f.is_empty() || f.iter().any(|x| x.kind == 2) {
+                fin(&mut out, &sl, ST_SL_UNSUPPORTED, None);
+                return out;
+            }
+        }
         // ---- post-unit guards (on the outcome, applied or rolled back) ----
         let post = (|| -> Result<(), Need> {
             // walk check

@@ -1,0 +1,10 @@
+== slfuzz 300 300 perp (00:39:30)
+{"mode":"perp","batches":300,"ok":300,"bad_segments":0,"unsupported_segments":0,"segments":2632,"units":102698,"witness_bytes":43275401,"max_witness":47020,"leaves_verified":346220,"tree_nodes":500430,"sl_hashes":1564988,"session_hashes":761246,"operator_iterations":109793,"first_bad":""}
+exit 0 (00:42:10)
+== slfuzz 60 1000 perp (00:42:10)
+{"mode":"perp","batches":60,"ok":60,"bad_segments":0,"unsupported_segments":0,"segments":1566,"units":66865,"witness_bytes":52210413,"max_witness":79779,"leaves_verified":340594,"tree_nodes":580827,"sl_hashes":1681472,"session_hashes":547417,"operator_iterations":80010,"first_bad":""}
+exit 0 (00:44:15)
+== sladv 40 200 wd (00:44:15)
+{"segments":362,"cases":58693,"sound":58693,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[301,301,0],"book:hide-level-in-trie":[301,301,0],"book:omit-best-level":[423,220,203],"book:omit-head":[362,310,52],"book:reorder-fifo":[168,168,0],"duplicate:account":[362,362,0],"extra:valid":[362,0,362],"flip:records":[1086,1032,54],"flip:tree":[1086,1080,6],"forge:absent-via-leaf-key":[313,313,0],"forge:account":[321,321,0],"forge:self-consistent":[321,321,0],"forge:self-consistent:bound":[321,321,0],"honest":[362,0,362],"light:forged-collateral":[362,362,0],"light:forged-digest":[362,362,0],"light:user-account":[321,321,0],"limit:accounts":[362,362,0],"omit:account":[5922,5922,0],"omit:aord":[5922,5307,615],"omit:bmp":[7783,4552,3231],"omit:level":[900,443,457],"omit:light":[362,351,11],"omit:market":[351,40,311],"omit:order":[10621,9152,1469],"omit:path":[501,178,323],"omit:wdl":[926,926,0],"trailing":[362,362,0],"tree:leaf-as-opaque":[15675,13229,2446],"truncate":[362,362,0],"wdl:add-record":[338,338,0],"wdl:claim-absent":[264,264,0],"wdl:drop-record":[264,264,0],"wrong-root":[322,259,63],"wrong-root:bound":[322,322,0]},"unsound_first":[]}
+exit 0 (00:45:48)
+TDONE

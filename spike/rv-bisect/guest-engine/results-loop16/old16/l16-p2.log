@@ -1,0 +1,10 @@
+== slperpstat 20 300 (00:03:27)
+{"k1": {"ok": 515}, "k14": {"ok": 438, "r7": 119}, "k15": {"ok": 273, "r19": 19, "r6": 213, "r9": 66}, "k16": {"ok": 118, "r7": 30, "r9": 9}, "k2": {"ok": 1840, "r7": 550}, "k20": {"ok": 572, "r17": 150, "r19": 278}, "k21": {"ok": 131, "r17": 456, "r19": 3, "r2": 436, "r3": 77, "r6": 11, "r7": 18, "r9": 7}, "k3": {"ok": 21, "r10": 301}, "k6": {"ok": 218, "r6": 8, "r9": 10}}
+exit 0 (00:03:31)
+== slfuzz 200 300 perp (00:03:31)
+{"mode":"perp","batches":200,"ok":198,"bad_segments":2,"unsupported_segments":12,"segments":1491,"units":68151,"witness_bytes":24364525,"max_witness":34998,"leaves_verified":215201,"tree_nodes":280585,"sl_hashes":909940,"session_hashes":496550,"operator_iterations":70828,"first_bad":"seed 72 seg 1 (size 77): need loop: Path([28, 14, 130, 209, 119, 112, 205, 109, 204, 129, 93, 40, 166, 106, 28, 218, 11, 132, 94, 169, 182, 186, 215, 145, 245, 154, 146, 163, 22, 190, 163, 170]) already supplied (iteration 3)"}
+exit 0 (00:04:57)
+== slfuzz 40 1000 perp (00:04:57)
+{"mode":"perp","batches":40,"ok":40,"bad_segments":0,"unsupported_segments":9,"segments":961,"units":44681,"witness_bytes":30376567,"max_witness":61854,"leaves_verified":213338,"tree_nodes":339743,"sl_hashes":1009954,"session_hashes":357952,"operator_iterations":50167,"first_bad":""}
+exit 0 (00:06:01)
+TDONE

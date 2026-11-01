@@ -137,7 +137,17 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   (the `cmt:` record; the inner op is loaded only when the reveal would consume the commit, with the inner kind's own
   guards), `gnon:` for every governance-nonce op.
 
-Unsupported ops (liquidate / ADL, oracle report / stake / slash / funding, proposals / vote / finalize, fixtures) →
+* Liquidate (round 17, book path): the keeper's record (its `acct:` key may be created by the reward: W2 depth key);
+  the target's full record and its position markets (snapshot / isolated risk), the market (a funding-rate market →
+  unsupported: off-book close + ADL over all holders), the insurance light record (fee leg), the target's `aord` and
+  every order in it (the IOC's cancel-maker STP / refunds), and a proof of the R7-H1 dust check's input
+  (`first_maker_qty`: every level in price priority up to the first one holding a live order of another account is
+  known, its start FIFO chain loaded up to that order — `liq_first_maker`). The IOC walk is checked like a Place's
+  (§6). **ADL remainder** (the book filled nothing: the unit returns no fill, or an ADL fill of kind 2) → unsupported:
+  the session ranks every opposite holder of the market; the stateless image would pick among the loaded ones only
+  (design §12.2). A revealed Liquidate (Reveal inner op) → unsupported.
+
+Unsupported ops (ADL, oracle report / stake / slash / funding, proposals / vote / finalize, fixtures) →
 `ST_SL_UNSUPPORTED = 14` (designs: §12).
 Withdraw is supported since round 15; the height hook runs lazily (§9).
 
@@ -292,7 +302,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops: liquidation / ADL, oracle report / stake / slash / funding, proposals / vote / finalize — designs in §12. Done:
+1. Ops: ADL, oracle report / stake / slash / funding, proposals / vote / finalize — designs in §12. Done: book-path
+   liquidation (round 17);
    withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
    `acmt:`).
 2. Height hook: lazy for withdrawals (round 15) and commits (round 16); stale `cmt:` leaves are never deleted (R16-I1);
@@ -300,7 +311,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 3. Rollup integration: SNAP_KIND 3 digest binding done (round 16); leaves for the state a migration drops (R15-I2:
    oracle rings / TWAPs / unbonding, proposals / voter sets / weight snapshots, funding clocks); export path of the
    stateless lineage (R16-I2); DA of the witness. Migration cost: the guest decode rebuilds the MNWIT1 witness tree of the
-   snapshot before migrating (round-16 step 4) — a migration decode mode that skips it is round-17 work.
+   snapshot before migrating (round-16 step 4) — round 17: `snapshot::decode_opts(.., build_wit = false)` skips it and
+   the snapshot is hashed once (by the decoder; digest checked after the decode).
 4. ~~Linked-FIFO levels~~ — done in round 16 (§6): the level cap R14-M1 and the migration bound R15-M1 are gone.
 5. Operator: direct touched-set tracking instead of Need iteration; witness compression (shared path prefixes).
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
@@ -363,6 +375,9 @@ consensus change to a mark-independent rank.)
   with the two neighbours (`pred < acct < succ`, `pred.next == succ`; the operator supplies them), plus the `adlq:`
   path bits of a list that appeared / emptied. Same cost class as resting / cancelling an order.
 * Differential test: session ADL counterparty == index head for every Liquidate in liqfuzz / sladv.
+* Status (round 17): the book path is supported (§4); a unit that reaches the ADL remainder is unsupported until this
+  index exists. Note the index must also be maintained by every op that changes a position (fills of Place, the
+  liquidation itself), so it lands together with its maintenance in all supported ops, and in the migration.
 
 ### 12.3 Governance: per-account PERP balance checkpoints instead of weight_snapshot
 

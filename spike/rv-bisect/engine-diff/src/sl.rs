@@ -406,6 +406,124 @@ pub fn ora_batch(seed: u64, ord: u32) -> Vec<u32> {
     w
 }
 
+/// "liq" workload (round 17): book-path liquidations without the funding-rate market (unsupported in the stateless
+/// image). The mark moves by joint oracle reports (segments holding one are unsupported and skipped); thin
+/// traders run 5-9x; keepers liquidate holders (the one closest to maintenance half of the time, anyone sometimes,
+/// the insurance account / self now and then); dust at the top of the book (R7-H1 skip -> ADL -> unsupported) and
+/// deep makers (book fills -> supported). Liquidations whose book IOC fills nothing reach the ADL remainder:
+/// the stateless image must report UNSUPPORTED for them, never a status-0 result.
+pub fn liq_sl_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let traders = 6 + rng.below(10) as u32;
+    let n_acc = 8 + traders; // 0..=1 keepers, 2..=7 makers, 8.. traders
+    let m2 = seed % 3 == 0;
+    // bonded oracles 1..=3 (fixture): the unoracled mark freezes after the first fill (state.rs), so the mark moves by
+    // oracle reports -- in bursts (3 reports back to back, ~4 % of ops) so that most segments hold none (a segment
+    // with a report is unsupported and skipped; the next one starts from the session's post-report state)
+    let flags = mnpilot::ORACLES_FLAG | if m2 { mnpilot::MARKET2_FLAG } else { 0 };
+    let (ids_real, mut g) = adv::new_gen(n_acc, flags);
+    let report = |g: &mut Gen, m: u32, px: i64| {
+        for o in 1..=3u32 {
+            g.apply([8 | (o << 8), 0, px as u32, (px >> 32) as u32, 0, 0, 0, m]);
+        }
+    };
+    let qs = QTY_SCALE;
+    for a in 0..n_acc {
+        let usd: i64 = if a >= 8 && (a % 3 == 1) { 1_500 + rng.below(8_000) as i64 } else if a >= 8 { 20_000 + rng.below(200_000) as i64 } else { 5_000_000 };
+        let amt = usd * USD_SCALE as i64;
+        g.apply([1 | (a << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]);
+    }
+    let place = |g: &mut Gen, a: u32, bid: bool, mkt: bool, ioc: bool, price: i64, qty: u64, market: u32| {
+        let c = g.next_cseq(a);
+        let fl = (!bid as u32) | ((mkt as u32) << 1) | ((ioc as u32) << 2);
+        g.apply([2 | (a << 8), fl, price as u32, (price >> 32) as u32, qty as u32, (qty >> 32) as u32, c as u32, market]);
+    };
+    let mark_of = |g: &Gen, m: u32| g.eng.state.marks.get(&mnpilot::types::MarketId(m)).copied().filter(|x| *x > 0).unwrap_or(MID);
+    let depth = |g: &mut Gen, rng: &mut Rng, m: u32| {
+        let mark = mark_of(g, m);
+        for mk in 2..8u32 {
+            for l in 1..=3i64 {
+                let off = l * mark / 400;
+                place(g, mk, true, false, false, mark - off, (1 + rng.below(30)) * qs / 10, m);
+                place(g, mk, false, false, false, mark + off, (1 + rng.below(30)) * qs / 10, m);
+            }
+        }
+    };
+    report(&mut g, 1, MID);
+    if m2 {
+        report(&mut g, 2, MID);
+    }
+    depth(&mut g, &mut rng, 1);
+    if m2 {
+        depth(&mut g, &mut rng, 2);
+    }
+    let trend_up = rng.below(2) == 0;
+    for _ in 0..n_ops {
+        let r = rng.below(100);
+        let t = 8 + rng.below(traders as u64) as u32;
+        let bid = rng.below(2) == 0;
+        let mkt = if m2 && rng.below(4) == 0 { 2 } else { 1 };
+        let mark = mark_of(&g, mkt);
+        match r {
+            0..=24 => {
+                let col = g.eng.state.accounts.get(&g.ids[t as usize]).map(|x| x.collateral).unwrap_or(0).max(0) as u128;
+                let lev = 5 + rng.below(5) as u128;
+                let q_lev = (col * lev * QTY_SCALE as u128 * DOLLAR as u128 / (USD_SCALE as u128 * mark.max(1) as u128)) as u64;
+                let q = if t % 3 == 1 && rng.below(3) != 0 { q_lev.max(qs / 1000) } else { (1 + rng.below(60)) * qs / 100 };
+                place(&mut g, t, bid, true, true, 0, q, mkt);
+            }
+            // mark move: a joint oracle report 4..9 % away (mostly with the trend; reports are capped at 10 %)
+            25..=28 => {
+                let up = if rng.below(10) < 7 { trend_up } else { !trend_up };
+                let step = mark * (4 + rng.below(6) as i64) / 100;
+                report(&mut g, mkt, if up { mark + step } else { (mark - step).max(10_000 * DOLLAR) });
+            }
+            // a trade 2..9 % away (a mover rests, a trader crosses it)
+            29..=39 => {
+                let up = if rng.below(10) < 7 { trend_up } else { !trend_up };
+                let step = mark * (2 + rng.below(8) as i64) / 100;
+                let px = if up { mark + step } else { (mark - step).max(10_000 * DOLLAR) };
+                let mk = 2 + rng.below(6) as u32;
+                let q = (1 + rng.below(5)) * qs / 100;
+                place(&mut g, mk, !up, false, false, px, q, mkt);
+                place(&mut g, t, up, false, true, px, q, mkt);
+            }
+            40..=62 => {
+                let holders: Vec<u32> = (0..n_acc).filter(|&a| g.eng.state.accounts.get(&g.ids[a as usize]).is_some_and(|x| x.positions.contains_key(&mnpilot::types::MarketId(mkt)))).collect();
+                let st = &g.eng.state;
+                let worst = holders.iter().copied().max_by_key(|&h| {
+                    let a = &st.accounts[&g.ids[h as usize]];
+                    let sn = a.snapshot(&st.marks, &st.markets);
+                    (sn.mm.max(0) * 1_000_000 / sn.equity.max(1), h)
+                });
+                let target = if let (Some(wt), true) = (worst, rng.below(2) == 0) { wt } else if !holders.is_empty() && rng.below(5) != 0 { holders[rng.below(holders.len() as u64) as usize] } else if rng.below(20) == 0 { mnpilot::LIQ_TARGET_INSURANCE } else { rng.below(n_acc as u64) as u32 };
+                let k = if rng.below(10) == 0 && target < n_acc { target } else { rng.below(2) as u32 };
+                if rng.below(4) == 0 {
+                    let mk = 2 + rng.below(6) as u32;
+                    place(&mut g, mk, true, false, false, mark - mark / 1000, qs / 10_000, mkt);
+                    place(&mut g, mk, false, false, false, mark + mark / 1000, qs / 10_000, mkt);
+                }
+                g.apply([7 | (k << 8), target, 0, 0, 0, 0, 0, mkt]);
+            }
+            63..=77 => depth(&mut g, &mut rng, mkt),
+            78..=84 => {
+                let amt = (500 + rng.below(20_000) as i64) * USD_SCALE as i64;
+                g.apply([1 | (t << 8), amt as u32, (amt >> 32) as u32, 0, 0, 0, 0, 0]);
+            }
+            _ => {
+                if let Some(i) = (!g.live.is_empty()).then(|| rng.below(g.live.len() as u64) as usize) {
+                    let (ca, cs) = g.live.swap_remove(i);
+                    g.apply([3 | (ca << 8), 0, 0, 0, 0, 0, cs as u32, 1]);
+                } else {
+                    let q = (1 + rng.below(40)) * qs / 100;
+                    place(&mut g, t, bid, false, false, mark + if bid { -DOLLAR } else { DOLLAR } * (1 + rng.below(50) as i64), q, mkt);
+                }
+            }
+        }
+    }
+    adv::batch_words(&ids_real, &g.ops, flags)
+}
+
 /// "wd" workload (round 15): a gen batch with Withdraw units spliced into the flow (~1 in 8 units): random trader /
 /// maker, amounts from dust (< MIN_WITHDRAW -> Risk) to more than the collateral (Insufficient), full balance, and
 /// nonces from a small range (DuplicateNonce), so the stateless withdraw path (wdl: records, R2-E-3 resting IM,
@@ -458,6 +576,7 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
     let (mut wbytes, mut verified, mut nodes, mut hashes, mut sess_hashes, mut iters) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut maxw = 0usize;
     let mut unsupported = 0u64;
+    let mut liq_units = 0u64; // round 17: Liquidate units inside segments proven with status 0
     let mut first_bad = String::new();
     for s in 1..=n {
         let w = if adv {
@@ -468,6 +587,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
             wd_batch(s, ord)
         } else if mode == "perp" {
             perp_batch(s, ord)
+        } else if mode == "liq" {
+            liq_sl_batch(s, ord)
         } else {
             let makers = 4 + (s % 9) as u32;
             let levels = 1 + (s % 25) as u32;
@@ -507,6 +628,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
                         let at = ev.iter().zip(&r.ev).position(|(x, y)| x != y);
                         Some(format!("events differ at {:?} (len {} vs {})", at, ev.len(), r.ev.len()))
                     } else {
+                        let base = 4 + 8 * r.seg[1] as usize;
+                        liq_units += (0..r.seg[2] as usize).filter(|k| r.seg[base + 8 * k] & 0xff == 7).count() as u64;
                         None
                     }
                 }
@@ -525,8 +648,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
         }
     }
     format!(
-        "{{\"mode\":\"{}\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"first_bad\":\"{}\"}}",
-        mode, n, ok, bad, unsupported, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, first_bad
+        "{{\"mode\":\"{}\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"liq_units_proven\":{},\"first_bad\":\"{}\"}}",
+        mode, n, ok, bad, unsupported, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, liq_units, first_bad
     )
 }
 
@@ -665,7 +788,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
         let makers = 4 + (s % 9) as u32;
         let levels = 1 + (s % 25) as u32;
         let per = 1 + (s % 3) as u32;
-        let w = if mode == "wd" { wd_batch(s, ord) } else if mode == "perp" { perp_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
+        let w = if mode == "wd" { wd_batch(s, ord) } else if mode == "perp" { perp_batch(s, ord) } else if mode == "liq" { liq_sl_batch(s, ord) } else { gen(s, makers, levels, per, ord, s % 2 == 0).0 };
         let mut rng = Rng(s.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let size = 8 + rng.below(64) as u32;
         let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
@@ -1985,6 +2108,7 @@ pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
         let w = match mode {
             "perp" => perp_batch(s, ord),
             "wd" => wd_batch(s, ord),
+            "liq" => liq_sl_batch(s, ord),
             _ => gen(s, 4 + (s % 9) as u32, 1 + (s % 25) as u32, 1 + (s % 3) as u32, ord, s % 2 == 0).0,
         };
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
@@ -2037,4 +2161,95 @@ pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
         }
     }
     out.join("\n")
+}
+
+/// round 17 PoC (stateless liquidation, ADL remainder): on the `liq` workload, find the segments whose units reach the
+/// ADL remainder (session-side replay with the engine's SL_ADL_REACHED flag) and check the stateless outcome:
+/// with the honest witness and with a witness that additionally carries every position holder's record (so the
+/// partial state DOES hold candidates and the ADL leg would pick one), the status must be UNSUPPORTED (14) or another
+/// refusal -- never 0 (a status-0 run would have picked among the loaded holders only). Also counts the
+/// book-path liquidations proven in the other segments.
+pub fn slpoc17(n: u64, ord: u32) -> String {
+    let (mut segs_adl, mut honest_14, mut extra_refused, mut wrong, mut op_err) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut first_wrong = String::new();
+    for s in 1..=n {
+        let w = liq_sl_batch(s, ord);
+        let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
+        let size = 1 + rng.below(200) as u32;
+        for (k, r) in session_refs(&w, size).iter().enumerate() {
+            // session-side replay of the units (dispatch on the full pre-state) -> does any unit reach the ADL leg?
+            let seg = &r.seg;
+            let n_acc = seg[1];
+            let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+                .map(|a| {
+                    let mut id = [0u8; 32];
+                    for q in 0..8 {
+                        id[q * 4..q * 4 + 4].copy_from_slice(&seg[4 + (a * 8) as usize + q].to_le_bytes());
+                    }
+                    mnpilot::types::AccountId(id)
+                })
+                .collect();
+            let base = 4 + 8 * n_acc;
+            let mut eng = mnpilot::engine::Engine { state: r.pre.clone() };
+            let mut rd = |i: u32| seg.get(i as usize).copied().unwrap_or(0);
+            let mut adl = false;
+            for i in 0..seg[2] {
+                let mut ow = [0u32; 8];
+                for (q, x) in ow.iter_mut().enumerate() {
+                    *x = seg[(base + i * 8) as usize + q];
+                }
+                let op = mnpilot::decode_op(&ow);
+                let seq = eng.state.seq;
+                unsafe { sl::SL_ADL_REACHED = false };
+                let res = mnpilot::dispatch(&mut eng, &op, &accts, mnpilot::Uid { v2: false, at: base + 8 * seg[2] + i * 8 }, seq, &mnpilot::Ext::NONE, &mut rd, false);
+                if unsafe { sl::SL_ADL_REACHED } {
+                    adl = true;
+                    break;
+                }
+                if res.is_ok() {
+                    eng.state.seq += 1;
+                }
+                let _ = eng.state.take_dirty();
+            }
+            if !adl {
+                continue;
+            }
+            segs_adl += 1;
+            let b = WitBuilder::new(&r.pre);
+            match operate(&b, seg) {
+                Ok((needs, _, o, ev, _)) => {
+                    if o.status == sl::ST_SL_UNSUPPORTED {
+                        honest_14 += 1;
+                    } else if o.status == 0 && (o.end_root != r.post_root || ev != r.ev) {
+                        wrong += 1;
+                        if first_wrong.is_empty() {
+                            first_wrong = format!("seed {} seg {}: honest status 0 with a different result", s, k);
+                        }
+                    }
+                    let mut nx = needs.clone();
+                    for (id, a) in r.pre.accounts.iter() {
+                        if !a.positions.is_empty() && *id != mnpilot::types::INSURANCE_ACCOUNT {
+                            nx.insert(Need::Account(*id));
+                        }
+                    }
+                    let wf = b.build(&nx);
+                    let (ox, evx) = run_sl(seg, &wf);
+                    if ox.status != 0 {
+                        extra_refused += 1;
+                    } else if ox.end_root != r.post_root || evx != r.ev {
+                        wrong += 1;
+                        if first_wrong.is_empty() {
+                            first_wrong = format!("seed {} seg {}: extra-holders witness status 0 with a different result", s, k);
+                        }
+                    }
+                }
+                Err(_) => op_err += 1,
+            }
+        }
+    }
+    let ok = wrong == 0 && segs_adl > 0 && honest_14 + op_err == segs_adl;
+    format!(
+        "{{\"ok\":{},\"batches\":{},\"segments_reaching_adl\":{},\"honest_unsupported\":{},\"extra_holders_refused\":{},\"wrong_status0\":{},\"operator_errors\":{},\"first_wrong\":\"{}\"}}",
+        ok, n, segs_adl, honest_14, extra_refused, wrong, op_err, first_wrong
+    )
 }

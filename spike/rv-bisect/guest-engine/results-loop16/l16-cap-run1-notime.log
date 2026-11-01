@@ -1,0 +1,60 @@
+    Finished `release` profile [optimized] target(s) in 52.85s
+== slmigcap 64 16 8 64 8 (23:48:04)
+/data/hark/spike-rv/l16c.sh: line 13: /usr/bin/time: No such file or directory
+cat: /data/hark/spike-rv/loop16/sl/cap-64-16-8-64-8/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 15.45s
+cp: cannot create regular file '/data/hark/spike-rv/loop16/sl/cap-64-16-8-64-8/rvengine-emb': No such file or directory
+== migsail 64 16 8 64 8 (23:48:19)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop16/sl/cap-64-16-8-64-8/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop16/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop16/sl/cap-64-16-8-64-8/mig.bin'
+}
+
+Node.js v22.23.3
+== slmigcap 256 16 32 64 64 (23:48:19)
+/data/hark/spike-rv/l16c.sh: line 13: /usr/bin/time: No such file or directory
+cat: /data/hark/spike-rv/loop16/sl/cap-256-16-32-64-64/digest.txt: No such file or directory
+digest 
+    Finished `release` profile [optimized] target(s) in 0.00s
+cp: cannot create regular file '/data/hark/spike-rv/loop16/sl/cap-256-16-32-64-64/rvengine-emb': No such file or directory
+== migsail 256 16 32 64 64 (23:48:19)
+node:fs:560
+  return binding.open(
+                 ^
+
+Error: ENOENT: no such file or directory, open '/data/hark/spike-rv/loop16/sl/cap-256-16-32-64-64/mig.bin'
+    at Object.openSync (node:fs:560:18)
+    at Object.readFileSync (node:fs:444:35)
+    at Object.<anonymous> (/data/hark/spike-rv/loop16/xval/migsail.js:12:17)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object..js (node:internal/modules/cjs/loader:1913:10)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function.<anonymous> (node:internal/modules/cjs/loader:1309:12)
+    at Module._load (/usr/local/lib/instabox/headed-browser.cjs:71:22)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5) {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'open',
+  path: '/data/hark/spike-rv/loop16/sl/cap-256-16-32-64-64/mig.bin'
+}
+
+Node.js v22.23.3
+CAPDONE

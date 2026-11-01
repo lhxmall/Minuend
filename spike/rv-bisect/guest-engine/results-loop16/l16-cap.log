@@ -1,0 +1,6 @@
+    Finished `release` profile [optimized] target(s) in 0.01s
+== slmigcap 64 16 8 64 8 (23:49:31)
+{"ok":true,"status":0,"accounts":64,"markets":16,"oracles":8,"live_orders":4096,"positions":1024,"max_level_orders":1,"rejected_setup_ops":0,"snapshot_words":214461,"mnwits_leaves":23493,"root":"1c5554cb755f8e42c0dcbc21377abd1100851452e8e4a9cf1832bf017c5dd4c1","root_eq_host":true,"export_s":0.002,"migrate_host_s":0.037,"migrate_heap_peak_live":15936128,"migrate_heap_top":21146176}
+digest b98ba00d55777bb324bca9b57b8d702370b379863b52d1191dd92bde7f57173a:214461
+    Finished `release` profile [optimized] target(s) in 6.11s
+== migsail 64 16 8 64 8 (23:49:37)
