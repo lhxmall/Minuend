@@ -3906,6 +3906,37 @@ pub fn slpoc22() -> String {
         };
         res.push(line);
     }
+    // P5: a Reveal whose INNER op is a capped unit by the (non-member) author at the cap: the session runs state_cap_ok on
+    // the decoded inner op with the author whether or not it would run (here its commit does not even exist) -> 19
+    {
+        let pre = mk_pre(12);
+        let mut ext5: Vec<u32> = Vec::new();
+        for x in [[0x5Au8; 32], [0x5Bu8; 32]] {
+            for k in 0..8 {
+                ext5.push(u32::from_le_bytes(x[k * 4..k * 4 + 4].try_into().unwrap()));
+            }
+        }
+        ext5.extend_from_slice(&GB::w_dep(3, 7 * USD_SCALE as i64));
+        ext5.extend_from_slice(&[0u32; 16]);
+        let w5 = seg_words2(&table, &[[21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0], [21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0]], &ext5);
+        let (post, ev_s) = sess_seg(&pre, &w5, 11);
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        let b = WitBuilder::new(&pre);
+        let r = operate(&b, &w5);
+        let (od, evd) = operate_deny(&b, &w5, &|n: &Need| *n == Need::Gcnt);
+        set_caps(sl::SL_CAPS_PROD);
+        let (post12, ev12) = sess_seg(&pre, &w5, 12);
+        let line = match r {
+            Ok((needs, _, o, ev, _)) => {
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && ev_units(&ev_s) == ["19", "19"] && needs.contains(&Need::Gcnt) && ev_units(&ev12)[0] != "19";
+                let deny_ok = od.status != 0 || (od.end_root == sl::s_root(&post) && evd == ev_s);
+                let _ = post12;
+                format!("{{\"case\":\"P5 Reveal with a capped inner op (author at the cap)\",\"ok\":{},\"session\":{:?},\"session_below_cap\":{:?},\"stateless\":{:?},\"deny_gcnt_status\":{}}}", ok && deny_ok, ev_units(&ev_s), ev_units(&ev12), ev_units(&ev), od.status)
+            }
+            Err(e) => format!("{{\"case\":\"P5\",\"ok\":false,\"why\":\"{}\"}}", e),
+        };
+        res.push(line);
+    }
     // P3: production caps: accounts / PERP ids lifted -> no 19 for the first credits (the session at a large cap agrees
     // on those; markets / oracles: the session's constants still refuse, the lineage does not -- by design)
     {
