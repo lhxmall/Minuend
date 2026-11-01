@@ -4426,6 +4426,30 @@ pub fn slpoc23() -> String {
         };
         res.push(line);
     }
+    // P1c at the total cap, a Commit the engine would reject anyway (duplicate live hash): the session's cap check runs
+    // first (19), so the count is an input even though nothing changes (mutant gcap-commit-gcnt-off)
+    {
+        let pre = mk_pre(cap);
+        let mut ext_c = ext.clone();
+        ext_c.extend_from_slice(&hw(&hash_of(0)));
+        let w = seg_words2(&table, &[commit(1, 24, h0 + 5)], &ext_c);
+        let (post, ev_s) = sess_seg(&pre, &w, 256);
+        let b = WitBuilder::new(&pre);
+        let (od, evd) = operate_deny(&b, &w, &|n: &Need| *n == Need::Gcnt);
+        let line = match operate(&b, &w) {
+            Ok((_, _, o, ev, _)) => {
+                let deny_ok = od.status != 0 || (od.end_root == sl::s_root(&post) && evd == ev_s);
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && ev_units(&ev_s) == ["19"] && deny_ok;
+                all_ok &= ok;
+                format!("{{\"case\":\"P1c duplicate hash at the commit cap\",\"ok\":{},\"session\":{:?},\"stateless\":{:?},\"deny_gcnt_status\":{}}}", ok, ev_units(&ev_s), ev_units(&ev), od.status)
+            }
+            Err(e) => {
+                all_ok = false;
+                format!("{{\"case\":\"P1c\",\"ok\":false,\"why\":\"{}\"}}", e)
+            }
+        };
+        res.push(line);
+    }
     // P2 / P3: hook expiry at the cap (full set), then commits fit again
     let full = mk_pre(cap);
     let w2 = seg_words2(&table, &[commit(1, 0, h0 + 41 + 5), commit(2, 8, h0 + 41 + 6)], &ext);
@@ -4576,6 +4600,37 @@ pub fn slpoc23() -> String {
             Err(e) => {
                 ok7 = false;
                 lines.push(format!("\"P7b\":\"{}\"", e));
+            }
+        }
+        // P7c two commits into a group with one slot left (the bound counts the run's own commits); P7d a Commit that the
+        // engine would reject anyway (duplicate live hash) into a full group: the group bound refuses it first (19), so
+        // the group must be loaded even though no count changes (mutants cexp-now-created-off / gcap-commit-cexp-need-off)
+        let pre = mk_pre(300);
+        let dup = hash_of(3); // live, TTL h0 + 3
+        let mut ext_d = ext.clone();
+        ext_d.extend_from_slice(&hw(&dup));
+        for (name, bound, ops, want_ev, applied) in [
+            ("P7c two commits, one slot left", g16 + 1, vec![commit(1, 0, h0 + 16), commit(2, 8, h0 + 16)], vec!["applied/0", "19"], vec![(0usize, 1u32, h0 + 16)]),
+            ("P7d duplicate hash into a full group", g3, vec![commit(1, 24, h0 + 3)], vec!["19"], vec![]),
+        ] {
+            unsafe { sl::SL_CAPS = sl::SlCaps { commit_group: bound, ..sl::SL_CAPS_PROD } };
+            let w = seg_words2(&table, &ops, &ext_d);
+            let b = WitBuilder::new(&pre);
+            let r = operate(&b, &w);
+            let (od, evd) = operate_deny(&b, &w, &|n: &Need| matches!(n, Need::Cexp(_)));
+            unsafe { sl::SL_CAPS = sess_caps };
+            match r {
+                Ok((_, _, o, ev, _)) => {
+                    let want = expect(&pre, &applied);
+                    let deny_ok = od.status != 0 || (od.end_root == sl::s_root(&want) && evd == ev);
+                    let k = o.status == 0 && o.end_root == sl::s_root(&want) && ev_units(&ev) == want_ev && deny_ok;
+                    ok7 &= k;
+                    lines.push(format!("\"{}\":[{},{:?},\"deny_cexp_status\",{}]", name, k, ev_units(&ev), od.status));
+                }
+                Err(e) => {
+                    ok7 = false;
+                    lines.push(format!("\"{}\":\"{}\"", name, e));
+                }
             }
         }
         all_ok &= ok7;
