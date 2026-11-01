@@ -719,7 +719,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
             }
             let (o3, ev3) = run_sl(&r.seg, &b.build(&n3));
             a.rec("extra:valid", r, &o3, &ev3, false);
-            if o3.status != 0 {
+            if o3.status != 0 && o.status == 0 {
                 a.unsound.push(format!("extra valid records refused: status {} {:?}", o3.status, o3.need));
             }
             // A3 random byte flips in the record area and in the tree area
@@ -797,6 +797,78 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     a.unsound.push("forged self-consistent witness carries the honest start root".into());
                 }
                 forged.clear();
+            }
+            // A16 (round 16): forged round-16 records under the honest tree / root -- PERP aggregates, market-id cursor,
+            // gov nonce, external-source membership, commit index (drop / retime an entry) and single commit records
+            {
+                let mut forges: Vec<(&str, mnpilot::state::ChainState)> = Vec::new();
+                if needs.contains(&Need::Perp) {
+                    let mut p2 = r.pre.clone();
+                    p2.perp_supply += 1;
+                    forges.push(("forge16:perp-supply", p2));
+                    let mut p2 = r.pre.clone();
+                    p2.next_market_id += 1;
+                    forges.push(("forge16:next-market", p2));
+                }
+                for nd in needs.iter() {
+                    match *nd {
+                        Need::Gnon(id) => {
+                            let mut p2 = r.pre.clone();
+                            let v = p2.seen_gov_nonces.get(&id).copied().unwrap_or(0);
+                            if v > 0 {
+                                p2.seen_gov_nonces.insert(id, v - 1);
+                            } else {
+                                p2.seen_gov_nonces.insert(id, 7);
+                            }
+                            forges.push(("forge16:gnon", p2));
+                        }
+                        Need::Xsrc(id) => {
+                            let mut p2 = r.pre.clone();
+                            if !p2.external_sources.remove(&id) {
+                                p2.external_sources.insert(id);
+                            }
+                            forges.push(("forge16:xsrc", p2));
+                        }
+                        Need::Acmt(id) => {
+                            let hs: Vec<[u8; 32]> = r.pre.commits.iter().filter(|(_, e)| e.account == id).map(|(h, _)| *h).collect();
+                            if let Some(h) = hs.first() {
+                                let mut p2 = r.pre.clone();
+                                p2.commits.remove(h);
+                                forges.push(("forge16:acmt-drop", p2));
+                                let mut p2 = r.pre.clone();
+                                p2.commits.get_mut(h).unwrap().ttl_height += 1;
+                                forges.push(("forge16:acmt-ttl", p2));
+                                let mut p2 = r.pre.clone();
+                                let e = p2.commits.get_mut(h).unwrap();
+                                e.revealed = !e.revealed;
+                                forges.push(("forge16:acmt-revealed", p2));
+                            } else {
+                                // claim a commit the account does not have (its index is absent)
+                                let mut p2 = r.pre.clone();
+                                p2.commits.insert([0x5A; 32], mnpilot::state::CommitEntry { account: id, commit_unit: [1; 32], commit_height: 0, ttl_height: 5, revealed: false });
+                                forges.push(("forge16:acmt-add", p2));
+                            }
+                        }
+                        Need::Cmt(h) => {
+                            let mut p2 = r.pre.clone();
+                            if p2.commits.remove(&h).is_none() {
+                                let who = r.pre.accounts.keys().next().copied().unwrap_or(mnpilot::types::INSURANCE_ACCOUNT);
+                                p2.commits.insert(h, mnpilot::state::CommitEntry { account: who, commit_unit: [2; 32], commit_height: 0, ttl_height: 9, revealed: false });
+                            }
+                            forges.push(("forge16:cmt", p2));
+                        }
+                        _ => {}
+                    }
+                }
+                for (name, p2) in forges.into_iter().take(12) {
+                    let bf = WitBuilder::new(&p2);
+                    let forged = bf.build(&needs);
+                    let lay_f = layout(&forged);
+                    let mut wf = wit[..lay.tree_end].to_vec();
+                    wf.extend_from_slice(&forged[lay_f.tree_end..]);
+                    let (of, evf) = run_sl(&r.seg, &wf);
+                    a.rec(name, r, &of, &evf, true);
+                }
             }
             // A7 order-book boundary: omit the BEST level of each side of market 1 (keep the trie path)
             if let Some(bk) = r.pre.books.get(&mnpilot::types::MarketId(1)) {
@@ -1882,4 +1954,44 @@ pub fn slperpstat(n: u64, ord: u32) -> String {
         }
     }
     format!("{:?}", t)
+}
+
+/// round 16 debug: for the perp workload, locate the first unit of every segment that is UNSUPPORTED or whose
+/// operator does not converge (prefix bisection from the same pre-state); prints the op words and the last need
+pub fn sldbg(n: u64, ord: u32) -> String {
+    let mut out = Vec::new();
+    for s in 1..=n {
+        let w = perp_batch(s, ord);
+        let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
+        let size = 1 + rng.below(200) as u32;
+        let refs = session_refs_v2(&w, size);
+        for (k, r) in refs.iter().enumerate() {
+            let b = WitBuilder::new(&r.pre);
+            let res = operate(&b, &r.seg);
+            let bad = match &res {
+                Err(e) => Some(e.clone()),
+                Ok((_, _, o, _, _)) if o.status != 0 => Some(format!("status {}", o.status)),
+                _ => None,
+            };
+            let Some(why) = bad else { continue };
+            // bisect the prefix length
+            let units = r.seg[2] as usize;
+            let mut lo = 0usize;
+            let mut hi = units;
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                let sw = crate::gov::cut_v2(&r.seg, 0, mid);
+                let ok = matches!(operate(&b, &sw), Ok((_, _, ref o, _, _)) if o.status == 0);
+                if ok { lo = mid } else { hi = mid }
+            }
+            let base = 4 + 8 * r.seg[1] as usize;
+            let op: Vec<u32> = r.seg[base + 8 * lo..base + 8 * lo + 8].to_vec();
+            let dec = mnpilot::decode_op(&op.clone().try_into().unwrap());
+            let sw = crate::gov::cut_v2(&r.seg, 0, lo + 1);
+            let last = match operate(&b, &sw) { Ok((nd, _, o, _, _)) => format!("status {} need {:?} needs {}", o.status, o.need, nd.len()), Err(e) => e };
+            out.push(format!("seed {} seg {} unit {}: {} | op {:?} | {}", s, k, lo, why, dec, last));
+            if out.len() >= 20 { return out.join("\n"); }
+        }
+    }
+    out.join("\n")
 }

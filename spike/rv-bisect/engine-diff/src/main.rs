@@ -1346,6 +1346,7 @@ fn main() {
         Some("slpoc15") => println!("{}", sl::slpoc15()), // loop round 15
         Some("slmigdump") => println!("{}", sl::slmigdump(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])), // loop round 15
         Some("slperpstat") => println!("{}", sl::slperpstat(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 16
+        Some("sldbg") => println!("{}", sl::sldbg(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 16
         Some("slmigcap") => println!("{}", sl::slmigcap(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), a[5].parse().unwrap(), a[6].parse().unwrap(), &a[7])), // loop round 16
         Some("slmig") => println!("{}", sl::slmig(a[2].parse().unwrap(), a[3].parse().unwrap(), a.get(4).map(|x| x.parse().unwrap()).unwrap_or(0))), // loop round 15
         #[cfg(feature = "stateless")]

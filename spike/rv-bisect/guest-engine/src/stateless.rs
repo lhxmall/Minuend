@@ -431,13 +431,30 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         }
     }
 }
-/// MNWIT-S root of a full state (reference).
+/// MNWIT-S root of a full state (reference). Round 16 (step 4): bulk build over the sorted leaf set -- one hash per
+/// internal node of the compact tree (a single-leaf subtree is the leaf) instead of an incremental `Smt::set` per leaf
+/// (path re-hash per insertion, ~depth x more node hashes); the guest's migration run computes its root this way.
 pub fn s_root(s: &ChainState) -> H {
-    let mut t = wit::Smt::new();
-    for (k, lh) in s_leaves(s) {
-        t.set(k, lh);
+    let mut v = s_leaves(s);
+    v.sort_unstable_by(|x, y| x.0.cmp(&y.0));
+    v.dedup_by(|a, b| a.0 == b.0);
+    root_of_sorted(&v)
+}
+/// compact-SMT root of sorted, distinct (key, leaf hash) pairs (same tree as wit::Smt)
+pub fn root_of_sorted(v: &[(H, H)]) -> H {
+    fn go(v: &[(H, H)], d: usize) -> H {
+        match v.len() {
+            0 => EMPTY,
+            1 => v[0].1,
+            _ => {
+                let mid = v.partition_point(|(k, _)| kbit(k, d) == 0);
+                let a = go(&v[..mid], d + 1);
+                let b = go(&v[mid..], d + 1);
+                wit::node_hash(&a, &b)
+            }
+        }
     }
-    t.root()
+    go(v, 0)
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1751,9 +1768,47 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
             // the per-account rules below (commit bond, zero GovWithdraw) read the author's record and live commits for
             // the op AND the inner op whatever its signer (the session's state_cap_ok runs on both with the author)
             let bonded = |o: &crate::BatchOp| matches!(o, crate::BatchOp::GovWithdraw { .. } | crate::BatchOp::CreateMarket { .. } | crate::BatchOp::Stake { .. } | crate::BatchOp::Commit { .. });
+            // the inner op runs only if reveal_begin consumes the commit (inner kind / signer, encoding hash == commit_ref,
+            // commit live, the author's, not revealed, its unit a parent): decided on the loaded commit record (pre(op)
+            // required it) -- an inner op that never runs reads nothing (e.g. a foreign commit's Stake: BadCommit)
+            let mut reveal_runs = |st: &ChainState| -> bool {
+                let (Some(io), crate::BatchOp::Reveal { ext: off, .. }) = (inner, op) else { return false };
+                if !runs_inner(&io) {
+                    return false;
+                }
+                let Some(e) = ext.read(rd, off, crate::EXT_REVEAL_LEN) else { return false };
+                let Some(cr) = x else { return false };
+                let Some(ent) = st.commits.get(&cr) else { return false };
+                if ent.revealed || ent.account != a || st.height > ent.ttl_height {
+                    return false;
+                }
+                let parents = [id32(&e[24..32]), id32(&e[32..40])];
+                if !parents.iter().any(|p| *p != [0u8; 32] && *p == ent.commit_unit) {
+                    return false;
+                }
+                let Some(enc) = crate::encode_op(&io, &accts, &ext, rd) else { return false };
+                let mut h = Sha256::new();
+                h.update(&enc);
+                h.update(id32(&e[8..16]));
+                let hh: H = h.finalize().into();
+                hh == cr
+            };
+            let runs = reveal_runs(&eng.state);
             let pr = pre(&sl, &eng.state, &op, a, x)
                 .and_then(|_| match inner {
-                    Some(io) if runs_inner(&io) => pre(&sl, &eng.state, &io, a, None),
+                    // the W2 depth keys of an inner op (any kind / signer; the session's wit_depth_ok runs on it with the
+                    // author) depend on the author's record and, for a listing, on the next market id
+                    Some(io) => {
+                        need_acct(&sl, &eng.state, &a).map_err(Ok)?;
+                        if matches!(io, crate::BatchOp::CreateMarket { .. }) && !sl.perp {
+                            return Err(Ok(Need::Perp));
+                        }
+                        Ok(())
+                    }
+                    None => Ok(()),
+                })
+                .and_then(|_| match inner {
+                    Some(io) if runs => pre(&sl, &eng.state, &io, a, None),
                     _ => Ok(()),
                 })
                 .and_then(|_| {
@@ -2390,6 +2445,10 @@ impl<'a> WitBuilder<'a> {
         }
         let levels = lv2;
         // collect the keys to expand and serialize records
+        // round 16: a Path need for a key that EXISTS (a depth-rule key of an object the partial state does not hold, e.g.
+        // a revealed inner Place re-using a live order's client_seq) is sent as a verified leaf (tag 4), so the guest
+        // sees "exists" instead of an unverified hash-only leaf (which it may not trust, R14-C1)
+        let pk: BTreeSet<H> = paths.clone();
         let mut keys: BTreeSet<H> = paths;
         let mut b = Buf::new();
         let mut o: Vec<u8> = Vec::new();
@@ -2628,7 +2687,7 @@ impl<'a> WitBuilder<'a> {
             keys.insert(kid_key(&b));
         }
         let keys: Vec<H> = keys.into_iter().collect();
-        self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false);
+        self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
         o.extend_from_slice(&rec);
         o
     }
@@ -2648,14 +2707,14 @@ impl<'a> WitBuilder<'a> {
     /// A single leaf is always emitted as L (never hidden in an O). `sib`: this subtree is the sibling
     /// of an expanded path -> expand one more level, so a later deletion on the path can prove the
     /// sibling is an internal node (no collapse) instead of an opaque hash (ambiguous -> missing).
-    fn tree(&self, o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool) {
+    fn tree(&self, o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>) {
         match hi - lo {
             0 => o.push(0),
             1 => {
                 // a key whose path ends at ANOTHER leaf needs that leaf verified (exclusion / split, R14-C1);
                 // so does a single-leaf sibling of a path: a deletion on the path may lift it to where a later
                 // insertion must split it
-                if sib || keys.iter().any(|k| *k != self.leaves[lo].0) {
+                if sib || keys.iter().any(|k| *k != self.leaves[lo].0) || pk.contains(&self.leaves[lo].0) {
                     let (kl, st) = &self.strs[lo];
                     o.push(4);
                     o.extend_from_slice(&(*kl as u16).to_le_bytes());
@@ -2677,8 +2736,8 @@ impl<'a> WitBuilder<'a> {
                 }
                 let km = keys.partition_point(|k| kbit(k, d) == 0);
                 o.push(3);
-                self.tree(o, lo, mid, d + 1, &keys[..km], !keys.is_empty() && km == 0);
-                self.tree(o, mid, hi, d + 1, &keys[km..], !keys.is_empty() && km == keys.len());
+                self.tree(o, lo, mid, d + 1, &keys[..km], !keys.is_empty() && km == 0, pk);
+                self.tree(o, mid, hi, d + 1, &keys[km..], !keys.is_empty() && km == keys.len(), pk);
             }
         }
     }
