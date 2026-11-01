@@ -2558,3 +2558,66 @@ pub fn slpoc18(big: u32) -> String {
     }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }
+
+/// round 18: migration (session export -> stateless::migrate) of gov-workload sessions with live proposals, votes and
+/// exception holders: the migrated MNWIT-S root must equal s_root of the session state (pglob: / pexc: / prop: counts
+/// derived from the snapshot's proposals); checked at up to 4 segment boundaries per batch
+pub fn slmiggov(n: u64, ord: u32) -> String {
+    let (mut ok, mut migs, mut with_props, mut with_exc) = (0u64, 0u64, 0u64, 0u64);
+    let mut first_bad = String::new();
+    for seed in 1..=n {
+        let w = gov_batch(seed, ord);
+        let n_acc = w[1];
+        let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+            .map(|a| {
+                let mut id = [0u8; 32];
+                for k in 0..8 {
+                    id[k * 4..k * 4 + 4].copy_from_slice(&w[4 + (a * 8) as usize + k].to_le_bytes());
+                }
+                mnpilot::types::AccountId(id)
+            })
+            .collect();
+        let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
+        let n_ops = w[2] as usize;
+        let size = 1 + (seed as usize * 37) % 120;
+        let mut lo = 0usize;
+        let mut done = 0;
+        let mut bad: Option<String> = None;
+        while lo < n_ops {
+            let hi = (lo + size).min(n_ops);
+            let mut sw = crate::gov::cut_v2(&w, lo, hi);
+            sw[3] = 0;
+            let (_, st, _) = mnpilot::run_segment(&mut |i| sw.get(i as usize).copied().unwrap_or(0), &mut |_| {}, &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess);
+            if st.status != 0 {
+                bad = Some(format!("session status {}", st.status));
+                break;
+            }
+            lo = hi;
+            let s = &sess.as_ref().unwrap().eng.state;
+            if done < 4 && !s.proposals.is_empty() {
+                done += 1;
+                let (dg, nw, words) = mnpilot::snapshot::export(sess.as_ref().unwrap(), true);
+                let words = words.unwrap();
+                let mut inp = vec![sl::SL_MIG_MAGIC];
+                inp.extend_from_slice(&words);
+                let mo = sl::migrate(&mut |j| inp.get(j as usize).copied().unwrap_or(0), Some(&(dg, nw)), true);
+                let s = &sess.as_ref().unwrap().eng.state;
+                migs += 1;
+                with_props += 1;
+                if !sl::pexc_all(s).is_empty() {
+                    with_exc += 1;
+                }
+                if mo.status != 0 || mo.root != sl::s_root(s) {
+                    bad = Some(format!("migrate status {} root_ok {}", mo.status, mo.root == sl::s_root(s)));
+                    break;
+                }
+            }
+        }
+        match bad {
+            None => ok += 1,
+            Some(b) if first_bad.is_empty() => first_bad = format!("seed {}: {}", seed, b),
+            _ => {}
+        }
+    }
+    format!("{{\"batches\":{},\"ok\":{},\"migrations\":{},\"with_live_proposals\":{},\"with_exception_lists\":{},\"first_bad\":\"{}\"}}", n, ok, migs, with_props, with_exc, first_bad)
+}

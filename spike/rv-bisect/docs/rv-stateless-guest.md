@@ -39,7 +39,10 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `xsrc:<acct>` | `:1` (absent = not a source) | round 16: `external_sources` membership (a funding-market creator) |
 | `acmt:<acct>` | `:<n>:<sha256((commit hash, ttl) sorted by hash)>` (absent = none; n ≤ `SL_MAX_ACMT` 64) | round 16: the account's commit index (R7-M2 commit bond, Commit's pending count); lazy expiry like `wdl:`; live entries are checked against their `cmt:` leaves (MNWIT1 `govwit` kind), `gnon:` read as in MNWIT1 |
 
-`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc` are pure functions of the state; `bmp` too (the reference builder derives it from
+| `pglob:0` | `:<next_proposal_id>:<non-zero PERP holders>:<n live>:<sha256((id u64, n_exc u32) by id)>` (always present, `govwit`) | round 18: proposal cursor, the live set (≤ 64) with each proposal's exception count, the snapshot size a new proposal records; loaded together with every live `prop:` |
+| `pexc:<acct>` | `:<n>:<sha256((pid u64, weight u128, voted u8) by pid)>` (absent = none) | round 18: the live proposals where the account's snapshot weight ≠ its current PERP balance, or that it voted on |
+
+`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob/pexc` are pure functions of the state; `bmp` too (the reference builder derives it from
 the levels), but the guest maintains it by **delta** (sets / clears path bits of the levels a unit created or
 emptied), so a node is updated without loading the other levels under it. Consensus change: every MNWIT root changes
 (the AA verifiers keep working — they only prove `acct:` / `pos:` / `ord:` leaves — but W<h> roots are MNWIT-S roots).
@@ -147,7 +150,15 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   the session ranks every opposite holder of the market; the stateless image would pick among the loaded ones only
   (design §12.2). A revealed Liquidate (Reveal inner op) → unsupported.
 
-Unsupported ops (ADL, oracle report / stake / slash / funding, proposals / vote / finalize, fixtures) →
+* Governance (round 18, §12.3): CreateProposal (creator record, `perp:0`, the market present / absent, `pglob:` with
+  every live `prop:`), Vote (voter record + `pexc:`, `pglob:`; also for a Reveal's inner Vote, whose R6-H2 zero-voter rule
+  the session evaluates whether or not it runs), FinalizeProposal (`pglob:`, the proposal's market, and the `pexc:` of
+  **every** account holding an entry for it: loaded count = `n_exc` from `pglob:` is the completeness proof). The loader
+  fills the partial proposals' `weight_snapshot` / `voted` for every account whose `pexc:` is loaded (entry-less pair =
+  weight = balance, not voted), so the engine runs unchanged; `prop:` counts are carried explicitly. Post-unit: a PERP
+  balance change needs `pglob:` (holder count) and the account's `pexc:`. SetSeq (test fixture) runs in non-prod builds.
+
+Unsupported ops (ADL, oracle report / stake / slash / funding, fixtures other than SetSeq) →
 `ST_SL_UNSUPPORTED = 14` (designs: §12).
 Withdraw is supported since round 15; the height hook runs lazily (§9).
 
@@ -302,8 +313,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops: ADL, oracle report / stake / slash / funding, proposals / vote / finalize — designs in §12. Done: book-path
-   liquidation (round 17);
+1. Ops: ADL, oracle report / stake / slash / funding — designs in §12. Done: proposals / vote / finalize (round 18,
+   §12.3); book-path liquidation (round 17);
    withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
    `acmt:`).
 2. Height hook: lazy for withdrawals (round 15) and commits (round 16); stale `cmt:` leaves are never deleted (R16-I1);
@@ -354,6 +365,18 @@ and the expiry happens at a height with no op touching it.
   (the fill / liquidation already loads the market and both accounts); the funding-rate off-book liquidation keeps its
   own ADL order (below).
 
+* **Round-18 review (R18-I2)**: as written, lazy unbonding cannot match a reference root computed from the session
+  state: `prune_oracle_unbonding` (height hook) removes the expired oracle's bond AND its reports / histories from every
+  market at the expiry height, so the session-derived `orep:<m>` no longer holds the entry while the stateless leaf still
+  carries it (dead by its copied unlock height) until the market is next touched. Options: (a) the stateless lineage is
+  its own consensus after the migration (R17-I2) and its reference is a stateless model with the lazy rule (the
+  differential tests then compare events and the leaves the session can derive, not the whole root); (b) an eager hook
+  that touches, at each height, the `orm:` markets of every oracle expiring there (bounded per oracle by
+  SL_MAX_ORACLE_MKTS, unbounded in the number of oracles expiring at one height: needs an expiry queue leaf and a
+  per-height processing bound); (c) a consensus change to upstream: expiry removes only the bond, reports of an unbonded
+  oracle are ignored by the median (no report removal). The governance design (§12.3) avoided the problem only because
+  Finalize is a unit that can load what it invalidates.
+
 ### 12.2 Liquidation / ADL: holder index by mark-independent rank
 
 Session facts (engine.rs `liquidate_book_path`): liquidation reads the target's positions, the market, its book (§6
@@ -379,23 +402,29 @@ consensus change to a mark-independent rank.)
   index exists. Note the index must also be maintained by every op that changes a position (fills of Place, the
   liquidation itself), so it lands together with its maintenance in all supported ops, and in the migration.
 
-### 12.3 Governance: per-account PERP balance checkpoints instead of weight_snapshot
+### 12.3 Governance (implemented, round 18)
 
-Session facts (engine.rs propose / vote): a proposal copies every non-zero PERP balance (`weight_snapshot`,
-O(holders)) at creation; a vote weighs the voter's snapshotted balance; finalize compares tallies after the deadline
-(seq-based, `PROPOSAL_DURATION_SEQS`).
+Session facts (engine.rs propose / vote / finalize): a proposal copies every non-zero PERP balance (`weight_snapshot`,
+O(holders)) at creation; a vote weighs the voter's snapshotted balance and is recorded in `voted`; finalize compares the
+tallies after the deadline and removes the proposal; the R6-H2 rule (state_cap_ok) bounds zero-weight voters by
+|voted| < |snapshot| + MAX_ZERO_VOTERS; at most 64 live proposals.
+
+The round-16 sketch (per-account `(seq, balance)` checkpoints) was dropped: the session state keeps no balance history,
+so the reference MNWIT-S root (a function of the session state) could not contain it. Round 18 uses **exceptions**:
 
 | leaf | value |
 |---|---|
-| `pchk:<acct>` | `:<n>:<sha256((seq, balance) ascending)>` — the balance *before* each change at seq (≤ `SL_MAX_PCHK`; entries older than the oldest live proposal's creation seq are pruned lazily, keeping the last one) |
-| `prop:<id>` (MNWIT1 `govwit`) | + `:<created_seq>` |
-| `pvote:<id>:<acct>` | `:<weight>:<choice>` (absent = not voted) |
-| `ptally:<id>` | `:<yes>:<no>` |
+| `pglob:0` | `:<next id>:<non-zero holders>:<n live>:<sha256((id, n_exc))>` — n_exc = accounts with a `pexc:` entry for the id |
+| `pexc:<acct>` | entries (pid, weight, voted) for the live proposals where weight ≠ current balance, or voted |
+| `prop:<id>` (MNWIT1 `govwit`) | unchanged; the stateless image writes its |voted| / |snapshot| counts from the loaded counts + deltas |
 
-* Vote: the voter's `pchk:` (weight = balance as of `created_seq`: the entry list answers it), `pvote:` absent →
-  present, `ptally:` + `prop:`. Finalize: `prop:` + `ptally:` — O(1). Propose: `prop:` absent, author's `gnon:`.
-* Every PERP balance change (GovDeposit / GovWithdraw / migration) appends a checkpoint to the account's `pchk:` (the
-  record is loaded anyway). The weight equals the session's snapshot for every voter (balance at the creation seq),
-  so no rule change; differential tests compare every vote's weight and every tally.
-* Bound: an account changing its PERP balance more than SL_MAX_PCHK times inside the lifetime of a live proposal is
-  refused (stateless rule, like SL_MAX_ACMT).
+* Every (account, live proposal) pair without an entry has weight = the account's current balance and no vote; so a
+  proposal is created in O(1) (no entry for anyone; |snapshot| = the holder count), a vote reads one record, and a
+  balance change rewrites the account's own list (the old balance becomes an explicit entry for every live proposal).
+* Finalize removes the proposal, so every entry for it disappears from the reference: the unit loads **all** n_exc
+  holders (count-verified). This is the one O(exceptions) step: above SL_MAX_ACCOUNTS (4096) holders a proposal cannot
+  be finalized statelessly (R18-M1, open). A lazy rule (dead entries ignored, pruned on touch) needs a reference that
+  is not a function of the session state (the stateless lineage as its own consensus) — the same obstacle as the
+  oracle's lazy unbonding (§12.1, R18-I2).
+* Tests: slfuzz / sladv `gov` (gov_batch on the real engine: deposits / withdrawals, proposals, votes, SetSeq jumps,
+  finalize), slpoc18, slmiggov (migration of states with live proposals), loop18-mut.py (guard mutants).
