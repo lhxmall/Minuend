@@ -82,10 +82,13 @@ pub const SL_MAX_ACMT: usize = 64;
 /// listings (burned fee) and oracle bonds (bonded PERP) are capped. The counts are still kept (export precondition,
 /// R16-I2: a lineage state fits the session image iff its counts are within the session's caps). The session's
 /// Round 23 (R22-I2 / R16-I1): commits expire EAGERLY (per-TTL groups `cexp:<u>`, the height hook deletes the expired
-/// `cmt:` leaves), so the live-commit count is a fifth `gcnt:0` field and the session's MAX_STATE_COMMITS is mirrored:
-/// `commits` = MAX_STATE_COMMITS in production too (a full commit set locks commit-reveal for at most
-/// COMMIT_TTL_HEIGHTS heights at COMMIT_BOND_PERP per slot, R7-M2 -- not a permanent lockout like an id cap -- and it
-/// bounds one height's expiry work; decision R23-D1). The per-account SL_MAX_ACMT bound stays.
+/// `cmt:` leaves), so the live-commit count is a fifth `gcnt:0` field and the session's MAX_STATE_COMMITS rule runs on
+/// it (`commits`). R23-M1: in production the lineage does NOT cap the total (`u64::MAX`; the session's 1024 would be a
+/// renewable global commit-reveal lockout for 1024 x COMMIT_BOND_PERP of bonded PERP and 1024 unit fees per
+/// COMMIT_TTL_HEIGHTS heights); one height's expiry work is bounded per TTL instead (`commit_group` = 1024 commits per
+/// TTL height: a lockout now needs every one of the COMMIT_TTL_HEIGHTS future groups full, 16x the session's cost, and
+/// a prod hook (height + 1) drops one group). With the session's values (host tests) both images agree: the session
+/// never holds more than 1024 commits, so the group bound never binds there. The per-account SL_MAX_ACMT bound stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlCaps {
     pub accounts: u64,
@@ -93,8 +96,19 @@ pub struct SlCaps {
     pub oracles: u64,
     /// round 23: live commits (the session's MAX_STATE_COMMITS)
     pub commits: u64,
+    /// round 23 (R23-M1): live commits per TTL height (one expiry group)
+    pub commit_group: u64,
 }
-pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12, commits: crate::MAX_STATE_COMMITS as u64 };
+pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12, commits: u64::MAX, commit_group: crate::MAX_STATE_COMMITS as u64 };
+/// round 23: a Commit's TTL is in the live range the engine accepts (height, height + COMMIT_TTL_HEIGHTS]
+fn ttl_ok(s: &ChainState, ttl: u64) -> bool {
+    ttl > s.height && ttl <= s.height.saturating_add(COMMIT_TTL_HEIGHTS)
+}
+/// round 23: the size of TTL group u now (loaded group + the commits created in the run)
+fn cexp_now(sl: &Sl, s: &ChainState, u: u64) -> u64 {
+    let g0 = sl.cx.get(&u).map(|g| g.len()).unwrap_or(0) as u64;
+    g0 + s.commits.iter().filter(|(h, e)| e.ttl_height == u && !sl.cmt0.contains(*h)).count() as u64
+}
 /// round 23: loader bound of one expiry group `cexp:<u>` (hashes) and of the groups one witness may carry
 pub const SL_MAX_CEXP: usize = 4096;
 pub const SL_MAX_CEXP_GROUPS: usize = 64;
@@ -2392,8 +2406,14 @@ fn gcap_pre(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> Resul
             }
         }
         B::CreateMarket { .. } => false,
-        // round 23: the session's MAX_STATE_COMMITS (every Commit reads the count)
-        B::Commit { .. } => false,
+        // round 23: the session's MAX_STATE_COMMITS (every Commit reads the count) and the per-TTL group bound (R23-M1:
+        // the group of a valid TTL)
+        B::Commit { ttl, .. } => {
+            if ttl_ok(s, ttl) && !sl.cx.contains_key(&ttl) {
+                return Err(Ok(Need::Cexp(ttl)));
+            }
+            false
+        }
         B::Stake { .. } => {
             if !sl.o.stk.contains(a) {
                 return Err(Ok(Need::Ostk(*a)));
@@ -2419,7 +2439,7 @@ fn gcap_ok(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> bool {
         B::Deposit { .. } | B::Liquidate { .. } => s.accounts.contains_key(a) || now(0) < c.accounts,
         B::GovDeposit { .. } | B::GovWithdraw { .. } | B::Slash { .. } => s.perp_balances.contains_key(a) || now(1) < c.accounts,
         B::CreateMarket { .. } => now(2) < c.markets,
-        B::Commit { .. } => now(4) < c.commits,
+        B::Commit { ttl, .. } => now(4) < c.commits && (!ttl_ok(s, ttl) || cexp_now(sl, s, ttl) < c.commit_group),
         B::Stake { .. } => s.oracle_bonds.contains_key(a) || now(3) < c.oracles,
         _ => true,
     }
@@ -3499,7 +3519,7 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
                 o.status = ST_SL_MIG_BOUNDS;
                 return o;
             }
-            if st.commits.values().any(|e| e.ttl_height < st.height || e.ttl_height > st.height.saturating_add(COMMIT_TTL_HEIGHTS)) {
+            if st.commits.values().any(|e| e.ttl_height < st.height || e.ttl_height > st.height.saturating_add(COMMIT_TTL_HEIGHTS)) || cexp_groups(st).values().any(|g| g.len() as u64 > c.commit_group) {
                 o.status = ST_SL_MIG_BOUNDS;
                 return o;
             }

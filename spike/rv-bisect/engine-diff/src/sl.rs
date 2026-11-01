@@ -3903,7 +3903,7 @@ pub fn slpoc22() -> String {
         let pre = mk_pre(12);
         let (post, ev_s) = sess_seg(&pre, &w, cap);
         let room = cap - 12;
-        set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
+        set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64, commit_group: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w);
         set_caps(sl::SL_CAPS_PROD);
@@ -3918,7 +3918,7 @@ pub fn slpoc22() -> String {
         res.push(line);
         // P2: forged counts / omission (at the caps)
         if let (Some((needs, pre)), 12) = (needs, cap) {
-            set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
+            set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64, commit_group: mnpilot::MAX_STATE_COMMITS as u64 });
             let b = WitBuilder::new(&pre);
             let (mut runs, mut refused, mut wrong) = (0u32, 0u32, 0u32);
             for t in 1u8..=4 {
@@ -3961,7 +3961,7 @@ pub fn slpoc22() -> String {
         let pre = mk_pre(12);
         let w4 = seg_words2(&table, &[[7 | (3 << 8), 0, 0, 0, 0, 0, 0, 1], GB::w_gwd(3, 5, 1)], &[]);
         let (post, ev_s) = sess_seg(&pre, &w4, 11);
-        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64, commit_group: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w4);
         let (od, evd) = operate_deny(&b, &w4, &|n: &Need| *n == Need::Gcnt);
@@ -3990,7 +3990,7 @@ pub fn slpoc22() -> String {
         ext5.extend_from_slice(&[0u32; 16]);
         let w5 = seg_words2(&table, &[[21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0], [21 | (3 << 8), 0, 0, 0, 0, 0, 0, 0]], &ext5);
         let (post, ev_s) = sess_seg(&pre, &w5, 11);
-        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64 });
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64, commits: mnpilot::MAX_STATE_COMMITS as u64, commit_group: mnpilot::MAX_STATE_COMMITS as u64 });
         let b = WitBuilder::new(&pre);
         let r = operate(&b, &w5);
         let (od, evd) = operate_deny(&b, &w5, &|n: &Need| *n == Need::Gcnt);
@@ -4403,6 +4403,9 @@ pub fn slpoc23() -> String {
     for h in &new_h {
         ext.extend_from_slice(&hw(h));
     }
+    // P1-P5 compare with the SESSION image: the session's commit cap (the lineage's own values: P7)
+    let sess_caps = sl::SlCaps { commits: cap as u64, commit_group: cap as u64, ..sl::SL_CAPS_PROD };
+    unsafe { sl::SL_CAPS = sess_caps };
     // P1 (no hook): at the cap and one below
     let w1 = seg_words2(&table, &[commit(1, 0, h0 + 5), commit(2, 8, h0 + 6), GB_dep(3)], &ext);
     for (name, n, want19) in [("P1 at the commit cap", cap - 1, 1usize), ("P1 one below the commit cap", cap - 2, 0)] {
@@ -4506,11 +4509,79 @@ pub fn slpoc23() -> String {
         let (st_old, _) = mig(&old_ttl);
         unsafe { sl::SL_CAPS = sl::SlCaps { commits: cap as u64 - 1, ..sl::SL_CAPS_PROD } };
         let (st_cap, _) = mig(&full);
-        unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
-        let ok = st_full == 0 && root_ok && st_ttl == sl::ST_SL_MIG_BOUNDS && st_old == sl::ST_SL_MIG_BOUNDS && st_cap == sl::ST_SL_MIG_BOUNDS;
+        unsafe { sl::SL_CAPS = sl::SlCaps { commit_group: 60, ..sl::SL_CAPS_PROD } };
+        let (st_grp, _) = mig(&full);
+        unsafe { sl::SL_CAPS = sess_caps };
+        let ok = st_full == 0 && root_ok && st_ttl == sl::ST_SL_MIG_BOUNDS && st_old == sl::ST_SL_MIG_BOUNDS && st_cap == sl::ST_SL_MIG_BOUNDS && st_grp == sl::ST_SL_MIG_BOUNDS;
         all_ok &= ok;
-        res.push(format!("{{\"case\":\"P6 migration (full commit set; TTL / count bounds)\",\"ok\":{},\"full\":[{},{}],\"ttl_above\":{},\"ttl_below\":{},\"count_above_cap\":{}}}", ok, st_full, root_ok, st_ttl, st_old, st_cap));
+        res.push(format!("{{\"case\":\"P6 migration (full commit set; TTL / count / group bounds)\",\"ok\":{},\"full\":[{},{}],\"ttl_above\":{},\"ttl_below\":{},\"count_above_cap\":{},\"group_above_bound\":{}}}", ok, st_full, root_ok, st_ttl, st_old, st_cap, st_grp));
     }
+    // P7 (R23-M1) the lineage's production values: no global commit cap (a Commit beyond the session's 1024 applies),
+    // and the per-TTL group bound (commit_group): a Commit into a full group is refused (19), into the next group it
+    // applies; the group is an input of the rule (omitted / denied -> refused). Expected post-state built by hand: the
+    // applied commits inserted, seq + 1 per applied unit (a refusal changes nothing)
+    {
+        let uid = |i: u64| -> [u8; 32] {
+            let mut u = [0u8; 32];
+            u[..8].copy_from_slice(&(0x22C0_DE00_0000u64 + i).to_le_bytes());
+            u[31] = 0x22;
+            u
+        };
+        let expect = |pre: &mnpilot::state::ChainState, applied: &[(usize, u32, u64)]| -> mnpilot::state::ChainState {
+            let mut p = pre.clone();
+            for (i, a, ttl) in applied {
+                p.commits.insert(new_h[*i], mnpilot::state::CommitEntry { account: id(*a), commit_unit: uid(*i as u64), commit_height: p.height, ttl_height: *ttl, revealed: false });
+                p.seq += 1;
+            }
+            p
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut ok7 = true;
+        // P7a beyond the session's cap: the full set + one more commit (session: 19)
+        unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
+        let w7 = seg_words2(&table, &[commit(1, 0, h0 + 7)], &ext);
+        let (_, ev_s) = sess_seg(&full, &w7, 256);
+        let b = WitBuilder::new(&full);
+        match operate(&b, &w7) {
+            Ok((_, _, o, ev, _)) => {
+                let want = expect(&full, &[(0, 1, h0 + 7)]);
+                let k = o.status == 0 && o.end_root == sl::s_root(&want) && ev_units(&ev) == ["applied/0"] && ev_units(&ev_s) == ["19"];
+                ok7 &= k;
+                lines.push(format!("\"P7a beyond 1024 (prod)\":[{},{:?},{:?}]", k, ev_units(&ev_s), ev_units(&ev)));
+            }
+            Err(e) => {
+                ok7 = false;
+                lines.push(format!("\"P7a\":\"{}\"", e));
+            }
+        }
+        // P7b group bound 8: group h0 + 3 of mk_pre(300) holds 18 commits -> bound 18: the Commit into it is refused, the
+        // one into the group h0 + 16 (the next TTL with room) applies
+        let pre = mk_pre(300);
+        let g3 = pre.commits.values().filter(|e| e.ttl_height == h0 + 3).count() as u64;
+        let g16 = pre.commits.values().filter(|e| e.ttl_height == h0 + 16).count() as u64;
+        unsafe { sl::SL_CAPS = sl::SlCaps { commit_group: g3, ..sl::SL_CAPS_PROD } };
+        let w7b = seg_words2(&table, &[commit(1, 0, h0 + 3), commit(2, 8, h0 + 16)], &ext);
+        let b = WitBuilder::new(&pre);
+        let r = operate(&b, &w7b);
+        let (od, evd) = operate_deny(&b, &w7b, &|n: &Need| matches!(n, Need::Cexp(_)));
+        unsafe { sl::SL_CAPS = sess_caps };
+        match r {
+            Ok((needs, _, o, ev, _)) => {
+                let want = expect(&pre, &[(1, 2, h0 + 16)]);
+                let deny_ok = od.status != 0 || (od.end_root == sl::s_root(&want) && evd == ev);
+                let k = g16 < g3 && o.status == 0 && o.end_root == sl::s_root(&want) && ev_units(&ev) == ["19", "applied/0"] && needs.contains(&Need::Cexp(h0 + 3)) && deny_ok;
+                ok7 &= k;
+                lines.push(format!("\"P7b group bound {} (group h0+3 full, h0+16 has {})\":[{},{:?},\"deny_cexp_status\",{}]", g3, g16, k, ev_units(&ev), od.status));
+            }
+            Err(e) => {
+                ok7 = false;
+                lines.push(format!("\"P7b\":\"{}\"", e));
+            }
+        }
+        all_ok &= ok7;
+        res.push(format!("{{\"case\":\"P7 production values (R23-M1): no global cap, per-TTL group bound\",\"ok\":{},{}}}", ok7, lines.join(",")));
+    }
+    unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
     let _ = M(0);
     format!("{{\"slpoc23\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }

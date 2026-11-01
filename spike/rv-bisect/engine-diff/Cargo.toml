@@ -39,4 +39,8 @@ inherits = "release"
 [profile.l22m]
 inherits = "release"
 
+# loop round 23: mutant builds of round 23 (target-spike/l23m/)
+[profile.l23m]
+inherits = "release"
+
 [workspace]
