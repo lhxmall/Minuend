@@ -434,6 +434,16 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
                 mnpilot::BatchOp::Stake { .. } | mnpilot::BatchOp::Unstake { .. } => {
                     n.insert(Need::Ostk(a));
                 }
+                mnpilot::BatchOp::Slash { target, market, .. } => {
+                    n.insert(Need::Perp);
+                    n.insert(Need::Oglob);
+                    n.insert(Need::Market(market));
+                    if let Some(t) = id(target) {
+                        n.insert(Need::Ostk(t));
+                        n.insert(Need::Ohist(market, t));
+                        n.insert(Need::Omk(market));
+                    }
+                }
                 mnpilot::BatchOp::Report { market, .. } => {
                     n.insert(Need::Ostk(a));
                     n.insert(Need::Market(market));
@@ -2707,6 +2717,9 @@ fn w_stake(a: u32) -> [u32; 8] {
 fn w_unstake(a: u32) -> [u32; 8] {
     [12 | (a << 8), 0, 0, 0, 0, 0, 0, 0]
 }
+fn w_slash(a: u32, target: u32, market: u32) -> [u32; 8] {
+    [13 | (a << 8), target, 0, 0, 0, 0, 0, market]
+}
 /// the 'orc' workload (MNP2, built on the REAL engine by gov::GB): genesis oracles 1..3 (ORACLES_FLAG), PERP holders
 /// 4..9 (PERP_FLAG: two bonds each), markets 1 and 2; reports (mostly at the market's mid so the funding premium is 0,
 /// some off-mid -> a funding transfer -> unsupported segment; zero / MARK_CAP / unknown market / unbonded reporter),
@@ -2725,6 +2738,8 @@ pub fn orc_batch(seed: u64, n_ops: u32) -> Vec<u32> {
     let off = (seed % 3) as i64; // seed 0 mod 3: every report at mid (no funding at all)
     // seed 2 mod 3: reports drift +-2 000 dollars around mid (median moves -> a funding premium -> unsupported segments)
     let drift = [0i64, 1, 100][(seed % 3) as usize] * dollar;
+    // round 20 (step 3): a deviant oracle (8 % above mid in market 1, one report per op slot it gets) and slashes of it
+    let bad = 1 + (seed % 3) as u32;
     for _ in 0..n_ops {
         let a = 1 + rng.below((n_acc - 1) as u64) as u32;
         let orc = 1 + rng.below(9) as u32;
@@ -2763,6 +2778,13 @@ pub fn orc_batch(seed: u64, n_ops: u32) -> Vec<u32> {
             }
             75..=79 => {
                 g.op(GB::w_gdep(4 + rng.below(6) as u32, 1_000 + rng.below(60_000)));
+            }
+            80..=86 => {
+                g.op(w_report(bad, mid + mid / 12 + (rng.below(3) as i64) * dollar, 1));
+            }
+            87..=89 => {
+                let t = if rng.below(4) == 0 { orc } else { bad };
+                g.op(w_slash(a, t, if rng.below(5) == 0 { 2 } else { 1 }));
             }
             _ => {
                 g.op(GB::w_dep(a, USD_SCALE as i64 * (1 + rng.below(100) as i64)));
@@ -2889,7 +2911,7 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
     let (mut wbytes, mut maxw, mut iters) = (0u64, 0usize, 0u64);
     // proven with status 0: [report applied, report rejected, stake applied, stake rejected, unstake applied, unstake
     // rejected], segments whose hook released bonds, released oracles, empty-height runs
-    let mut kinds = [0u64; 6];
+    let mut kinds = [0u64; 8];
     let (mut hook_segs, mut released, mut empty_runs) = (0u64, 0u64, 0u64);
     let mut first_bad = String::new();
     for seed in 1..=n {
@@ -2941,6 +2963,7 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
                                 8 => Some(0),
                                 11 => Some(2),
                                 12 => Some(4),
+                                13 => Some(6),
                                 _ => None,
                             };
                             if let Some(sl0) = slot {
@@ -2970,7 +2993,7 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
     let mut cs: Vec<String> = a.counts.iter().map(|(k, v)| format!("\"{}\":[{},{},{}]", k, v.0, v.1, v.2)).collect();
     cs.sort();
     format!(
-        "{{\"mode\":\"orc\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"operator_iterations\":{},\"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej\":{:?},\"hook_segments\":{},\"released_oracles\":{},\"empty_runs\":{},\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
+        "{{\"mode\":\"orc\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"operator_iterations\":{},\"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej\":{:?},\"hook_segments\":{},\"released_oracles\":{},\"empty_runs\":{},\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
         n, ok, bad, unsup, segs, units, wbytes, maxw, iters, kinds, hook_segs, released, empty_runs, a.cases, a.unsound.len(), cs.join(","), a.unsound.first().cloned().unwrap_or_default(), first_bad
     )
 }

@@ -2089,6 +2089,13 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
         Stake { .. } => ora::pre_stake(sl, s, &author, false)?,
         Unstake { .. } => ora::pre_stake(sl, s, &author, true)?,
         Report { market, price, .. } => ora::pre_report(sl, s, &author, market, price)?,
+        // round 20 (step 3): the challenger's record (reward), perp:0 (burn); the target's reads: run loop (pre_slash)
+        Slash { .. } => {
+            need_acct(sl, s, &author).map_err(Ok)?;
+            if !sl.perp {
+                return Err(Ok(Need::Perp));
+            }
+        }
         _ => return Err(Err(ST_SL_UNSUPPORTED)),
     }
     Ok(())
@@ -2371,6 +2378,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 .and_then(|_| match inner {
                     // round 17: a revealed Liquidate has no target guard here (liq_pre runs on the op only)
                     Some(crate::BatchOp::Liquidate { .. }) if runs => Err(Err(ST_SL_UNSUPPORTED)),
+                    // round 20: likewise a revealed Slash (its target guard runs on the op only)
+                    Some(crate::BatchOp::Slash { .. }) if runs => Err(Err(ST_SL_UNSUPPORTED)),
                     Some(io) if runs => pre(&sl, &eng.state, &io, a, None),
                     _ => Ok(()),
                 })
@@ -2397,6 +2406,11 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                         _ => Ok(()),
                     }
                 }
+                // round 20: the slashed oracle's reads (target from the batch table, as dispatch)
+                crate::BatchOp::Slash { target, market, .. } => match accts.get(target as usize) {
+                    Some(t) => ora::pre_slash(&sl, &eng.state, t, market),
+                    None => Ok(()),
+                },
                 _ => Ok(()),
             });
             if let Err(e) = pr {
@@ -2481,6 +2495,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                         }
                     }
                     crate::BatchOp::GovDeposit { .. } if !st.accounts.contains_key(&a) && !st.perp_balances.contains_key(&a) && !st.withdrawn_total.contains_key(&a) => keys.push(wit::acct_key(&a)),
+                    // round 20: a slash reward may create the challenger's acct: key (session wit_depth_ok)
+                    crate::BatchOp::Slash { .. } if !st.accounts.contains_key(&a) && !st.perp_balances.contains_key(&a) && !st.withdrawn_total.contains_key(&a) => keys.push(wit::acct_key(&a)),
                     crate::BatchOp::CreateMarket { .. } => keys.extend(wit::market_keys(MarketId(st.next_market_id))),
                     _ => {}
                 }

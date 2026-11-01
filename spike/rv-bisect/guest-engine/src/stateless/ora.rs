@@ -22,7 +22,8 @@
 //! loaded report sets). R20-M2: at most SL_MAX_UNSTAKES oracles per expiry group (an Unstake beyond it is refused, code
 //! 19), so one height's expiry is bounded. Stake / Unstake / Report run unchanged on the loaded
 //! records; a Report that would pay funding (the O(holders) transfer, R19-I1) or runs on a funding-rate market /
-//! with the AggregatedExternal source is unsupported. Slash: unsupported (round-20 step 3).
+//! with the AggregatedExternal source is unsupported. Slash (step 3): the target's bond, the market's TWAP / config and
+//! the target's history there; the bond removal rewrites the target's entries everywhere (post (b)).
 use super::*;
 use crate::types::{FundingSourceKind, OracleConfig, ReportSample, TwapSample};
 use alloc::collections::VecDeque;
@@ -652,6 +653,30 @@ pub(super) fn pre_report(sl: &Sl, s: &ChainState, a: &AccountId, market: u32, pr
     }
     if !sl.o.mk.contains(&market) {
         return nd(Need::Omk(market));
+    }
+    Ok(())
+}
+/// Slash (step 3): the market (present / absent), the target's bond; for a bonded target in a present market what
+/// apply_slash reads -- the TWAP rings + config (`omk:`), the target's history in the market (`orep:` entry + samples),
+/// `oglob:` (slash nonce). The removal of the bond (flags of every entry of the target, its expiry group) and the
+/// challenger's PERP credit are checked by `post` / the run loop's balance guard
+pub(super) fn pre_slash(sl: &Sl, s: &ChainState, t: &AccountId, market: u32) -> G {
+    let Some(present) = sl.markets.get(&market) else { return nd(Need::Market(market)) };
+    need_stk(sl, t)?;
+    if !*present || !s.oracle_bonds.contains_key(t) {
+        return Ok(());
+    }
+    if sl.o.glob.is_none() {
+        return nd(Need::Oglob);
+    }
+    if !sl.o.mk.contains(&market) {
+        return nd(Need::Omk(market));
+    }
+    if !sl.o.rep.contains_key(&market) {
+        return nd(Need::Orep(market));
+    }
+    if !sl.o.hist.contains(&(market, *t)) {
+        return nd(Need::Ohist(market, *t));
     }
     Ok(())
 }

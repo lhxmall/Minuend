@@ -30,4 +30,9 @@ stateless = ["mnpilot/stateless"]
 opt-level = 3
 debug = false
 
+# loop round 20: the test binary's own profile (target-spike/l20/), so mutant builds (release) in the shared
+# CARGO_TARGET_DIR never overwrite it
+[profile.l20]
+inherits = "release"
+
 [workspace]
