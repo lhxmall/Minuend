@@ -2725,7 +2725,29 @@ fn w_slash(a: u32, target: u32, market: u32) -> [u32; 8] {
 /// some off-mid -> a funding transfer -> unsupported segment; zero / MARK_CAP / unknown market / unbonded reporter),
 /// stakes / unstakes (re-stake after the unbonding expired, unstake twice, unbonded), trading on both markets (fills on
 /// oracled markets), deposits, PERP deposits. No withdrawals / commits (their lazy expiry is tested by slmig).
-pub fn orc_batch(seed: u64, n_ops: u32) -> Vec<u32> {
+/// the run schedule of an orc batch cut into segments of `size` units: segment k runs at height .0, and an empty run
+/// (hook only) follows it at height .1 when Some (round 20: the builder needs the heights for commit TTLs)
+pub fn orc_sched(hstep: u64, seed: u64, n_seg: usize) -> Vec<(u64, Option<u64>)> {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x2020);
+    let mut h = 0u64;
+    let mut v = Vec::with_capacity(n_seg);
+    for _ in 0..n_seg {
+        h += 1 + if hstep > 0 { rng.below(hstep) } else { 0 };
+        let hk = h;
+        let e = if rng.below(10) == 0 {
+            h += 1 + if hstep > 0 { rng.below(hstep * 4) } else { 0 };
+            Some(h)
+        } else {
+            None
+        };
+        v.push((hk, e));
+    }
+    v
+}
+/// (no commit-reveal: with bound heights the session prunes expired commits eagerly while the stateless image keeps them
+/// lazily (R16-I1), so the session root is not the reference there; revealed oracle ops: slpoc20 P8)
+pub fn orc_batch(seed: u64, n_ops: u32, size: u32, sched: &[(u64, Option<u64>)]) -> Vec<u32> {
+    let _ = (size, sched);
     use crate::gov::GB;
     let mut rng = Rng(seed.wrapping_mul(0x8CB9_2BA7_2F3D_8DD7) | 1);
     let n_acc = 12 + rng.below(5) as u32;
@@ -2794,7 +2816,7 @@ pub fn orc_batch(seed: u64, n_ops: u32) -> Vec<u32> {
     g.words()
 }
 /// session reference with the height binding (run number = height): heights advance by 1 + rand(hstep) per segment
-pub fn orc_refs(w: &[u32], s: u32, hstep: u64, seed: u64) -> Vec<(SegRef, u64)> {
+pub fn orc_refs(w: &[u32], s: u32, sched: &[(u64, Option<u64>)]) -> Vec<(SegRef, u64)> {
     let n_acc = w[1];
     let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
         .map(|a| {
@@ -2807,45 +2829,34 @@ pub fn orc_refs(w: &[u32], s: u32, hstep: u64, seed: u64) -> Vec<(SegRef, u64)> 
         .collect();
     let mut sess = Some(mnpilot::Session::genesis_with(w[3], mnpilot::WitMode::Incremental, &accts));
     sess.as_mut().unwrap().bind_height = true;
-    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x2020);
     let mut out = Vec::new();
     let n = w[2] as usize;
     let mut lo = 0usize;
-    let mut h = 0u64;
+    let mut k = 0usize;
     loop {
         let hi = (lo + s as usize).min(n);
-        let mut sw = crate::gov::cut_v2(w, lo, hi);
-        sw[3] = 0;
-        h += 1 + if hstep > 0 { rng.below(hstep) } else { 0 };
-        let pre = sess.as_ref().unwrap().eng.state.clone();
-        let mut ev = Vec::new();
-        let (_, st, _) = mnpilot::run_segment_n(
-            &mut |i| sw.get(i as usize).copied().unwrap_or(0),
-            &mut |x| ev.push(x),
-            &mut |_, _, _| {},
-            mnpilot::WitMode::Incremental,
-            &mut sess,
-            mnpilot::SegOpt { run_no: Some(h as u32), bind: true },
-        );
-        assert_eq!(st.status, 0);
-        let s1 = sess.as_ref().unwrap();
-        out.push((SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: sw, sess_hashes: 0 }, h));
+        let (h, e) = sched[k];
+        k += 1;
+        let mut runs = vec![(lo, hi, h)];
+        if hi < n {
+            if let Some(he) = e {
+                runs.push((hi, hi, he));
+            }
+        }
+        for (a, b, hh) in runs {
+            let mut sw = crate::gov::cut_v2(w, a, b);
+            sw[3] = 0;
+            let pre = sess.as_ref().unwrap().eng.state.clone();
+            let mut ev = Vec::new();
+            let (_, st, _) = mnpilot::run_segment_n(&mut |i| sw.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(hh as u32), bind: true });
+            assert_eq!(st.status, 0);
+            let s1 = sess.as_ref().unwrap();
+            out.push((SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: sw, sess_hashes: 0 }, hh));
+        }
         if hi >= n {
             break;
         }
         lo = hi;
-        // a few empty heights (runs without units: only the hook)
-        if rng.below(10) == 0 {
-            let mut ew = crate::gov::cut_v2(w, lo, lo);
-            ew[3] = 0;
-            h += 1 + if hstep > 0 { rng.below(hstep * 4) } else { 0 };
-            let pre = sess.as_ref().unwrap().eng.state.clone();
-            let mut ev = Vec::new();
-            let (_, st, _) = mnpilot::run_segment_n(&mut |i| ew.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess, mnpilot::SegOpt { run_no: Some(h as u32), bind: true });
-            assert_eq!(st.status, 0);
-            let s1 = sess.as_ref().unwrap();
-            out.push((SegRef { pre, post_root: sl::s_root(&s1.eng.state), post: s1.eng.state.clone(), ev, seg: ew, sess_hashes: 0 }, h));
-        }
     }
     out
 }
@@ -2911,14 +2922,15 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
     let (mut wbytes, mut maxw, mut iters) = (0u64, 0usize, 0u64);
     // proven with status 0: [report applied, report rejected, stake applied, stake rejected, unstake applied, unstake
     // rejected], segments whose hook released bonds, released oracles, empty-height runs
-    let mut kinds = [0u64; 8];
+    let mut kinds = [0u64; 10];
     let (mut hook_segs, mut released, mut empty_runs) = (0u64, 0u64, 0u64);
     let mut first_bad = String::new();
     for seed in 1..=n {
-        let w = orc_batch(seed, ord);
         let mut rng = Rng(seed.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(12) as u32;
-        let refs = orc_refs(&w, size, hstep, seed);
+        let sched = orc_sched(hstep, seed, (3 * ord as usize + 64) / size as usize + 2);
+        let w = orc_batch(seed, ord, size, &sched);
+        let refs = orc_refs(&w, size, &sched);
         let mut batch_ok = true;
         for (k, (r, h)) in refs.iter().enumerate() {
             segs += 1;
@@ -2964,6 +2976,7 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
                                 11 => Some(2),
                                 12 => Some(4),
                                 13 => Some(6),
+                                21 => Some(8),
                                 _ => None,
                             };
                             if let Some(sl0) = slot {
@@ -2993,7 +3006,7 @@ pub fn slora(n: u64, ord: u32, hstep: u64, adv: bool) -> String {
     let mut cs: Vec<String> = a.counts.iter().map(|(k, v)| format!("\"{}\":[{},{},{}]", k, v.0, v.1, v.2)).collect();
     cs.sort();
     format!(
-        "{{\"mode\":\"orc\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"operator_iterations\":{},\"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej\":{:?},\"hook_segments\":{},\"released_oracles\":{},\"empty_runs\":{},\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
+        "{{\"mode\":\"orc\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"operator_iterations\":{},\"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej_reveal_ok_rej\":{:?},\"hook_segments\":{},\"released_oracles\":{},\"empty_runs\":{},\"adv_cases\":{},\"adv_unsound\":{},\"adv_counts\":{{{}}},\"first_unsound\":\"{}\",\"first_bad\":\"{}\"}}",
         n, ok, bad, unsup, segs, units, wbytes, maxw, iters, kinds, hook_segs, released, empty_runs, a.cases, a.unsound.len(), cs.join(","), a.unsound.first().cloned().unwrap_or_default(), first_bad
     )
 }
@@ -3045,7 +3058,7 @@ fn ora_adv(a: &mut Adv, b: &WitBuilder, r: &SegRef, h: u64, needs: &BTreeSet<Nee
         a.unsound.push(format!("extra valid oracle records refused: status {} {:?}", o3.status, o3.need));
     }
     // dropped list entries (orep / orm / oexp): the digests bind them -> refused
-    for (m, kind) in [(1u8, "forge20:orep-drop"), (2u8, "forge20:orm-drop"), (3u8, "forge20:oexp-drop")] {
+    for (m, kind) in [(1u8, "forge20:orep-drop"), (2u8, "forge20:orm-drop"), (3u8, "forge20:oexp-drop"), (4u8, "forge20:ohist-samples")] {
         b.t_odrop.set(m);
         let w2 = b.build(needs);
         b.t_odrop.set(0);
@@ -3267,6 +3280,66 @@ pub fn slpoc20() -> String {
         let ok7 = full && room && other;
         all_ok &= ok7;
         res.push(format!("{{\"case\":\"P7 R20-L1 session state_cap_ok: 17th unstake at one height refused, 16th allowed\",\"ok\":{}}}", ok7));
+    }
+    // ---- P8: revealed oracle ops (non-bound session reference): an inner Report / Stake / Unstake runs with its guards,
+    // an inner Slash is unsupported (its target guard runs on the op only) ----
+    {
+        use crate::gov::GB;
+        let mut g = GB::new(12, mnpilot::ORACLES_FLAG | mnpilot::PERP_FLAG);
+        let mut st8: Vec<(&str, u32)> = Vec::new();
+        let inners: [(&str, [u32; 8]); 4] = [("report", w_report(4, MID, 1)), ("stake", w_stake(4)), ("unstake", w_unstake(4)), ("slash", w_slash(4, 1, 1))];
+        // heights 1..=3 (SetHeight fixture, session-only segments): oracles 2, 3 report mid, oracle 1 reports 8 % above:
+        // a slashable streak of oracle 1 at height 3; account 4 holds PERP (commit bond)
+        for h in 1..=3u64 {
+            g.op(GB::w_height(h));
+            g.op(w_report(2, MID, 1));
+            g.op(w_report(3, MID, 1));
+            g.op(w_report(1, MID + MID / 12, 1));
+        }
+        for (k, (_, inner)) in inners.iter().enumerate() {
+            let mut salt = [0u8; 32];
+            salt[0] = k as u8 + 1;
+            let hash = g.commit_hash_any(inner, &salt);
+            let w = g.w_commit(4, &hash, 5);
+            g.op(w);
+            let cu = *g.uids.last().unwrap();
+            let p1 = g.last();
+            let w = g.w_reveal(4, &hash, &salt, inner, p1, cu);
+            g.op(w);
+        }
+        let w = g.words();
+        let refs = session_refs_v2(&w, 1);
+        let mut ok8 = true;
+        let mut nrev = 0usize;
+        let mut slash_applied = false;
+        for r in refs.iter() {
+            let kd = r.seg[4 + 8 * r.seg[1] as usize] & 0xff;
+            if kd != 20 && kd != 21 {
+                continue;
+            }
+            let b = WitBuilder::new(&r.pre);
+            let res = operate(&b, &r.seg);
+            let stt = match &res {
+                Ok((_, _, o, ev, _)) if o.status == 0 && (o.end_root != r.post_root || *ev != r.ev) => 98,
+                Ok((_, _, o, _, _)) => o.status,
+                Err(_) => 99,
+            };
+            if kd == 21 {
+                st8.push((inners[nrev].0, stt));
+                if nrev == 3 {
+                    ok8 &= stt == sl::ST_SL_UNSUPPORTED;
+                    slash_applied = r.ev.first().is_some_and(|e| e & EV_APPLIED != 0);
+                } else {
+                    ok8 &= stt == 0;
+                }
+                nrev += 1;
+            } else {
+                ok8 &= stt == 0;
+            }
+        }
+        ok8 &= nrev == 4 && slash_applied;
+        all_ok &= ok8;
+        res.push(format!("{{\"case\":\"P8 revealed oracle ops: inner report (rejected) / stake / unstake proven = session, inner slash unsupported\",\"ok\":{},\"reveal_status\":{:?},\"session_slash_applied\":{}}}", ok8, st8, slash_applied));
     }
     // ---- P6: Slash (step 3): X deviates 8 % for 3 consecutive heights in market 1 and also reports in market 2 (sole
     // reporter: `oracled` flips), X is unbonding alone in the queue head (the group is unlinked); Y (honest) cannot be

@@ -3119,7 +3119,8 @@ pub struct WitBuilder<'a> {
     /// 3: send every listed account as entry-less AND its sub-trees built without its entries (consistent forgery: only
     /// the sub-tree roots bound by `pglob:` tell it apart)
     pub t_pxe: core::cell::Cell<u8>,
-    /// round 20 (adversarial tests only): drop the first entry of every sent oracle list record (1 orep, 2 orm, 3 oexp)
+    /// round 20 (adversarial tests only): drop the first entry of every sent oracle list record (1 orep, 2 orm, 3 oexp);
+    /// 4: forge the first sample of every sent history (its report-set entry honest)
     pub t_odrop: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {

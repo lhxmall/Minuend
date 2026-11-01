@@ -1037,7 +1037,7 @@ impl ONeeds {
     }
 }
 /// append the section; `keys` gets every key whose path the tree must expand. `t_drop`: adversarial knob (drop the
-/// first entry of every list record: 1 orep, 2 orm, 3 oexp)
+/// first entry of every list record: 1 orep, 2 orm, 3 oexp; 4: the first history sample's price + 1, entries honest)
 pub fn build(s: &ChainState, n: &ONeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<H>, t_drop: u8) {
     let mut b = Buf::new();
     let g = oexp_groups(s);
@@ -1121,9 +1121,9 @@ pub fn build(s: &ChainState, n: &ONeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<
         rec.extend_from_slice(&a.0);
         let q = s.oracle_report_history.get(&(MarketId(*m), *a));
         rec.push(q.map(|q| q.len()).unwrap_or(0) as u8);
-        for x in q.into_iter().flatten() {
+        for (i, x) in q.into_iter().flatten().enumerate() {
             rec.extend_from_slice(&x.height.to_le_bytes());
-            rec.extend_from_slice(&x.price.to_le_bytes());
+            rec.extend_from_slice(&(x.price + (t_drop == 4 && i == 0) as i64).to_le_bytes());
             rec.extend_from_slice(&x.seq.to_le_bytes());
         }
     }
