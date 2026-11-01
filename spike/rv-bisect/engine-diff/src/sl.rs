@@ -4579,7 +4579,44 @@ pub fn slpoc23() -> String {
             }
         }
         all_ok &= ok7;
-        res.push(format!("{{\"case\":\"P7 production values (R23-M1): no global cap, per-TTL group bound\",\"ok\":{},{}}}", ok7, lines.join(",")));
+        res.push(format!("{{\"case\":\"P7 production values (R23-M1): beyond the session's cap, per-TTL group bound\",\"ok\":{},{}}}", ok7, lines.join(",")));
+    }
+    // P8 (R23-H1) a jump hook after failed runs drops EVERY live commit: at the production bound (SL_MAX_CMT_LIVE = 4096,
+    // 64 owners) the height is provable (= session hook); beyond it (8 200 commits, the uncapped draft f0cb05d) no
+    // witness can carry the expiry (record sections bounded by SL_MAX_CMT_RECS): the lineage would halt at that height
+    {
+        unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
+        let big = |n: usize| -> mnpilot::state::ChainState {
+            let mut s = mk_pre(0);
+            for i in 0..n as u32 {
+                let ttl = h0 + (i as u64 % ttl_n);
+                s.commits.insert(hash_of(i), mnpilot::state::CommitEntry { account: id(1000 + i / 64), commit_unit: hash_of(1_000_000 + i), commit_height: ttl.saturating_sub(minuend_types::COMMIT_TTL_HEIGHTS).max(1).min(h0), ttl_height: ttl, revealed: false });
+            }
+            s
+        };
+        let h1 = h0 + 40;
+        let w8 = seg_words2(&table, &[commit(1, 0, h1 + 5)], &ext);
+        let mut lines: Vec<String> = Vec::new();
+        let mut ok8 = true;
+        for (n, want_ok) in [(sl::SL_MAX_CMT_LIVE, true), (8_200usize, false)] {
+            let pre = big(n);
+            let (post, ev_s) = sess_seg_h(&pre, &w8, 256, h1);
+            let b = WitBuilder::new(&pre);
+            match operate_h(&b, &w8, Some(h1)) {
+                Ok((_, wit, o, ev, it)) => {
+                    let proven = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s;
+                    let k = proven == want_ok && (want_ok || o.status == sl::ST_SL_BADWIT);
+                    ok8 &= k;
+                    lines.push(format!("\"{} commits\":{{\"ok\":{},\"status\":{},\"proven\":{},\"witness_bytes\":{},\"operator_iterations\":{}}}", n, k, o.status, proven, wit.len(), it));
+                }
+                Err(e) => {
+                    ok8 = false;
+                    lines.push(format!("\"{} commits\":\"{}\"", n, e));
+                }
+            }
+        }
+        all_ok &= ok8;
+        res.push(format!("{{\"case\":\"P8 (R23-H1) jump hook: every live commit expires\",\"ok\":{},{}}}", ok8, lines.join(",")));
     }
     unsafe { sl::SL_CAPS = sl::SL_CAPS_PROD };
     let _ = M(0);

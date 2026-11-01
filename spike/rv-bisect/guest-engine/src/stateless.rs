@@ -85,10 +85,13 @@ pub const SL_MAX_ACMT: usize = 64;
 /// `cmt:` leaves), so the live-commit count is a fifth `gcnt:0` field and the session's MAX_STATE_COMMITS rule runs on
 /// it (`commits`). R23-M1: in production the lineage does NOT cap the total (`u64::MAX`; the session's 1024 would be a
 /// renewable global commit-reveal lockout for 1024 x COMMIT_BOND_PERP of bonded PERP and 1024 unit fees per
-/// COMMIT_TTL_HEIGHTS heights); one height's expiry work is bounded per TTL instead (`commit_group` = 1024 commits per
-/// TTL height: a lockout now needs every one of the COMMIT_TTL_HEIGHTS future groups full, 16x the session's cost, and
-/// a prod hook (height + 1) drops one group). With the session's values (host tests) both images agree: the session
-/// never holds more than 1024 commits, so the group bound never binds there. The per-account SL_MAX_ACMT bound stays.
+/// COMMIT_TTL_HEIGHTS heights). R23-H1: the total must still bound the hook -- a run that fails (status != 0) leaves the
+/// root but counts as a height, so the next hook can drop up to COMMIT_TTL_HEIGHTS + 1 groups, i.e. EVERY live commit,
+/// and a commit set larger than the loader's record bounds would make that height unprovable (lineage halt). Production:
+/// `commits` = SL_MAX_CMT_LIVE (4096, 4x the session: the lockout cost) with the commit record sections bounded by
+/// SL_MAX_CMT_RECS = 2 x that (every expiring record + owner index, plus the units' own); `commit_group` = 1024 per TTL
+/// height bounds the normal one-step hook. With the session's values (host tests) both images agree (the session never
+/// holds more than 1024 commits, so the group bound never binds there). The per-account SL_MAX_ACMT bound stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlCaps {
     pub accounts: u64,
@@ -99,7 +102,12 @@ pub struct SlCaps {
     /// round 23 (R23-M1): live commits per TTL height (one expiry group)
     pub commit_group: u64,
 }
-pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12, commits: u64::MAX, commit_group: crate::MAX_STATE_COMMITS as u64 };
+pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12, commits: SL_MAX_CMT_LIVE as u64, commit_group: crate::MAX_STATE_COMMITS as u64 };
+/// round 23 (R23-H1): the production bound on live commits = what one hook can always expire
+pub const SL_MAX_CMT_LIVE: usize = 4096;
+/// round 23 (R23-H1): loader bound of the commit index / single commit record sections (u16 counts)
+pub const SL_MAX_CMT_RECS: usize = 2 * SL_MAX_CMT_LIVE;
+const _: () = assert!(SL_CAPS_PROD.commits as usize <= SL_MAX_CMT_LIVE && SL_MAX_CMT_RECS <= u16::MAX as usize && SL_CAPS_PROD.commit_group as usize <= SL_MAX_CEXP && SL_MAX_CMT_LIVE <= SL_MAX_CEXP);
 /// round 23: a Commit's TTL is in the live range the engine accepts (height, height + COMMIT_TTL_HEIGHTS]
 fn ttl_ok(s: &ChainState, ttl: u64) -> bool {
     ttl > s.height && ttl <= s.height.saturating_add(COMMIT_TTL_HEIGHTS)
@@ -1736,7 +1744,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     // non-live entries a committed index can hold) is covered by the digest here; its cmt: record comes from the
     // single-record section (cmtx) and the index is rewritten without it (end root)
     let n = bad!(r.u16()) as usize;
-    if n > SL_MAX_ACCOUNTS {
+    if n > SL_MAX_CMT_RECS {
         return Err(ST_SL_BADWIT);
     }
     for _ in 0..n {
@@ -1777,7 +1785,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     }
     // single commit records by hash (present: the full entry; absent proven)
     let n = bad!(r.u16()) as usize;
-    if n > SL_MAX_ACCOUNTS {
+    if n > SL_MAX_CMT_RECS {
         return Err(ST_SL_BADWIT);
     }
     for _ in 0..n {
