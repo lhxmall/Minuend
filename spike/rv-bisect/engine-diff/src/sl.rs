@@ -888,10 +888,14 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                 } else if o7.start_root != b.root {
                     e.2 += 1;
                     a.sound += 1; // detected by the chain binding (start_root != previous end root)
+                } else if wrong[4..36] == b.root && o7.end_root == r.post_root && ev7 == r.ev {
+                    // round 17: the previous segment left the state unchanged (all its units refused / rejected),
+                    // so the "wrong" witness IS an honest witness of this pre-state: a correct acceptance
+                    e.2 += 1;
+                    a.sound += 1;
                 } else {
                     a.unsound.push("wrong-root accepted with the right start root".into());
                 }
-                let _ = ev7;
             }
             // A6 claimed root differs from the tree (operator writes the honest root but a forged tree):
             // forge one account's collateral inside the records (leaf mismatch) -> BADWIT
@@ -2252,4 +2256,78 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
         "{{\"ok\":{},\"batches\":{},\"segments_reaching_adl\":{},\"honest_unsupported\":{},\"extra_holders_refused\":{},\"wrong_status0\":{},\"operator_errors\":{},\"first_wrong\":\"{}\"}}",
         ok, n, segs_adl, honest_14, extra_refused, wrong, op_err, first_wrong
     )
+}
+
+/// round 17 debug: for one (seed, mode) batch, the first segment whose stateless status-0 events differ from the
+/// session's -> the unit, its op, both unit event slices, and the pre-state facts of the liquidation target / book
+pub fn sldiff(seed: u64, ord: u32, mode: &str) -> String {
+    let w = match mode {
+        "liq" => liq_sl_batch(seed, ord),
+        "perp" => perp_batch(seed, ord),
+        "wd" => wd_batch(seed, ord),
+        _ => gen(seed, 4 + (seed % 9) as u32, 1 + (seed % 25) as u32, 1 + (seed % 3) as u32, ord, seed % 2 == 0).0,
+    };
+    let mut rng = Rng(seed.wrapping_mul(0x51_7CC1_B727_220A) | 1);
+    let size = 1 + rng.below(200) as u32;
+    let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
+    // split an event stream into units
+    let units = |ev: &[u32]| -> Vec<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < ev.len() {
+            let x = ev[i];
+            let n = if x & mnpilot::EV_APPLIED != 0 { 1 + 6 * (x & 0xFFFF) as usize } else { 1 };
+            out.push(ev[i..(i + n).min(ev.len())].to_vec());
+            i += n;
+        }
+        out
+    };
+    for (k, r) in refs.iter().enumerate() {
+        let b = WitBuilder::new(&r.pre);
+        let Ok((_, _, o, ev, _)) = operate(&b, &r.seg) else { continue };
+        if o.status != 0 || ev == r.ev {
+            continue;
+        }
+        let (us, uref) = (units(&ev), units(&r.ev));
+        let j = us.iter().zip(&uref).position(|(a, b)| a != b).unwrap_or(0);
+        let base = 4 + 8 * r.seg[1] as usize;
+        let ow: [u32; 8] = r.seg[base + 8 * j..base + 8 * j + 8].try_into().unwrap();
+        let op = mnpilot::decode_op(&ow);
+        // session-side replay up to unit j (dispatch on the full pre-state): the fill of unit j in full
+        let n_acc = r.seg[1];
+        let accts: Vec<mnpilot::types::AccountId> = (0..n_acc)
+            .map(|a| {
+                let mut id = [0u8; 32];
+                for q in 0..8 {
+                    id[q * 4..q * 4 + 4].copy_from_slice(&r.seg[4 + (a * 8) as usize + q].to_le_bytes());
+                }
+                mnpilot::types::AccountId(id)
+            })
+            .collect();
+        let mut eng = mnpilot::engine::Engine { state: r.pre.clone() };
+        let seg = r.seg.clone();
+        let mut rd = |i: u32| seg.get(i as usize).copied().unwrap_or(0);
+        let mut detail = String::new();
+        for i in 0..=j as u32 {
+            let mut w8 = [0u32; 8];
+            for (q, x) in w8.iter_mut().enumerate() {
+                *x = r.seg[base + 8 * i as usize + q];
+            }
+            let o2 = mnpilot::decode_op(&w8);
+            let sq = eng.state.seq;
+            let res = mnpilot::dispatch(&mut eng, &o2, &accts, mnpilot::Uid { v2: false, at: (base + 8 * r.seg[2] as usize) as u32 + i * 8 }, sq, &mnpilot::Ext::NONE, &mut rd, false);
+            if i == j as u32 {
+                detail = match &res {
+                    Ok(f) => f.iter().map(|x| format!("taker {:02x?} maker {:02x?} kind {} taker_acct {:02x?} maker_acct {:02x?}", &x.taker_id.0[..6], &x.maker_id.0[..6], x.kind, &x.taker.0[..4], &x.maker.0[..4])).collect::<Vec<_>>().join("; "),
+                    Err(e) => format!("err {:?}", e),
+                };
+            }
+            if res.is_ok() {
+                eng.state.seq += 1;
+            }
+            let _ = eng.state.take_dirty();
+        }
+        return format!("seed {} seg {} unit {}/{}: op {:?}\n  stateless {:?}\n  session   {:?}\n  prev units equal: {}\n  replay fill: {}\n  liq id(0) {:02x?}", seed, k, j, r.seg[2], op, us.get(j), uref.get(j), us[..j] == uref[..j], detail, &mnpilot::types::liq_order_id([0u8; 32]).0[..6]);
+    }
+    "no differing segment".into()
 }

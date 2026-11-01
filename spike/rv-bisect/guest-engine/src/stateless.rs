@@ -2219,7 +2219,13 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 ev(crate::EV_APPLIED | fills.len() as u32);
                 for f in &fills {
                     ev(u32::from_le_bytes([f.maker_id.0[0], f.maker_id.0[1], f.maker_id.0[2], f.maker_id.0[3]]));
-                    ev(u32::from_le_bytes([f.taker_id.0[0], f.taker_id.0[1], f.taker_id.0[2], f.taker_id.0[3]]));
+                    // R17-L1 (round 17 collection): the session's MNP1 event mask for liquidation / ADL fills (unit id 0
+                    // in MNP1: the taker id is written as LIQ_TAKER_EV); the stateless log must equal the session's
+                    ev(if (f.kind == 2 || f.kind == 3) && !v2 {
+                        crate::LIQ_TAKER_EV
+                    } else {
+                        u32::from_le_bytes([f.taker_id.0[0], f.taker_id.0[1], f.taker_id.0[2], f.taker_id.0[3]])
+                    });
                     ev(f.price as u32);
                     ev((f.price >> 32) as u32);
                     ev(f.qty as u32);
