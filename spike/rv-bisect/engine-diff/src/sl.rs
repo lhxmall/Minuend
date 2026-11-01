@@ -3083,28 +3083,33 @@ fn ora_adv(a: &mut Adv, b: &WitBuilder, r: &SegRef, h: u64, needs: &BTreeSet<Nee
 }
 
 /// slpoc20 (round 20 PoCs / regression, stateless oracle):
-///  P1 R20-M2: 70 bonded oracles unstake at one height: the first SL_MAX_UNSTAKES (64) start unbonding, the rest are
-///     refused (code 19, stateless bound); events + end root = direct (the first 64 units)
-///  P2 R19-I2 / R20-M1: at the unlock height the hook releases the 64 oracles (60 of them report in 16 markets) with
-///     one report-set record per MARKET (round-20 first form: one ohist: record per (market, oracle) = 960); end root =
-///     the session hook (prune_oracle_unbonding) on the full state; mkx `oracled` of the 16 markets flips
+///  P1 R20-M2: 20 bonded oracles unstake at one height: the first SL_MAX_UNSTAKES (16) start unbonding, the rest are
+///     refused (code 19, stateless bound); events + end root = direct (the first 16 units)
+///  P2 R19-I2 / R20-M1 / R20-M3: at the unlock height the hook releases the 16 oracles, each with entries in 16 DISTINCT
+///     markets (256 markets: the R20-M3 worst case = SL_MAX_MARKETS) -> one report-set record per market (round-20 first
+///     form: one ohist: record per (market, oracle)); end root = the session hook (prune_oracle_unbonding) on the full
+///     state; mkx `oracled` of the 256 markets flips
 ///  P3 the expiry witness without a released oracle's ostk: / without oglob: / with a group entry dropped / with a report
 ///     set entry dropped -> refused
+///  P4 / P5 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS refusals (code 19) = direct; migration bound
 pub fn slpoc20() -> String {
     use mnpilot::types::{AccountId as A, MarketId as M};
     let mut res: Vec<String> = Vec::new();
     let mut all_ok = true;
     let id = |i: u32| A(acct_id(i).0);
     let h0: u64 = 1_000;
+    let nu = sl::ora::SL_MAX_UNSTAKES as u32;
+    let nm = sl::ora::SL_MAX_ORACLE_MKTS as u32;
     let mut s = mnpilot::state::ChainState::genesis();
-    for m in 2..=16u32 {
+    for m in 2..=nu * nm {
         s.markets.insert(M(m), s.markets[&M(1)]);
         s.books.insert(M(m), mnpilot::book::OrderBook::new(M(m)));
     }
-    for i in 0..70u32 {
+    for i in 0..nu + 4 {
         s.oracle_bonds.insert(id(100 + i), mnpilot::types::ORACLE_BOND_PERP);
-        if i < 60 {
-            for m in 1..=16u32 {
+        if i < nu {
+            for k in 1..=nm {
+                let m = i * nm + k;
                 s.oracle_reports.insert((M(m), id(100 + i)), MID + i as i64);
                 let mut q = std::collections::VecDeque::new();
                 q.push_back(mnpilot::types::ReportSample { height: h0 - 1, price: MID + i as i64, seq: i as u64 });
@@ -3114,25 +3119,25 @@ pub fn slpoc20() -> String {
     }
     s.height = h0;
     let _ = s.take_dirty();
-    let table: Vec<u32> = (100..170).collect();
-    let ops: Vec<[u32; 8]> = (0..70u32).map(w_unstake).collect();
+    let table: Vec<u32> = (100..100 + nu + 4).collect();
+    let ops: Vec<[u32; 8]> = (0..nu + 4).map(w_unstake).collect();
     let seg = seg_words(&table, &ops);
     // ---- P1 ----
     let b = WitBuilder::new(&s);
     let p1 = operate_h(&b, &seg, Some(h0));
-    let (post64, ev64) = direct(&s, &seg_words(&table, &ops[..64]));
-    let mut want_ev = ev64.clone();
-    want_ev.extend(std::iter::repeat(mnpilot::STATE_CAP_CODE).take(6));
+    let (post16, ev16) = direct(&s, &seg_words(&table, &ops[..nu as usize]));
+    let mut want_ev = ev16.clone();
+    want_ev.extend(std::iter::repeat(mnpilot::STATE_CAP_CODE).take(4));
     let (st1, root1, ev1, wb1) = match &p1 {
-        Ok((_, wit, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post64), *ev == want_ev, wit.len()),
+        Ok((_, wit, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post16), *ev == want_ev, wit.len()),
         Err(_) => (99, false, false, 0),
     };
-    let ok1 = st1 == 0 && root1 && ev1 && post64.oracle_unbonding.len() == 64;
+    let ok1 = st1 == 0 && root1 && ev1 && post16.oracle_unbonding.len() == nu as usize;
     all_ok &= ok1;
-    res.push(format!("{{\"case\":\"P1 R20-M2 70 unstakes at one height: 64 start unbonding, 6 refused (19)\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"witness_bytes\":{}}}", ok1, st1, root1, ev1, wb1));
+    res.push(format!("{{\"case\":\"P1 R20-M2 {} unstakes at one height: {} start unbonding, 4 refused (19)\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"witness_bytes\":{}}}", nu + 4, nu, ok1, st1, root1, ev1, wb1));
     // ---- P2: the hook at the unlock height (an empty run) ----
     let u = h0 + mnpilot::types::ORACLE_UNBOND_HEIGHTS;
-    let pre2 = post64.clone();
+    let pre2 = post16.clone();
     let mut want = pre2.clone();
     want.height = u;
     want.prune_oracle_unbonding(u);
@@ -3140,17 +3145,17 @@ pub fn slpoc20() -> String {
     let empty = seg_words(&table, &[]);
     let b2 = WitBuilder::new(&pre2);
     let p2 = operate_h(&b2, &empty, Some(u));
-    let orc_flip = (1..=16u32).all(|m| sl::oracled(&pre2, M(m)) && !sl::oracled(&want, M(m)));
-    let (st2, root2, wb2, nrec) = match &p2 {
-        Ok((needs, wit, o, _, _)) => (o.status, o.end_root == sl::s_root(&want), wit.len(), needs.iter().filter(|n| matches!(n, Need::Orep(_))).count()),
+    let orc_flip = (1..=nu * nm).all(|m| sl::oracled(&pre2, M(m)) && !sl::oracled(&want, M(m)));
+    let (st2, root2, wb2, nrec, nmk) = match &p2 {
+        Ok((needs, wit, o, _, _)) => (o.status, o.end_root == sl::s_root(&want), wit.len(), needs.iter().filter(|n| matches!(n, Need::Orep(_))).count(), needs.iter().filter(|n| matches!(n, Need::Market(_))).count()),
         Err(e) => {
             res.push(format!("{{\"case\":\"P2 operator\",\"error\":\"{}\"}}", e));
-            (99, false, 0, 0)
+            (99, false, 0, 0, 0)
         }
     };
-    let ok2 = st2 == 0 && root2 && orc_flip && want.oracle_bonds.len() == 6 && nrec == 16;
+    let ok2 = st2 == 0 && root2 && orc_flip && want.oracle_bonds.len() == 4 && nrec == (nu * nm) as usize;
     all_ok &= ok2;
-    res.push(format!("{{\"case\":\"P2 R19-I2 / R20-M1 hook releases 64 oracles (60 x 16 markets): 16 report-set records\",\"ok\":{},\"status\":{},\"root_ok\":{},\"oracled_flipped\":{},\"orep_records\":{},\"witness_bytes\":{}}}", ok2, st2, root2, orc_flip, nrec, wb2));
+    res.push(format!("{{\"case\":\"P2 R19-I2 / R20-M1 / R20-M3 hook releases {} oracles x {} distinct markets: one report-set record per market\",\"ok\":{},\"status\":{},\"root_ok\":{},\"oracled_flipped\":{},\"orep_records\":{},\"market_records\":{},\"witness_bytes\":{}}}", nu, nm, ok2, st2, root2, orc_flip, nrec, nmk, wb2));
     // ---- P3: incomplete / forged expiry witnesses ----
     if let Ok((needs, wit, _, _, _)) = &p2 {
         let mut refused = 0;
@@ -3193,10 +3198,10 @@ pub fn slpoc20() -> String {
         all_ok &= ok3;
         res.push(format!("{{\"case\":\"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{}}}", ok3, runs, refused, wrong));
     }
-    // ---- P4: the stateless report bounds (code 19): a 65th reporter in a market, a 65th market for an oracle ----
+    // ---- P4: the stateless report bounds (code 19): a 65th reporter in a market, a 17th market for an oracle ----
     {
         let mut s4 = mnpilot::state::ChainState::genesis();
-        for m in 2..=65u32 {
+        for m in 2..=nm + 1 {
             s4.markets.insert(M(m), s4.markets[&M(1)]);
             s4.books.insert(M(m), mnpilot::book::OrderBook::new(M(m)));
         }
@@ -3206,15 +3211,14 @@ pub fn slpoc20() -> String {
         for i in 0..64u32 {
             s4.oracle_reports.insert((M(1), id(100 + i)), MID);
         }
-        for m in 2..=64u32 {
+        for m in 2..=nm {
             s4.oracle_reports.insert((M(m), id(100)), MID);
         }
         s4.height = h0;
         let _ = s4.take_dirty();
         let table: Vec<u32> = vec![164, 101, 100];
-        // 65th reporter in market 1 (refused), an existing reporter of market 1 (applied), oracle 100 (entries in 64
-        // markets) in a 65th market... it has 65 already (1..=65); a new market 66 does not exist -> use market 1: it
-        // already reports there (applied)
+        // 65th reporter in market 1 (refused), an existing reporter of market 1 (applied), oracle 100 (entries in
+        // SL_MAX_ORACLE_MKTS markets) in one of them (applied)
         let ops = vec![w_report(0, MID, 1), w_report(1, MID + 1, 1), w_report(2, MID, 1)];
         let seg4 = seg_words(&table, &ops);
         let b4 = WitBuilder::new(&s4);
@@ -3226,12 +3230,12 @@ pub fn slpoc20() -> String {
             Ok((_, _, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post4), *ev == want),
             Err(_) => (99, false, false),
         };
-        // an oracle with entries in 64 markets reports in a 65th
+        // an oracle with entries in SL_MAX_ORACLE_MKTS markets reports in one more (refused); another oracle there (applied)
         let s5 = s4.clone();
-        let seg5 = seg_words(&[100, 101], &[w_report(0, MID, 65), w_report(1, MID, 65)]);
+        let seg5 = seg_words(&[100, 101], &[w_report(0, MID, nm + 1), w_report(1, MID, nm + 1)]);
         let b5 = WitBuilder::new(&s5);
         let r5 = operate_h(&b5, &seg5, Some(h0));
-        let (post5, ev5d) = direct(&s5, &seg_words(&[101], &[w_report(0, MID, 65)]));
+        let (post5, ev5d) = direct(&s5, &seg_words(&[101], &[w_report(0, MID, nm + 1)]));
         let mut want5 = vec![mnpilot::STATE_CAP_CODE];
         want5.extend(ev5d);
         let (st5, root5, ev5ok) = match &r5 {
@@ -3240,13 +3244,60 @@ pub fn slpoc20() -> String {
         };
         let ok4 = st == 0 && root_ok && ev_ok && st5 == 0 && root5 && ev5ok;
         all_ok &= ok4;
-        res.push(format!("{{\"case\":\"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 65th market refused (19)\",\"ok\":{},\"status\":[{},{}],\"root_ok\":[{},{}],\"ev_ok\":[{},{}]}}", ok4, st, st5, root_ok, root5, ev_ok, ev5ok));
+        res.push(format!("{{\"case\":\"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 17th market refused (19)\",\"ok\":{},\"status\":[{},{}],\"root_ok\":[{},{}],\"ev_ok\":[{},{}]}}", ok4, st, st5, root_ok, root5, ev_ok, ev5ok));
         // migration bound: the same state as a migration input would hold a 65-entry report set
         let mut s6 = s4.clone();
         s6.oracle_reports.insert((M(1), id(164)), MID);
         let ok6 = !sl::ora::mig_ok(&s6) && sl::ora::mig_ok(&s4);
         all_ok &= ok6;
         res.push(format!("{{\"case\":\"P5 migration bound (65 reporters in a market)\",\"ok\":{}}}", ok6));
+    }
+    // ---- P6: Slash (step 3): X deviates 8 % for 3 consecutive heights in market 1 and also reports in market 2 (sole
+    // reporter: `oracled` flips), X is unbonding alone in the queue head (the group is unlinked); Y (honest) cannot be
+    // slashed; the challenger is a fresh id (its acct: key is created by the reward)
+    {
+        let mut s6 = mnpilot::state::ChainState::genesis();
+        s6.markets.insert(M(2), s6.markets[&M(1)]);
+        s6.books.insert(M(2), mnpilot::book::OrderBook::new(M(2)));
+        let (x, y) = (id(100), id(101));
+        for o in [x, y] {
+            s6.oracle_bonds.insert(o, mnpilot::types::ORACLE_BOND_PERP);
+        }
+        s6.oracle_unbonding.insert(x, h0 + 100);
+        s6.oracle_unbonding.insert(y, h0 + 200);
+        let dev = MID + MID / 12;
+        s6.oracle_reports.insert((M(1), x), dev);
+        s6.oracle_reports.insert((M(2), x), MID);
+        s6.oracle_reports.insert((M(1), y), MID);
+        let mut q = std::collections::VecDeque::new();
+        for k in 0..3u64 {
+            q.push_back(mnpilot::types::ReportSample { height: h0 - 2 + k, price: dev, seq: k });
+        }
+        s6.oracle_report_history.insert((M(1), x), q);
+        let mut qy = std::collections::VecDeque::new();
+        qy.push_back(mnpilot::types::ReportSample { height: h0, price: MID, seq: 9 });
+        s6.oracle_report_history.insert((M(1), y), qy);
+        let mut tw = std::collections::VecDeque::new();
+        for k in 0..5u64 {
+            tw.push_back(mnpilot::types::TwapSample { seq: k, height: h0 - 4 + k, median: MID });
+        }
+        s6.oracle_twap.insert(M(1), tw);
+        s6.perp_supply = 10 * mnpilot::types::ORACLE_BOND_PERP;
+        s6.height = h0;
+        let _ = s6.take_dirty();
+        let seg6 = seg_words(&[200, 100, 101], &[w_slash(0, 2, 1), w_slash(0, 1, 1), w_slash(0, 1, 2)]);
+        let (post6, ev6d) = direct(&s6, &seg6);
+        let b6 = WitBuilder::new(&s6);
+        let r6 = operate_h(&b6, &seg6, Some(h0));
+        let (st, root_ok, ev_ok, wb) = match &r6 {
+            Ok((_, wit, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post6), *ev == ev6d, wit.len()),
+            Err(_) => (99, false, false, 0),
+        };
+        let applied = ev6d.get(1).is_some_and(|e| e & EV_APPLIED != 0) && ev6d[0] & EV_APPLIED == 0;
+        let flip = sl::oracled(&s6, M(2)) && !sl::oracled(&post6, M(2)) && !post6.oracle_unbonding.contains_key(&x);
+        let ok = st == 0 && root_ok && ev_ok && applied && flip;
+        all_ok &= ok;
+        res.push(format!("{{\"case\":\"P6 Slash: honest Y refused, deviant X slashed (queue head unlinked, market 2 oracled flips, challenger reward), X again refused\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"ev\":{:?},\"witness_bytes\":{}}}", ok, st, root_ok, ev_ok, ev6d, wb));
     }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }

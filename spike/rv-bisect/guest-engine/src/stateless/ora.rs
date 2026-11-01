@@ -28,13 +28,18 @@ use super::*;
 use crate::types::{FundingSourceKind, OracleConfig, ReportSample, TwapSample};
 use alloc::collections::VecDeque;
 
-/// stateless bound: markets an oracle may hold a report / history in (keeps `orm:` and a bond change loadable)
-pub const SL_MAX_ORACLE_MKTS: usize = 64;
+/// stateless bound: markets an oracle may hold a report / history in (keeps `orm:` and a bond change loadable).
+/// R20-M3: 16 (the session's MAX_STATE_MARKETS), so that one height's expiry -- SL_MAX_UNSTAKES oracles, each with its
+/// report sets -- needs at most SL_MAX_MARKETS report-set / market records (the hook runs before any unit and cannot be
+/// split: above the per-segment limits no witness exists and the chain halts)
+pub const SL_MAX_ORACLE_MKTS: usize = 16;
 /// stateless bound: reporters per market (keeps `orep:` loadable)
 pub const SL_MAX_REPORTERS: usize = 64;
 const HIST_MAX: usize = 8;
 /// R20-M2 (stateless bound, code 19): oracles that may start unbonding at one height (= one expiry group)
-pub const SL_MAX_UNSTAKES: usize = 64;
+pub const SL_MAX_UNSTAKES: usize = 16;
+// R20-M3: the worst-case expiry of one height fits the per-segment record limits
+const _: () = assert!(SL_MAX_UNSTAKES * SL_MAX_ORACLE_MKTS <= SL_MAX_MARKETS && SL_MAX_UNSTAKES <= SL_MAX_ACCOUNTS);
 const OTW_MAX: usize = crate::types::ORACLE_TWAP_MAX as usize;
 const FTW_MAX: usize = crate::types::FUNDING_TWAP_WINDOW as usize;
 
