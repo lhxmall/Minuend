@@ -460,6 +460,24 @@ pub fn guess(seg: &[u32]) -> BTreeSet<Need> {
     n
 }
 
+/// round 21: an ADVERSARIAL operator fixpoint -- the builder's forge flags as set by the caller, and the needs `deny`
+/// rejects are never supplied (the run is then reported as it stands: a refusal)
+pub fn operate_deny(b: &WitBuilder, seg: &[u32], deny: &dyn Fn(&Need) -> bool) -> (sl::SlOut, Vec<u32>) {
+    let mut needs: BTreeSet<Need> = guess(seg).into_iter().filter(|n| !deny(n)).collect();
+    let mut last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), None);
+    for _ in 0..20_000u32 {
+        if last.0.status != sl::ST_SL_MISSING {
+            break;
+        }
+        let n = last.0.need.unwrap();
+        if deny(&n) || !needs.insert(n) {
+            break;
+        }
+        last = run_sl_xh(seg, &b.build(&needs), Some(&b.root), None);
+    }
+    last
+}
+
 /// operator fixpoint: Some((needs, witness, out, ev, iterations)) or None (need loop / not converging)
 pub fn operate(b: &WitBuilder, seg: &[u32]) -> Result<(BTreeSet<Need>, Vec<u8>, sl::SlOut, Vec<u32>, u32), String> {
     operate_h(b, seg, None)
@@ -2501,6 +2519,22 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                     let rs = sl::adl::sets(&st_i);
                     if let Some(v) = rs.get(&(*m, *sd)).filter(|v| v.len() >= 2) {
                         let (top, second) = (v[0].2, v[1].2);
+                        // P3c: an adversarial operator that never supplies the top holder's record or a path to its key
+                        let tk = v[0].0;
+                        for t in [2u8, 3, 4] {
+                            b3.t_adrop.set(t);
+                            let (of, evf) = operate_deny(&b3, &w1, &|n: &Need| matches!(n, Need::Account(a) if *a == top) || matches!(n, Need::AdlKey(_, _, k) if *k == tk));
+                            b3.t_adrop.set(0);
+                            p2_runs += 1;
+                            if of.status != 0 {
+                                p2_ref += 1;
+                            } else if of.end_root != sl::s_root(&post1) || evf.len() != ev1.len() {
+                                p2_wrong += 1;
+                                if p2_first.is_empty() {
+                                    p2_first = format!("seed {} seg {} unit {}: P3c adversarial operator t_adrop {}", s, k, ui, t);
+                                }
+                            }
+                        }
                         for t in [2u8, 3, 4] {
                             let mut nf = n3.clone();
                             nf.remove(&Need::Account(top));
