@@ -2470,6 +2470,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
     let mut proven = 0u32;
     let (mut adl_b0, mut adl_b1) = (0usize, 0usize);
     let mut whale_hits = 0u32;
+    let mut acc_n = (0usize, 0usize);
     let (mut p3_runs, mut p3_ok) = (0u32, 0u32);
     let mut p3_first = String::new();
     for (s, k, r, (m, sd, ui)) in &segs {
@@ -2492,7 +2493,34 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
             let b3 = WitBuilder::new(&st_i);
             p3_runs += 1;
             match operate(&b3, &w1) {
-                Ok((_, _, o, ev, _)) if o.status == 0 && o.end_root == sl::s_root(&post1) && ev.len() == ev1.len() => p3_ok += 1,
+                Ok((n3, _, o, ev, _)) if o.status == 0 && o.end_root == sl::s_root(&post1) && ev.len() == ev1.len() => {
+                    p3_ok += 1;
+                    // P3b: forged sub-trees (t_adrop 2 / 3 / 4) COMBINED with a witness that drops the top holder's
+                    // record and carries the second one's: a pick that skipped the hidden / dropped top would find a
+                    // consistent loaded candidate (the second) -> must still be refused (or identical)
+                    let rs = sl::adl::sets(&st_i);
+                    if let Some(v) = rs.get(&(*m, *sd)).filter(|v| v.len() >= 2) {
+                        let (top, second) = (v[0].2, v[1].2);
+                        for t in [2u8, 3, 4] {
+                            let mut nf = n3.clone();
+                            nf.remove(&Need::Account(top));
+                            nf.insert(Need::Account(second));
+                            b3.t_adrop.set(t);
+                            let wf = b3.build(&nf);
+                            b3.t_adrop.set(0);
+                            p2_runs += 1;
+                            let (of, evf) = run_sl_xh(&w1, &wf, Some(&b3.root), None);
+                            if of.status != 0 {
+                                p2_ref += 1;
+                            } else if of.end_root != sl::s_root(&post1) || evf.len() != ev1.len() {
+                                p2_wrong += 1;
+                                if p2_first.is_empty() {
+                                    p2_first = format!("seed {} seg {} unit {}: P3b t_adrop {} without the top holder", s, k, ui, t);
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok((_, _, o, ev, _)) => {
                     if p3_first.is_empty() {
                         p3_first = format!("seed {} seg {} unit {}: status {} root_ok {} ev {:?} want {:?} need {:?}", s, k, ui, o.status, o.end_root == sl::s_root(&post1), ev, ev1, o.need);
@@ -2529,7 +2557,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
             let mut n2 = needs.clone();
             n2.remove(nd);
             p2_runs += 1;
-            let (o, ev) = run_sl(&r.seg, &b0.build(&n2));
+            let (o, ev) = run_sl_xh(&r.seg, &b0.build(&n2), Some(&b0.root), None);
             if o.status != 0 {
                 p2_ref += 1;
             } else if o.end_root != r.post_root || ev != r.ev {
@@ -2547,7 +2575,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                 continue;
             }
             p2_runs += 1;
-            let (o, ev) = run_sl(&r.seg, &w2);
+            let (o, ev) = run_sl_xh(&r.seg, &w2, Some(&b0.root), None);
             if o.status != 0 {
                 p2_ref += 1;
             } else if o.end_root != r.post_root || ev != r.ev {
@@ -2582,6 +2610,8 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
             Ok((n1, w1, o1, _, _)) => {
                 let strip = |n: &BTreeSet<Need>| -> BTreeSet<Need> { n.iter().filter(|x| !matches!(x, Need::Adl(..) | Need::AdlTop(..) | Need::AdlKey(..))).copied().collect() };
                 adl_b0 = adl_b0.max(wit0.len() - b0.build(&strip(&needs)).len());
+                let na = |n: &BTreeSet<Need>| n.iter().filter(|x| matches!(x, Need::Account(_))).count();
+                acc_n = acc_n.max((na(&needs), na(&n1)));
                 adl_b1 = adl_b1.max(w1.len() - b1.build(&strip(&n1)).len());
                 let lo_hit = post.accounts.get(&lo).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
                 let hi_hit = post.accounts.get(&hi).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
@@ -2606,8 +2636,8 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
     }
     let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && whale_hits > 0 && p3_runs > 0 && p3_ok == p3_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len();
     format!(
-        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"P1_whale_picked\":{},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\",\"P3_single_unit_runs\":{},\"P3_ok\":{},\"P3_first_bad\":\"{}\"}}",
-        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, whale_hits, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first, p3_runs, p3_ok, p3_first
+        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"P1_whale_picked\":{},\"max_account_records_plain_inflated\":{:?},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\",\"P3_single_unit_runs\":{},\"P3_ok\":{},\"P3_first_bad\":\"{}\"}}",
+        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, whale_hits, acc_n, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first, p3_runs, p3_ok, p3_first
     )
 }
 

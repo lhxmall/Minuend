@@ -6,7 +6,7 @@ funding flag in `state.rs`, the session rule in `lib.rs`; harness `engine-diff/s
 workload). Box logs: `guest-engine/results-loop20/`. Notes: work/rv-rollup-notes.md "Loop round 20". Pushes: Radicle first,
 then GitHub.
 
-Status: **FINAL** for the round-20 scope (oracle steps 1 and 3 implemented, step 2 = funding decided against with a
+Status: **FINAL** (closed in round 21: Tests, mutant kills, sail row) for the round-20 scope (oracle steps 1 and 3 implemented, step 2 = funding decided against with a
 recommendation; stateless ADL not started — see "What remains").
 
 ## What was done
@@ -71,7 +71,7 @@ CARGO_TARGET_DIR /data/hark/target-spike): 65e247ae (221003b), 5522b875 / 64aecc
 | round-20 close-out (in round 21): slpoc20 **P9** = every single omission from the P6 Slash witness must be refused or identical (the honest operator's guess always supplies `omk:` / the history for a Slash, so only a forged witness can drop them) | P9 ok on the final code (19 omissions: 14 refused, 5 identical, 0 wrong); **pre-slash-omk-off KILLED, pre-slash-hist-off KILLED** by slpoc20 P9 (loop20-mut2.py rerun on the round-21 tree, which holds the round-20 oracle code unchanged) | ../results-loop21/l21-mut20.log |
 | equivalent / defence-in-depth survivors (explained, no test can kill them alone) | post-a-off: every writer of a bond / unbonding (Stake / Unstake pre_stake, Slash pre_slash, hook hook_pre) loads the `ostk:` first, and those single guards are killed (pre-stake-off, pre-slash-stk-off, hook-stk-off). post-d-off: the only writer of market-level oracle state is Report (Slash reads it), whose `omk:` guard pair is killed (report-omk-both-off). report-orep-both-off (+ pre-report-orep-off, post-c-orep-off): a Report needs the author's `ohist` record, and the loader refuses an `ohist` record whose report set is not loaded — the report set is required transitively. post-c-orm-off / pre-report-orm-off, pre-report-ohist-off, pre-report-omk-off, hook-acct-off: their pairs are killed. load-flag-check-off: the `orep:` entry's `bonded` flag is checked against the tree, which commits it as the bond presence — a contradiction needs a root that is no session state. entries-gone-off: a released oracle without loaded samples has an empty history and no report after the prune, so `entries_now` drops it anyway. **Every non-equivalent mutant is killed.** | — |
 | Radicle native CI | 221003b…960e87b: c1529f1, 777d820, a4af214, 960e87b **SUCCESS** (root fmt / clippy / test + the spike engine-diff checks) | /data/hark/radicle-ci/logs/cib.log |
-| sail 64-account migration measurement (round-19 item) | see round 21 notes: SAIL_ROW | l19-cap-dec.log, l19-cap-base.log |
+| sail 64-account migration measurement (round-19 item; decode mode loop17 image 6da2b093 vs round-16 baseline loop16c e3e5db11, started 03:00 UTC, nice 15) | **no data point**: no output after 2 h 31 m (migsail prints only at the end); both runs stopped in round 21 (05:31 UTC, own process groups only, as instructed). Round 17 ran > 1 h 47 m too. The 64-account sail migration is beyond this box's practical budget; the host-side step counts (round 17) stand | ../results-loop21/l19-cap-dec.log, l19-cap-base.log |
 
 
 ## What remains
