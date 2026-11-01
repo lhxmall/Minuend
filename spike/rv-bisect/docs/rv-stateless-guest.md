@@ -41,6 +41,12 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 
 | `pglob:0` | `:<next_proposal_id>:<non-zero PERP holders>:<n live>:<sha256((id u64, xroot 32 B) by id)>` (always present, `govwit`) | round 18: proposal cursor, the live set (≤ 64), the snapshot size a new proposal records; round 19: each live proposal's **exception sub-tree root** `xroot` (round 18: an exception count); loaded together with every live `prop:` and every live proposal's pruned sub-tree |
 | `pxe:<pid>:<acct>` (leaf of proposal `pid`'s exception sub-tree, not of MNWIT-S) | `:<weight>:<voted 0/1>` | round 19 (R18-M1 fix; replaces round 18's per-account `pexc:<acct>` lists): the pair (account, live proposal) where the account's snapshot weight ≠ its current PERP balance, or it voted. Sub-tree = compact SMT of the MNWIT-S form over these leaves |
+| `ostk:<acct>` | `:<bond or ->:<unlock height or ->` (absent = neither) | round 20 (oracle, §12.1): `oracle_bonds` / `oracle_unbonding` of one account |
+| `orm:<acct>` | `:<n>:<sha256(markets u32 LE ascending)>` (n ≤ `SL_MAX_ORACLE_MKTS` 16) | round 20: the markets where the oracle has a report or a non-empty history (a bond change rewrites its entries there) |
+| `orep:<m>` | `:<n>:<sha256(entries by oracle)>`, entry = (oracle, has report, price, bonded now, history length, sha256(history samples)) (n ≤ `SL_MAX_REPORTERS` 64) | round 20: the market's reporters — median / `oracled` input (`bonded` copied per entry); R20-M1: the slash-streak history is a digest in the entry, its samples are sent only where a unit reads / writes them |
+| `omk:<m>` | `:<deviation,window,reward or ->:<funding_index_twap or ->:<last_funding_height or ->:<n>:<dg oracle TWAP ring>:<n>:<dg funding TWAP ring>` | round 20: the market's oracle config, funding clock and TWAP rings (absent = all default) |
+| `oglob:0` | `:<funding source>:<slash nonce>:<queue head or ->:<queue tail or ->` (absent = all default) | round 20: global oracle facts + the expiry queue's ends |
+| `oexp:<u>` | `:<prev u or ->:<next u or ->:<n>:<sha256(accounts)>` (n ≤ `SL_MAX_UNSTAKES` 16) | round 20 (R19-I2): the oracles whose unbonding ends at height u; a doubly linked list over the distinct unlock heights, ascending |
 
 `glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc/pglob` (with its `pxe` sub-trees) are pure functions of the state; `bmp` too (the reference builder derives it from
 the levels), but the guest maintains it by **delta** (sets / clears path bits of the levels a unit created or
@@ -161,7 +167,23 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
   Post-unit: a PERP balance change needs `pglob:` (holder count) and the account's exception list. SetSeq (test
   fixture) runs in non-prod builds.
 
-Unsupported ops (ADL, oracle report / stake / slash / funding, fixtures other than SetSeq) →
+* Oracle (round 20, §12.1 round-20 implementation): Stake / Unstake (the author's `ostk:`; an Unstake that starts an
+  unbonding also `oglob:` and this height's expiry group when it exists), Report (`ostk:` of the author; for a bonded
+  author, a present non-spot market and a valid price: `oglob:`, the market's `orep:` with the author's history samples,
+  the author's `orm:`, `omk:`; a funding-rate market or the AggregatedExternal source → unsupported), Slash (challenger
+  record, `perp:0`; the target's `ostk:`, the market, and for a bonded target `oglob:`, `omk:`, `orep:` + the target's
+  history; a revealed Slash → unsupported). Post-unit (ora.rs `post`): a bond / unbonding changes only for a loaded
+  `ostk:`; a bond that appeared / disappeared needs the oracle's `orm:` and every `orep:` in it (flags; R20-M1: one record
+  per market); a report / history exists only inside loaded report sets; an entry that appeared / disappeared needs the
+  oracle's `orm:`; market-level oracle state only for loaded `omk:`; a report set whose `oracled` fact flipped needs its
+  market (mkx:); the expiry queue is updated (append at the tail, unlink emptied groups). A unit that reaches a funding
+  transfer / the funding-rate peg (state.rs flag) → unsupported (R19-I1 / R20-I1).
+* Height hook (round 20, R19-I2): a run that moves the height loads `oglob:0`, every expiry group up to the new height
+  with each listed oracle's `ostk:` and account record, runs the session's `prune_oracle_unbonding` on the partial state
+  (a released oracle's entries leave every report set, loaded samples or not), then the post-unit guards (dirty accounts,
+  PERP balance → `pglob:` / exception list, oracle records, queue).
+
+Unsupported ops (ADL, funding transfers / the funding-rate peg, ExtPrice, fixtures other than SetSeq) →
 `ST_SL_UNSUPPORTED = 14` (designs: §12).
 Withdraw is supported since round 15; the height hook runs lazily (§9).
 
@@ -316,7 +338,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops: ADL, oracle report / stake / slash / funding — designs in §12. Done: proposals / vote / finalize (round 18,
+1. Ops: ADL, funding transfers / peg, ExtPrice — designs in §12 (funding: R20-I1). Done: oracle stake / unstake / report /
+   slash + the eager unbonding expiry (round 20, §12.1); proposals / vote / finalize (round 18,
    §12.3); book-path liquidation (round 17);
    withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
    `acmt:`).
@@ -403,6 +426,32 @@ and the expiry happens at a height with no op touching it.
   * Implementation order: (1) `ostk:` / `orep:` / `ohist:` / TWAP ring leaves + migration, Stake / Unstake / Report on
     markets where no funding tick is due (refuse the tick: UNSUPPORTED), `oexp:` expiry hook; (2) `hset:` + funding;
     (3) Slash (reads the market TWAP + the target's history; removes one report).
+
+* **Round-20 implementation** (stateless/ora.rs; leaves §2; guards §4): steps (1) and (3) of the order above, step (2)
+  decided against (R20-I1). Differences from the round-19 plan:
+  * no `ohist:<m>:<acct>` leaf (R20-M1): with one leaf per (market, oracle) a bond change / expiry loads every history of
+    the oracle; the history is a digest inside its `orep:` entry and the samples travel only for the Report author /
+    Slash target. An expired oracle's entries leave the loaded report sets whether or not their samples were sent.
+  * the queue is a doubly linked list of non-empty groups (`oexp:` prev / next, ends in `oglob:0`): Unstake appends at
+    the tail (unlock = height + 256 is the maximum in a bound image; a smaller unlock → unsupported), a Slash / expiry
+    unlinks an emptied group (its neighbours are loaded), the hook walks from the head.
+  * bounds of one height's expiry (the hook runs before any unit and cannot be split by the operator): at most
+    `SL_MAX_UNSTAKES` = `MAX_UNSTAKES_PER_HEIGHT` = 16 oracles per group (R20-M2; refusal code 19 in BOTH images,
+    R20-L1) and `SL_MAX_ORACLE_MKTS` = 16 markets per oracle (R20-M3), so the hook's worst case (16 × 16 = 256 report-set
+    + market records, slpoc20 P2: 125 KB) stays within `SL_MAX_MARKETS`; `SL_MAX_REPORTERS` = 64 per market. The session
+    never reaches the last two (MAX_STATE_ORACLES 32, MAX_STATE_MARKETS 16); the migration refuses a state above any of
+    them (ST_SL_MIG_BOUNDS).
+  * `mkx:` keeps its `oracled` bit (a pure function: some entry has a report and `bonded`); a market whose report set is
+    loaded has its real reporters instead of the stand-in one, the loader checks the two agree.
+  * **Funding (R20-I1, the round-19 option "bounded holder list" rejected)**: a tick still needs every holder of the
+    market (R19-I1). A `hset:<m>` holder list would be maintained on every position open / close (fills of both
+    parties, liquidation, ADL, migration) and a tick would load all of them: a market above ~4 096 holders could never
+    tick, so a per-market holder cap would have to become a consensus rule of both images — a new squatting surface (dust
+    positions fill the cap and lock others out of the market) — and every tick (each height with ≥ 2 reporters) would
+    cost a witness of ~600 B per holder. The stateless image therefore keeps funding transfers and the funding-rate peg
+    UNSUPPORTED; production needs the upstream change to index-based funding (a per-market cumulative funding index
+    updated O(1) per tick, each position settling `qty × (I_now − I_entry)` when touched), which also replaces the
+    clamp-at-collateral budget of `transfer_funding` (Phase 2a / 2b) — a consensus decision upstream.
 
 ### 12.2 Liquidation / ADL: holder index by mark-independent rank
 
