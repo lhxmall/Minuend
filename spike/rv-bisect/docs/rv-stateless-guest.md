@@ -47,6 +47,7 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `omk:<m>` | `:<deviation,window,reward or ->:<funding_index_twap or ->:<last_funding_height or ->:<n>:<dg oracle TWAP ring>:<n>:<dg funding TWAP ring>` | round 20: the market's oracle config, funding clock and TWAP rings (absent = all default) |
 | `oglob:0` | `:<funding source>:<slash nonce>:<queue head or ->:<queue tail or ->` (absent = all default) | round 20: global oracle facts + the expiry queue's ends |
 | `oexp:<u>` | `:<prev u or ->:<next u or ->:<n>:<sha256(accounts)>` (n ≤ `SL_MAX_UNSTAKES` 16) | round 20 (R19-I2): the oracles whose unbonding ends at height u; a doubly linked list over the distinct unlock heights, ascending |
+| `gcnt:0` | `:<accounts>:<PERP ids>:<markets>:<oracle bonds>` (always present) | round 22 (R16-I3 / R17-I3): the sizes of the session maps its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`); kept by delta, read by the global caps (§5) |
 | `adlr:<m>:<sign>` | `:<rank sub-tree root hex>` (absent = no holder of that sign; sign 0 long, 1 short) | round 21 (ADL, §12.2): the root of the market's **rank sub-tree** for one sign |
 | rank leaf (of the `adlr:` sub-tree, not of MNWIT-S) | key = `BE(u64::MAX − |qty|)` (8 B) ‖ `AccountId[0..24]`, leaf = `sha256("~R1:" ‖ key ‖ AccountId)` | round 21: one leaf per non-insurance holder; the keys are raw (not hashed), so the compact SMT's bit order is the ADL order (|qty| descending, AccountId ascending) and its leftmost leaf is the pick |
 
@@ -210,8 +211,34 @@ status-0 result: every input of every rule is loaded completely (own orders, who
 * **Per-account commit bound (round 16)**: a Commit by an account that already has `SL_MAX_ACMT = 64` live commits is
   refused (19) — keeps `acmt:` loadable (the session has only global commit caps).
 Below the caps the session and the stateless image agree (differential tests); `slcaps` exercises the exposure rule
-and the lifted level rule. The stateless image has **no global caps** (R16-I3): the session's market / account /
-order / commit totals are not enforced (no aggregate leaf); they matter for the session's memory, not for a witness.
+and the lifted level rule.
+
+**Global caps (round 22, R16-I3 / R17-I3).** Rounds 14–21: no global caps (no aggregate leaf). Round 22 adds the
+aggregate leaf `gcnt:0` = (Account-map entries, PERP-ledger ids, markets, oracle bonds) and the session's global rules
+of `state_cap_ok` on it, for the op and a Reveal's inner op with the author, exactly as the session evaluates them:
+
+| unit (author `a`) | refused (code 19) when |
+|---|---|
+| Deposit, Liquidate (keeper's first credit) | `a` has no Account entry and accounts ≥ `SL_CAPS.accounts` |
+| GovDeposit, GovWithdraw, Slash (challenger) | `a` has no PERP entry and PERP ids ≥ `SL_CAPS.accounts` (the session's one `cap`) |
+| CreateMarket | markets ≥ `SL_CAPS.markets` |
+| Stake | `a` is not bonded and bonds ≥ `SL_CAPS.oracles` |
+
+* **Delta, not a scan.** The counts move only with records the segment loads: the Account / PERP membership of every
+  loaded account (its `apos:` flags at load vs the partial state; a dirty account is always loaded; a light record's
+  flags never change), the loaded / proven-absent market records (a listing proves its id absent), the loaded `ostk:`
+  records (bonds of other accounts never change: ora guard (a)). End root: any non-zero delta needs `gcnt:0` loaded
+  (`Need::Gcnt`) and rewrites it; catch-alls refuse a partial-state account / market without its record. A capped unit
+  by a non-member needs `gcnt:0` even when the unit then fails and changes no count (slpoc22 P4).
+* **Values (consensus constants of the lineage, `SL_CAPS_PROD`).** Accounts / PERP ids: **uncapped** (R22-M1: ids are
+  never removed upstream, so a hard cap is a permanent lockout of new users that costs one dust Deposit per slot —
+  2^20 slots are cheap; the session's 256 has the same flaw as a pilot limit). Listings: 2^16 (each burns
+  `CREATE_MARKET_FEE_PERP`). Oracle bonds: 2^12 (each locks `ORACLE_BOND_PERP`). With the session's values (host tests)
+  the two images agree at the caps (slpoc22 P1). The counts stay useful uncapped: export precondition (§9, R16-I2) and
+  storage metering.
+* **Not mirrored:** the session's `MAX_STATE_COMMITS` (R22-I2): commits expire lazily in the stateless image (R16-I1),
+  so the number of live commits is not an aggregate of touched records; the per-account `SL_MAX_ACMT` bound stays.
+* Migration: a snapshot whose counts exceed `SL_CAPS` is refused (`ST_SL_MIG_BOUNDS`).
 
 ## 6. Order-book matching with partial state
 
@@ -313,6 +340,10 @@ memory whose OUT words say status 0, start root S and end root E.
   carried (R15-I2).
 * **Lineage export (R16-I2).** The stateless lineage has no export path yet: a session image cannot be rebuilt from a
   stateless lineage (no MNWIT-S → snapshot run). Needed before the session image can be retired or re-entered.
+  Round 22: the precondition is O(1) now — the lineage state fits the session image iff `gcnt:0` is within the
+  session's caps (accounts / PERP ids ≤ `MAX_STATE_ACCOUNTS`, markets ≤ 16, bonds ≤ 32) and no commit index exceeds
+  its bound; with uncapped accounts (R22-M1) an export can become impossible, i.e. an export must be a governance
+  decision taken while the counts fit, or the session image's caps must be raised first.
 * **Rollup (round 16).** rv_rollup accepts the migration (snapshot kind 3) on the export / migration digest binding
   (R15-I1 closed; rolltest group `r16mig`).
 
@@ -361,8 +392,8 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 5. Operator: direct touched-set tracking instead of Need iteration; witness compression (shared path prefixes).
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
 7. Upstream: the leaf kinds and the guards must be mirrored by the real engine's witness code (consensus).
-8. No global caps in the stateless image (R16-I3, §5) — decide whether any session cap is a consensus rule (then it
-   needs an aggregate leaf, `perp:0`-style) or only a memory bound of the session image.
+8. ~~No global caps in the stateless image (R16-I3)~~ — round 22 (§5): `gcnt:0` + the session's global rules with the
+   lineage's own values (accounts uncapped, R22-M1); the session's commit cap is not mirrored (R22-I2).
 
 ## 12. Designs for the remaining ops (round 16)
 

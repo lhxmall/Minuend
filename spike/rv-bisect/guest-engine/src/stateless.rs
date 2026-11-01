@@ -4,7 +4,8 @@
 //! between heights (hence MAX_STATE_ACCOUNTS / MAX_STATE_MARKETS). Here a segment's guest receives only
 //! the leaves its units touch, with MNWIT-S inclusion / exclusion proofs (a pruned compact SMT) against
 //! the segment's start root, runs the units on that partial state with completeness guards, and
-//! recomputes the end root from the updated leaves + the pruned tree. No session, no global caps.
+//! recomputes the end root from the updated leaves + the pruned tree. No session; global caps on the aggregate
+//! leaf gcnt:0 (round 22).
 //!
 //! MNWIT-S = MNWIT1 (same tree, same key / leaf / node hashing, same acct: pos: ord: band: meta: leaf
 //! strings, + prop: cmt: gnon: with `govwit`) plus the state the session kept only in memory:
@@ -3325,6 +3326,12 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
             }
             // round 20: oracle objects (orm: / orep: / rings / expiry groups) must stay loadable
             if !ora::mig_ok(st) {
+                o.status = ST_SL_MIG_BOUNDS;
+                return o;
+            }
+            // round 22: the migrated state is within the lineage's global caps (gcnt:0 starts at its counts)
+            let (g, c) = (gcnt_of(st), sl_caps());
+            if g[0] > c.accounts || g[1] > c.accounts || g[2] > c.markets || g[3] > c.oracles {
                 o.status = ST_SL_MIG_BOUNDS;
                 return o;
             }

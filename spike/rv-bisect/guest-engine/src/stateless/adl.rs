@@ -301,7 +301,9 @@ impl ANeeds {
 }
 /// `t_drop` (tests): 1 = send the leftmost leaf unverified (tag 2), 2 = hide the leftmost path behind its root hash,
 /// 3 = the sub-tree without its leftmost holder under the honest `adlr:` root, 4 = the same with its own root as the
-/// `adlr:` value (a forged leaf), 5 = claim the tree absent (no `adlr:` leaf, empty sub-tree) while it has holders
+/// `adlr:` value (a forged leaf), 5 = claim the tree absent (no `adlr:` leaf, empty sub-tree) while it has holders,
+/// 6 = the leftmost leaf sent as an opaque stub (tag 1, its leaf hash: same root) while the SECOND leaf's path is
+/// expanded (a pick that skips the stub finds a verified candidate; round 22, kills leftmost-skip-stub)
 pub fn build(s: &ChainState, n: &ANeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<H>, t_drop: u8) {
     let mut b = Buf::new();
     let all = if n.trees.is_empty() { BTreeMap::new() } else { sets(s) };
@@ -331,20 +333,25 @@ pub fn build(s: &ChainState, n: &ANeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<
         let mut pk: BTreeSet<H> = v.iter().take(k).map(|x| x.0).collect();
         let mut kk: BTreeSet<H> = ks.clone();
         kk.extend(pk.iter().copied());
-        if t_drop == 2 {
+        if t_drop == 2 || t_drop == 6 {
             if let Some(f) = v.first() {
                 kk.remove(&f.0);
                 pk.remove(&f.0);
             }
+            // 6: the second leaf's path expanded beside the first one, sent as a stub
+            if let (6, Some(x)) = (t_drop, v.get(1)) {
+                kk.insert(x.0);
+                pk.insert(x.0);
+            }
         }
         let kk: Vec<H> = kk.into_iter().collect();
         let ids: Vec<AccountId> = v.iter().map(|x| x.2).collect();
-        emit_rtree(&kv, &ids, rec, 0, kv.len(), 0, &kk, false, &pk, t_drop == 1);
+        emit_rtree(&kv, &ids, rec, 0, kv.len(), 0, &kk, false, &pk, if t_drop == 1 { 1 } else if t_drop == 6 { 2 } else { 0 });
     }
 }
 /// as `emit_tree`, over raw-keyed rank leaves: a verified leaf is tag 5 (key + account id)
 #[allow(clippy::too_many_arguments)]
-fn emit_rtree(leaves: &[(H, H)], ids: &[AccountId], o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>, unv_first: bool) {
+fn emit_rtree(leaves: &[(H, H)], ids: &[AccountId], o: &mut Vec<u8>, lo: usize, hi: usize, d: usize, keys: &[H], sib: bool, pk: &BTreeSet<H>, unv_first: u8) {
     match hi - lo {
         0 => o.push(0),
         1 => {
@@ -352,8 +359,11 @@ fn emit_rtree(leaves: &[(H, H)], ids: &[AccountId], o: &mut Vec<u8>, lo: usize, 
             // could later be lifted by a collapse onto another key's path and block an insertion there (round-21 first
             // regression: operator need loops on AdlKey)
             let _ = (sib, keys, pk);
-            let verified = !(unv_first && lo == 0);
-            if verified {
+            let verified = !(unv_first != 0 && lo == 0);
+            if !verified && unv_first == 2 {
+                o.push(1);
+                o.extend_from_slice(&leaves[lo].1);
+            } else if verified {
                 o.push(5);
                 o.extend_from_slice(&leaves[lo].0);
                 o.extend_from_slice(&ids[lo].0);

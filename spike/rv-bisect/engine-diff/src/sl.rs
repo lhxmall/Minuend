@@ -2523,7 +2523,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                         let (top, second) = (v[0].2, v[1].2);
                         // P3c: an adversarial operator that never supplies the top holder's record or a path to its key
                         let tk = v[0].0;
-                        for t in [2u8, 3, 4, 5] {
+                        for t in [2u8, 3, 4, 5, 6] {
                             b3.t_adrop.set(t);
                             let (of, evf) = operate_deny(&b3, &w1, &|n: &Need| matches!(n, Need::Account(a) if *a == top) || matches!(n, Need::AdlKey(_, _, k) if *k == tk));
                             b3.t_adrop.set(0);
@@ -2537,7 +2537,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                                 }
                             }
                         }
-                        for t in [2u8, 3, 4] {
+                        for t in [2u8, 3, 4, 6] {
                             let mut nf = n3.clone();
                             nf.remove(&Need::Account(top));
                             nf.insert(Need::Account(second));
@@ -2603,7 +2603,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                 }
             }
         }
-        for t in [1u8, 2, 3, 4, 5] {
+        for t in [1u8, 2, 3, 4, 5, 6] {
             b0.t_adrop.set(t);
             let w2 = b0.build(&needs);
             b0.t_adrop.set(0);

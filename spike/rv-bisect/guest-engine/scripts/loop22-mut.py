@@ -20,6 +20,12 @@ MUTS2 = [
         }"""),
   ('load-absent-check-off', A, """            adlr_kid(b, m, sd);
             sl.absent(b)?;""", """            adlr_kid(b, m, sd);"""),
+  ('leftmost-skip-stub', A, "                p = if a == P::E { b } else { a };", "                p = if matches!(a, P::E | P::O(_)) { b } else { a };"),
+  ('removed-count-off', A, "        *sl.adl.removed.entry((m, sd)).or_insert(0) += 1;", ""),
+  ('insurance-in-tree', A, """    for a in dirty {
+        if *a == INSURANCE_ACCOUNT {
+            continue;
+        }""", """    for a in dirty {"""),
   # round 22: gcnt
   ('gcnt-load-check-off', S, """            gcnt_leaf(&mut b, &g);
             sl.check(&b, true)?;
