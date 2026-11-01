@@ -3170,5 +3170,60 @@ pub fn slpoc20() -> String {
         all_ok &= ok3;
         res.push(format!("{{\"case\":\"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{}}}", ok3, runs, refused, wrong));
     }
+    // ---- P4: the stateless report bounds (code 19): a 65th reporter in a market, a 65th market for an oracle ----
+    {
+        let mut s4 = mnpilot::state::ChainState::genesis();
+        for m in 2..=65u32 {
+            s4.markets.insert(M(m), s4.markets[&M(1)]);
+            s4.books.insert(M(m), mnpilot::book::OrderBook::new(M(m)));
+        }
+        for i in 0..65u32 {
+            s4.oracle_bonds.insert(id(100 + i), mnpilot::types::ORACLE_BOND_PERP);
+        }
+        for i in 0..64u32 {
+            s4.oracle_reports.insert((M(1), id(100 + i)), MID);
+        }
+        for m in 2..=64u32 {
+            s4.oracle_reports.insert((M(m), id(100)), MID);
+        }
+        s4.height = h0;
+        let _ = s4.take_dirty();
+        let table: Vec<u32> = vec![164, 101, 100];
+        // 65th reporter in market 1 (refused), an existing reporter of market 1 (applied), oracle 100 (entries in 64
+        // markets) in a 65th market... it has 65 already (1..=65); a new market 66 does not exist -> use market 1: it
+        // already reports there (applied)
+        let ops = vec![w_report(0, MID, 1), w_report(1, MID + 1, 1), w_report(2, MID, 1)];
+        let seg4 = seg_words(&table, &ops);
+        let b4 = WitBuilder::new(&s4);
+        let r4 = operate_h(&b4, &seg4, Some(h0));
+        let (post4, ev_d) = direct(&s4, &seg_words(&table, &ops[1..]));
+        let mut want = vec![mnpilot::STATE_CAP_CODE];
+        want.extend(ev_d);
+        let (st, root_ok, ev_ok) = match &r4 {
+            Ok((_, _, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post4), *ev == want),
+            Err(_) => (99, false, false),
+        };
+        // an oracle with entries in 64 markets reports in a 65th
+        let s5 = s4.clone();
+        let seg5 = seg_words(&[100, 101], &[w_report(0, MID, 65), w_report(1, MID, 65)]);
+        let b5 = WitBuilder::new(&s5);
+        let r5 = operate_h(&b5, &seg5, Some(h0));
+        let (post5, ev5d) = direct(&s5, &seg_words(&[101], &[w_report(0, MID, 65)]));
+        let mut want5 = vec![mnpilot::STATE_CAP_CODE];
+        want5.extend(ev5d);
+        let (st5, root5, ev5ok) = match &r5 {
+            Ok((_, _, o, ev, _)) => (o.status, o.end_root == sl::s_root(&post5), *ev == want5),
+            Err(_) => (99, false, false),
+        };
+        let ok4 = st == 0 && root_ok && ev_ok && st5 == 0 && root5 && ev5ok;
+        all_ok &= ok4;
+        res.push(format!("{{\"case\":\"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 65th market refused (19)\",\"ok\":{},\"status\":[{},{}],\"root_ok\":[{},{}],\"ev_ok\":[{},{}]}}", ok4, st, st5, root_ok, root5, ev_ok, ev5ok));
+        // migration bound: the same state as a migration input would hold a 65-entry report set
+        let mut s6 = s4.clone();
+        s6.oracle_reports.insert((M(1), id(164)), MID);
+        let ok6 = !sl::ora::mig_ok(&s6) && sl::ora::mig_ok(&s4);
+        all_ok &= ok6;
+        res.push(format!("{{\"case\":\"P5 migration bound (65 reporters in a market)\",\"ok\":{}}}", ok6));
+    }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }
