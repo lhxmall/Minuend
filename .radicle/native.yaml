@@ -1,4 +1,9 @@
 # Radicle native CI (radicle-native-ci) for Minuend.
+# Mirrors the Rust jobs of .github/workflows/ci.yml (lint + test).
+# The JS checks and devnet E2E jobs stay on GitHub Actions (they need
+# npm + the aa-testkit submodule and compile rocksdb/sqlite3).
+# CARGO_TARGET_DIR / CARGO_BUILD_JOBS can be set by the CI node operator
+# to reuse a build cache and cap parallelism (8 GiB RAM host).
 shell: |
   set -eu
   export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
