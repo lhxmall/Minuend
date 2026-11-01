@@ -1,0 +1,44 @@
+== slpoc18 20000 (05:14:14)
+{"ok":true,"cases":[{"case":"P1 vote after a balance change: snapshot weight 2000 (balance 500)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":4,"iterations":1,"witness_bytes":2220},
+{"case":"P2 finalize, 10 exception holders (passes: taker fee -> 5)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":5,"iterations":2,"witness_bytes":2917},
+{"case":"P2 finalize reads no exception holder","ok":true,"status":0,"needs":"{Account(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Light(AccountId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), Market(1), Aord(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Pglob}","witness_bytes":2917},
+{"case":"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes","ok":true,"status":0,"ev":[19, 2147483648]},
+{"case":"P5 vote by 1 (entry holder): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list entry-less + sub-trees without its entries","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list entry-less + sub-trees without its entries","ok":true,"status":0},
+{"case":"P3 R18-M1 finalize with 4000 voters","ok":true,"status":0,"needs":5,"witness_bytes":10423},
+{"case":"P3 R18-M1 finalize with 4097 voters","ok":true,"status":0,"needs":5,"witness_bytes":10315},
+{"case":"P3 R18-M1 finalize with 20000 voters","ok":true,"status":0,"needs":5,"witness_bytes":11737}]}
+exit 0 (05:14:18)
+== slpoc20 (05:14:18)
+{"ok":true,"cases":[{"case":"P1 R20-M2 20 unstakes at one height: 16 start unbonding, 4 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24191},
+{"case":"P2 R19-I2 / R20-M1 / R20-M3 hook releases 16 oracles x 16 distinct markets: one report-set record per market","ok":true,"status":0,"root_ok":true,"oracled_flipped":true,"orep_records":256,"market_records":256,"witness_bytes":124930},
+{"case":"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped","ok":true,"runs":4,"refused":4,"wrong":0},
+{"case":"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 17th market refused (19)","ok":true,"status":[0,0],"root_ok":[true,true],"ev_ok":[true,true]},
+{"case":"P5 migration bound (65 reporters in a market)","ok":true},
+{"case":"P7 R20-L1 session state_cap_ok: 17th unstake at one height refused, 16th allowed","ok":true},
+{"case":"P8 revealed oracle ops: inner report (rejected) / stake / unstake proven = session, inner slash unsupported","ok":true,"reveal_status":[("report", 0), ("stake", 0), ("unstake", 0), ("slash", 14)],"session_slash_applied":true},
+{"case":"P6 Slash: honest Y refused, deviant X slashed (queue head unlinked, market 2 oracled flips, challenger reward), X again refused","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":[16, 2147483648, 13],"witness_bytes":2934},
+{"case":"P9 single omissions from the P6 (Slash) witness: refused or identical","ok":true,"runs":19,"refused":14,"wrong":0,"wrong_needs":[]}]}
+exit 0 (05:14:28)
+== slpoc21 30 300 12 2000 (05:14:28)
+{"ok":true,"segments":8,"honest_proven":6,"skipped_refused":2,"P1_inflated_runs":6,"P1_ok":6,"extra_holders":2000,"max_witness_plain":168126,"max_witness_inflated":397372,"max_rank_section_plain":1403,"max_rank_section_inflated":2046,"P1_first_bad":"seed 27 seg 5: honest operator need loop: AdlKey(1, 1, [255, 255, 255, 255, 255, 133, 179, 103, 225, 186, 135, 6, 96, 72, 248, 109, 195, 38, 241, 116, 115, 216, 208, 229, 105, 92, 135, 115, 34, 67, 51, 13]) already supplied (iteration 408)","P2_runs":150,"P2_refused":133,"P2_wrong":0,"P2_first_wrong":""}
+exit 0 (05:15:17)
+== slfuzz 100 300 gov (05:15:17)
+{"mode":"gov","batches":100,"ok":96,"bad_segments":4,"unsupported_segments":0,"segments":621,"units":32542,"witness_bytes":7633642,"max_witness":29297,"leaves_verified":60836,"tree_nodes":75887,"sl_hashes":273404,"session_hashes":161027,"operator_iterations":15979,"liq_units_proven":0,"gov_units_proven":[1147, 1705, 1538, 7260, 682, 2576],"first_bad":"seed 11 seg 1 (size 172): need loop: AdlKey(1, 1, [255, 255, 255, 255, 255, 254, 121, 95, 132, 218, 92, 22, 101, 45, 182, 199, 237, 119, 77, 235, 202, 171, 73, 24, 161, 70, 253, 119, 198, 27, 200, 14]) already supplied (iteration 44)"}
+exit 0 (05:15:32)
+== sladv 20 300 gov (05:15:32)
+{"segments":189,"cases":25984,"sound":25984,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[115,115,0],"book:hide-level-in-trie":[115,115,0],"book:omit-best-level":[141,113,28],"book:omit-head":[189,118,71],"book:reorder-fifo":[38,38,0],"duplicate:account":[189,189,0],"extra:valid":[189,0,189],"flip:records":[567,547,20],"flip:tree":[567,563,4],"forge16:acmt-add":[458,458,0],"forge16:gnon":[484,484,0],"forge16:next-market":[187,187,0],"forge16:perp-supply":[187,187,0],"forge19:pxe-drop":[150,150,0],"forge19:pxe-subtree":[138,138,0],"forge19:pxe-weight":[150,150,0],"forge:absent-via-leaf-key":[155,155,0],"forge:account":[169,169,0],"forge:self-consistent":[169,169,0],"forge:self-consistent:bound":[169,169,0],"honest":[189,0,189],"light:forged-collateral":[189,189,0],"light:forged-digest":[189,189,0],"light:user-account":[166,166,0],"limit:accounts":[189,189,0],"omit:account":[2020,679,1341],"omit:acmt":[484,484,0],"omit:adl":[386,264,122],"omit:aord":[2020,915,1105],"omit:bmp":[3200,1772,1428],"omit:gnon":[484,484,0],"omit:level":[213,166,47],"omit:light":[189,177,12],"omit:market":[303,159,144],"omit:order":[301,280,21],"omit:path":[34,17,17],"omit:perp":[187,187,0],"omit:pexc":[1265,1265,0],"omit:pglob":[185,185,0],"trailing":[189,189,0],"tree:leaf-as-opaque":[8549,7020,1529],"truncate":[189,189,0],"wrong-root":[169,83,86],"wrong-root:bound":[169,169,0]},"unsound_first":[]}
+exit 0 (05:15:51)
+== slmiggov 30 300 (05:15:51)
+{"batches":30,"ok":30,"migrations":115,"with_live_proposals":115,"with_exception_lists":107,"first_bad":""}
+exit 0 (05:15:54)
+== slora 40 300 1 (05:15:54)
+{"mode":"orc","batches":40,"ok":38,"bad_segments":2,"unsupported_segments":1033,"segments":3466,"units":14302,"witness_bytes":27915950,"max_witness":34880,"operator_iterations":41450,"proven_report_ok_rej_stake_ok_rej_unstake_ok_rej_slash_ok_rej_reveal_ok_rej":[632, 837, 134, 305, 129, 265, 4, 202, 0, 0],"hook_segments":5,"released_oracles":5,"empty_runs":291,"adv_cases":0,"adv_unsound":0,"adv_counts":{},"first_unsound":"","first_bad":"seed 9 seg 20 (size 8, h 25): need loop: AdlKey(1, 1, [255, 255, 255, 255, 255, 225, 123, 127, 179, 169, 45, 132, 141, 173, 20, 95, 82, 232, 135, 115, 49, 70, 224, 117, 196, 245, 13, 165, 236, 31, 93, 55]) already supplied (iteration 13)"}
+exit 0 (05:16:33)
+== slora 30 400 40 (05:16:33)
+exit 143 (05:17:17)
+== slora 15 600 1 adv (05:17:17)

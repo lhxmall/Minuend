@@ -1,0 +1,4 @@
+pre-slash-omk-off: KILLED by slpoc20: {"ok":false,"cases":[{"case":"P1 R20-M2 20 unstakes at one height: 16 start unbonding, 4 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24191},
+{"case":"P2 R19-I2 / R20-M1 / R20-M3 hook releases 16 oracles x 16 distinct markets: one report-set record per market","ok":
+pre-slash-hist-off: KILLED by slpoc20: {"ok":false,"cases":[{"case":"P1 R20-M2 20 unstakes at one height: 16 start unbonding, 4 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24191},
+{"case":"P2 R19-I2 / R20-M1 / R20-M3 hook releases 16 oracles x 16 distinct markets: one report-set record per market","ok":

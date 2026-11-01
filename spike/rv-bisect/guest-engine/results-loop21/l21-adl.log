@@ -1,0 +1,7 @@
+== slpoc21 6 300 8 2000 (05:08:40)
+{"ok":true,"segments":3,"honest_proven":3,"skipped_refused":0,"P1_inflated_runs":3,"P1_ok":3,"extra_holders":2000,"max_witness_plain":155304,"max_witness_inflated":375656,"P1_first_bad":"","P2_runs":72,"P2_refused":62,"P2_wrong":0,"P2_first_wrong":""}
+exit 0 (05:08:46)
+== slpoc17 20 300 (05:08:46)
+{"ok":true,"batches":20,"segments_reaching_adl":6,"proven":6,"honest_unsupported":0,"extra_holders_refused":0,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (05:08:50)
+TDONE

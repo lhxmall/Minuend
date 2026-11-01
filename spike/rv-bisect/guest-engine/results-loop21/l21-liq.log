@@ -1,0 +1,15 @@
+== slfuzz 10 300 liq (05:08:40)
+{"mode":"liq","batches":10,"ok":7,"bad_segments":3,"unsupported_segments":0,"segments":293,"units":14893,"witness_bytes":36476524,"max_witness":190592,"leaves_verified":213084,"tree_nodes":334590,"sl_hashes":1075450,"session_hashes":93033,"operator_iterations":81600,"liq_units_proven":553,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":"seed 4 seg 2 (size 82): need loop: AdlKey(1, 0, [255, 255, 255, 255, 247, 15, 46, 127, 179, 169, 45, 132, 141, 173, 20, 95, 82, 232, 135, 115, 49, 70, 224, 117, 196, 245, 13, 165, 236, 31, 93, 55]) already supplied (iteration 83)"}
+exit 0 (05:10:23)
+== slpoc20 (05:10:23)
+{"ok":true,"cases":[{"case":"P1 R20-M2 20 unstakes at one height: 16 start unbonding, 4 refused (19)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"witness_bytes":24191},
+{"case":"P2 R19-I2 / R20-M1 / R20-M3 hook releases 16 oracles x 16 distinct markets: one report-set record per market","ok":true,"status":0,"root_ok":true,"oracled_flipped":true,"orep_records":256,"market_records":256,"witness_bytes":124930},
+{"case":"P3 expiry witness: ostk / oglob omitted, report-set / group entry dropped","ok":true,"runs":4,"refused":4,"wrong":0},
+{"case":"P4 SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS: 65th reporter, 17th market refused (19)","ok":true,"status":[0,0],"root_ok":[true,true],"ev_ok":[true,true]},
+{"case":"P5 migration bound (65 reporters in a market)","ok":true},
+{"case":"P7 R20-L1 session state_cap_ok: 17th unstake at one height refused, 16th allowed","ok":true},
+{"case":"P8 revealed oracle ops: inner report (rejected) / stake / unstake proven = session, inner slash unsupported","ok":true,"reveal_status":[("report", 0), ("stake", 0), ("unstake", 0), ("slash", 14)],"session_slash_applied":true},
+{"case":"P6 Slash: honest Y refused, deviant X slashed (queue head unlinked, market 2 oracled flips, challenger reward), X again refused","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":[16, 2147483648, 13],"witness_bytes":2934},
+{"case":"P9 single omissions from the P6 (Slash) witness: refused or identical","ok":true,"runs":19,"refused":14,"wrong":0,"wrong_needs":[]}]}
+exit 0 (05:10:26)
+TDONE

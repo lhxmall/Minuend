@@ -1,0 +1,61 @@
+== slpoc22 (06:44:49)
+{"ok":true,"cases":[{"case":"P0 both rank sub-trees emptied (adlr: leaves deleted)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/1", "applied/10", "applied/211", "1316134912", "2328", "10000000", "0"],"needs":18,"iterations":15,"witness_bytes":3464},{"case":"P1 at the caps","ok":true,"status":0,"root_ok":true,"ev_ok":true,"session":["applied/0", "19", "applied/0", "19", "applied/0", "19", "19", "19", "applied/0", "19", "applied/0", "19", "applied/0"],"stateless":["applied/0", "19", "applied/0", "19", "applied/0", "19", "19", "19", "applied/0", "19", "applied/0", "19", "applied/0"],"session_19":7,"gcnt_needed":true,"witness_bytes":7389},{"case":"P2 forged gcnt / omission","ok":true,"runs":6,"refused":6,"wrong":0},{"case":"P1 one below the caps (room + 1)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"session":["applied/0", "applied/0", "applied/0", "19", "applied/0", "applied/0", "applied/0", "13", "applied/0", "19", "applied/0", "19", "applied/0"],"stateless":["applied/0", "applied/0", "applied/0", "19", "applied/0", "applied/0", "applied/0", "13", "applied/0", "19", "applied/0", "19", "applied/0"],"session_19":3,"gcnt_needed":true,"witness_bytes":7422},{"case":"P4 failing capped units at the cap (no count change)","ok":true,"session":["19", "19"],"stateless":["19", "19"],"deny_gcnt_status":13},{"case":"P5 Reveal with a capped inner op (author at the cap)","ok":true,"session":["19", "19"],"session_below_cap":["2", "2"],"stateless":["19", "19"],"deny_gcnt_status":13},{"case":"P3 production caps (lifted)","ok":true,"status":0,"session":["applied/0", "applied/0", "applied/0", "11", "applied/0", "applied/0", "applied/0", "13", "applied/0", "19", "applied/0", "19", "applied/0"],"stateless":["applied/0", "applied/0", "applied/0", "11", "applied/0", "applied/0", "applied/0", "13", "applied/0", "applied/0", "applied/0", "applied/0", "applied/0"]}]}
+exit 0 (06:44:49)
+== slpoc21 30 300 12 2000 (06:44:49)
+{"ok":true,"segments":8,"honest_proven":8,"skipped_refused":0,"P1_inflated_runs":8,"P1_ok":8,"P1_whale_picked":7,"max_account_records_plain_inflated":(21, 21),"extra_holders":2000,"max_witness_plain":178783,"max_witness_inflated":430538,"max_rank_section_plain":2111,"max_rank_section_inflated":3055,"P1_first_bad":"","P2_runs":308,"P2_refused":278,"P2_wrong":0,"P2_first_wrong":"","P3_single_unit_runs":8,"P3_ok":8,"P3_first_bad":"","P3d_honest_proven":8,"P3d_forged_runs":16,"P3d_refused":16}
+exit 0 (06:45:14)
+== slpoc21 6 300 4 200 (06:45:14)
+{"ok":true,"segments":3,"honest_proven":3,"skipped_refused":0,"P1_inflated_runs":3,"P1_ok":3,"P1_whale_picked":3,"max_account_records_plain_inflated":(19, 20),"extra_holders":200,"max_witness_plain":155324,"max_witness_inflated":209028,"max_rank_section_plain":1382,"max_rank_section_inflated":1602,"P1_first_bad":"","P2_runs":117,"P2_refused":107,"P2_wrong":0,"P2_first_wrong":"","P3_single_unit_runs":3,"P3_ok":3,"P3_first_bad":"","P3d_honest_proven":3,"P3d_forged_runs":6,"P3d_refused":6}
+exit 0 (06:45:18)
+== slpoc17 20 300 (06:45:18)
+{"ok":true,"batches":20,"segments_reaching_adl":6,"proven":6,"honest_unsupported":0,"extra_holders_refused":0,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (06:45:23)
+== slpoc15 (06:45:24)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":81,"iterations":75,"witness_bytes":33714},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":20,"iterations":15,"witness_bytes":8864},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6", "6"],"needs":20,"iterations":10,"witness_bytes":4279},
+{"case":"P6 single omissions from the P3 witness","ok":true,"runs":20,"refused":20,"wrong":0},
+{"case":"P7 R2-E-3: withdraw against pre-existing resting IM","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["9", "applied/0"],"needs":5,"iterations":2,"witness_bytes":2721},
+{"case":"P8a dup-nonce dust single omissions","ok":true,"honest":true,"runs":4,"wrong":0,"ev":[6]},
+{"case":"P8b resting IM single omissions","ok":true,"honest":true,"runs":5,"wrong":0,"ev":[9]},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]},
+{"case":"P5 R15-M1 lifted (round 16): levels of 4097 and 4096 orders both migrate","ok":true,"status_over":0,"status_at":0,"root_at_ok":true}]}
+exit 0 (06:45:24)
+== slpoc18 5000 (06:45:24)
+{"ok":true,"cases":[{"case":"P1 vote after a balance change: snapshot weight 2000 (balance 500)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":4,"iterations":1,"witness_bytes":2301},
+{"case":"P2 finalize, 10 exception holders (passes: taker fee -> 5)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":5,"iterations":2,"witness_bytes":2939},
+{"case":"P2 finalize reads no exception holder","ok":true,"status":0,"needs":"{Account(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Light(AccountId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), Market(1), Aord(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Pglob}","witness_bytes":2939},
+{"case":"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes","ok":true,"status":0,"ev":[19, 2147483648]},
+{"case":"P5 vote by 1 (entry holder): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list entry-less + sub-trees without its entries","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list entry-less + sub-trees without its entries","ok":true,"status":0},
+{"case":"P3 R18-M1 finalize with 4000 voters","ok":true,"status":0,"needs":5,"witness_bytes":10424},
+{"case":"P3 R18-M1 finalize with 4097 voters","ok":true,"status":0,"needs":5,"witness_bytes":10316},
+{"case":"P3 R18-M1 finalize with 5000 voters","ok":true,"status":0,"needs":5,"witness_bytes":10698}]}
+exit 0 (06:45:25)
+== slcaps (06:45:25)
+{"ok":true,"status":0,"units":["19", "applied/0", "applied/0", "applied/0", "applied/1"],"level_orders":4096,"needs":112,"iterations":103,"witness_bytes":188127,"leaves_verified":311}
+exit 0 (06:45:25)
+== slfuzz 10 300 (06:45:25)
+{"mode":"gen","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":0,"segments":92,"units":3491,"witness_bytes":2934365,"max_witness":57932,"leaves_verified":19475,"tree_nodes":30995,"sl_hashes":119451,"session_hashes":50557,"operator_iterations":4782,"liq_units_proven":0,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":""}
+exit 0 (06:45:28)
+== slfuzz 10 300 gov (06:45:28)
+{"mode":"gov","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":0,"segments":84,"units":3298,"witness_bytes":1043839,"max_witness":22998,"leaves_verified":8034,"tree_nodes":10611,"sl_hashes":51377,"session_hashes":16514,"operator_iterations":2040,"liq_units_proven":0,"gov_units_proven":[109, 166, 154, 745, 67, 280],"first_bad":""}
+exit 0 (06:45:29)
+== sladv 2 200 gov (06:45:29)
+{"segments":15,"cases":1939,"sound":1939,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[5,5,0],"book:hide-level-in-trie":[5,5,0],"book:omit-best-level":[5,4,1],"book:omit-head":[15,6,9],"book:reorder-fifo":[4,4,0],"duplicate:account":[15,15,0],"extra:valid":[15,0,15],"flip:records":[45,44,1],"flip:tree":[45,45,0],"forge16:acmt-add":[34,34,0],"forge16:gnon":[34,34,0],"forge16:next-market":[15,15,0],"forge16:perp-supply":[15,15,0],"forge19:pxe-drop":[13,13,0],"forge19:pxe-subtree":[12,12,0],"forge19:pxe-weight":[13,13,0],"forge:absent-via-leaf-key":[12,12,0],"forge:account":[13,13,0],"forge:self-consistent":[13,13,0],"forge:self-consistent:bound":[13,13,0],"honest":[15,0,15],"light:forged-collateral":[15,15,0],"light:forged-digest":[15,15,0],"light:user-account":[13,13,0],"limit:accounts":[15,15,0],"omit:account":[171,65,106],"omit:acmt":[34,34,0],"omit:adl":[17,14,3],"omit:aord":[171,63,108],"omit:bmp":[185,141,44],"omit:gcnt":[9,9,0],"omit:gnon":[34,34,0],"omit:level":[6,4,2],"omit:light":[15,13,2],"omit:market":[21,13,8],"omit:order":[11,9,2],"omit:path":[4,3,1],"omit:perp":[15,15,0],"omit:pexc":[96,96,0],"omit:pglob":[15,15,0],"trailing":[15,15,0],"tree:leaf-as-opaque":[665,512,153],"truncate":[15,15,0],"wrong-root":[13,5,8],"wrong-root:bound":[13,13,0]},"unsound_first":[]}
+exit 0 (06:45:29)
+== slmig 5 300 0 (06:45:29)
+{"batches":5,"ok":5,"migrations":5,"migration_negatives_ok":5,"stateless_segments":23,"units":964,"sets_with_expired_records_seen":0,"first_bad":""}
+exit 0 (06:45:30)
+== slmiggov 5 300 (06:45:30)
+{"batches":5,"ok":5,"migrations":19,"with_live_proposals":19,"with_exception_lists":19,"first_bad":""}
+exit 0 (06:45:30)
+TDONE

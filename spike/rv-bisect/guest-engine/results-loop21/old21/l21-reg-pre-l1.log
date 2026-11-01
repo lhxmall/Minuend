@@ -1,0 +1,48 @@
+== slpoc15 (05:14:14)
+{"ok":true,"cases":[{"case":"P1 apos leaf length (fixed form)","bytes":139,"round14_form_bytes":775},
+{"case":"P1 R15-H1 64 positions in 10-digit markets: place, taker fill, withdraw","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/109", "applied/172", "316134912", "2328", "1000000", "0", "applied/0"],"needs":81,"iterations":75,"witness_bytes":33669},
+{"case":"P2 R14-M2 insurance with 100 positions: maker + taker fill (fee to insurance)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "applied/1", "applied/10", "applied/98", "1316134912", "2328", "1000000", "0"],"needs":20,"iterations":15,"witness_bytes":8895},
+{"case":"P2 full insurance record (round-14 path)","ok":true,"status":12},
+{"case":"P2 light record of a user account","ok":true,"status":12},
+{"case":"P2 light record with a forged position digest","ok":true,"status":12},
+{"case":"P3 withdraw paths (wdl:)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0", "6", "7", "9", "applied/0", "9", "9", "applied/0", "7", "6", "applied/0", "applied/0", "7", "7", "6", "6"],"needs":20,"iterations":10,"witness_bytes":4332},
+{"case":"P6 single omissions from the P3 witness","ok":true,"runs":20,"refused":20,"wrong":0},
+{"case":"P7 R2-E-3: withdraw against pre-existing resting IM","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["9", "applied/0"],"needs":5,"iterations":2,"witness_bytes":2700},
+{"case":"P8a dup-nonce dust single omissions","ok":true,"honest":true,"runs":4,"wrong":0,"ev":[6]},
+{"case":"P8b resting IM single omissions","ok":true,"honest":true,"runs":5,"wrong":0,"ev":[9]},
+{"case":"P4 lazy expiry: expired nonce re-used, live nonce duplicate, untouched extra set unchanged","ok":true,"touched_ok":true,"extra_untouched_ok":true,"status":0,"ev":[2147483648, 6]},
+{"case":"P5 R15-M1 lifted (round 16): levels of 4097 and 4096 orders both migrate","ok":true,"status_over":0,"status_at":0,"root_at_ok":true}]}
+exit 0 (05:14:15)
+== slcaps (05:14:15)
+{"ok":true,"status":0,"units":["19", "applied/0", "applied/0", "applied/0", "applied/1"],"level_orders":4096,"needs":112,"iterations":103,"witness_bytes":188126,"leaves_verified":311}
+exit 0 (05:14:17)
+== slpoc17 20 300 (05:14:17)
+{"ok":true,"batches":20,"segments_reaching_adl":6,"proven":6,"honest_unsupported":0,"extra_holders_refused":0,"wrong_status0":0,"operator_errors":0,"first_wrong":""}
+exit 0 (05:14:31)
+== slmig 20 300 0 (05:14:31)
+{"batches":20,"ok":17,"migrations":20,"migration_negatives_ok":20,"stateless_segments":87,"units":3998,"sets_with_expired_records_seen":0,"first_bad":"seed 3: operator: need loop: AdlKey(1, 0, [255, 255, 255, 255, 245, 64, 24, 198, 239, 212, 173, 56, 67, 239, 6, 150, 123, 53, 143, 104, 231, 19, 219, 187, 183, 36, 65, 61, 237, 125, 158, 224]) already supplied (iteration 22) at seg 8"}
+exit 0 (05:14:46)
+== slmig 20 300 5 (05:14:46)
+{"batches":20,"ok":17,"migrations":20,"migration_negatives_ok":20,"stateless_segments":87,"units":3998,"sets_with_expired_records_seen":0,"first_bad":"seed 3: operator: need loop: AdlKey(1, 0, [255, 255, 255, 255, 245, 64, 24, 198, 239, 212, 173, 56, 67, 239, 6, 150, 123, 53, 143, 104, 231, 19, 219, 187, 183, 36, 65, 61, 237, 125, 158, 224]) already supplied (iteration 22) at seg 8"}
+exit 0 (05:14:58)
+== slfuzz 60 300 (05:14:58)
+{"mode":"gen","batches":60,"ok":48,"bad_segments":12,"unsupported_segments":0,"segments":516,"units":21293,"witness_bytes":19222835,"max_witness":103388,"leaves_verified":122100,"tree_nodes":201915,"sl_hashes":634536,"session_hashes":293897,"operator_iterations":31337,"liq_units_proven":0,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":"seed 2 seg 4 (size 70): need loop: AdlKey(1, 1, [255, 255, 255, 255, 250, 159, 22, 64, 234, 108, 113, 159, 53, 133, 140, 160, 128, 185, 25, 22, 147, 154, 113, 112, 127, 209, 212, 153, 149, 74, 250, 66]) already supplied (iteration 37)"}
+exit 0 (05:15:31)
+== slfuzz 40 300 perp (05:15:31)
+{"mode":"perp","batches":40,"ok":34,"bad_segments":6,"unsupported_segments":0,"segments":275,"units":13202,"witness_bytes":5277202,"max_witness":38134,"leaves_verified":45191,"tree_nodes":58398,"sl_hashes":194183,"session_hashes":95114,"operator_iterations":16401,"liq_units_proven":0,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":"seed 6 seg 3 (size 86): need loop: AdlKey(1, 0, [255, 255, 255, 255, 255, 254, 121, 95, 35, 7, 233, 193, 100, 40, 55, 7, 210, 174, 100, 35, 31, 131, 233, 190, 167, 249, 129, 181, 92, 46, 46, 219]) already supplied (iteration 62)"}
+exit 0 (05:15:52)
+== slfuzz 30 300 wd (05:15:52)
+{"mode":"wd","batches":30,"ok":23,"bad_segments":7,"unsupported_segments":0,"segments":235,"units":11986,"witness_bytes":8941034,"max_witness":91214,"leaves_verified":59646,"tree_nodes":92840,"sl_hashes":301093,"session_hashes":159353,"operator_iterations":14611,"liq_units_proven":0,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":"seed 2 seg 4 (size 70): need loop: AdlKey(1, 1, [255, 255, 255, 255, 250, 159, 22, 64, 234, 108, 113, 159, 53, 133, 140, 160, 128, 185, 25, 22, 147, 154, 113, 112, 127, 209, 212, 153, 149, 74, 250, 66]) already supplied (iteration 31)"}
+exit 0 (05:16:15)
+== slfuzz 30 300 ora (05:16:15)
+{"mode":"ora","batches":30,"ok":26,"bad_segments":4,"unsupported_segments":0,"segments":210,"units":10844,"witness_bytes":8012292,"max_witness":103733,"leaves_verified":54053,"tree_nodes":84615,"sl_hashes":277139,"session_hashes":152565,"operator_iterations":13697,"liq_units_proven":0,"gov_units_proven":[0, 0, 0, 0, 0, 0],"first_bad":"seed 2 seg 4 (size 70): need loop: AdlKey(1, 1, [255, 255, 255, 255, 250, 159, 22, 64, 234, 108, 113, 159, 53, 133, 140, 160, 128, 185, 25, 22, 147, 154, 113, 112, 127, 209, 212, 153, 149, 74, 250, 66]) already supplied (iteration 37)"}
+exit 0 (05:16:36)
+== sladv 6 200 perp (05:16:36)
+{"segments":37,"cases":6295,"sound":6295,"unsound":1,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[27,27,0],"book:hide-level-in-trie":[27,27,0],"book:omit-best-level":[29,23,6],"book:omit-head":[37,28,9],"book:reorder-fifo":[8,8,0],"duplicate:account":[37,37,0],"extra:valid":[37,0,37],"flip:records":[111,109,2],"flip:tree":[111,111,0],"forge16:acmt-add":[90,90,0],"forge16:acmt-drop":[39,39,0],"forge16:acmt-revealed":[31,31,0],"forge16:acmt-ttl":[34,34,0],"forge16:cmt":[22,22,0],"forge16:gnon":[89,89,0],"forge16:next-market":[35,35,0],"forge16:perp-supply":[35,35,0],"forge16:xsrc":[43,43,0],"forge:absent-via-leaf-key":[27,27,0],"forge:account":[31,31,0],"forge:self-consistent":[31,31,0],"forge:self-consistent:bound":[31,31,0],"honest":[37,0,37],"light:forged-collateral":[37,37,0],"light:forged-digest":[37,37,0],"light:user-account":[31,31,0],"limit:accounts":[37,37,0],"omit:account":[391,269,122],"omit:acmt":[222,222,0],"omit:adl":[120,95,25],"omit:aord":[391,316,75],"omit:bmp":[1164,856,308],"omit:cmt":[247,244,3],"omit:gnon":[89,89,0],"omit:level":[46,37,9],"omit:light":[37,37,0],"omit:market":[144,89,55],"omit:order":[193,177,16],"omit:path":[26,9,17],"omit:perp":[35,35,0],"omit:pexc":[122,122,0],"omit:pglob":[33,33,0],"omit:wdl":[51,51,0],"omit:xsrc":[43,43,0],"trailing":[37,37,0],"tree:leaf-as-opaque":[1625,1371,254],"truncate":[37,37,0],"wdl:add-record":[25,25,0],"wdl:claim-absent":[7,7,0],"wdl:drop-record":[7,7,0],"wrong-root":[31,26,5],"wrong-root:bound":[31,31,0]},"unsound_first":["seed 5: operator failed"]}
+exit 0 (05:16:41)
+== sladv 6 200 (05:16:41)
+{"segments":37,"cases":5482,"sound":5482,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[29,29,0],"book:hide-level-in-trie":[29,29,0],"book:omit-best-level":[37,17,20],"book:omit-head":[37,30,7],"book:reorder-fifo":[19,19,0],"duplicate:account":[37,37,0],"extra:valid":[37,0,37],"flip:records":[111,106,5],"flip:tree":[111,111,0],"forge:absent-via-leaf-key":[31,31,0],"forge:account":[31,31,0],"forge:self-consistent":[31,31,0],"forge:self-consistent:bound":[31,31,0],"honest":[37,0,37],"light:forged-collateral":[37,37,0],"light:forged-digest":[37,37,0],"light:user-account":[31,31,0],"limit:accounts":[37,37,0],"omit:account":[675,675,0],"omit:adl":[229,145,84],"omit:aord":[675,603,72],"omit:bmp":[603,340,263],"omit:level":[71,28,43],"omit:light":[37,37,0],"omit:market":[37,6,31],"omit:order":[703,608,95],"omit:path":[30,12,18],"trailing":[37,37,0],"tree:leaf-as-opaque":[1536,1341,195],"truncate":[37,37,0],"wrong-root":[31,24,7],"wrong-root:bound":[31,31,0]},"unsound_first":[]}
+exit 0 (05:16:50)
+== slfuzz 10 300 liq (05:16:50)
+exit 143 (05:17:17)
+== sladv 4 200 liq (05:17:17)

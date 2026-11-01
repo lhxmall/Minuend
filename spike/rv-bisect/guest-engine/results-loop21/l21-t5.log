@@ -1,0 +1,7 @@
+== slpoc21 6 300 8 200 (06:15:06)
+{"ok":true,"segments":3,"honest_proven":3,"skipped_refused":0,"P1_inflated_runs":3,"P1_ok":3,"P1_whale_picked":3,"max_account_records_plain_inflated":(19, 20),"extra_holders":200,"max_witness_plain":155304,"max_witness_inflated":209027,"max_rank_section_plain":1382,"max_rank_section_inflated":1602,"P1_first_bad":"","P2_runs":102,"P2_refused":92,"P2_wrong":0,"P2_first_wrong":"","P3_single_unit_runs":3,"P3_ok":3,"P3_first_bad":""}
+exit 0 (06:15:09)
+== slpoc21 30 300 8 2000 (06:15:09)
+{"ok":true,"segments":8,"honest_proven":8,"skipped_refused":0,"P1_inflated_runs":8,"P1_ok":8,"P1_whale_picked":7,"max_account_records_plain_inflated":(21, 21),"extra_holders":2000,"max_witness_plain":178761,"max_witness_inflated":430514,"max_rank_section_plain":2111,"max_rank_section_inflated":3055,"P1_first_bad":"","P2_runs":268,"P2_refused":238,"P2_wrong":0,"P2_first_wrong":"","P3_single_unit_runs":8,"P3_ok":8,"P3_first_bad":""}
+exit 0 (06:15:29)
+TDONE

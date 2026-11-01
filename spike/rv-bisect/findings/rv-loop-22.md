@@ -8,7 +8,7 @@ bound); `stateless/adl.rs` (test forgeries `t_adrop` 5 / 6); harness `engine-dif
 = the SESSION image on a synthetic pre-state, `seg_words2`). Box logs: `guest-engine/results-loop22/`. Notes:
 work/rv-rollup-notes.md "Loop round 22". Pushes: Radicle first, then GitHub.
 
-Status: **DRAFT**
+Status: **FINAL**
 
 ## Choice of the round-22 gap
 
@@ -71,16 +71,19 @@ Totals: **C 0 · H 0 · M 1 (mitigated by decision) · L 0 · I 4**.
 ## Tests
 
 Logs: `guest-engine/results-loop22/` (box /data/hark/logs/rv). Binaries (engine-diff, CARGO_TARGET_DIR
-/data/hark/target-spike, profile l20, copied to loop22/bin; mutants: profile l22m).
+/data/hark/target-spike, profile l20, copied to loop22/bin; mutants: profile l22m): 8868800b (7c0993c), 9b25c0dc
+(prod caps + catch-alls), ec234148 (t_adrop 6), 19d9730e (+ migration bound: **final guest code**, full regression),
+a2f07f30 (+ slpoc22 P5 / slpoc21 P3d: test code only; final tests).
 
 | what | result | log |
 |---|---|---|
-| slpoc22 | TESTS_SLPOC22 | l22-regF.log |
-| round-21 survivors re-tested | TESTS_R21 | l22-mut.log, l22-mut2.log |
-| gcnt guard mutants (loop22-mut.py) | MUT22_RESULT | l22-mut.log, l22-mut2.log |
-| regression | REG22 | l22-reg.log, l22-gov.log |
-| riscv32 stateless guest build | GUEST22 | l22-b2.log, l22-b5.log |
-| Radicle native CI | CI22 | /data/hark/radicle-ci/logs/cib.log |
+| slpoc22 (final) | P0 both rank sub-trees emptied: status 0 = direct, `adlr:` leaves deleted; **P1 at the caps: session 7 × code 19 (2nd first Deposit, Liquidate by a new keeper = R17-I3, 2nd new PERP id, GovWithdraw / Slash by a non-member, 2nd listing, 2nd new oracle) = stateless, root + events equal**, witness 7.4 KB; P1 one below the account cap: 3 × 19, equal; P2 forged `gcnt:0` (t_gdrop 1–4) / omitted / adversarial operator denying Gcnt: 6 / 6 refused, 0 wrong; P3 production caps: first credits equal to a session at cap 2^20, the 2nd listing / 2nd oracle run in the lineage (session constants refuse); P4 failing capped units at the cap (no count change): 19 × 2 = session, deny-Gcnt operator refused (13); P5 Reveal with a capped inner Deposit by the non-member author: 19 × 2 = session (below the cap: the engine's code 2), deny-Gcnt refused | l22-final.log, l22-reg.log |
+| round-21 survivors re-tested | **end-del-off KILLED** (slpoc22 P0), **load-absent-check-off KILLED** (slpoc21 `t_adrop` 5; also in round-21 pass 2), **leftmost-skip-stub KILLED** (pass 3: slpoc21 P3d — `t_adrop` 6 / P3c alone could not reach it: removing the second leaf beside a single-leaf stub is refused by the collapse rule, so a whale + tie pair was needed); removed-count-off (liveness only) and insurance-in-tree (unreachable on supported paths) survive — rv-loop-21 notes | l22-mut.log, l22-mut2.log, l22-mut3.log, l21-mut2.log |
+| gcnt guard mutants (loop22-mut.py, 18 round-22) | pass 1: 16 / 20 killed (incl. the 2 round-21 re-tests); pass 2: **gcnt-end-need-off KILLED** (slora 10 300 40: the hook's bond expiry rewrites `gcnt:0` without any capped unit), **gcap-inner-off KILLED** (slpoc22 P5); survivors `catchall-acct-off` / `catchall-mkt-off` = defence in depth (the premise of `gcnt_delta` already holds through the dirty-account / market guards and ora guard (a); the catch-alls are the explicit statement of it). **Round 22: 16 / 18 killed, 2 equivalent** | l22-mut.log, l22-mut2.log |
+| regression (final guest code 19d9730e) | slpoc15 / slcaps / slpoc17 (6 / 6 ADL segments proven) ok; slmig 20×300 0 / 5 20 / 20; slfuzz gen 60 / 60, perp 40 / 40, wd 30 / 30, ora 30 / 30, liq 10 / 10 (0 unsupported, 717 liquidation units proven), gov 100 / 100; sladv perp 6 546 + gen 5 470 + liq 47 515 + gov 26 099 cases **0 unsound**; slpoc18 20000, slpoc20, slpoc21 30×300 (12, 2 000) ok; slmiggov 30 / 30; slora 40×300 h1, 30×400 h40, adv 15×600 h1 + 10×400 h60 (83 242 cases **0 unsound**; unsupported segments unchanged vs round 21: 1 087 / 864 / 811 / 299 = funding / peg); govfuzz 30 / 30, liqfuzz 20 / 20 real engine = port. Final tests (a2f07f30): CI set + slpoc21 P3d 8 / 8 + 3 / 3 honest proven, 16 + 6 forged refused | l22-reg.log, l22-gov.log, l22-final.log |
+| cost vs round 21 (same commands) | witness bytes: gen +0.04 %, perp +0.5 %, wd +0.04 %, ora +0.05 %, liq +0.01 %, gov +0.5 %, orc +0.2 %; guest hashes (sl_hashes): +0.1 – 0.4 % | l22-reg.log, l22-gov.log, ../results-loop21/l21-regF.log, l21-govF.log |
+| riscv32 stateless guest build | clean (release, `stateless`, riscv32im): b2 (gcnt + production caps) and b5 (final guest code) | l22-b2.log, l22-b5.log |
+| Radicle native CI (incl. slpoc22) | 7c0993c, 85cf3a4, dbcdef4, bf3cd51 SUCCESS (the closing commit: see work notes) | /data/hark/radicle-ci/state/*/log.html |
 
 ## What remains
 
