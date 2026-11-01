@@ -2414,21 +2414,21 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
         o.status = crate::ST_BAD_SNAP;
         return o;
     }
-    let mut h = Sha256::new();
-    for i in 0..*words {
-        h.update(rd(1 + i).to_le_bytes());
-    }
-    let d: H = h.finalize().into();
-    if d != *digest {
+    // round 17: one pass over the snapshot -- the decoder hashes what it reads (SnapR), so the digest is checked after
+    // the decode (a decoded state is used only if every word was read and the digest matches; round 16 hashed the
+    // words twice), and the decode skips the session's MNWIT1 witness tree (decode_opts build_wit = false)
+    let mut rd1 = |i: u32| rd(1 + i);
+    let mut r = crate::snapshot::SnapR::new(&mut rd1, *words);
+    let dec = crate::snapshot::decode_opts(&mut r, false);
+    let full = r.i == *words;
+    let d: H = r.digest();
+    if d != *digest || !full {
         o.status = crate::ST_BAD_SNAP;
         return o;
     }
-    let mut rd1 = |i: u32| rd(1 + i);
-    let mut r = crate::snapshot::SnapR::new(&mut rd1, *words);
-    match crate::snapshot::decode(&mut r) {
-        Ok(mut sess) if r.i == *words => {
-            // the decoded session's MNWIT1 tree is not needed: free it before the MNWIT-S tree is built (peak memory)
-            drop(sess.w.take());
+    match dec {
+        Ok(sess) => {
+            debug_assert!(sess.w.is_none());
             let st = &sess.eng.state;
             // R15-M1: every object must stay loadable under the stateless image's per-object bounds
             let mut expo: BTreeMap<AccountId, BTreeSet<u32>> = BTreeMap::new();

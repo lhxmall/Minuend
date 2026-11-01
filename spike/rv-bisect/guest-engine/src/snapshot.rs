@@ -435,6 +435,12 @@ fn asc<K: Ord + Copy>(prev: &mut Option<K>, k: K) -> Res<()> {
 /// Decode a snapshot into a fresh session (state, derived indexes, MNWIT1 tree). Errors on any
 /// malformed or non-canonical input. Returns the session and the digest of the words consumed.
 pub fn decode(r: &mut SnapR) -> Res<Session> {
+    decode_opts(r, true)
+}
+/// loop round 17: `build_wit = false` (the stateless migration) skips the MNWIT1 witness tree of an Incremental
+/// session (`Wit::from_state`, one leaf at a time -- the dominant guest cost of a migration, round-16 step 4); the
+/// returned session then has `w = None` and must not run units.
+pub fn decode_opts(r: &mut SnapR, build_wit: bool) -> Res<Session> {
     if r.w()? != SNAP_MAGIC {
         return Err(());
     }
@@ -675,7 +681,7 @@ pub fn decode(r: &mut SnapR) -> Res<Session> {
     if s.books.keys().any(|m| !s.markets.contains_key(m)) {
         return Err(());
     }
-    let w = if mode == WitMode::Incremental { Some(crate::wit::Wit::from_state(&s)) } else { None };
+    let w = if mode == WitMode::Incremental && build_wit { Some(crate::wit::Wit::from_state(&s)) } else { None };
     let _ = s.take_dirty();
     // the account cap is a consensus constant, not session state; an import above it is malformed
     if s.accounts.len() > crate::MAX_STATE_ACCOUNTS {
