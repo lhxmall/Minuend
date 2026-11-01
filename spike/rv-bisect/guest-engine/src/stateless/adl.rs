@@ -341,7 +341,11 @@ fn emit_rtree(leaves: &[(H, H)], ids: &[AccountId], o: &mut Vec<u8>, lo: usize, 
     match hi - lo {
         0 => o.push(0),
         1 => {
-            let verified = (sib || keys.iter().any(|k| *k != leaves[lo].0) || pk.contains(&leaves[lo].0)) && !(unv_first && lo == 0);
+            // every emitted rank leaf is verified (tag 5 is as long as tag 2): a leaf sent unverified for its own key
+            // could later be lifted by a collapse onto another key's path and block an insertion there (round-21 first
+            // regression: operator need loops on AdlKey)
+            let _ = (sib, keys, pk);
+            let verified = !(unv_first && lo == 0);
             if verified {
                 o.push(5);
                 o.extend_from_slice(&leaves[lo].0);
