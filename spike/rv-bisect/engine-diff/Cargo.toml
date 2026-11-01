@@ -35,4 +35,8 @@ debug = false
 [profile.l20]
 inherits = "release"
 
+# loop round 22: mutant builds of round 22 (target-spike/l22m/), apart from a still running earlier mutant pass (release)
+[profile.l22m]
+inherits = "release"
+
 [workspace]

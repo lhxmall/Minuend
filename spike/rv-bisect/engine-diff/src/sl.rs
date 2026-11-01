@@ -995,6 +995,7 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     Need::Pglob => "omit:pglob",
                     Need::Pexc(_) => "omit:pexc",
                     Need::Adl(..) | Need::AdlTop(..) | Need::AdlKey(..) => "omit:adl",
+                    Need::Gcnt => "omit:gcnt",
                     _ => "omit:oracle",
                 };
                 a.rec(kind, r, &o2, &ev2, false);
@@ -2474,7 +2475,8 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
 ///     and its witness must not grow with `extra` (rank sub-tree: the leftmost path only);
 ///  P2 every single omission from the honest witness of a round-21 need (Adl / AdlTop / AdlKey / Account) and the
 ///     forged sub-trees (t_adrop 1 leftmost leaf unverified, 2 leftmost path hidden, 3 the sub-tree without its top
-///     holder under the honest root, 4 the same with its own root as the `adlr:` value) -> refused or the identical result;
+///     holder under the honest root, 4 the same with its own root as the `adlr:` value, 5 the tree claimed absent with
+///     an empty sub-tree: round-22 kill of load-absent-check-off) -> refused or the identical result;
 ///  P3 the ADL unit ALONE (pre-state replayed to just before it): no opposite holder is loaded for another reason, so
 ///     only the pick check brings the top holder in (kills a pick that treats an unloaded tree as empty).
 pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
@@ -2521,7 +2523,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                         let (top, second) = (v[0].2, v[1].2);
                         // P3c: an adversarial operator that never supplies the top holder's record or a path to its key
                         let tk = v[0].0;
-                        for t in [2u8, 3, 4] {
+                        for t in [2u8, 3, 4, 5] {
                             b3.t_adrop.set(t);
                             let (of, evf) = operate_deny(&b3, &w1, &|n: &Need| matches!(n, Need::Account(a) if *a == top) || matches!(n, Need::AdlKey(_, _, k) if *k == tk));
                             b3.t_adrop.set(0);
@@ -2601,7 +2603,7 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                 }
             }
         }
-        for t in [1u8, 2, 3, 4] {
+        for t in [1u8, 2, 3, 4, 5] {
             b0.t_adrop.set(t);
             let w2 = b0.build(&needs);
             b0.t_adrop.set(0);
@@ -3657,4 +3659,272 @@ pub fn slpoc20() -> String {
         }
     }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
+}
+
+/// round 22 PoCs. P0 (round-21 close-out, kills mutant end-del-off): a fill that flattens the ONLY long and the ONLY
+/// short holder of a market empties both rank sub-trees present at segment start -> both `adlr:` leaves must be
+/// deleted (end root = direct, status 0).
+pub fn slpoc22_p0() -> String {
+    use mnpilot::types::{AccountId as A, MarketId as M, Side};
+    let mut s = mnpilot::state::ChainState::genesis();
+    let id = |i: u32| A(acct_id(i).0);
+    let q = (QTY_SCALE / 10) as i64;
+    let px = MID;
+    for (i, qty) in [(0u32, q), (1, -q)] {
+        let mut a = mnpilot::account::Account::new(id(i));
+        a.collateral = 1_000_000_000 * USD_SCALE as i128;
+        a.positions.insert(M(1), mnpilot::account::Position { market: M(1), qty, entry_price: MID, isolated: false });
+        s.put_account(id(i), a);
+    }
+    // B (short) rests a bid of q: A's IOC ask fills it -> A flat, B flat
+    let oid = mnpilot::types::order_id(id(1), M(1), 1);
+    s.book_mut(M(1)).sl_restore(mnpilot::Order {
+        id: oid, account: id(1), market: M(1), side: Side::Bid, typ: mnpilot::types::OrderType::Limit,
+        tif: mnpilot::types::TimeInForce::Gtc, price: px, qty: q as u64, remaining: q as u64, seq: 0, isolated: false, margin_left: 0,
+    });
+    s.seen_client_seq.insert(id(1), 1);
+    let _ = s.take_dirty();
+    let pre_trees = sl::adl::sets(&s).len();
+    let op = [2u32, 1 | 4, px as u32, (px >> 32) as u32, q as u32, ((q as u64) >> 32) as u32, 1, 1];
+    let w = seg_words(&[0, 1], &[op]);
+    check15("P0 both rank sub-trees emptied (adlr: leaves deleted)", &s, &w, &|post: &mnpilot::state::ChainState, o: &sl::SlOut, _| {
+        pre_trees == 2 && sl::adl::sets(post).is_empty() && o.dels.len() >= 2
+    })
+}
+
+/// MNP2 batch (unit ids + extension words) for synthetic segments
+fn seg_words2(table: &[u32], ops: &[[u32; 8]], ext: &[u32]) -> Vec<u32> {
+    let mut w = vec![mnpilot::MAGIC2, table.len() as u32, ops.len() as u32, 0];
+    for t in table {
+        let x = acct_id(*t);
+        for k in 0..8 {
+            w.push(u32::from_le_bytes(x.0[k * 4..k * 4 + 4].try_into().unwrap()));
+        }
+    }
+    for o in ops {
+        w.extend_from_slice(o);
+    }
+    for i in 0..ops.len() {
+        let mut u = [0u8; 32];
+        u[..8].copy_from_slice(&(0x22C0_DE00_0000u64 + i as u64).to_le_bytes());
+        u[31] = 0x22;
+        for k in 0..8 {
+            w.push(u32::from_le_bytes(u[k * 4..k * 4 + 4].try_into().unwrap()));
+        }
+    }
+    w.push(ext.len() as u32);
+    w.extend_from_slice(ext);
+    w
+}
+
+/// the SESSION image (state_cap_ok with account cap `cap`, MAX_STATE_MARKETS / MAX_STATE_ORACLES) on one segment from
+/// an arbitrary pre-state: (post state, events)
+pub fn sess_seg(pre: &mnpilot::state::ChainState, w: &[u32], cap: usize) -> (mnpilot::state::ChainState, Vec<u32>) {
+    let eng = mnpilot::engine::Engine { state: pre.clone() };
+    let wt = mnpilot::wit::Wit::from_state(&eng.state);
+    let mut sess = Some(mnpilot::Session { eng, w: Some(wt), mode: mnpilot::WitMode::Incremental, segs: 1, state_cap: cap, bind_height: false });
+    let mut ev = Vec::new();
+    let (_, st, _) = mnpilot::run_segment(&mut |i| w.get(i as usize).copied().unwrap_or(0), &mut |x| ev.push(x), &mut |_, _, _| {}, mnpilot::WitMode::Incremental, &mut sess);
+    assert_eq!(st.status, 0);
+    let mut s = sess.unwrap().eng.state;
+    let _ = s.take_dirty();
+    (s, ev)
+}
+
+fn ev_units(ev: &[u32]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < ev.len() {
+        let e = ev[k];
+        if e & EV_APPLIED != 0 {
+            let nf = (e & 0xff) as usize;
+            out.push(format!("applied/{}", nf));
+            k += 1 + 6 * nf;
+        } else {
+            out.push(e.to_string());
+            k += 1;
+        }
+    }
+    out
+}
+
+/// round 22: stateless global caps (R16-I3 / R17-I3, `gcnt:0`).
+///  P0 (round-21 close-out) both rank sub-trees emptied -> adlr: leaves deleted (kills end-del-off);
+///  P1 at the caps: a pre-state one below each session cap (accounts / PERP ids: `cap`; markets MAX_STATE_MARKETS;
+///     oracle bonds MAX_STATE_ORACLES), a segment of first credits / listings / stakes by new and existing ids
+///     (Deposit, Liquidate keeper, GovDeposit, GovWithdraw, Slash challenger, CreateMarket, Stake) -> the stateless image
+///     with SL_CAPS = the session's caps must equal the SESSION image (root + events, code 19 where it refuses), the
+///     same segment one below the caps (cap + 1 room) too;
+///  P2 forged `gcnt:0` counts (t_gdrop 1-4) and the omission of the Gcnt need -> refused;
+///  P3 the production caps (SL_CAPS_PROD: Account map / PERP ledger uncapped, R22-M1; listings 2^16, bonds 2^12): the
+///     first credits agree with a session at a large account cap; the listing / stake the session's constants refuse
+///     run in the lineage (lifted caps, design §5).
+pub fn slpoc22() -> String {
+    use crate::gov::{listing_regular, GB};
+    use mnpilot::types::{AccountId as A, MarketId as M};
+    let mut res: Vec<String> = vec![slpoc22_p0()];
+    let id = |i: u32| A(acct_id(i).0);
+    // pre-state
+    let mk_pre = |cap: usize| -> mnpilot::state::ChainState {
+        let mut s = mnpilot::state::ChainState::genesis();
+        let mut a0 = mnpilot::account::Account::new(id(0));
+        a0.collateral = 1_000_000 * USD_SCALE as i128;
+        a0.positions.insert(M(1), mnpilot::account::Position { market: M(1), qty: (QTY_SCALE / 100) as i64, entry_price: MID, isolated: false });
+        s.put_account(id(0), a0);
+        let big: u128 = 10_000_000;
+        s.perp_balances.insert(id(0), big);
+        s.perp_supply += big;
+        // fillers up to cap - 1 (the session's one `cap` for the Account map and the PERP ledger)
+        let mut i = 0u32;
+        while s.accounts.len() < cap - 1 {
+            let mut a = mnpilot::account::Account::new(id(50_000 + i));
+            a.collateral = USD_SCALE as i128;
+            s.put_account(id(50_000 + i), a);
+            i += 1;
+        }
+        let mut i = 0u32;
+        while s.perp_balances.len() < cap - 1 {
+            s.perp_balances.insert(id(60_000 + i), 1);
+            s.perp_supply += 1;
+            i += 1;
+        }
+        let p0 = mnpilot::types::genesis_params();
+        let mut m = 1000u32;
+        while s.markets.len() < mnpilot::MAX_STATE_MARKETS - 1 {
+            s.markets.insert(M(m), p0);
+            s.marks.insert(M(m), MID);
+            m += 1;
+        }
+        let mut i = 0u32;
+        while s.oracle_bonds.len() < mnpilot::MAX_STATE_ORACLES - 1 {
+            s.oracle_bonds.insert(id(70_000 + i), mnpilot::types::ORACLE_BOND_PERP);
+            i += 1;
+        }
+        let _ = s.take_dirty();
+        s
+    };
+    // table: 0 funded existing (creator / staker), 1 2 3 new ids
+    let table = [0u32, 1, 2, 3];
+    let mut ext: Vec<u32> = Vec::new();
+    let l = listing_regular("ZZZ");
+    ext.extend_from_slice(&l);
+    let l2 = listing_regular("ZZY");
+    ext.extend_from_slice(&l2);
+    let ops: Vec<[u32; 8]> = vec![
+        GB::w_dep(1, 1_000 * USD_SCALE as i64),               // new id: fits (accounts cap - 1 -> cap)
+        GB::w_dep(2, 1_000 * USD_SCALE as i64),               // new id at the cap -> 19
+        GB::w_dep(0, 1_000 * USD_SCALE as i64),               // member -> applied
+        [7 | (3 << 8), 0, 0, 0, 0, 0, 0, 1],                  // Liquidate by a new keeper (R17-I3) at the cap -> 19
+        GB::w_gdep(2, 60_000),                                // new PERP id: fits (ledger cap - 1 -> cap)
+        GB::w_gdep(3, 60_000),                                // new PERP id at the cap -> 19
+        GB::w_gwd(3, 5, 1),                                   // GovWithdraw by a non-member at the cap -> 19
+        w_slash(3, 0, 1),                                     // Slash challenger new at the cap -> 19
+        [16, 0, 0, 0, 0, 0, 0, 0],                            // CreateMarket (markets cap - 1 -> cap)
+        [16, 0, 0, 0, 0, 0, 0, l.len() as u32],               // CreateMarket at the cap -> 19
+        w_stake(0),                                           // Stake: bonds cap - 1 -> cap
+        w_stake(2),                                           // Stake by a new oracle at the cap -> 19
+        GB::w_dep(1, 5 * USD_SCALE as i64),                   // member now -> applied
+    ];
+    let w = seg_words2(&table, &ops, &ext);
+    let set_caps = |c: sl::SlCaps| unsafe { sl::SL_CAPS = c };
+    for (name, cap) in [("P1 at the caps", 12usize), ("P1 one below the caps (room + 1)", 13usize)] {
+        // the pre-state is one below every cap at cap 12; at cap 13 the Account map / PERP ledger have one more slot
+        // (markets / oracle bonds: the session's constants in both)
+        let pre = mk_pre(12);
+        let (post, ev_s) = sess_seg(&pre, &w, cap);
+        let room = cap - 12;
+        set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        let b = WitBuilder::new(&pre);
+        let r = operate(&b, &w);
+        set_caps(sl::SL_CAPS_PROD);
+        let (line, needs) = match r {
+            Ok((needs, wit, o, ev, _)) => {
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s;
+                let caps19 = ev_units(&ev_s).iter().filter(|x| *x == "19").count();
+                (format!("{{\"case\":\"{}\",\"ok\":{},\"status\":{},\"root_ok\":{},\"ev_ok\":{},\"session\":{:?},\"stateless\":{:?},\"session_19\":{},\"gcnt_needed\":{},\"witness_bytes\":{}}}", name, ok && (room > 0 || caps19 == 7), o.status, o.end_root == sl::s_root(&post), ev == ev_s, ev_units(&ev_s), ev_units(&ev), caps19, needs.contains(&Need::Gcnt), wit.len()), Some((needs, pre.clone())))
+            }
+            Err(e) => (format!("{{\"case\":\"{}\",\"ok\":false,\"why\":\"{}\",\"session\":{:?}}}", name, e, ev_units(&ev_s)), None),
+        };
+        res.push(line);
+        // P2: forged counts / omission (at the caps)
+        if let (Some((needs, pre)), 12) = (needs, cap) {
+            set_caps(sl::SlCaps { accounts: cap as u64, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+            let b = WitBuilder::new(&pre);
+            let (mut runs, mut refused, mut wrong) = (0u32, 0u32, 0u32);
+            for t in 1u8..=4 {
+                b.t_gdrop.set(t);
+                let wf = b.build(&needs);
+                b.t_gdrop.set(0);
+                runs += 1;
+                let (o, ev) = run_sl_x(&w, &wf, Some(&b.root));
+                if o.status != 0 {
+                    refused += 1;
+                } else if o.end_root != sl::s_root(&post) || ev != ev_s {
+                    wrong += 1;
+                }
+            }
+            let mut n2 = needs.clone();
+            n2.remove(&Need::Gcnt);
+            runs += 1;
+            let (o, ev) = run_sl_x(&w, &b.build(&n2), Some(&b.root));
+            if o.status != 0 {
+                refused += 1;
+            } else if o.end_root != sl::s_root(&post) || ev != ev_s {
+                wrong += 1;
+            }
+            // an adversarial operator that never supplies gcnt:0
+            let (o, ev) = operate_deny(&b, &w, &|n: &Need| *n == Need::Gcnt);
+            runs += 1;
+            if o.status != 0 {
+                refused += 1;
+            } else if o.end_root != sl::s_root(&post) || ev != ev_s {
+                wrong += 1;
+            }
+            set_caps(sl::SL_CAPS_PROD);
+            res.push(format!("{{\"case\":\"P2 forged gcnt / omission\",\"ok\":{},\"runs\":{},\"refused\":{},\"wrong\":{}}}", wrong == 0 && refused == runs, runs, refused, wrong));
+        }
+    }
+    // P4: capped units by non-members that fail anyway below the cap (Liquidate of a healthy target, GovWithdraw beyond
+    // the balance) and change no count: only the cap check itself needs gcnt:0 (its omission must not turn the session's
+    // 19 into the engine's error code); the pre-state is AT the account cap (11 = cap)
+    {
+        let pre = mk_pre(12);
+        let w4 = seg_words2(&table, &[[7 | (3 << 8), 0, 0, 0, 0, 0, 0, 1], GB::w_gwd(3, 5, 1)], &[]);
+        let (post, ev_s) = sess_seg(&pre, &w4, 11);
+        set_caps(sl::SlCaps { accounts: 11, markets: mnpilot::MAX_STATE_MARKETS as u64, oracles: mnpilot::MAX_STATE_ORACLES as u64 });
+        let b = WitBuilder::new(&pre);
+        let r = operate(&b, &w4);
+        let (od, evd) = operate_deny(&b, &w4, &|n: &Need| *n == Need::Gcnt);
+        set_caps(sl::SL_CAPS_PROD);
+        let line = match r {
+            Ok((needs, _, o, ev, _)) => {
+                let ok = o.status == 0 && o.end_root == sl::s_root(&post) && ev == ev_s && ev_units(&ev_s) == ["19", "19"] && needs.contains(&Need::Gcnt);
+                let deny_ok = od.status != 0 || (od.end_root == sl::s_root(&post) && evd == ev_s);
+                format!("{{\"case\":\"P4 failing capped units at the cap (no count change)\",\"ok\":{},\"session\":{:?},\"stateless\":{:?},\"deny_gcnt_status\":{}}}", ok && deny_ok, ev_units(&ev_s), ev_units(&ev), od.status)
+            }
+            Err(e) => format!("{{\"case\":\"P4\",\"ok\":false,\"why\":\"{}\"}}", e),
+        };
+        res.push(line);
+    }
+    // P3: production caps: accounts / PERP ids lifted -> no 19 for the first credits (the session at a large cap agrees
+    // on those; markets / oracles: the session's constants still refuse, the lineage does not -- by design)
+    {
+        let pre = mk_pre(12);
+        let (post, ev_s) = sess_seg(&pre, &w, 1 << 20);
+        let b = WitBuilder::new(&pre);
+        match operate(&b, &w) {
+            Ok((_, _, o, ev, _)) => {
+                let su = ev_units(&ev_s);
+                let tu = ev_units(&ev);
+                // units 0..8 (accounts / PERP ids) must agree; the listing / stake at the session constants differ
+                let same = su[..8] == tu[..8];
+                let lifted = tu[9] != "19" && tu[11] != "19" && su[9] == "19" && su[11] == "19";
+                let _ = post;
+                res.push(format!("{{\"case\":\"P3 production caps (lifted)\",\"ok\":{},\"status\":{},\"session\":{:?},\"stateless\":{:?}}}", o.status == 0 && same && lifted, o.status, su, tu));
+            }
+            Err(e) => res.push(format!("{{\"case\":\"P3 production caps (lifted)\",\"ok\":false,\"why\":\"{}\"}}", e)),
+        }
+    }
+    let ok = res.iter().all(|l| l.contains("\"ok\":true"));
+    format!("{{\"ok\":{},\"cases\":[{}]}}", ok, res.join(","))
 }

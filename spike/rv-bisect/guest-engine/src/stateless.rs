@@ -72,6 +72,29 @@ pub const SL_MAX_POS: usize = 64;
 /// account at the bound is refused (code 19) -- keeps the `acmt:` record loadable (the session's global
 /// MAX_STATE_COMMITS cap does not exist in the stateless image)
 pub const SL_MAX_ACMT: usize = 64;
+/// round 22 (R16-I3 / R17-I3): the GLOBAL caps of the stateless lineage -- the session's `state_cap_ok` totals (account
+/// map, PERP ledger ids: one `cap` for both; markets; oracle bonds) enforced on the aggregate leaf `gcnt:0`, kept by
+/// delta (design §5). Consensus constants of the lineage; the production values lift the session's memory bounds
+/// (MAX_STATE_ACCOUNTS 256 / MAX_STATE_MARKETS 16 / MAX_STATE_ORACLES 32). R22-M1: the Account map / PERP ledger is
+/// NOT capped in production (`u64::MAX`): ids are never removed upstream, so a hard cap is a permanent lockout of new
+/// users that costs an attacker only one dust Deposit per slot (the session's 256 has the same flaw, pilot limit);
+/// listings (burned fee) and oracle bonds (bonded PERP) are capped. The counts are still kept (export precondition,
+/// R16-I2: a lineage state fits the session image iff its counts are within the session's caps). The session's
+/// MAX_STATE_COMMITS is NOT mirrored (R22-I2: lazy commit expiry -- live commits are not an aggregate of the touched
+/// records; the per-account SL_MAX_ACMT bound stays).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlCaps {
+    pub accounts: u64,
+    pub markets: u64,
+    pub oracles: u64,
+}
+pub const SL_CAPS_PROD: SlCaps = SlCaps { accounts: u64::MAX, markets: 1 << 16, oracles: 1 << 12 };
+/// the lineage's caps (the guest never writes it; host tests set the session's values to compare the two images at
+/// the caps)
+pub static mut SL_CAPS: SlCaps = SL_CAPS_PROD;
+fn sl_caps() -> SlCaps {
+    unsafe { SL_CAPS }
+}
 
 // ------------------------------------------------------------------------------------------------
 // leaf strings (extension kinds)
@@ -267,6 +290,21 @@ pub fn perp_kid(b: &mut Buf) {
 pub fn perp_leaf(b: &mut Buf, supply: u128, burned: u128, next_market: u32) {
     perp_kid(b);
     let _ = write!(b, ":{}:{}:{}", supply, burned, next_market);
+}
+pub fn gcnt_kid(b: &mut Buf) {
+    b.n = 0;
+    let _ = write!(b, "gcnt:0");
+    mark(b);
+}
+/// round 22: `gcnt:0:<accounts>:<PERP ids>:<markets>:<oracle bonds>` (always present): the sizes of the session maps
+/// its global caps count (`accounts`, `perp_balances`, `markets`, `oracle_bonds`)
+pub fn gcnt_leaf(b: &mut Buf, g: &[u64; 4]) {
+    gcnt_kid(b);
+    let _ = write!(b, ":{}:{}:{}:{}", g[0], g[1], g[2], g[3]);
+}
+/// reference counts of a full state
+pub fn gcnt_of(s: &ChainState) -> [u64; 4] {
+    [s.accounts.len() as u64, s.perp_balances.len() as u64, s.markets.len() as u64, s.oracle_bonds.len() as u64]
 }
 pub fn xsrc_kid(b: &mut Buf, id: &AccountId) {
     b.n = 0;
@@ -539,6 +577,9 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
     push(&b);
     // round 16
     perp_leaf(&mut b, s.perp_supply, s.perp_burned, s.next_market_id);
+    push(&b);
+    // round 22
+    gcnt_leaf(&mut b, &gcnt_of(s));
     push(&b);
     for id in &s.external_sources {
         xsrc_leaf(&mut b, id);
@@ -1015,6 +1056,8 @@ pub enum Need {
     AdlTop(u32, u8, u16),
     /// round 21: a rank sub-tree path to this key (removal / insertion)
     AdlKey(u32, u8, H),
+    /// round 22: the `gcnt:0` record (global cap counts)
+    Gcnt,
 }
 
 /// Result of a stateless segment run.
@@ -1038,6 +1081,8 @@ pub struct SlOut {
 
 struct AcctRec {
     present: bool,
+    /// round 22: membership flags at load (apos: bit0 Account entry, bit1 PERP entry; 0 = proven absent)
+    f0: u8,
     /// markets of the start positions (pos leaves to delete if closed)
     start_pos: Vec<MarketId>,
     /// round 15 (R14-M2): a light record (insurance only): start flags, position count, position-market digest.
@@ -1091,6 +1136,8 @@ struct Sl {
     o: ora::Ora,
     /// round 21: the loaded rank sub-trees (adl.rs)
     adl: adl::Adl,
+    /// round 22: `gcnt:0` loaded (the counts at load)
+    gcnt: Option<[u64; 4]>,
     verified: u32,
     leaf_hashes: u64,
 }
@@ -1193,6 +1240,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         bal0: BTreeMap::new(),
         o: ora::Ora::default(),
         adl: adl::Adl::default(),
+        gcnt: None,
         verified: 0,
         leaf_hashes: 0,
     };
@@ -1267,6 +1315,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         }
         let present = kind != 0;
         let mut start_pos = Vec::new();
+        let mut f0 = 0u8;
         if kind == 2 {
             // round 15 (R14-M2) light record: ONLY the insurance account (its positions are read by no supported op;
             // a light record of any other account would hide positions from risk checks)
@@ -1300,7 +1349,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             if flags & 4 != 0 {
                 s.withdrawn_total.insert(id, wd);
             }
-            sl.accts.insert(id, AcctRec { present: true, start_pos, light: Some((flags, npos, dg)) });
+            sl.accts.insert(id, AcctRec { present: true, f0: flags, start_pos, light: Some((flags, npos, dg)) });
             continue;
         }
         if present {
@@ -1308,6 +1357,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             if flags & !7 != 0 || flags == 0 {
                 return Err(ST_SL_BADWIT);
             }
+            f0 = flags;
             let coll = bad!(r.i128());
             let perp = bad!(r.u128());
             let wd = bad!(r.i128());
@@ -1375,7 +1425,7 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             cseq_kid(&mut b, &id);
             sl.absent(&b)?;
         }
-        sl.accts.insert(id, AcctRec { present, start_pos, light: None });
+        sl.accts.insert(id, AcctRec { present, f0, start_pos, light: None });
     }
     // aord
     let n = bad!(r.u16()) as usize;
@@ -1819,6 +1869,17 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
     ora::load(&mut sl, &mut s, &mut r, &mut b)?;
     // round 21: rank sub-trees
     adl::load(&mut sl, &s, &mut r, &mut b)?;
+    // round 22: gcnt:0 (u8 flag: loaded)
+    match bad!(r.u8()) {
+        0 => {}
+        1 => {
+            let g = [bad!(r.u64()), bad!(r.u64()), bad!(r.u64()), bad!(r.u64())];
+            gcnt_leaf(&mut b, &g);
+            sl.check(&b, true)?;
+            sl.gcnt = Some(g);
+        }
+        _ => return Err(ST_SL_BADWIT),
+    }
     if r.i != w.len() {
         return Err(ST_SL_BADWIT);
     }
@@ -2166,6 +2227,78 @@ fn holders_now(sl: &Sl, s: &ChainState) -> u64 {
     (h0 + d) as u64
 }
 
+/// round 22: change of the global counts since load: every map membership that can change belongs to a loaded record
+/// (accounts / PERP ids: the loaded account records -- a dirty account is always loaded, a light record's flags never
+/// change; markets: the loaded / proven-absent market records -- a listing proves its id absent; bonds: the loaded
+/// `ostk:` records -- guard (a) of ora::post)
+fn gcnt_delta(sl: &Sl, s: &ChainState) -> [i64; 4] {
+    let mut d = [0i64; 4];
+    for (a, rec) in &sl.accts {
+        d[0] += s.accounts.contains_key(a) as i64 - (rec.f0 & 1) as i64;
+        d[1] += s.perp_balances.contains_key(a) as i64 - ((rec.f0 >> 1) & 1) as i64;
+    }
+    for (m, p0) in &sl.markets {
+        d[2] += s.markets.contains_key(&MarketId(*m)) as i64 - *p0 as i64;
+    }
+    for a in &sl.o.stk {
+        d[3] += s.oracle_bonds.contains_key(a) as i64 - sl.o.bonds0.contains_key(a) as i64;
+    }
+    d
+}
+fn gcnt_add(g: &[u64; 4], d: &[i64; 4]) -> [u64; 4] {
+    let mut o = [0u64; 4];
+    for i in 0..4 {
+        o[i] = (g[i] as i64).wrapping_add(d[i]) as u64;
+    }
+    o
+}
+/// round 22: the inputs of the session's global caps for op `o` with author `a` (the session's `state_cap_ok` runs on
+/// the op and on a Reveal's inner op, with the author): the author's membership (its record / `ostk:`) and, for a
+/// non-member, `gcnt:0`
+fn gcap_pre(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> Result<(), Result<Need, u32>> {
+    use crate::BatchOp as B;
+    let member = match *o {
+        B::Deposit { .. } | B::Liquidate { .. } | B::GovDeposit { .. } | B::GovWithdraw { .. } | B::Slash { .. } => {
+            if !sl.accts.contains_key(a) {
+                return Err(Ok(Need::Account(*a)));
+            }
+            if matches!(o, B::Deposit { .. } | B::Liquidate { .. }) {
+                s.accounts.contains_key(a)
+            } else {
+                s.perp_balances.contains_key(a)
+            }
+        }
+        B::CreateMarket { .. } => false,
+        B::Stake { .. } => {
+            if !sl.o.stk.contains(a) {
+                return Err(Ok(Need::Ostk(*a)));
+            }
+            s.oracle_bonds.contains_key(a)
+        }
+        _ => return Ok(()),
+    };
+    if !member && sl.gcnt.is_none() {
+        return Err(Ok(Need::Gcnt));
+    }
+    Ok(())
+}
+/// round 22: the session's global caps (`state_cap_ok`) on the counts now (gcap_pre loaded the inputs)
+fn gcap_ok(sl: &Sl, s: &ChainState, o: &crate::BatchOp, a: &AccountId) -> bool {
+    use crate::BatchOp as B;
+    let c = sl_caps();
+    let now = |i: usize| -> u64 {
+        let g0 = sl.gcnt.unwrap_or([0; 4]);
+        gcnt_add(&g0, &gcnt_delta(sl, s))[i]
+    };
+    match *o {
+        B::Deposit { .. } | B::Liquidate { .. } => s.accounts.contains_key(a) || now(0) < c.accounts,
+        B::GovDeposit { .. } | B::GovWithdraw { .. } | B::Slash { .. } => s.perp_balances.contains_key(a) || now(1) < c.accounts,
+        B::CreateMarket { .. } => now(2) < c.markets,
+        B::Stake { .. } => s.oracle_bonds.contains_key(a) || now(3) < c.oracles,
+        _ => true,
+    }
+}
+
 /// round 17 (stateless liquidation, book path): the reads of `liquidate_inner` / `liquidate_book_path` for target `t`
 /// in market `m` -- the target's full record and its position markets (snapshot / isolated_risk), the market, its order
 /// set (the IOC's cancel-maker STP and refunds), the insurance light record (fee leg), and a proof of the R7-H1 dust
@@ -2443,6 +2576,14 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                     }
                     Ok(())
                 });
+            // round 22: the global caps' inputs (op and inner op, author a)
+            let pr = pr.and_then(|_| {
+                gcap_pre(&sl, &eng.state, &op, &a)?;
+                match inner {
+                    Some(io) => gcap_pre(&sl, &eng.state, &io, &a),
+                    None => Ok(()),
+                }
+            });
             // round 17: the liquidation target's reads (the target index is resolved like dispatch does)
             let pr = pr.and_then(|_| match op {
                 crate::BatchOp::Liquidate { target, market, .. } => {
@@ -2497,6 +2638,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 };
                 // round 20: the stateless oracle bounds (SL_MAX_REPORTERS / SL_MAX_ORACLE_MKTS)
                 let rule_ok = |o: &crate::BatchOp| rule_ok(o) && ora::cap_ok(&sl, st, o, &a);
+                // round 22: the session's global caps (R16-I3 / R17-I3) on gcnt:0 + the deltas
+                let rule_ok = |o: &crate::BatchOp| rule_ok(o) && gcap_ok(&sl, st, o, &a);
                 if !rule_ok(&op) || inner.is_some_and(|io| !rule_ok(&io)) {
                     out.rejected += 1;
                     ev(crate::STATE_CAP_CODE);
@@ -2996,6 +3139,24 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
         perp_leaf(&mut b, s.perp_supply, s.perp_burned, s.next_market_id);
         puts.push(kh(&b));
     }
+    // round 22: the global counts move only with `gcnt:0` loaded; catch-all of gcnt_delta's premise: every id of the
+    // partial Account map / PERP ledger has its record loaded, every market of the partial state its market record
+    for a in s.accounts.keys().chain(s.perp_balances.keys()) {
+        if !sl.accts.contains_key(a) {
+            return Err(Need::Account(*a));
+        }
+    }
+    for m in s.markets.keys() {
+        if !sl.markets.contains_key(&m.0) {
+            return Err(Need::Market(m.0));
+        }
+    }
+    let gd = gcnt_delta(sl, s);
+    if gd != [0; 4] {
+        let Some(g0) = sl.gcnt else { return Err(Need::Gcnt) };
+        gcnt_leaf(&mut b, &gcnt_add(&g0, &gd));
+        puts.push(kh(&b));
+    }
     for (id, v0) in &sl.gnon {
         if let Some(v) = s.seen_gov_nonces.get(id) {
             if v != v0 {
@@ -3203,6 +3364,8 @@ pub struct WitBuilder<'a> {
     pub t_odrop: core::cell::Cell<u8>,
     /// round 21 (adversarial tests only): rank sub-trees -- 1 send the leftmost leaf unverified, 2 hide the leftmost path
     pub t_adrop: core::cell::Cell<u8>,
+    /// round 22 tests: forged `gcnt:0` counts (see build)
+    pub t_gdrop: core::cell::Cell<u8>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -3233,7 +3396,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0), t_adrop: core::cell::Cell::new(0) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false), t_omit_pglob: core::cell::Cell::new(false), t_pxe: core::cell::Cell::new(0), t_odrop: core::cell::Cell::new(0), t_adrop: core::cell::Cell::new(0), t_gdrop: core::cell::Cell::new(0) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -3258,6 +3421,7 @@ impl<'a> WitBuilder<'a> {
         // round 16: the orders to send per level (a level need sends its head)
         let mut lsel: BTreeMap<(u32, u8, Price), BTreeSet<OrderId>> = BTreeMap::new();
         let mut perp = false;
+        let mut gcnt = false;
         let mut gnons: BTreeSet<AccountId> = BTreeSet::new();
         let mut xsrcs: BTreeSet<AccountId> = BTreeSet::new();
         let mut acmts: BTreeSet<AccountId> = BTreeSet::new();
@@ -3310,6 +3474,7 @@ impl<'a> WitBuilder<'a> {
                     paths.insert(k);
                 }
                 Need::Perp => perp = true,
+                Need::Gcnt => gcnt = true,
                 Need::Gnon(a) => {
                     gnons.insert(a);
                 }
@@ -3673,6 +3838,23 @@ impl<'a> WitBuilder<'a> {
         ora::build(s, &on, &mut rec, &mut keys, self.t_odrop.get());
         // round 21: rank sub-trees
         adl::build(s, &an, &mut rec, &mut keys, self.t_adrop.get());
+        // round 22: gcnt:0 (`t_gdrop` tests: 1 = accounts - 1, 2 = PERP ids - 1, 3 = markets - 1, 4 = bonds - 1, each
+        // with a forged leaf string, i.e. a record that does not verify)
+        if gcnt {
+            rec.push(1);
+            let mut g = gcnt_of(s);
+            let t = self.t_gdrop.get();
+            if (1..=4).contains(&t) {
+                g[t as usize - 1] = g[t as usize - 1].wrapping_sub(1);
+            }
+            for x in g {
+                rec.extend_from_slice(&x.to_le_bytes());
+            }
+            gcnt_kid(&mut b);
+            keys.insert(kid_key(&b));
+        } else {
+            rec.push(0);
+        }
         let keys: Vec<H> = keys.into_iter().collect();
         self.tree(&mut o, 0, self.leaves.len(), 0, &keys, false, &pk);
         o.extend_from_slice(&rec);

@@ -301,13 +301,16 @@ impl ANeeds {
 }
 /// `t_drop` (tests): 1 = send the leftmost leaf unverified (tag 2), 2 = hide the leftmost path behind its root hash,
 /// 3 = the sub-tree without its leftmost holder under the honest `adlr:` root, 4 = the same with its own root as the
-/// `adlr:` value (a forged leaf)
+/// `adlr:` value (a forged leaf), 5 = claim the tree absent (no `adlr:` leaf, empty sub-tree) while it has holders
 pub fn build(s: &ChainState, n: &ANeeds, rec: &mut Vec<u8>, keys: &mut BTreeSet<H>, t_drop: u8) {
     let mut b = Buf::new();
     let all = if n.trees.is_empty() { BTreeMap::new() } else { sets(s) };
     rec.extend_from_slice(&(n.trees.len() as u16).to_le_bytes());
     for ((m, sd), (top, ks)) in &n.trees {
         let mut v = all.get(&(*m, *sd)).cloned().unwrap_or_default();
+        if t_drop == 5 {
+            v.clear();
+        }
         rec.extend_from_slice(&m.to_le_bytes());
         rec.push(*sd);
         let kv: Vec<(H, H)> = v.iter().map(|x| (x.0, x.1)).collect();
