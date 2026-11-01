@@ -425,6 +425,8 @@ so the reference MNWIT-S root (a function of the session state) could not contai
   holders (count-verified). This is the one O(exceptions) step: above SL_MAX_ACCOUNTS (4096) holders a proposal cannot
   be finalized statelessly (R18-M1, open). A lazy rule (dead entries ignored, pruned on touch) needs a reference that
   is not a function of the session state (the stateless lineage as its own consensus) — the same obstacle as the
-  oracle's lazy unbonding (§12.1, R18-I2).
+  oracle's lazy unbonding (§12.1, R18-I2). Recommended fix: a per-proposal sub-SMT of exceptions (account → weight,
+  voted) whose root is a field of the `prop:` leaf — Finalize drops the leaf and the sub-tree in O(1), a Vote updates
+  one sub-tree path, a balance change one path per live proposal (≤ 64); still a pure function of the session state.
 * Tests: slfuzz / sladv `gov` (gov_batch on the real engine: deposits / withdrawals, proposals, votes, SetSeq jumps,
   finalize), slpoc18, slmiggov (migration of states with live proposals), loop18-mut.py (guard mutants).
