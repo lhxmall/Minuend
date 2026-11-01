@@ -1,0 +1,23 @@
+== slpoc18 20000 (03:08:50)
+{"ok":true,"cases":[{"case":"P1 vote after a balance change: snapshot weight 2000 (balance 500)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":4,"iterations":1,"witness_bytes":2205},
+{"case":"P2 finalize, 10 exception holders (passes: taker fee -> 5)","ok":true,"status":0,"root_ok":true,"ev_ok":true,"ev":["applied/0"],"needs":5,"iterations":2,"witness_bytes":2902},
+{"case":"P2 finalize reads no exception holder","ok":true,"status":0,"needs":"{Account(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Light(AccountId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])), Market(1), Aord(AccountId([245, 195, 107, 6, 129, 221, 3, 172, 214, 1, 245, 36, 225, 178, 197, 121, 253, 251, 68, 38, 125, 220, 159, 251, 247, 62, 145, 108, 29, 96, 58, 89])), Pglob}","witness_bytes":2902},
+{"case":"P4 R6-H2: fresh zero-weight voter beyond |snapshot| + 64 refused, holder votes","ok":true,"status":0,"ev":[19, 2147483648]},
+{"case":"P5 vote by 1 (entry holder): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 1 (entry holder): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list drop / fake entry","ok":true,"status":12},
+{"case":"P5 vote by 6 (no entry): forged list weight + 1 / fake entry","ok":true,"status":12},
+{"case":"P3 R18-M1 finalize with 4000 voters","ok":true,"status":0,"needs":5,"witness_bytes":10408},
+{"case":"P3 R18-M1 finalize with 4097 voters","ok":true,"status":0,"needs":5,"witness_bytes":10300},
+{"case":"P3 R18-M1 finalize with 20000 voters","ok":true,"status":0,"needs":5,"witness_bytes":11722}]}
+exit 0 (03:08:55)
+== slfuzz 10 300 gov (03:08:55)
+{"mode":"gov","batches":10,"ok":10,"bad_segments":0,"unsupported_segments":0,"segments":84,"units":3298,"witness_bytes":983977,"max_witness":21588,"leaves_verified":7887,"tree_nodes":9571,"sl_hashes":34147,"session_hashes":16514,"operator_iterations":1835,"liq_units_proven":0,"gov_units_proven":[109, 166, 154, 745, 67, 280],"first_bad":""}
+exit 0 (03:08:57)
+== sladv 4 300 gov (03:08:57)
+{"segments":38,"cases":4941,"sound":4941,"unsound":0,"by_case [runs, refused, accepted-correct]":{"book:drop-order-in-level":[18,18,0],"book:hide-level-in-trie":[18,18,0],"book:omit-best-level":[19,15,4],"book:omit-head":[38,19,19],"book:reorder-fifo":[9,9,0],"duplicate:account":[38,38,0],"extra:valid":[38,0,38],"flip:records":[114,109,5],"flip:tree":[114,114,0],"forge16:acmt-add":[93,93,0],"forge16:gnon":[97,97,0],"forge16:next-market":[37,37,0],"forge16:perp-supply":[37,37,0],"forge19:pxe-drop":[31,31,0],"forge19:pxe-weight":[31,31,0],"forge:absent-via-leaf-key":[33,33,0],"forge:account":[34,34,0],"forge:self-consistent":[34,34,0],"forge:self-consistent:bound":[34,34,0],"honest":[38,0,38],"light:forged-collateral":[38,38,0],"light:forged-digest":[38,38,0],"light:user-account":[32,32,0],"limit:accounts":[38,38,0],"omit:account":[400,126,274],"omit:acmt":[97,97,0],"omit:aord":[400,168,232],"omit:bmp":[545,357,188],"omit:gnon":[97,97,0],"omit:level":[28,20,8],"omit:light":[38,34,4],"omit:market":[60,34,26],"omit:order":[47,44,3],"omit:path":[6,3,3],"omit:perp":[37,37,0],"omit:pexc":[260,260,0],"omit:pglob":[36,36,0],"trailing":[38,38,0],"tree:leaf-as-opaque":[1695,1377,318],"truncate":[38,38,0],"wrong-root":[34,14,20],"wrong-root:bound":[34,34,0]},"unsound_first":[]}
+exit 0 (03:09:00)
+== slmiggov 10 300 (03:09:00)
+{"batches":10,"ok":10,"migrations":39,"with_live_proposals":39,"with_exception_lists":38,"first_bad":""}
+exit 0 (03:09:02)
+TDONE

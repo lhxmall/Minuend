@@ -5,7 +5,7 @@ draft edits), d1be889 (R18-M1 fix), 8822296 (rv-loop-18 FINAL, round-17 sail row
 Design: `docs/rv-stateless-guest.md` §2, §4, §12.1 (round-19 review), §12.3. Box logs: `guest-engine/results-loop19/`.
 Notes: work/rv-rollup-notes.md "Loop round 19". Pushes: Radicle first, then GitHub (user rule 10:56).
 
-Status: DRAFT (see "What remains").
+Status: **FINAL** for the round-19 scope (R18-M1 / R19-L1 fixed; oracle / ADL not implemented, see "What remains"; the sail data point is pending).
 
 ## What was done
 
@@ -47,8 +47,25 @@ Totals: **C 0 · H 0 · M 1 (R18-M1, fixed) · L 1 (fixed) · I 3**.
 
 ## Tests
 
-(filled below)
+Logs: `guest-engine/results-loop19/` (box /data/hark/logs/rv). Binaries: target-l19-host e8d79471 (a749440 rebuild),
+6bafc382 (R18-M1 fix, d1be889), 1e714ba2 (R19-L1, 1e61af2), c3047436 (forge19:pxe-subtree, 8d56db9).
+
+| what | result | log |
+|---|---|---|
+| R18-M1 fix, first runs (6bafc382) | slpoc18 20000 ok: P1 / P2 / P4, P2 finalize reads no exception holder (needs: creator acct + aord, insurance light, market, Pglob; 2.9 KB), P3 finalize with 4000 / 4097 / 20 000 voters status 0 = direct (10.4 / 10.3 / 11.7 KB; round 18: 1.5 MB / BADWIT), P5 forged lists 4/4 BADWIT; slfuzz gov 10/10; sladv gov 4 941 cases 0 unsound (forge19:pxe-drop 31/31, pxe-weight 31/31 refused); slmiggov 10/10 | l19-p18.log |
+| gov suite (6bafc382) | slfuzz gov 100x300 100/100 (gov_units_proven [1178, 1747, 1575, 7443, 703, 2651], max witness 28.2 KB), 30x1000 30/30 (max 38.9 KB); sladv gov 20x300 25 372 cases **0 unsound**; slmiggov 30x300 30/30 (115 migrations, 107 with exceptions), 10x1000 10/10 | l19-gov.log |
+| regression (6bafc382; the last two commands on 1e714ba2) | slpoc15 / slcaps ok; slpoc17 20/20 (6 ADL segments refused, also with extra holders); slmig 20/20; slfuzz gen 60/60, perp 40/40, liq 10/10 (107 ADL segments unsupported), wd 30/30; sladv perp 6 352 cases 0 unsound | l19-reg.log |
+| R19-L1 (1e714ba2) | slpoc18 20000 ok; slfuzz gov 40/40; sladv gov 10x300 12 496 cases 0 unsound; slmiggov 10/10; guest stateless riscv32 build clean | l19-l1.log, l19-b4.log |
+| consistent sub-tree forgery (c3047436) | slpoc18 P5 mode 3: entry holder BADWIT, entry-less account = honest witness, status 0; sladv gov 20x300 25 510 cases **0 unsound** (forge19:pxe-subtree all refused); slfuzz gov 40/40 | l19-l1b.log |
+| guard mutants (loop19-mut.py, pass 1 on d1be889 sources) | **12 / 16 killed** (pxe-member-check-off, pxe-absent-check-off, pxe-end-remove-off, pxe-end-set-off, pxe-new-prop-reuse, balance-guard-off, populate-voted-off, populate-weight-zero, r6h2-off (P4), new-prop-snap-count+1, vote-count-delta-off, vote-pexc-both-off). Survived: **pxe-root-check-off** (no test forged a sub-tree consistently -> forge19:pxe-subtree / P5 mode 3 added), vote-pexc-off (equivalent: the run loop's R6-H2 input check needs the voter's list too; both off is killed), pexc-without-pglob and create-pglob-off (defence in depth: every use of a list and every created proposal needs `pglob:` again in pre / post guards) | l19-mut.log |
+| guard mutants pass 2 (8d56db9 sources) | 2 / 5 killed: pxe-root-check-off **KILLED** (slpoc18 P5 mode 3), vote-pexc-both-off KILLED (sladv 27 unsound); vote-pexc-off, pexc-without-pglob, create-pglob-off survive (equivalent / defence in depth, as above). Overall: every non-equivalent mutant killed | l19-mut2.log |
+| Radicle native CI (.radicle/native.yaml, box broker) | 286eaf0, 1e61af2, 344dcc2, 8d56db9 all SUCCESS (110–144 s each): root fmt / clippy -D warnings / test + spike engine-diff checks (slpoc15 / slpoc18 5000 / slcaps / slfuzz gen + gov / sladv gov / slmig / slmiggov) | /data/hark/radicle-ci/state/{53c9f681..,87b40da6..}/log.html |
+| sail migration measurement, 64 accounts (decode mode loop17 vs round-16 baseline loop16c) | **still running** at the time of writing (started 03:00 UTC, nice 15; round 17's attempt ran > 1 h 47 m) | l19-cap-dec.log, l19-cap-base.log |
 
 ## What remains
 
-(filled below)
+- Stateless oracle (§12.1 implementation order): `ostk:` / `orep:` / `ohist:` / TWAP ring leaves + migration, Stake /
+  Unstake / Report on markets with no funding tick due, the `oexp:<height>` expiry hook (R19-I2); then `hset:` +
+  funding (R19-I1); Slash. Stateless ADL (§12.2 rank index; still UNSUPPORTED, R17-H1).
+- Production items: DA, stateless export path (R16-I2), global caps in the stateless image (R16-I3 / R17-I3).
+- Sail measurement: collect l19-cap-{dec,base}.log `sail_insns` when the runs end (rows above).
