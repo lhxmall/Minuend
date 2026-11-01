@@ -1345,6 +1345,7 @@ fn main() {
         Some("slcaps") => println!("{}", sl::slcaps()), // loop round 14
         Some("slpoc15") => println!("{}", sl::slpoc15()), // loop round 15
         Some("sldiff") => println!("{}", sl::sldiff(a[2].parse().unwrap(), a[3].parse().unwrap(), &a[4])), // loop round 17
+        Some("slpoc18") => println!("{}", sl::slpoc18(a.get(2).map(|x| x.parse().unwrap()).unwrap_or(4000))), // loop round 18
         Some("slpoc17") => println!("{}", sl::slpoc17(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 17
         Some("slmigdump") => println!("{}", sl::slmigdump(a[2].parse().unwrap(), a[3].parse().unwrap(), a[4].parse().unwrap(), &a[5])), // loop round 15
         Some("slperpstat") => println!("{}", sl::slperpstat(a[2].parse().unwrap(), a[3].parse().unwrap())), // loop round 16

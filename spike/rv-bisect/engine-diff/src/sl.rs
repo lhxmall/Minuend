@@ -687,6 +687,7 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
     let mut maxw = 0usize;
     let mut unsupported = 0u64;
     let mut liq_units = 0u64; // round 17: Liquidate units inside segments proven with status 0
+    let mut gov = [0u64; 6]; // round 18: [create ok, create rej, vote ok, vote rej, finalize ok, finalize rej] proven
     let mut first_bad = String::new();
     for s in 1..=n {
         let w = if adv {
@@ -742,6 +743,17 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
                     } else {
                         let base = 4 + 8 * r.seg[1] as usize;
                         liq_units += (0..r.seg[2] as usize).filter(|k| r.seg[base + 8 * k] & 0xff == 7).count() as u64;
+                        // round 18: governance units (create / vote / finalize, applied and rejected) proven with status 0
+                        let mut i = 0usize;
+                        for k in 0..r.seg[2] as usize {
+                            let x = r.ev.get(i).copied().unwrap_or(0);
+                            let app = x & mnpilot::EV_APPLIED != 0;
+                            i += if app { 1 + 6 * (x & 0xFFFF) as usize } else { 1 };
+                            let kd = r.seg[base + 8 * k] & 0xff;
+                            if (17..=19).contains(&kd) {
+                                gov[(kd - 17) as usize * 2 + (!app) as usize] += 1;
+                            }
+                        }
                         None
                     }
                 }
@@ -760,8 +772,8 @@ pub fn slfuzz(n: u64, ord: u32, mode: &str) -> String {
         }
     }
     format!(
-        "{{\"mode\":\"{}\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"liq_units_proven\":{},\"first_bad\":\"{}\"}}",
-        mode, n, ok, bad, unsupported, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, liq_units, first_bad
+        "{{\"mode\":\"{}\",\"batches\":{},\"ok\":{},\"bad_segments\":{},\"unsupported_segments\":{},\"segments\":{},\"units\":{},\"witness_bytes\":{},\"max_witness\":{},\"leaves_verified\":{},\"tree_nodes\":{},\"sl_hashes\":{},\"session_hashes\":{},\"operator_iterations\":{},\"liq_units_proven\":{},\"gov_units_proven\":{:?},\"first_bad\":\"{}\"}}",
+        mode, n, ok, bad, unsupported, segs, units, wbytes, maxw, verified, nodes, hashes, sess_hashes, iters, liq_units, gov, first_bad
     )
 }
 
@@ -2453,4 +2465,96 @@ pub fn sldiff(seed: u64, ord: u32, mode: &str) -> String {
         return format!("seed {} seg {} unit {}/{}: op {:?}\n  stateless {:?}\n  session   {:?}\n  prev units equal: {}\n  replay fill: {}\n  liq id(0) {:02x?}", seed, k, j, r.seg[2], op, us.get(j), uref.get(j), us[..j] == uref[..j], detail, &mnpilot::types::liq_order_id([0u8; 32]).0[..6]);
     }
     "no differing segment".into()
+}
+
+/// slpoc18 (round 18 PoCs / regression, stateless governance):
+///  P1 a vote after a balance change weighs the snapshot weight (pexc: entry), not the balance; events + end root = direct
+///  P2 finalize of a proposal with exception holders: honest -> status 0 = direct; the witness without one holder's
+///     pexc: record -> MISSING (the pglob: exception count is the completeness proof), never a status-0 result
+///  P3 R18-M1 (liveness bound): a proposal with `v` voters needs `v` exception records at Finalize; above
+///     SL_MAX_ACCOUNTS (4096) records the witness is refused (BADWIT) -- the proposal can never be finalized statelessly
+pub fn slpoc18(big: u32) -> String {
+    use mnpilot::types::AccountId as A;
+    let id = |i: u32| A(acct_id(i).0);
+    let mut res: Vec<String> = Vec::new();
+    let mut all_ok = true;
+    let mk = |n_hold: u32, voters: u32, seq: u64| -> mnpilot::state::ChainState {
+        let mut s = mnpilot::state::ChainState::genesis();
+        for i in 0..n_hold {
+            s.set_perp(id(i), 2_000);
+        }
+        s.perp_supply = 2_000 * n_hold as u128;
+        let snap: std::collections::BTreeMap<A, u128> = (0..n_hold).map(|i| (id(i), 2_000u128)).collect();
+        let mut p = mnpilot::state::Proposal {
+            creator: id(0),
+            market: mnpilot::types::MarketId(1),
+            key: mnpilot::types::ParamKey::from_u8(2).unwrap(),
+            value: 5,
+            created_seq: 0,
+            deadline_seq: minuend_types::PROPOSAL_DURATION_SEQS,
+            supply_at_create: s.perp_supply,
+            yes: 0,
+            no: 0,
+            voted: Default::default(),
+            weight_snapshot: snap,
+        };
+        for i in 0..voters {
+            p.voted.insert(id(i));
+            p.yes += 2_000;
+        }
+        s.proposals.insert(1, p);
+        s.next_proposal_id = 2;
+        s.seq = seq;
+        let _ = s.take_dirty();
+        s
+    };
+    // ---- P1: account 1 withdrew half after the snapshot (exception entry), then votes ----
+    {
+        let mut s = mk(8, 0, 100);
+        s.set_perp(id(1), 500);
+        let _ = s.take_dirty();
+        let seg = seg_words(&[1], &[crate::gov::GB::w_vote(0, 1, true)]);
+        let l = check15("P1 vote after a balance change: snapshot weight 2000 (balance 500)", &s, &seg, &|post, _, _| post.proposals[&1].yes == 2_000);
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+    }
+    // ---- P2: finalize with 10 voters (10 exception holders) ----
+    {
+        let s = mk(20, 10, minuend_types::PROPOSAL_DURATION_SEQS + 5);
+        let seg = seg_words(&[0], &[crate::gov::GB::w_fin(0, 1)]);
+        let l = check15("P2 finalize, 10 exception holders (passes: taker fee -> 5)", &s, &seg, &|post, _, _| post.proposals.is_empty() && post.markets[&mnpilot::types::MarketId(1)].taker_fee_bps == 5);
+        all_ok &= l.contains("\"ok\":true");
+        res.push(l);
+        let b = WitBuilder::new(&s);
+        if let Ok((needs, _, _, _, _)) = operate(&b, &seg) {
+            let mut n2: BTreeSet<Need> = needs.iter().filter(|n| !matches!(n, Need::PexcOf(_))).copied().collect();
+            for i in 1..10 {
+                n2.insert(Need::Pexc(id(i)));
+            }
+            let (o, _) = run_sl(&seg, &b.build(&n2));
+            let ok = o.status == sl::ST_SL_MISSING;
+            all_ok &= ok;
+            res.push(format!("{{\"case\":\"P2 finalize witness missing one exception holder\",\"ok\":{},\"status\":{},\"need\":\"{:?}\"}}", ok, o.status, o.need));
+        }
+    }
+    // ---- P3: R18-M1 ----
+    for v in [big.min(4000), 4097] {
+        let s = mk(v, v, minuend_types::PROPOSAL_DURATION_SEQS + 5);
+        let seg = seg_words(&[0], &[crate::gov::GB::w_fin(0, 1)]);
+        let b = WitBuilder::new(&s);
+        match operate(&b, &seg) {
+            Ok((needs, wit, o, _, _)) => {
+                let (post, _) = direct(&s, &seg);
+                let exp_ok = v <= 4000;
+                let ok = if exp_ok { o.status == 0 && o.end_root == sl::s_root(&post) } else { o.status == sl::ST_SL_BADWIT };
+                all_ok &= ok;
+                res.push(format!("{{\"case\":\"P3 R18-M1 finalize with {} voters\",\"ok\":{},\"status\":{},\"needs\":{},\"witness_bytes\":{}}}", v, ok, o.status, needs.len(), wit.len()));
+            }
+            Err(e) => {
+                all_ok = false;
+                res.push(format!("{{\"case\":\"P3 R18-M1 finalize with {} voters\",\"ok\":false,\"why\":\"{}\"}}", v, e));
+            }
+        }
+    }
+    format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }
