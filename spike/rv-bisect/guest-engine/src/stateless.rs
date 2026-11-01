@@ -156,10 +156,37 @@ pub fn ids_digest(ids: &[OrderId]) -> H {
     }
     h.finalize().into()
 }
-pub fn lvl_leaf(b: &mut Buf, m: MarketId, side: u8, price: Price, ids: &[OrderId]) {
+fn idw(b: &mut Buf, x: Option<OrderId>) {
+    match x {
+        Some(o) => hexw(b, &o.0),
+        None => {
+            let _ = write!(b, "-");
+        }
+    }
+}
+/// round 16 (linked-FIFO levels): `lvl:<m>:<side>:<price>:<head id>:<tail id>` -- the level's ends only; the FIFO is
+/// the chain of `olk:` links, so a level is never loaded whole (round 14/15: `:<n>:<sha256(ids)>`, whole-level loads,
+/// the 4096-order level cap R14-M1 and the migration bound R15-M1)
+pub fn lvl_leaf(b: &mut Buf, m: MarketId, side: u8, price: Price, head: OrderId, tail: OrderId) {
     lvl_kid(b, m, side, price);
-    let _ = write!(b, ":{}:", ids.len());
-    hexw(b, &ids_digest(ids));
+    let _ = write!(b, ":");
+    hexw(b, &head.0);
+    let _ = write!(b, ":");
+    hexw(b, &tail.0);
+}
+pub fn olk_kid(b: &mut Buf, id: &OrderId) {
+    b.n = 0;
+    let _ = write!(b, "olk:");
+    hexw(b, &id.0);
+    mark(b);
+}
+/// round 16: `olk:<order id>:<prev id | ->:<next id | ->` -- a live order's FIFO neighbours in its level
+pub fn olk_leaf(b: &mut Buf, id: &OrderId, prev: Option<OrderId>, next: Option<OrderId>) {
+    olk_kid(b, id);
+    let _ = write!(b, ":");
+    idw(b, prev);
+    let _ = write!(b, ":");
+    idw(b, next);
 }
 pub fn bmp_kid(b: &mut Buf, m: MarketId, side: u8, d: u8, prefix: u64) {
     b.n = 0;
@@ -376,8 +403,12 @@ fn s_leaves_with(s: &ChainState, push: &mut dyn FnMut(&Buf)) {
         let mut bm: BTreeMap<(u8, u8, u64), [u8; 32]> = BTreeMap::new();
         for (side, price, ids) in book.sl_levels() {
             let sd = sides(side);
-            lvl_leaf(&mut b, *m, sd, price, &ids);
+            lvl_leaf(&mut b, *m, sd, price, ids[0], ids[ids.len() - 1]);
             push(&b);
+            for (k, id) in ids.iter().enumerate() {
+                olk_leaf(&mut b, id, if k > 0 { Some(ids[k - 1]) } else { None }, ids.get(k + 1).copied());
+                push(&b);
+            }
             let u = ubias(price);
             for d in 0..8u8 {
                 mset(bm.entry((sd, d, pfx(u, d))).or_insert([0; 32]), byte_at(u, d), true);
@@ -1206,24 +1237,30 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
             return Err(ST_SL_BADWIT);
         }
     }
-    // levels (complete: every live order of the level, FIFO)
+    // levels (round 16, linked FIFO): the level's ends (head, tail) + SOME of its live orders, each with its FIFO links
+    // (prev, next), sorted by seq (= FIFO order within a level: an order rests at its placement unit, seqs grow)
     let n = bad!(r.u16()) as usize;
     if n > SL_MAX_LEVELS {
         return Err(ST_SL_BADWIT);
     }
+    let oid_opt = |x: H| if x == [0u8; 32] { None } else { Some(OrderId(x)) };
     for _ in 0..n {
         let m = MarketId(bad!(r.u32()));
         let sd = bad!(r.u8());
         let price = bad!(r.i64());
         let side = bad!(Side::from_u8(sd));
+        let head = OrderId(bad!(r.h32()));
+        let tail = OrderId(bad!(r.h32()));
         let k = bad!(r.u16()) as usize;
-        if k == 0 || k > SL_MAX_LEVEL_ORDERS || sl.levels.contains_key(&(m.0, sd, price)) {
+        if k > SL_MAX_LEVEL_ORDERS || sl.levels.contains_key(&(m.0, sd, price)) || head.0 == [0u8; 32] || tail.0 == [0u8; 32] {
             return Err(ST_SL_BADWIT);
         }
-        let mut ids = Vec::with_capacity(k);
         if sl.oloc.len() + k > SL_MAX_ORDERS {
             return Err(ST_SL_BADWIT);
         }
+        lvl_leaf(&mut b, m, sd, price, head, tail);
+        sl.check(&b, true)?;
+        let mut los: Vec<(OrderId, Option<OrderId>, Option<OrderId>, u64)> = Vec::with_capacity(k);
         for _ in 0..k {
             let o = Order {
                 id: OrderId(bad!(r.h32())),
@@ -1239,18 +1276,38 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
                 isolated: bad!(r.bool()),
                 margin_left: bad!(r.u64()),
             };
-            if o.remaining == 0 || sl.oloc.contains_key(&o.id) {
+            let prev = oid_opt(bad!(r.h32()));
+            let next = oid_opt(bad!(r.h32()));
+            if o.remaining == 0 || sl.oloc.contains_key(&o.id) || los.last().is_some_and(|x| x.3 >= o.seq) {
+                return Err(ST_SL_BADWIT);
+            }
+            // the ends: no prev <=> the head, no next <=> the tail
+            if (prev.is_none() != (o.id == head)) || (next.is_none() != (o.id == tail)) {
                 return Err(ST_SL_BADWIT);
             }
             wit::ord_leaf(&mut b, &o);
             sl.check(&b, true)?;
+            olk_leaf(&mut b, &o.id, prev, next);
+            sl.check(&b, true)?;
             sl.oloc.insert(o.id, (m.0, sd, price, o.account));
-            ids.push(o.id);
+            los.push((o.id, prev, next, o.seq));
             s.book_mut(m).sl_restore(o);
         }
-        lvl_leaf(&mut b, m, sd, price, &ids);
-        sl.leaf_hashes += k as u64 / 2; // ids digest (64 B per 2 ids ~ one compression each)
-        sl.check(&b, true)?;
+        // a link between two loaded orders must agree with their (seq = FIFO) order
+        for (i, (_, _, nx, _)) in los.iter().enumerate() {
+            if let Some(q) = nx {
+                if let Some(jq) = los.iter().position(|x| x.0 == *q) {
+                    if jq <= i || los[jq].1 != Some(los[i].0) {
+                        return Err(ST_SL_BADWIT);
+                    }
+                }
+            }
+        }
+        let bk = s.book_mut(m);
+        bk.sl.lv.insert((sd, price), (Some(head), Some(tail)));
+        for (id, p, nx, _) in &los {
+            bk.sl.lk.insert(*id, (*p, *nx));
+        }
         sl.levels.insert((m.0, sd, price), true);
     }
     // order ids proven absent
@@ -1424,6 +1481,10 @@ fn load(w: &[u8], height: Option<u64>) -> Result<(Sl, ChainState, H), u32> {
         return Err(ST_SL_BADWIT);
     }
     sl.cmt0 = s.commits.keys().copied().collect();
+    // round 16: every loaded book is a partial book (the walk checks its FIFO links)
+    for bk in s.books.values_mut() {
+        bk.sl.on = true;
+    }
     let _ = s.take_dirty();
     // the session's books carry the peek log; start empty
     Ok((sl, s, claimed))
@@ -1451,10 +1512,10 @@ fn need_acct(sl: &Sl, s: &ChainState, a: &AccountId) -> Result<(), Need> {
 }
 fn need_aord_full(sl: &Sl, a: &AccountId) -> Result<(), Need> {
     let Some((es, _)) = sl.aord.get(a) else { return Err(Need::Aord(*a)) };
-    for (oid, (m, sd, p)) in es {
-        if !sl.levels.contains_key(&(*m, *sd, *p)) {
-            let _ = oid;
-            return Err(Need::Level(*m, *sd, *p));
+    for (oid, (m, _sd, _p)) in es {
+        // round 16: the order itself (with its level's ends and its links), not its whole level
+        if !sl.oloc.contains_key(oid) {
+            return Err(Need::Order(*oid));
         }
         if !sl.markets.contains_key(m) {
             return Err(Need::Market(*m));
@@ -1478,10 +1539,12 @@ fn trie_has(sl: &Sl, m: u32, sd: u8, price: Price) -> Result<bool, Need> {
 }
 /// Walk check: every non-empty level of side `sd` (per the trie at unit start) that is better than
 /// or equal to `frontier` (None = the whole side) must be a known (complete) level.
-fn walk_check(sl: &Sl, m: u32, sd: u8, frontier: Option<Price>) -> Result<(), Need> {
+fn walk_check(sl: &Sl, bk: &crate::book::OrderBook, m: u32, sd: u8, frontier: Option<Price>) -> Result<(), Need> {
     // bids: best = highest u (children high -> low); asks: lowest first
     let fu = frontier.map(ubias);
-    fn go(sl: &Sl, m: u32, sd: u8, d: u8, prefix: u64, fu: Option<u64>) -> Result<bool, Need> {
+    // round 16: the levels the walk examined (their heads were checked by the book, OrderBook::sl_ok / sl_drained)
+    let seen: BTreeSet<u64> = bk.peeks.0.iter().filter_map(|(_, p)| p.map(ubias)).collect();
+    fn go(sl: &Sl, bk: &crate::book::OrderBook, seen: &BTreeSet<u64>, m: u32, sd: u8, d: u8, prefix: u64, fu: Option<u64>) -> Result<bool, Need> {
         let map = bmp_get(sl, m, sd, d, prefix)?.map;
         let order: &mut dyn Iterator<Item = u16> = if sd == 0 { &mut (0..256u16).rev() } else { &mut (0..256u16) };
         for c in order {
@@ -1506,13 +1569,42 @@ fn walk_check(sl: &Sl, m: u32, sd: u8, frontier: Option<Price>) -> Result<(), Ne
                 if !sl.levels.contains_key(&(m, sd, q)) {
                     return Err(Need::Level(m, sd, q));
                 }
-            } else if !go(sl, m, sd, d + 1, np, fu)? {
+                // round 16 (linked FIFO): a level strictly better than the frontier that the walk never examined looked
+                // empty in memory: it must really be empty (its whole start chain loaded and gone)
+                if fu != Some(np) && !seen.contains(&np) {
+                    let mut x = bk.sl.lv.get(&(sd, q)).and_then(|e| e.0);
+                    while let Some(o) = x {
+                        match bk.sl.lk.get(&o) {
+                            Some(&(_, nx)) if !bk.get(o).is_some_and(|z| z.remaining > 0) => x = nx,
+                            _ => return Err(Need::Order(o)),
+                        }
+                    }
+                }
+            } else if !go(sl, bk, seen, m, sd, d + 1, np, fu)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
-    go(sl, m, sd, 0, 0, fu).map(|_| ())
+    go(sl, bk, &seen, m, sd, 0, 0, fu).map(|_| ())
+}
+/// round 16: is the level non-empty now? Its start chain minus the orders gone in this segment (an order that was not
+/// loaded is live: nothing in the segment could remove it), plus the live orders created in the segment.
+fn lvl_live(bk: &crate::book::OrderBook, sd: u8, p: Price) -> bool {
+    let live = |o: &OrderId| bk.get(*o).is_some_and(|z| z.remaining > 0);
+    let mut x = bk.sl.lv.get(&(sd, p)).and_then(|e| e.0);
+    while let Some(o) = x {
+        match bk.sl.lk.get(&o) {
+            None => return true,
+            Some(&(_, nx)) => {
+                if live(&o) {
+                    return true;
+                }
+                x = nx;
+            }
+        }
+    }
+    bk.sl_mem_level(Side::from_u8(sd).unwrap(), p).iter().any(|id| !bk.sl.lk.contains_key(id) && live(id))
 }
 /// set / clear the trie bits of one level (all 8 path nodes must be loaded)
 fn trie_set(sl: &mut Sl, m: u32, sd: u8, price: Price, v: bool) -> Result<(), Need> {
@@ -1621,17 +1713,7 @@ fn pre(sl: &Sl, s: &ChainState, op: &crate::BatchOp, author: AccountId, x: Optio
                 return Err(Ok(Need::Light(INSURANCE_ACCOUNT)));
             }
             need_aord_full(sl, &author).map_err(Ok)?;
-            // R14-M1 rule input: the own-side level a GTC limit may join must be known (or absent per the trie), so
-            // the level-size rule below never depends on which extra records the witness carries
-            if let Place { side, typ: OrderType::Limit, tif: TimeInForce::Gtc, price, .. } = *op {
-                if price != 0 && !sl.levels.contains_key(&(market, side.as_u8(), price)) {
-                    match trie_has(sl, market, side.as_u8(), price) {
-                        Err(n) => return Err(Ok(n)),
-                        Ok(true) => return Err(Ok(Need::Level(market, side.as_u8(), price))),
-                        Ok(false) => {}
-                    }
-                }
-            }
+            // (round 16: the R14-M1 level-size rule and its own-side level input are gone with linked-FIFO levels)
             // resting_open_im walks every book of the state and reads its market's params
             for m in s.books.keys() {
                 if !sl.markets.contains_key(&m.0) {
@@ -1863,10 +1945,8 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 if let Some((es, _)) = sl.aord.get(&a) {
                     expo.extend(es.values().map(|e| e.0));
                 }
-                let lvl_full = typ == OrderType::Limit
-                    && tif == TimeInForce::Gtc
-                    && st.books.get(&m).and_then(|b| b.sl_level(side, price)).is_some_and(|v| v.len() >= SL_MAX_LEVEL_ORDERS);
-                if (!has && expo.len() >= SL_MAX_POS) || lvl_full {
+                let _ = (side, typ, tif, price);
+                if !has && expo.len() >= SL_MAX_POS {
                     out.rejected += 1;
                     ev(crate::STATE_CAP_CODE);
                     continue;
@@ -1915,14 +1995,22 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         }
         for b in eng.state.books.values_mut() {
             b.peeks.0.clear();
+            b.sl.short = None;
         }
         let res = crate::dispatch(&mut eng, &op, &accts, crate::Uid { v2, at: uid_base + i * 8 }, seq, &ext, rd, false);
         // ---- post-unit guards (on the outcome, applied or rolled back) ----
         let post = (|| -> Result<(), Need> {
             // walk check
             for (m, b) in &eng.state.books {
+                // round 16: the walk stopped at an order whose FIFO predecessors are not all loaded (or an unknown level)
+                if let Some(sh) = b.sl.short {
+                    return Err(match sh {
+                        crate::book::SlShort::Order(o) => Need::Order(o),
+                        crate::book::SlShort::Level(sd, p) => Need::Level(m.0, sd, p),
+                    });
+                }
                 if let Some((ts, last)) = b.peeks.0.last() {
-                    walk_check(&sl, m.0, ts.opposite().as_u8(), *last)?;
+                    walk_check(&sl, b, m.0, ts.opposite().as_u8(), *last)?;
                 }
             }
             // round 15: a withdrawal record can only appear for a loaded set (the author's, pre); catch-all
@@ -1980,6 +2068,10 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                         return Err(Need::Level(mm, sd, p));
                     }
                     sl.levels.insert((mm, sd, p), false);
+                    // round 16: proven absent at start -> known, empty ends
+                    let bk = eng.state.book_mut(MarketId(mm));
+                    bk.sl.on = true;
+                    bk.sl.lv.insert((sd, p), (None, None));
                 }
                 lv.insert((mm, sd, p));
                 let live_now = eng.state.books.get(m).and_then(|b| b.get(*oid)).is_some_and(|o| o.remaining > 0);
@@ -1996,7 +2088,7 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
                 sl.oloc.entry(*oid).or_insert((mm, sd, p, acc));
             }
             for (mm, sd, p) in lv {
-                let now = eng.state.books.get(&MarketId(mm)).and_then(|b| b.sl_level(Side::from_u8(sd).unwrap(), p)).is_some();
+                let now = eng.state.books.get(&MarketId(mm)).is_some_and(|b| lvl_live(b, sd, p));
                 let was = sl.levels[&(mm, sd, p)];
                 if now != was {
                     trie_set(&mut sl, mm, sd, p, now)?;
@@ -2119,17 +2211,82 @@ fn end_root(sl: &mut Sl, s: &ChainState, dbg_puts: &mut Vec<(H, H)>, dbg_dels: &
             None => dels.push(wit::ord_key(oid)),
         }
     }
-    // levels
-    for ((m, sd, p), _) in &sl.levels {
-        match s.books.get(&MarketId(*m)).and_then(|bk| bk.sl_level(Side::from_u8(*sd).unwrap(), *p)) {
-            Some(ids) => {
-                lvl_leaf(&mut b, MarketId(*m), *sd, *p, &ids);
-                sl.leaf_hashes += ids.len() as u64 / 2;
+    // levels (round 16, linked FIFO): new ends, and the links of every loaded / created order whose neighbours changed.
+    // An order the witness did not load is live (no unit of the segment could reach it); one whose links change (the
+    // neighbour of a removed order, a new head, the tail a new order is appended to) must be loaded -> Need::Order.
+    let mut by_lvl: BTreeMap<(u32, u8, Price), Vec<OrderId>> = BTreeMap::new();
+    for (oid, (m, sd, p, _)) in &sl.oloc {
+        by_lvl.entry((*m, *sd, *p)).or_default().push(*oid);
+    }
+    for (m, sd, p) in sl.levels.keys() {
+        let Some(bk) = s.books.get(&MarketId(*m)) else { continue };
+        let side = Side::from_u8(*sd).unwrap();
+        let live = |o: &OrderId| bk.get(*o).is_some_and(|z| z.remaining > 0);
+        let lk = &bk.sl.lk;
+        let (h0, t0) = bk.sl.lv.get(&(*sd, *p)).copied().unwrap_or((None, None));
+        let news: Vec<OrderId> = bk.sl_mem_level(side, *p).into_iter().filter(|id| !lk.contains_key(id) && live(id)).collect();
+        // first order at or after / before x on the start chain that is still live (an unloaded one is live)
+        let fwd = |mut x: Option<OrderId>| -> Option<OrderId> {
+            while let Some(o) = x {
+                match lk.get(&o) {
+                    Some(&(_, nx)) if !live(&o) => x = nx,
+                    _ => return Some(o),
+                }
+            }
+            None
+        };
+        let back = |mut x: Option<OrderId>| -> Option<OrderId> {
+            while let Some(o) = x {
+                match lk.get(&o) {
+                    Some(&(pv, _)) if !live(&o) => x = pv,
+                    _ => return Some(o),
+                }
+            }
+            None
+        };
+        let hh = fwd(h0);
+        let tt = back(t0);
+        let need = |o: Option<OrderId>| -> Result<(), Need> {
+            match o {
+                Some(x) if !lk.contains_key(&x) => Err(Need::Order(x)),
+                _ => Ok(()),
+            }
+        };
+        if hh != h0 {
+            need(hh)?;
+        }
+        if !news.is_empty() {
+            need(tt)?;
+        }
+        for o in by_lvl.get(&(*m, *sd, *p)).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let Some(&(pv, nx)) = lk.get(o) else { continue }; // created in the segment: below
+            if !live(o) {
+                olk_kid(&mut b, o);
+                dels.push(kid_key(&b));
+                need(back(pv))?;
+                need(fwd(nx))?;
+            } else {
+                let fp = back(pv);
+                let fnx = fwd(nx).or_else(|| news.first().copied());
+                olk_leaf(&mut b, o, fp, fnx);
                 puts.push(kh(&b));
             }
-            None => {
-                lvl_kid(&mut b, MarketId(*m), *sd, *p);
-                dels.push(kid_key(&b));
+        }
+        for (i, o) in news.iter().enumerate() {
+            let pv = if i == 0 { tt } else { Some(news[i - 1]) };
+            olk_leaf(&mut b, o, pv, news.get(i + 1).copied());
+            puts.push(kh(&b));
+        }
+        match (hh.or(news.first().copied()), news.last().copied().or(tt)) {
+            (Some(h), Some(t)) => {
+                lvl_leaf(&mut b, MarketId(*m), *sd, *p, h, t);
+                puts.push(kh(&b));
+            }
+            _ => {
+                if h0.is_some() {
+                    lvl_kid(&mut b, MarketId(*m), *sd, *p);
+                    dels.push(kid_key(&b));
+                }
             }
         }
     }
@@ -2278,11 +2435,8 @@ pub fn migrate(rd: &mut dyn FnMut(u32) -> u32, expect: Option<&(H, u32)>, fresh:
             for (id, a) in st.accounts.iter() {
                 expo.entry(*id).or_default().extend(a.positions.keys().map(|m| m.0));
             }
+            // (round 16: no level-size bound -- linked-FIFO levels are never loaded whole; R15-M1 lifted)
             for (m, bk) in &st.books {
-                if bk.sl_levels().iter().any(|(_, _, ids)| ids.len() > SL_MAX_LEVEL_ORDERS) {
-                    o.status = ST_SL_MIG_BOUNDS;
-                    return o;
-                }
                 for od in bk.live_orders() {
                     expo.entry(od.account).or_default().insert(m.0);
                 }
@@ -2323,6 +2477,8 @@ pub struct WitBuilder<'a> {
     pub root: H,
     /// round 16: the run's engine height (height hook) -- a commit index entry is live iff ttl >= it
     pub live_h: core::cell::Cell<u64>,
+    /// round 16 (adversarial tests only): send level records WITHOUT their head order (unless needed by id)
+    pub t_omit_head: core::cell::Cell<bool>,
 }
 fn put_params(o: &mut Vec<u8>, p: &MarketParams) {
     o.extend_from_slice(&p.symbol);
@@ -2353,7 +2509,7 @@ impl<'a> WitBuilder<'a> {
         let root = t.root();
         let leaves = all.iter().map(|x| (x.0, x.1)).collect();
         let strs = all.into_iter().map(|x| (x.2, x.3)).collect();
-        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height) }
+        WitBuilder { s, leaves, strs, root, live_h: core::cell::Cell::new(s.height), t_omit_head: core::cell::Cell::new(false) }
     }
     fn level_of(&self, oid: &OrderId) -> Option<(u32, u8, Price)> {
         for (m, b) in &self.s.books {
@@ -2375,6 +2531,8 @@ impl<'a> WitBuilder<'a> {
         let mut bmps: BTreeSet<(u32, u8, u8, u64)> = BTreeSet::new();
         let mut ordx: BTreeSet<OrderId> = BTreeSet::new();
         let mut paths: BTreeSet<H> = BTreeSet::new();
+        // round 16: the orders to send per level (a level need sends its head)
+        let mut lsel: BTreeMap<(u32, u8, Price), BTreeSet<OrderId>> = BTreeMap::new();
         let mut perp = false;
         let mut gnons: BTreeSet<AccountId> = BTreeSet::new();
         let mut xsrcs: BTreeSet<AccountId> = BTreeSet::new();
@@ -2400,6 +2558,7 @@ impl<'a> WitBuilder<'a> {
                 Need::Order(o) => match self.level_of(&o) {
                     Some(l) => {
                         levels.insert(l);
+                        lsel.entry(l).or_default().insert(o);
                     }
                     None => {
                         ordx.insert(o);
@@ -2581,12 +2740,18 @@ impl<'a> WitBuilder<'a> {
         for (m, sd, p) in &levels {
             let bk = &s.books[&MarketId(*m)];
             let ids = bk.sl_level(Side::from_u8(*sd).unwrap(), *p).unwrap();
+            let sel = lsel.get(&(*m, *sd, *p));
             rec.extend_from_slice(&m.to_le_bytes());
             rec.push(*sd);
             rec.extend_from_slice(&p.to_le_bytes());
-            rec.extend_from_slice(&(ids.len() as u16).to_le_bytes());
-            for id in &ids {
-                let o2 = bk.get(*id).unwrap();
+            rec.extend_from_slice(&ids[0].0);
+            rec.extend_from_slice(&ids[ids.len() - 1].0);
+            // the head + the selected orders, FIFO order, each with its links
+            let pick: Vec<usize> = (0..ids.len()).filter(|k| (*k == 0 && !self.t_omit_head.get()) || sel.is_some_and(|x| x.contains(&ids[*k]))).collect();
+            rec.extend_from_slice(&(pick.len() as u16).to_le_bytes());
+            for k in pick {
+                let id = ids[k];
+                let o2 = bk.get(id).unwrap();
                 rec.extend_from_slice(&o2.id.0);
                 rec.extend_from_slice(&o2.account.0);
                 rec.push(o2.typ.as_u8());
@@ -2596,7 +2761,11 @@ impl<'a> WitBuilder<'a> {
                 rec.extend_from_slice(&o2.seq.to_le_bytes());
                 rec.push(o2.isolated as u8);
                 rec.extend_from_slice(&o2.margin_left.to_le_bytes());
-                keys.insert(wit::ord_key(id));
+                rec.extend_from_slice(&if k > 0 { ids[k - 1].0 } else { [0u8; 32] });
+                rec.extend_from_slice(&ids.get(k + 1).map(|x| x.0).unwrap_or([0u8; 32]));
+                keys.insert(wit::ord_key(&id));
+                olk_kid(&mut b, &id);
+                keys.insert(kid_key(&b));
             }
             lvl_kid(&mut b, MarketId(*m), *sd, *p);
             keys.insert(kid_key(&b));

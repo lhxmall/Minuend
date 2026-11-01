@@ -53,7 +53,40 @@ pub struct OrderBook {
     /// loop round 14 (feature `stateless`): heads examined by `submit_inner` (taker side, head price or
     /// None = side empty), for the stateless guest's walk check. Not state: equal / cloned as empty.
     pub peeks: PeekLog,
+    /// loop round 16 (feature `stateless`, linked-FIFO levels): the FIFO links / level ends of the orders and levels the
+    /// witness loaded, and what the matching walk found missing. Not state (equal / never compared).
+    #[cfg(feature = "stateless")]
+    pub sl: SlLinks,
 }
+
+/// loop round 16: partial levels. A level is loaded as its ends (head, tail) plus SOME of its orders, each with its FIFO
+/// links (prev, next) as of segment start. The walk may take an in-memory order as the level's head only if every FIFO
+/// predecessor of it is loaded and gone (filled / cancelled in this segment) back to the level's start head; an order
+/// created in this segment only if everything present at start is gone. Otherwise the walk stops and records `short`.
+#[cfg(feature = "stateless")]
+#[derive(Debug, Default, Clone)]
+pub struct SlLinks {
+    /// set by the stateless loader: the book holds a PARTIAL state (session / reference books: off, no check)
+    pub on: bool,
+    pub lk: BTreeMap<OrderId, (Option<OrderId>, Option<OrderId>)>,
+    /// known levels: (side, price) -> (head, tail) at segment start ((None, None) = proven absent)
+    pub lv: BTreeMap<(u8, Price), (Option<OrderId>, Option<OrderId>)>,
+    pub short: Option<SlShort>,
+}
+#[cfg(feature = "stateless")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlShort {
+    Order(OrderId),
+    Level(u8, Price),
+}
+#[cfg(feature = "stateless")]
+impl PartialEq for SlLinks {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+#[cfg(feature = "stateless")]
+impl Eq for SlLinks {}
 
 /// loop round 14: the head-walk log (never part of book equality or snapshots).
 #[derive(Debug, Default)]
@@ -123,7 +156,69 @@ impl OrderBook {
             arr: BTreeMap::new(),
             next_arr: 0,
             peeks: PeekLog::default(),
+            #[cfg(feature = "stateless")]
+            sl: SlLinks::default(),
         }
+    }
+    /// loop round 16: may `id` (the first live in-memory order of level (side, price)) be taken as the level's head?
+    #[cfg(feature = "stateless")]
+    fn sl_ok(&mut self, side: Side, price: Price, id: OrderId) -> bool {
+        if !self.sl.on {
+            return true;
+        }
+        let sd = side.as_u8();
+        let Some(&(_, tail0)) = self.sl.lv.get(&(sd, price)) else {
+            self.sl.short = Some(SlShort::Level(sd, price));
+            return false;
+        };
+        // predecessors at segment start: the loaded order's prev link, or (an order created in this segment) the start tail
+        let mut p = match self.sl.lk.get(&id) {
+            Some(&(prev, _)) => prev,
+            None => tail0,
+        };
+        while let Some(x) = p {
+            match self.sl.lk.get(&x) {
+                Some(&(prev, _)) if !self.orders.get(&x).is_some_and(|o| o.remaining > 0) => p = prev,
+                _ => {
+                    self.sl.short = Some(SlShort::Order(x));
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    /// loop round 16: the walk emptied level (side, price) in memory -- the level is really empty only if its whole start
+    /// chain is loaded and gone; otherwise record the first order still there (not loaded) as missing
+    #[cfg(feature = "stateless")]
+    fn sl_drained(&mut self, side: Side, price: Price) {
+        if !self.sl.on || self.sl.short.is_some() {
+            return;
+        }
+        let sd = side.as_u8();
+        let Some(&(h0, _)) = self.sl.lv.get(&(sd, price)) else {
+            self.sl.short = Some(SlShort::Level(sd, price));
+            return;
+        };
+        let mut x = h0;
+        while let Some(o) = x {
+            match self.sl.lk.get(&o) {
+                Some(&(_, nx)) if !self.orders.get(&o).is_some_and(|z| z.remaining > 0) => x = nx,
+                _ => {
+                    self.sl.short = Some(SlShort::Order(o));
+                    return;
+                }
+            }
+        }
+    }
+    /// loop round 16: the order ids of one level in memory (loaded + created), arrival order, live or not
+    #[cfg(feature = "stateless")]
+    pub fn sl_mem_level(&self, side: Side, price: Price) -> Vec<OrderId> {
+        match side {
+            Side::Bid => self.bids.get(&Reverse(price)),
+            Side::Ask => self.asks.get(&price),
+        }
+        .map(|l| l.values().copied().collect())
+        .unwrap_or_default()
     }
 
     /// loop round 14 (stateless loader): append a verified live order at the back of its level.
@@ -848,7 +943,13 @@ impl OrderBook {
             let price = *self.asks.keys().next()?;
             while let Some(id) = self.asks.get(&price).and_then(|dq| dq.values().next().copied()) {
                 match self.orders.get(&id) {
-                    Some(o) if o.remaining > 0 => return Some((id, price)),
+                    Some(o) if o.remaining > 0 => {
+                        #[cfg(feature = "stateless")]
+                        if !self.sl_ok(Side::Ask, price, id) {
+                            return None;
+                        }
+                        return Some((id, price));
+                    }
                     _ => {
                         self.save_level(j, Side::Ask, price);
                         self.save_order(j, id);
@@ -861,6 +962,8 @@ impl OrderBook {
                 }
             }
             self.save_level(j, Side::Ask, price);
+            #[cfg(feature = "stateless")]
+            self.sl_drained(Side::Ask, price);
             self.asks.remove(&price); // empty here (the loop above drained it)
         }
     }
@@ -874,7 +977,13 @@ impl OrderBook {
                 .and_then(|dq| dq.values().next().copied())
             {
                 match self.orders.get(&id) {
-                    Some(o) if o.remaining > 0 => return Some((id, price)),
+                    Some(o) if o.remaining > 0 => {
+                        #[cfg(feature = "stateless")]
+                        if !self.sl_ok(Side::Bid, price, id) {
+                            return None;
+                        }
+                        return Some((id, price));
+                    }
                     _ => {
                         self.save_level(j, Side::Bid, price);
                         self.save_order(j, id);
@@ -887,6 +996,8 @@ impl OrderBook {
                 }
             }
             self.save_level(j, Side::Bid, price);
+            #[cfg(feature = "stateless")]
+            self.sl_drained(Side::Bid, price);
             self.bids.remove(&Reverse(price));
         }
     }
@@ -900,6 +1011,10 @@ impl OrderBook {
                     if let Some(x) = x {
                         self.jlevel(j, Side::Ask, price).popped.push(x);
                     }
+                    #[cfg(feature = "stateless")]
+                    if self.asks.get(&price).is_some_and(|l| l.is_empty()) {
+                        self.sl_drained(Side::Ask, price);
+                    }
                     self.drop_empty_level(Side::Ask, price);
                 }
             }
@@ -909,6 +1024,10 @@ impl OrderBook {
                     let x = self.lvl_pop_front(Side::Bid, price);
                     if let Some(x) = x {
                         self.jlevel(j, Side::Bid, price).popped.push(x);
+                    }
+                    #[cfg(feature = "stateless")]
+                    if self.bids.get(&Reverse(price)).is_some_and(|l| l.is_empty()) {
+                        self.sl_drained(Side::Bid, price);
                     }
                     self.drop_empty_level(Side::Bid, price);
                 }

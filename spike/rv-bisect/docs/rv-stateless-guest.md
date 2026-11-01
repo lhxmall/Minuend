@@ -31,11 +31,15 @@ leaf / node hashing, same compact SMT; a kid is the identity prefix before the v
 | `apos:<acct>` | `:<flags>:<npos>:<sha256(markets, u32 LE ascending)>` flags bit0 Account entry, bit1 PERP entry, bit2 W entry | map membership + the markets with a position (which `pos:` leaves exist). Round 15: digest form (the round-14 decimal list overflowed the 384-byte leaf buffer, R15-H1; the digest also lets the insurance account be loaded light, R14-M2) |
 | `wdl:<acct>` | `:<n>:<sha256(records sorted by nonce: nonce u64, amount i128, pending u8, height u64)>` (absent = none; n ≤ 64) | round 15: the account's withdrawal records (Withdraw's nonce and pending-count rules); lazy expiry (§9) |
 | `mkx:<m>` | `:<spot>:<funding>:<symbol hex>:<last_index>:<oracled>` | MarketParams fields MNWIT1 omits; `last_index[m] != 0` and "a bonded reporter for m exists" (the fill path's mark rule, state.rs `apply_fill_pair`) |
-| `lvl:<m>:<side>:<price>` | `:<n>:<sha256(live ids, FIFO)>` | one price level, its queue order |
+| `lvl:<m>:<side>:<price>` | `:<head id>:<tail id>` (round 16; rounds 14–15: `:<n>:<sha256(live ids, FIFO)>`) | one price level: its FIFO ends only |
+| `olk:<order id>` | `:<prev id or ->:<next id or ->` | round 16 (linked-FIFO levels): a live order's neighbours in its level; the level's FIFO is the chain head → … → tail of these links, so a level is never loaded whole |
 | `bmp:<m>:<side>:<d>:<prefix>` | `:<256-bit map hex>` | price-level trie: fanout 256, depth 8 over `u = price ^ 2^63` (order-preserving); bit c of node (d, prefix) = some level has top d bytes = prefix and byte d = c. A node exists iff its map ≠ 0 |
 | `aord:<acct>` | `:<n>:<sha256(entries sorted by id)>`, entry = (order id, market, side, price) | the account's live orders across markets (≤ 64) and where they rest |
+| `perp:0` | `:<perp_supply>:<perp_burned>:<next_market_id>` (always present) | round 16: PERP ledger aggregates + the market-id cursor (GovDeposit / GovWithdraw / CreateMarket) |
+| `xsrc:<acct>` | `:1` (absent = not a source) | round 16: `external_sources` membership (a funding-market creator) |
+| `acmt:<acct>` | `:<n>:<sha256((commit hash, ttl) sorted by hash)>` (absent = none; n ≤ `SL_MAX_ACMT` 64) | round 16: the account's commit index (R7-M2 commit bond, Commit's pending count); lazy expiry like `wdl:`; live entries are checked against their `cmt:` leaves (MNWIT1 `govwit` kind), `gnon:` read as in MNWIT1 |
 
-`glob/cseq/apos/mkx/lvl/aord` are pure functions of the state; `bmp` too (the reference builder derives it from
+`glob/cseq/apos/mkx/lvl/olk/aord/perp/xsrc` are pure functions of the state; `bmp` too (the reference builder derives it from
 the levels), but the guest maintains it by **delta** (sets / clears path bits of the levels a unit created or
 emptied), so a node is updated without loading the other levels under it. Consensus change: every MNWIT root changes
 (the AA verifiers keep working — they only prove `acct:` / `pos:` / `ord:` leaves — but W<h> roots are MNWIT-S roots).
@@ -61,19 +65,28 @@ records:   glob: seq u64, height u64
                                    (round 15, R14-M2: INSURANCE_ACCOUNT only; acct: + apos: verified, no positions) }
            aord     u16 × { acct 32, n u16 × {order id 32, m u32, side u8, price i64} }   (n = 0: proven absent)
            bmp      u16 × { m u32, side u8, d u8, prefix u64, present u8, [map 32] }
-           levels   u16 × { m u32, side u8, price i64, n u16 × {id, account, typ, tif, qty, remaining, seq, iso, margin_left} }
+           levels   u16 × { m u32, side u8, price i64, head 32, tail 32,
+                            n u16 × {id, account, typ, tif, qty, remaining, seq, iso, margin_left, prev 32, next 32} }
+                    (round 16: SOME orders of the level, strictly increasing seq; zero id = no neighbour)
            ordx     u16 × { order id 32 }   (proven absent)
            wdl      u16 × { acct 32, n u8 × {nonce u64, amount i128, pending u8, height u64} }   (n = 0: proven absent; round 15)
+           perp     u8 (1: supply u128, burned u128, next_market u32)                            (round 16)
+           gnon     u16 × { acct 32, nonce u64 }                     (0: proven absent; round 16)
+           xsrc     u16 × { acct 32, present u8 }                    (round 16)
+           acmt     u16 × { acct 32, n u8 × {hash 32, ttl u64, commit_unit 32, commit_height u64, revealed u8} }
+           cmt      u16 × { hash 32, present u8, [CommitEntry] }     (round 16: a commit hash's record or its absence)
 ```
 Migration run (round 15): `[0] SL_MIG_MAGIC "MNSM"`, then the session snapshot words (snapshot.rs encoding).
 A record is never trusted: the guest re-formats the leaf strings from it, hashes them, and checks each against the
 tree (inclusion: the leaf at the key's path has that hash; exclusion: the path ends in E or in a *verified* leaf with
 another key). Absent markets / accounts prove all of their keys absent (`band/meta/mkx`, `acct/apos/cseq`). A level
-record must hold every live order of the level (`n` and the FIFO digest of `lvl:`), each with its `ord:` leaf.
+record (round 16) is checked against `lvl:` (head, tail) and carries any subset of the level's live orders, each
+verified by its `ord:` and `olk:` leaves; an order with no prev must be the head, no next the tail, and a link between
+two loaded orders must agree with their seq order (FIFO = seq order within a level). Rounds 14–15 loaded every order.
 Rejected (ST_SL_BADWIT = 12): bad tags, depth > 256, non-canonical nodes (N(E,E), N(E,L), N(L,E)), a leaf whose key
 is not on its path, root ≠ claimed root, any record that does not verify, duplicates (the same account / market /
 level / bmp node / aord twice, an order in two levels or both in a level and in `ordx`), counts above the
-per-segment limits (`SL_MAX_ACCOUNTS 4096`, `SL_MAX_MARKETS 256`, `SL_MAX_LEVELS 4096`, `SL_MAX_LEVEL_ORDERS 4096`,
+per-segment limits (`SL_MAX_ACCOUNTS 4096`, `SL_MAX_MARKETS 256`, `SL_MAX_LEVELS 4096`, `SL_MAX_LEVEL_ORDERS 4096` loaded per level record,
 `SL_MAX_ORDERS 65536` in total, `SL_MAX_BMP 16384`, `SL_MAX_TREE_NODES 2^18`, `SL_MAX_POS 64`), trailing bytes.
 
 ### 3.1 Proof verification cost
@@ -97,12 +110,13 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
 **Pre-unit (reads, from the op alone):**
 * Deposit: the author's account record (present or proven absent) and its position markets.
 * Place: author record + its position markets; the order's market (present or absent); the insurance account; the
-  author's `aord` and **every** order in it (each through its complete level) and those markets (live-order cap,
+  author's `aord` and **every** order in it (round 16: each by id with its level's ends and links) and those markets (live-order cap,
   resting IM, mode gate, QTY cap, spot-exposure rules read all own orders); every market that has a book in the
   partial state (`resting_open_im` walks all books); for a GTC limit, the own-side level at its price must be known or
-  proven empty by the trie (input of the level-size rule, §5). A funding-rate market → `ST_SL_UNSUPPORTED` (its OI
-  cap reads a global aggregate).
-* Cancel: author record, its `aord`, and the target order id: its level, or an `ordx` exclusion proof.
+  proven empty by the trie (rounds 14–15 only: input of the level-size rule, gone in round 16). A funding-rate market →
+  `ST_SL_UNSUPPORTED` (its OI cap reads a global aggregate).
+* Cancel: author record, its `aord`, and the target order id: the order (round 16: with its links; its neighbours when
+  their links change, end root) or an `ordx` exclusion proof.
 * Place (round 15): the insurance account as a **light** record suffices (the fee leg reads / writes only its
   collateral); a full record is also accepted (same result). `need_acct` refuses a light record wherever an account's
   positions are read; the end root requires the light account's membership flags unchanged and no positions.
@@ -118,7 +132,13 @@ with `ST_SL_MISSING = 13` and a `Need` (what to add):
 * *Resting*: a new resting order's level is known or proven absent by the trie (then it becomes known, empty).
 * *aord*: every account whose live-order set changed has its `aord` loaded (delta update).
 
-Unsupported ops (liquidate, oracle, governance, commit-reveal, CreateMarket, fixtures) → `ST_SL_UNSUPPORTED = 14`.
+* Round 16: GovDeposit / GovWithdraw (author record + `perp:0`), CreateMarket (`perp:0`, `xsrc:` of the creator, the new
+  market id proven absent), Commit (author record, `acmt:` + its live `cmt:` records, the commit hash's `cmt:`), Reveal
+  (the `cmt:` record; the inner op is loaded only when the reveal would consume the commit, with the inner kind's own
+  guards), `gnon:` for every governance-nonce op.
+
+Unsupported ops (liquidate / ADL, oracle report / stake / slash / funding, proposals / vote / finalize, fixtures) →
+`ST_SL_UNSUPPORTED = 14` (designs: §12).
 Withdraw is supported since round 15; the height hook runs lazily (§9).
 
 **Determinism / soundness property** (what the tests check): if a run returns status 0, its events and end root
@@ -132,10 +152,14 @@ status-0 result: every input of every rule is loaded completely (own orders, who
   market is refused (code 19) when the account already has `SL_MAX_POS = 64` markets of exposure. Without it an
   account could hold > 64 positions (markets are no longer capped), its record could never be loaded, and a resting
   order of it at the top of a book would halt that market.
-* **Per-level size cap (R14-M1)**: a GTC limit joining a level that already has `SL_MAX_LEVEL_ORDERS = 4096` live
-  orders is refused (19). Levels are loaded whole (§6), so an unbounded level would be unloadable.
+* ~~Per-level size cap (R14-M1)~~ — removed in round 16: linked-FIFO levels (§6) are never loaded whole, so a level
+  of any size is loadable; the session and the stateless image agree on a Place joining a 4 096-order level (`slcaps`).
 * The live-order cap (64 per account, upstream) bounds `aord`.
-Below the caps the session and the stateless image agree (differential tests); `slcaps` exercises both rules.
+* **Per-account commit bound (round 16)**: a Commit by an account that already has `SL_MAX_ACMT = 64` live commits is
+  refused (19) — keeps `acmt:` loadable (the session has only global commit caps).
+Below the caps the session and the stateless image agree (differential tests); `slcaps` exercises the exposure rule
+and the lifted level rule. The stateless image has **no global caps** (R16-I3): the session's market / account /
+order / commit totals are not enforced (no aggregate leaf); they matter for the session's memory, not for a witness.
 
 ## 6. Order-book matching with partial state
 
@@ -143,7 +167,16 @@ A unit carries at most one fill (round 7), but the walk may pass the account's o
 cancel-maker-continue) and a resting-type taker peeks one more head (MultiFill / non-crossing stop). The guest must
 know that no better level was left out.
 
-**Levels** are loaded whole: all live orders, FIFO, checked against `lvl:` (count + ids digest). **Navigation** uses
+**Levels** (round 16, linked FIFO): a level is its ends (`lvl:` head, tail) plus the orders a unit reaches, each with
+its `olk:` links. The book (`OrderBook::sl`, feature `stateless`) holds the start links of the loaded orders and the
+start ends of every known level; the walk may take an in-memory order as the level's head only if its whole start
+predecessor chain is loaded and gone in this segment (`sl_ok`; an order created in the segment: the whole start chain
+from the start tail); a level the walk empties in memory is really empty only if its start chain is loaded and gone
+(`sl_drained`); otherwise the unit stops with `Need::Order(first missing)`. End root: new ends, and new links for every
+loaded / created order whose neighbours changed; the neighbour of a removed order, a new head, and the tail a new order
+is appended to must be loaded (an unloaded order is live: nothing in the segment could reach it). A fill reads the
+head only, a cancel its two neighbours; the level size no longer matters. (Rounds 14–15 loaded levels whole against
+`:<n>:<digest>`.) **Navigation** uses
 the 256-ary trie over biased prices: 8 `bmp:` nodes per path. The book records each head the walk examines
 (`OrderBook::peeks`, feature `stateless`; not state, never compared / cloned). After the unit the guest enumerates the
 opposite side's trie *as of unit start* in price priority up to the last examined head F (the whole side if the walk
@@ -157,9 +190,10 @@ any price distribution, proves emptiness of a price (exclusion of a level) with 
 Boundary attacks (§9 tests): omitting the best level, hiding a level by claiming its trie node absent, dropping /
 reordering orders inside a level all fail (MISSING or BADWIT).
 
-Production refinement (not prototyped): FIFO as a linked list (`ord` link leaves + head/tail in `lvl:`) instead of
-whole levels — a fill touches the head only, a cancel its two neighbours, so a level's size stops mattering and the
-level cap can go.
+Walk check with partial levels (round 16): a level strictly better than the frontier that the walk never examined
+looked empty in memory, so its whole start chain must be loaded and gone. Adversarial cases `book:omit-head` (every
+level record without its head) and `book:drop-order-in-level` (one middle order dropped) must end MISSING or the
+reference result — never a different status-0 result.
 
 ## 7. End root
 
@@ -210,18 +244,25 @@ memory whose OUT words say status 0, start root S and end root E.
   only if `height + REPLAY_WINDOW > height` and a `wdl:` set is rewritten only when the unit changed its live set (so an
   untouched extra record never changes the root). The stateless chain's root is therefore the root of the *lazily
   committed* state, not of the session's eagerly pruned one; behaviour is identical (`slmig … 900`, lazy reference
-  model). Commits / oracle unbonding are not pruned: no op of the stateless image reads them (they need the same lazy
-  rule once supported).
+  model). Commits (round 16) use the same lazy rule: an `acmt:` entry is live while ttl ≥ height, an expired commit's
+  `cmt:` record reads as absent, and the index is rewritten only when its live set changes. Known gap (R16-I1): an
+  expired commit's `cmt:` leaf is never deleted (stale leaves accumulate; harmless for behaviour, costs tree size) — a
+  lazy delete on the next touch of the hash is the fix. Oracle unbonding needs the same rule once supported (§12).
 * **MNWIT-S genesis by migration (round 15).** Instead of (not in addition to — R15-L1) a compiled
   `MNPILOT_SL_GENESIS`, a fresh stateless image accepts one migration run `[SL_MIG_MAGIC, snapshot words]` whose digest /
   length equal the compiled-in `MNPILOT_IMPORT_DIGEST` (the export digest of the session image, chosen by governance —
-  the R4-S1 binding). It decodes the snapshot, refuses a state that violates a per-object bound (a level with > 4 096
-  orders, an account with > 64 markets of exposure: `ST_SL_MIG_BOUNDS` = 16, R15-M1), computes the MNWIT-S root over the
+  the R4-S1 binding). It decodes the snapshot, refuses a state that violates a per-object bound (an account with > 64
+  markets of exposure or > 64 live commits: `ST_SL_MIG_BOUNDS` = 16, R15-M1; the round-15 level bound of 4 096 orders is
+  lifted by linked-FIFO levels in round 16), computes the MNWIT-S root over the
   whole state and publishes it as SEG_START = SEG_END (SNAP_KIND 3); `SL_ROOT` / `SL_RUNS` (= export run + 1) start the
   lineage. Rollup integration (R15-I1): the export run's SEG_END is an MNWIT1 root, so for SNAP_KIND 3 the rollup binds the
   digest, not the root chain; the migration root is a disputable output like any other. State outside the MNWIT-S leaf
   set (oracle rings / TWAPs / unbonding, proposal voter sets / weight snapshots, perp supply, funding clocks) is not
   carried (R15-I2).
+* **Lineage export (R16-I2).** The stateless lineage has no export path yet: a session image cannot be rebuilt from a
+  stateless lineage (no MNWIT-S → snapshot run). Needed before the session image can be retired or re-entered.
+* **Rollup (round 16).** rv_rollup accepts the migration (snapshot kind 3) on the export / migration digest binding
+  (R15-I1 closed; rolltest group `r16mig`).
 
 ## 10. Measurements (box, loop round 14; logs guest-engine/results-loop14/)
 
@@ -251,17 +292,95 @@ Fixed cost ≈ 2.3 – 2.5 M steps per segment (decode, start root, end root); p
 
 ## 11. What remains (production)
 
-1. Ops (withdraw done in round 15: `wdl:`), liquidation / ADL (holders per
-   market and OI are global aggregates → per-market `oi:` leaves maintained by delta; ADL candidate selection needs
-   an ordered index like the price trie), oracle report / stake / slash (report history / TWAP leaves per (market,
-   oracle); `oracled` maintenance when bonds change), funding (OI cap + peg), governance and commit-reveal (`govwit`
-   leaves exist; `weight_snapshot` is O(holders) — needs a different snapshot design), CreateMarket.
-2. The height hook: done lazily in round 15 for withdrawals (§9); commits / oracle unbonding need the same lazy rule
-   when their ops are supported.
-3. Rollup integration: the migration run exists (round 15, §9); rv_rollup must accept SNAP_KIND 3 with the digest
-   binding instead of the root chain (R15-I1); leaves for the state a migration drops (R15-I2); DA of the witness.
-4. Linked-FIFO levels (§6) to drop whole-level loading, the level cap and the migration bound R15-M1. (The light
-   insurance record, R14-M2, is done in round 15.)
+1. Ops: liquidation / ADL, oracle report / stake / slash / funding, proposals / vote / finalize — designs in §12. Done:
+   withdraw (round 15, `wdl:`); GovDeposit / GovWithdraw / CreateMarket / Commit / Reveal (round 16, `perp:0` / `xsrc:` /
+   `acmt:`).
+2. Height hook: lazy for withdrawals (round 15) and commits (round 16); stale `cmt:` leaves are never deleted (R16-I1);
+   oracle unbonding needs the same rule (§12.1).
+3. Rollup integration: SNAP_KIND 3 digest binding done (round 16); leaves for the state a migration drops (R15-I2:
+   oracle rings / TWAPs / unbonding, proposals / voter sets / weight snapshots, funding clocks); export path of the
+   stateless lineage (R16-I2); DA of the witness. Migration cost: the guest decode rebuilds the MNWIT1 witness tree of the
+   snapshot before migrating (round-16 step 4) — a migration decode mode that skips it is round-17 work.
+4. ~~Linked-FIFO levels~~ — done in round 16 (§6): the level cap R14-M1 and the migration bound R15-M1 are gone.
 5. Operator: direct touched-set tracking instead of Need iteration; witness compression (shared path prefixes).
 6. Per-unit roots: the stateless guest returns only the segment start / end roots (the AAs bind the end root).
 7. Upstream: the leaf kinds and the guards must be mirrored by the real engine's witness code (consensus).
+8. No global caps in the stateless image (R16-I3, §5) — decide whether any session cap is a consensus rule (then it
+   needs an aggregate leaf, `perp:0`-style) or only a memory bound of the session image.
+
+## 12. Designs for the remaining ops (round 16)
+
+Principle: every rule input is either a leaf of the touched objects or an aggregate leaf maintained by delta; nothing
+iterates over all holders / all accounts. Each design states its leaves, the guards and what the operator supplies.
+
+### 12.1 Oracle: per-market report sets with a bonded-oracle epoch
+
+Session facts (state.rs `apply_report`, `stake / unstake / slash`, `prune_oracle_unbonding`): bonds are **global per
+account** (`oracle_bonds`, `oracle_unbonding`), reports per (market, oracle) (`oracle_reports` + an 8-deep
+`oracle_report_history` for slash streaks); the index is the median over reporters of m that hold a bond *now*; the
+fill path's mark rule reads "some bonded reporter of m exists" (`oracled`). A bond change (stake, slash, unbonding
+expiry) therefore changes the median input / `oracled` of every market the oracle ever reported in — a global effect,
+and the expiry happens at a height with no op touching it.
+
+| leaf | value |
+|---|---|
+| `ostk:<acct>` | `:<epoch>:<bond>:<unlock height or 0>` (absent = never bonded / slashed and cleaned) — `epoch` is a global counter value taken at each (re)bond |
+| `orm:<acct>` | `:<n>:<sha256(markets ascending)>` — the markets the oracle has a report in (≤ `SL_MAX_ORACLE_MKTS`, stateless bound) |
+| `orep:<m>` | `:<n>:<sha256(entries by oracle: oracle, price, epoch, unlock)>` — the report set of m (≤ `SL_MAX_REPORTERS`), each entry carrying a copy of its oracle's bond epoch / unlock height |
+| `ohist:<m>:<acct>` | `:<n>:<sha256(≤ 8 samples)>` — the slash-streak ring |
+| `oglob:0` | `:<next epoch>` |
+
+* An entry counts (median, `oracled`) iff its `epoch` equals the oracle's current bond epoch and `unlock == 0 ||
+  unlock > height` — evaluated from `orep:` alone, so **lazy unbonding** needs no op at the expiry height (the §9 rule).
+  Report: author's `ostk:` (bonded), `orep:<m>`, `ohist:`, `orm:` (insert m); the median reads only `orep:<m>`.
+* Stake / unstake / slash change `ostk:` and refresh the copied (epoch, unlock) in every `orep:` of the oracle's `orm:`
+  list (≤ SL_MAX_ORACLE_MKTS records) — the bonded-oracle epoch makes a slashed-then-rebonded oracle's old entries
+  count again exactly when the session would (same report kept, bond present again), via the refresh at re-bond.
+* `mkx.oracled` becomes a derived value (any counting entry in `orep:<m>`), so the fill path loads `orep:<m>` instead of
+  a flag that would go stale at an unbonding expiry.
+* Funding (OI cap, peg): per-market `oi:<m>` = `:<long_qty>:<short_qty>` maintained by delta on every position change
+  (the fill / liquidation already loads the market and both accounts); the funding-rate off-book liquidation keeps its
+  own ADL order (below).
+
+### 12.2 Liquidation / ADL: holder index by mark-independent rank
+
+Session facts (engine.rs `liquidate_book_path`): liquidation reads the target's positions, the market, its book (§6
+walk) and insurance — all loadable. The book-path ADL takes **one** counterparty per unit (round 7): the opposite-sign
+holder first in the order **|qty| descending, AccountId ascending** — a mark-independent rank. (The funding-rate
+off-book path ranks by unrealized funding cash at the close price — mark-dependent; it stays unsupported or needs a
+consensus change to a mark-independent rank.)
+
+| leaf | value |
+|---|---|
+| `adlq:<m>:<sign>:<d>:<prefix>` | 256-ary trie (like `bmp:`) over `u64::MAX − |qty|` of the holders of sign `sign` in m |
+| `adlv:<m>:<sign>:<qty>` | `:<first acct>:<last acct>` — the holders with exactly this |qty|, a list sorted by AccountId |
+| `alk:<m>:<acct>` | `:<prev acct or ->:<next acct or ->` — the holder's neighbours in its `adlv:` list |
+
+* ADL pick: the best `adlq:` level (trie walk, 8 nodes, the same walk check as §6), its first account; that account's
+  record. O(1) in the number of holders.
+* Maintenance on every position change of a non-insurance account in m (fill, liquidation, ADL, migration): remove
+  from the old (sign, |qty|) list (its two neighbours' links), insert into the new one — a sorted insert is verified
+  with the two neighbours (`pred < acct < succ`, `pred.next == succ`; the operator supplies them), plus the `adlq:`
+  path bits of a list that appeared / emptied. Same cost class as resting / cancelling an order.
+* Differential test: session ADL counterparty == index head for every Liquidate in liqfuzz / sladv.
+
+### 12.3 Governance: per-account PERP balance checkpoints instead of weight_snapshot
+
+Session facts (engine.rs propose / vote): a proposal copies every non-zero PERP balance (`weight_snapshot`,
+O(holders)) at creation; a vote weighs the voter's snapshotted balance; finalize compares tallies after the deadline
+(seq-based, `PROPOSAL_DURATION_SEQS`).
+
+| leaf | value |
+|---|---|
+| `pchk:<acct>` | `:<n>:<sha256((seq, balance) ascending)>` — the balance *before* each change at seq (≤ `SL_MAX_PCHK`; entries older than the oldest live proposal's creation seq are pruned lazily, keeping the last one) |
+| `prop:<id>` (MNWIT1 `govwit`) | + `:<created_seq>` |
+| `pvote:<id>:<acct>` | `:<weight>:<choice>` (absent = not voted) |
+| `ptally:<id>` | `:<yes>:<no>` |
+
+* Vote: the voter's `pchk:` (weight = balance as of `created_seq`: the entry list answers it), `pvote:` absent →
+  present, `ptally:` + `prop:`. Finalize: `prop:` + `ptally:` — O(1). Propose: `prop:` absent, author's `gnon:`.
+* Every PERP balance change (GovDeposit / GovWithdraw / migration) appends a checkpoint to the account's `pchk:` (the
+  record is loaded anyway). The weight equals the session's snapshot for every voter (balance at the creation seq),
+  so no rule change; differential tests compare every vote's weight and every tally.
+* Bound: an account changing its PERP balance more than SL_MAX_PCHK times inside the lifetime of a live proposal is
+  refused (stateless rule, like SL_MAX_ACMT).

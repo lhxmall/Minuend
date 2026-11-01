@@ -944,6 +944,16 @@ pub fn sladv_m(n: u64, ord: u32, mode: &str) -> String {
                     a.rec("book:hide-level-in-trie", r, &ox, &evx, true);
                 }
             }
+            // A17 (round 16, linked FIFO): every level record without its head order (a later order of the level, loaded
+            // by id, must never be taken as the head: OrderBook::sl_ok needs its whole predecessor chain); and the
+            // islands of a level only (own orders / cancel targets) -- status 0 must still be the reference result
+            {
+                b.t_omit_head.set(true);
+                let wf = b.build(&needs);
+                b.t_omit_head.set(false);
+                let (ox, evx) = run_sl(&r.seg, &wf);
+                a.rec("book:omit-head", r, &ox, &evx, false);
+            }
             // A10 duplicate record: the same account twice (patch the count) -> BADWIT
             {
                 let one: BTreeSet<Need> = [Need::Account(mnpilot::types::INSURANCE_ACCOUNT)].into_iter().collect();
@@ -1193,8 +1203,8 @@ pub fn slcaps() -> String {
     let ops = [
         op(0, 0, false, MID - 50 * DOLLAR, 66, 1), // A: new market 66 beyond the exposure cap -> 19
         op(0, 0, false, MID - 50 * DOLLAR, 2, 1),  // A: market 2 (holds a position) -> not 19
-        op(1, 1, false, px, 1, 1),                 // B: GTC ask joining the full level -> 19
-        op(1, 1, false, px + DOLLAR, 1, 1),        // B: next price -> rests (client_seq 1 again: the 19 consumed none)
+        op(1, 1, false, px, 1, 1),                 // B: GTC ask joining the 4096-order level -> rests (round 16: no level cap)
+        op(1, 1, false, px + DOLLAR, 1, 2),        // B: next price -> rests
         op(2, 0, true, px, 1, 1),                  // C: IOC bid at P -> one fill with the level head
     ];
     let mut w = vec![mnpilot::MAGIC, table.len() as u32, ops.len() as u32, 0];
@@ -1232,7 +1242,7 @@ pub fn slcaps() -> String {
         && units.len() == 5
         && units[0] == vec![mnpilot::STATE_CAP_CODE]
         && units[1] != vec![mnpilot::STATE_CAP_CODE]
-        && units[2] == vec![mnpilot::STATE_CAP_CODE]
+        && units[2][0] == EV_APPLIED
         && units[3][0] == EV_APPLIED
         && units[4][0] == EV_APPLIED | 1;
     format!(
@@ -1631,9 +1641,10 @@ pub fn slpoc15() -> String {
         };
         let (st_over, _) = mk(sl::SL_MAX_LEVEL_ORDERS + 1);
         let (st_at, root_at) = mk(sl::SL_MAX_LEVEL_ORDERS);
-        let ok = st_over == sl::ST_SL_MIG_BOUNDS && st_at == 0 && root_at;
+        // round 16: linked-FIFO levels lift the bound -- both migrate
+        let ok = st_over == 0 && st_at == 0 && root_at;
         all_ok &= ok;
-        res.push(format!("{{\"case\":\"P5 R15-M1 migration bounds: level of 4097 refused, 4096 accepted\",\"ok\":{},\"status_over\":{},\"status_at\":{},\"root_at_ok\":{}}}", ok, st_over, st_at, root_at));
+        res.push(format!("{{\"case\":\"P5 R15-M1 lifted (round 16): levels of 4097 and 4096 orders both migrate\",\"ok\":{},\"status_over\":{},\"status_at\":{},\"root_at_ok\":{}}}", ok, st_over, st_at, root_at));
     }
     format!("{{\"ok\":{},\"cases\":[{}]}}", all_ok, res.join(",\n"))
 }
@@ -1958,13 +1969,27 @@ pub fn slperpstat(n: u64, ord: u32) -> String {
 
 /// round 16 debug: for the perp workload, locate the first unit of every segment that is UNSUPPORTED or whose
 /// operator does not converge (prefix bisection from the same pre-state); prints the op words and the last need
-pub fn sldbg(n: u64, ord: u32) -> String {
+pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
     let mut out = Vec::new();
+    let cutp = |seg: &[u32], k: usize| -> Vec<u32> {
+        if seg[0] == mnpilot::MAGIC2 {
+            crate::gov::cut_v2(seg, 0, k)
+        } else {
+            let base = 4 + 8 * seg[1] as usize;
+            let mut v = seg[..base + 8 * k].to_vec();
+            v[2] = k as u32;
+            v
+        }
+    };
     for s in 1..=n {
-        let w = perp_batch(s, ord);
+        let w = match mode {
+            "perp" => perp_batch(s, ord),
+            "wd" => wd_batch(s, ord),
+            _ => gen(s, 4 + (s % 9) as u32, 1 + (s % 25) as u32, 1 + (s % 3) as u32, ord, s % 2 == 0).0,
+        };
         let mut rng = Rng(s.wrapping_mul(0x51_7CC1_B727_220A) | 1);
         let size = 1 + rng.below(200) as u32;
-        let refs = session_refs_v2(&w, size);
+        let refs = if mode == "perp" { session_refs_v2(&w, size) } else { session_refs(&w, size) };
         for (k, r) in refs.iter().enumerate() {
             let b = WitBuilder::new(&r.pre);
             let res = operate(&b, &r.seg);
@@ -1980,15 +2005,33 @@ pub fn sldbg(n: u64, ord: u32) -> String {
             let mut hi = units;
             while hi - lo > 1 {
                 let mid = (lo + hi) / 2;
-                let sw = crate::gov::cut_v2(&r.seg, 0, mid);
+                let sw = cutp(&r.seg, mid);
                 let ok = matches!(operate(&b, &sw), Ok((_, _, ref o, _, _)) if o.status == 0);
                 if ok { lo = mid } else { hi = mid }
             }
             let base = 4 + 8 * r.seg[1] as usize;
             let op: Vec<u32> = r.seg[base + 8 * lo..base + 8 * lo + 8].to_vec();
             let dec = mnpilot::decode_op(&op.clone().try_into().unwrap());
-            let sw = crate::gov::cut_v2(&r.seg, 0, lo + 1);
-            let last = match operate(&b, &sw) { Ok((nd, _, o, _, _)) => format!("status {} need {:?} needs {}", o.status, o.need, nd.len()), Err(e) => e };
+            let sw = cutp(&r.seg, lo + 1);
+            let mut last = match operate(&b, &sw) { Ok((nd, _, o, _, _)) => format!("status {} need {:?} needs {}", o.status, o.need, nd.len()), Err(e) => e };
+            // round 16: where is the order of an Order need loop in the pre-state
+            if let Some(i) = last.find("Order(OrderId([") {
+                let t = &last[i + 15..];
+                let bytes: Vec<u8> = t[..t.find(']').unwrap_or(0)].split(", ").filter_map(|x| x.trim().parse().ok()).collect();
+                if bytes.len() == 32 {
+                    let oid = mnpilot::types::OrderId(bytes.try_into().unwrap());
+                    let mut whr = String::from("not in pre-state");
+                    for (m, bk) in &r.pre.books {
+                        for (sd, p, ids) in bk.sl_levels() {
+                            if let Some(k) = ids.iter().position(|x| *x == oid) {
+                                let o = bk.get(oid).unwrap();
+                                whr = format!("m {} side {:?} price {} index {}/{} seq {} acct {:02x}{:02x} prev-seq {:?}", m.0, sd, p, k, ids.len(), o.seq, o.account.0[0], o.account.0[1], if k > 0 { bk.get(ids[k - 1]).map(|x| x.seq) } else { None });
+                            }
+                        }
+                    }
+                    last.push_str(&format!(" | order: {}", whr));
+                }
+            }
             out.push(format!("seed {} seg {} unit {}: {} | op {:?} | {}", s, k, lo, why, dec, last));
             if out.len() >= 20 { return out.join("\n"); }
         }
