@@ -2341,7 +2341,7 @@ pub fn sldbg(n: u64, ord: u32, mode: &str) -> String {
 
 /// round 21: the `liq` workload's segments whose units reach the ADL remainder (session-side replay with the engine's
 /// SL_ADL_REACHED flag): (seed, segment index, reference, (market, candidates' sign) of the first ADL unit)
-pub fn adl_segments(n: u64, ord: u32, limit: usize) -> Vec<(u64, usize, SegRef, (u32, u8))> {
+pub fn adl_segments(n: u64, ord: u32, limit: usize) -> Vec<(u64, usize, SegRef, (u32, u8, u32))> {
     let mut out = Vec::new();
     for s in 1..=n {
         let w = liq_sl_batch(s, ord);
@@ -2373,7 +2373,8 @@ pub fn adl_segments(n: u64, ord: u32, limit: usize) -> Vec<(u64, usize, SegRef, 
                 unsafe { sl::SL_ADL_REACHED = false };
                 let res = mnpilot::dispatch(&mut eng, &op, &accts, mnpilot::Uid { v2: false, at: base + 8 * seg[2] + i * 8 }, seq, &mnpilot::Ext::NONE, &mut rd, false);
                 if unsafe { sl::SL_ADL_REACHED } {
-                    side = Some(unsafe { sl::SL_ADL_SIDE });
+                    let (m, sd) = unsafe { sl::SL_ADL_SIDE };
+                    side = Some((m, sd, i));
                     break;
                 }
                 if res.is_ok() {
@@ -2454,7 +2455,10 @@ pub fn slpoc17(n: u64, ord: u32) -> String {
 ///     goes to the lower id): the stateless run must equal the session (root) with the tie winner as the counterparty,
 ///     and its witness must not grow with `extra` (rank sub-tree: the leftmost path only);
 ///  P2 every single omission from the honest witness of a round-21 need (Adl / AdlTop / AdlKey / Account) and the
-///     forged sub-trees (leftmost leaf unverified, leftmost path hidden) -> refused or the identical result.
+///     forged sub-trees (t_adrop 1 leftmost leaf unverified, 2 leftmost path hidden, 3 the sub-tree without its top
+///     holder under the honest root, 4 the same with its own root as the `adlr:` value) -> refused or the identical result;
+///  P3 the ADL unit ALONE (pre-state replayed to just before it): no opposite holder is loaded for another reason, so
+///     only the pick check brings the top holder in (kills a pick that treats an unloaded tree as empty).
 pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
     use mnpilot::types::{AccountId as A, MarketId as M};
     let segs = adl_segments(n, ord, lim);
@@ -2465,7 +2469,42 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
     let mut p2_first = String::new();
     let mut proven = 0u32;
     let (mut adl_b0, mut adl_b1) = (0usize, 0usize);
-    for (s, k, r, (m, sd)) in &segs {
+    let mut whale_hits = 0u32;
+    let (mut p3_runs, mut p3_ok) = (0u32, 0u32);
+    let mut p3_first = String::new();
+    for (s, k, r, (m, sd, ui)) in &segs {
+        // ---- P3: the ADL unit ALONE (state replayed to just before it): no opposite holder is loaded for any other
+        // reason, so only the pick check can bring the top holder in
+        {
+            let n_acc = r.seg[1] as usize;
+            let hdr = |n_ops: u32| -> Vec<u32> {
+                let mut w = vec![r.seg[0], r.seg[1], n_ops, r.seg[3]];
+                w.extend_from_slice(&r.seg[4..4 + 8 * n_acc]);
+                w
+            };
+            let base = 4 + 8 * n_acc;
+            let mut pw = hdr(*ui);
+            pw.extend_from_slice(&r.seg[base..base + 8 * *ui as usize]);
+            let (st_i, _) = direct(&r.pre, &pw);
+            let mut w1 = hdr(1);
+            w1.extend_from_slice(&r.seg[base + 8 * *ui as usize..base + 8 * (*ui as usize + 1)]);
+            let (post1, ev1) = direct(&st_i, &w1);
+            let b3 = WitBuilder::new(&st_i);
+            p3_runs += 1;
+            match operate(&b3, &w1) {
+                Ok((_, _, o, ev, _)) if o.status == 0 && o.end_root == sl::s_root(&post1) && ev.len() == ev1.len() => p3_ok += 1,
+                Ok((_, _, o, ev, _)) => {
+                    if p3_first.is_empty() {
+                        p3_first = format!("seed {} seg {} unit {}: status {} root_ok {} ev {:?} want {:?} need {:?}", s, k, ui, o.status, o.end_root == sl::s_root(&post1), ev, ev1, o.need);
+                    }
+                }
+                Err(e) => {
+                    if p3_first.is_empty() {
+                        p3_first = format!("seed {} seg {} unit {}: operator {}", s, k, ui, e);
+                    }
+                }
+            }
+        }
         let b0 = WitBuilder::new(&r.pre);
         let (needs, wit0, o0, ev0) = match operate(&b0, &r.seg) {
             Ok((a, b, c, d, _)) => (a, b, c, d),
@@ -2546,8 +2585,10 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
                 adl_b1 = adl_b1.max(w1.len() - b1.build(&strip(&n1)).len());
                 let lo_hit = post.accounts.get(&lo).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
                 let hi_hit = post.accounts.get(&hi).and_then(|a| a.positions.get(&M(*m))).map(|p| p.qty.unsigned_abs()) != Some(wq);
-                // the root is the check (the tie goes to the lower id first; a later ADL unit may take the other)
-                let good = o1.status == 0 && o1.end_root == sl::s_root(&post) && (lo_hit || hi_hit);
+                // the root is the check (the tie goes to the lower id first; a later ADL unit may take the other); the
+                // inflated pre-state may also change whether the remainder is reached (whale hits counted apart)
+                let good = o1.status == 0 && o1.end_root == sl::s_root(&post);
+                whale_hits += (lo_hit || hi_hit) as u32;
                 if good {
                     p1_ok += 1;
                     wb0_max = wb0_max.max(wit0.len());
@@ -2563,10 +2604,10 @@ pub fn slpoc21(n: u64, ord: u32, lim: usize, extra: u32) -> String {
             }
         }
     }
-    let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len();
+    let ok = !segs.is_empty() && p1_runs > 0 && p1_ok == p1_runs && whale_hits > 0 && p3_runs > 0 && p3_ok == p3_runs && p2_wrong == 0 && p2_runs > 0 && proven as usize + p1_skip as usize == segs.len();
     format!(
-        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\"}}",
-        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first
+        "{{\"ok\":{},\"segments\":{},\"honest_proven\":{},\"skipped_refused\":{},\"P1_inflated_runs\":{},\"P1_ok\":{},\"P1_whale_picked\":{},\"extra_holders\":{},\"max_witness_plain\":{},\"max_witness_inflated\":{},\"max_rank_section_plain\":{},\"max_rank_section_inflated\":{},\"P1_first_bad\":\"{}\",\"P2_runs\":{},\"P2_refused\":{},\"P2_wrong\":{},\"P2_first_wrong\":\"{}\",\"P3_single_unit_runs\":{},\"P3_ok\":{},\"P3_first_bad\":\"{}\"}}",
+        ok, segs.len(), proven, p1_skip, p1_runs, p1_ok, whale_hits, extra, wb0_max, wb1_max, adl_b0, adl_b1, p1_first, p2_runs, p2_ref, p2_wrong, p2_first, p3_runs, p3_ok, p3_first
     )
 }
 

@@ -2285,8 +2285,9 @@ pub fn run_stateless(rd: &mut dyn FnMut(u32) -> u32, wit_bytes: &[u8], expect: O
         out.status = st;
         out.need = need;
         out.leaves_verified = sl.verified;
-        out.node_hashes = sl.t.node_hashes;
-        out.leaf_hashes = sl.leaf_hashes;
+        // round 21: + the exception sub-trees and the rank sub-trees (node hashes) and the rank leaf hashes
+        out.node_hashes = sl.t.node_hashes + sl.xt.values().map(|x| x.node_hashes).sum::<u64>() + sl.adl.t.values().map(|x| x.1.node_hashes).sum::<u64>();
+        out.leaf_hashes = sl.leaf_hashes + sl.adl.hashes;
     };
     // round 20 (R19-I2): the eager oracle expiry of the session's height hook (commit_height -> prune_oracle_unbonding)
     // when the run moved the height: the queue groups up to the new height are loaded with their oracles, the prune

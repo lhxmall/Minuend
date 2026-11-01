@@ -100,6 +100,8 @@ pub struct Adl {
     pub cur: BTreeMap<(AccountId, u32), (u8, u64)>,
     /// keys removed per tree in the segment (bounds the leftmost-path need, AdlTop)
     pub removed: BTreeMap<(u32, u8), u16>,
+    /// stats: rank leaf hashes computed (decode of tag-5 leaves, removal checks, insertions)
+    pub hashes: u64,
 }
 
 type G = Result<(), Result<Need, u32>>;
@@ -135,6 +137,7 @@ pub(super) fn load(sl: &mut Sl, s: &ChainState, r: &mut Rd, b: &mut Buf) -> Resu
         if seen > SL_MAX_TREE_NODES || st.root_hash() != root {
             return Err(ST_SL_BADWIT);
         }
+        sl.adl.hashes += st.rids.len() as u64;
         let ids: BTreeMap<H, AccountId> = core::mem::take(&mut st.rids).into_iter().map(|(k, a)| (k, AccountId(a))).collect();
         sl.adl.ids.insert((m, sd), ids);
         sl.adl.t.insert((m, sd), (present, st));
@@ -222,6 +225,7 @@ pub(super) fn maint(sl: &mut Sl, s: &ChainState, dirty: &[AccountId]) -> G {
 }
 fn mv(sl: &mut Sl, a: &AccountId, m: u32, now: Option<(u8, u64)>) -> G {
     let was = sl.adl.cur.get(&(*a, m)).copied();
+    sl.adl.hashes += was.is_some() as u64 + now.is_some() as u64;
     if let Some((sd, q)) = was {
         let k = rkey(q, a);
         let Some((_, t)) = sl.adl.t.get_mut(&(m, sd)) else { return Err(Ok(Need::Adl(m, sd))) };
