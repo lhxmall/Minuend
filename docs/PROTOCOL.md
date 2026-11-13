@@ -297,13 +297,19 @@ submit(h)    h == last_submitted+1 ∧ chain_id='minuend-v2' ∧ 双根 + 六个
 
 fraud(h)     窗内（submitted_at+3600）任何人打 dispute / dispute_fill：
              deposit | withdraw | escrow(Cancel only) | fill_math | ghost | skip
+             （#47：p: op 为 p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}；
+             fill_math 的 kind 0/1 taker 腿按 op 重算 taker_post 与挂单余额；kind 2/3 只在
+             L: 单元的订单簿路径、对手方 post 抵押 > 0、caller ≠ maker 时判定；skip 判每个
+             unit 的第一笔 fill（idx 0）；gov D:/W: 对 pre_absent 账户出现 post 叶即欺诈）
              当前 P-omit 不可用：force 只存时间戳，不能证明 unit 存在，
              omit case 恒 bounce('no fraud')
              P-escrow 仅用于 Cancel：post collateral 必须精确等于 pre
              collateral + pre-order margin_left；Place escrow 无此证明分支
              验不过 → bounce('no fraud')，高度不动；
              验过 → dispute 付 10000 bytes + {verdict:'fraud',height,challenger}
-               → rollup frozen_h=2、清根（含 aa_root）、last_submitted 保持为 h、
+               → rollup frozen_h=2、清根（含 aa_root）、last_submitted = min(ls, h)
+                 （#47 A1：只会下调到失败高度，绝不上调；其上的高度作废、可被前向提交覆盖；
+                 frozen 重提只允许 h == last_submitted）、
                  pool_<operator> 扣 min(500000000000, pool)、
                  slash_reward_<challenger> += 实际扣款
 

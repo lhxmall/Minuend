@@ -716,7 +716,7 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 ### 10.1 submit(h) — rollup
 
 前置：`chain_id=='minuend-v2'` ∧ `assertion_version==1`
-∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 原位重提）
+∧（h == last_submitted+1 全新提交 ∨ frozen_h==2 且 h == last_submitted 原位重提——#47 A1）
 ∧ 全新提交时 prev == `state_root_{h-1}`（前序高度 fraud-failed 时拒绝，
   不再豁免——失败高度之上的新链必须走重提分支）；重提时 prev 必须等于
   `state_root_{h-1}` 的**当前值**（前序同样失败则 fail-closed，先修低高度）
@@ -738,9 +738,9 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 | deposit / withdraw（含 D/W gov） | dispute | op 前后余额算术（含 pre_absent 非成员） |
 | escrow（P-escrow） | dispute | 仅 Cancel：post collateral 必须精确等于 pre collateral + 被撤订单 pre-leaf 的 `margin_left`；Place escrow 没有此证明分支 |
 | omit | dispute | 当前禁用：force 只记录时间戳，不能证明 unit 存在；该 case 恒 bounce `no fraud` |
-| fill_math | dispute_fill | 普通受支持成交的账户/订单身份与 collateral 恒等式（含逐仓 post、释放、PnL、taker fee）；任何负的预期 collateral 都 bounce `no fraud`，不作欺诈判定；ADL kind-2 不在此证明路径内；仓位 entry 比较容差为 ±1 个最小单位 |
+| fill_math | dispute_fill | 普通受支持成交的账户/订单身份与 collateral 恒等式（含逐仓 post、释放、PnL、taker fee）；任何负的预期 collateral 都 bounce `no fraud`，不作欺诈判定；仓位 entry 比较容差为 ±1 个最小单位。#47：kind 0/1 taker 腿把 fill 绑定到本 unit 的 `p:` op（账户/市场/方向/数量），链上按 `book.rs` pro-rata 重算 `taker_post`（±1），按 op 的 typ/tif 推出剩余挂单是否留簿及其 `margin_left`，并校验逐仓 bucket；kind 2（ADL）/3（清算）只在 `L:` 单元订单簿路径（taker==target、caller≠maker、target 为 cross、对手方 post 抵押 > 0）上判定，target 腿扣除 keeper 奖励；资金费率场外 ADL 一律 bounce |
 | ghost | dispute_fill | 成交的 maker 订单 id 前缀区间不在 pre_wit |
-| skip | dispute_fill | pre_wit 中存在更优活单未成交 |
+| skip | dispute | pre_wit 中存在更优活单未成交（#47 B3：只判 unit 的第一笔 fill，多 fill unit 也可判；B7：taker 自己的 cross 挂单豁免，自己的逐仓托管挂单在 Place 成交（kind 0/1）上不豁免） |
 
 公共门：`frozen`/`submitted_at+3600`、stale-root 对比 rollup 变量、
 所有成员证明 `.root` 必须等于对应 pre_wit/post_wit/roots。
@@ -752,8 +752,9 @@ sbond_<addr>, reward_<addr>, slash_reward_<addr>（sbond 仅遗留 claim 路径�
 `trigger.address ∈ {dispute_aa, dispute_fill_aa}` ∧ verdict=='fraud'
 ∧ 高度 live ∧ 窗内 ∧ challenger 是合法 32 字符地址
 → frozen_h=2、清 state_root/aa_forest/aa_root/active_bond/fee_winner、
-  last_submitted **保持为 h**（失败高度钉住，不再回退 h-1——回退会让
-  `last_submitted==last_finalized` 误判空闲、池子被提走）、
+  last_submitted = **min(last_submitted, h)**（失败高度钉住，不再回退 h-1——回退会让
+  `last_submitted==last_finalized` 误判空闲、池子被提走；#47 A1：也绝不上调——对作废的
+  更高高度下 verdict 不能把 ls 抬回去，否则陈旧高度既不能 finalize 也不能重开）、
   `pool_<operator>` 扣 min(5e11, pool)（债务上界=实际罚没额，不再固定记 5e11）、
   slash_reward_<challenger> += 实际扣款。
 ### 10.4 finalize / escape_finalize(h) — rollup

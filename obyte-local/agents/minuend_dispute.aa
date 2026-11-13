@@ -24,7 +24,7 @@
 	// Op descriptors (crates/minuend-settle/src/lib.rs ops_element):
 	//   d:{acct}:{amount}   D:{acct}:{amount}
 	//   w:{acct}:{amount}:{nonce}   W:{acct}:{amount}:{nonce}
-	//   c:{acct}:{order_hex}   p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}
+	//   c:{acct}:{order_hex}   p:{acct}:{market}:{side}:{price}:{qty}:{isolated}:{margin}:{tif}:{typ}
 	// Fill descriptors (fills_element): f:{unit}:{idx}:{taker}:{maker}:
 	//   {taker_order}:{maker_order}:{market}:{price}:{qty}:{seq}:{side}:
 	//   {kind}:{taker_post}
@@ -170,6 +170,11 @@
 							AND trigger.data.left_proof.root == $pre_wit
 							AND trigger.data.right AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
 							AND trigger.data.right_proof.root == $pre_wit
+							// #47 B6: the two neighbors must be ADJACENT leaves,
+							// else any pair around an EXISTING account "proves"
+							// it absent — fatal now that a gov op on a pre-absent
+							// account is fraud whenever a post leaf exists.
+							AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
 							AND trigger.data.left < $ghost AND $ghost < trigger.data.right;
 						$hit2 = trigger.data.left AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
 							AND trigger.data.left_proof.root == $pre_wit
@@ -180,8 +185,17 @@
 							AND trigger.data.left_proof.index == (var[$rollup]['wit_count_' || ($h - 1)] otherwise 0) - 1
 							AND $ghost > trigger.data.left;
 						if (!$hit1 AND !$hit2 AND !$hit3) bounce('no fraud');
-						// Gov fresh account: pre perp = 0, collateral stays 0.
-						if ($gov ? (0 + $amount == $perp1 AND $col1 == '0') : ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1)))
+						// #47 B6: gov ops never create an account (exec
+						// gov_deposit / gov_withdraw only touch perp_balances),
+						// and a PERP-only holder has no acct leaf at all — so
+						// "absent pre leaf" does NOT mean perp 0, and no PERP
+						// baseline exists to compare against. What IS certain:
+						// an acct leaf for this account can never appear in a
+						// gov unit's post tree. A proven post leaf is
+						// therefore fraud for D: and W: alike (the old
+						// `0 + amount == perp1` arm accepted a fabricated W:
+						// leaf with the opposite sign to the Rust mirror).
+						if (!$gov AND ($deposit ? (0 + $amount == $col1) : (0 - $amount == $col1)))
 							bounce('no fraud');
 					} else {
 						if (typeof($pre_leaf) == 'boolean'
@@ -571,17 +585,18 @@
 						OR trigger.data.units_proof.root != trigger.data.units_root
 						OR !is_valid_merkle_proof($F[1], trigger.data.units_proof))
 						bounce('bad unit');
-					// #37-9: single-fill completeness (mirrors dispute_fill):
-					// without it an earlier fill in the SAME unit may already
-					// have consumed the "better" order, so the challenge is
-					// unprovable — fail closed on multi-fill units.
+					// #37-9 / #47 B3: only the unit's FIRST fill (idx 0) is
+					// judged. For idx 0, pre_wit (state before this unit) IS
+					// the book matching started from: nothing in the unit
+					// consumed an order before it. The only pre-match book
+					// change is STP-cancel of the taker's own makers, which
+					// the owner gate below handles. Later fills (idx > 0)
+					// may have lost their "better" order to an earlier
+					// same-unit fill, so they still fail closed. Multi-fill
+					// units are NOT excluded any more: their first fill's
+					// priority is checkable (the old right-neighbor gate
+					// made every multi-maker sweep unchallengeable).
 					if ($F[2] != '0') bounce('no fraud');
-					$right_ok = trigger.data.right
-						AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
-						AND trigger.data.right_proof.root == trigger.data.fills_root
-						AND trigger.data.right_proof.index == trigger.data.fill_proof.index + 1
-						AND !starts_with(trigger.data.right, 'f:' || $F[1] || ':');
-					if (!$right_ok) bounce('no fraud');
 					$pre_wit = trigger.data.pre_wit;
 					if ($k == 0){
 						if ($h == 1){
@@ -617,13 +632,18 @@
 					$fill_price = $F[8] + 0;
 					if ($MO[1] != $F[6] OR $bo_rem <= 0) bounce('no fraud');
 					// #37-9: the "better" order must not be the TAKER's own
-					// live order. A taker's own better-priced order can never
-					// fill against itself (self-trade rules skip it by
-					// design), so waving it as a skipped better order
-					// verdicts honest fills. The MAKER's own better order
-					// skipped is still real fraud (no self-trade between a
-					// maker's resting orders), so only the taker leg is out.
-					if ($BO[7] == $F[3]) bounce('no fraud');
+					// live CROSS order: self-trade cancel-maker-continue
+					// skips it by design, so waving it verdicts honest fills.
+					// #47 B7: a taker-owned ESCROWED order (margin_left > 0)
+					// is different on the Place path (kind 0/1 fills):
+					// SelfTrade::Reject rejects the whole Place when matching
+					// reaches it, so a fill that crossed past it cannot
+					// exist — fraud. Liquidation fills (kind 2/3) use
+					// cancel-maker-continue (escrow refunded), so the
+					// exemption stays for them. The MAKER's own better order
+					// skipped is always real fraud.
+					if ($BO[7] == $F[3] AND !($BO[9] + 0 > 0 AND ($F[12] == '0' OR $F[12] == '1')))
+						bounce('no fraud');
 					$bid_better = ($side == '0') AND $BO[3] == '1'
 						AND ($bo_price < $mo_price OR ($bo_price == $mo_price AND $bo_seq < $mo_seq))
 						AND !($bo_price > $fill_price);
