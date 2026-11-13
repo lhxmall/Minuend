@@ -243,9 +243,11 @@ fn gov_nonce_watermark_survives_restart_without_snapshot() {
     // across the restart (closes the snapshot-cadence gap of up to 63 heights).
     let mut eng2 = Engine::load_or_genesis(&dir).unwrap();
     allow_all(&mut eng2);
+    // #47 H3: WAL-only nonces live beside committed state, not in it; the
+    // producing watermark reads both.
     assert_eq!(
-        eng2.state.seen_gov_nonces.get(&acct_of(&alice)).copied(),
-        Some(5),
+        eng2.gov_nonce_watermark(&acct_of(&alice)),
+        5,
         "watermark must survive a snapshot-less crash via the journal"
     );
 
@@ -274,10 +276,7 @@ fn gov_nonce_watermark_survives_restart_without_snapshot() {
     minuend_settle::Batch::from_applied(&prev3, &mut eng2, &[unit_id(&w6)]).unwrap();
     // ...and survives yet another restart.
     let eng3 = Engine::load_or_genesis(&dir).unwrap();
-    assert_eq!(
-        eng3.state.seen_gov_nonces.get(&acct_of(&alice)).copied(),
-        Some(6)
-    );
+    assert_eq!(eng3.gov_nonce_watermark(&acct_of(&alice)), 6);
 }
 
 #[test]
@@ -516,8 +515,8 @@ fn failed_validate_against_does_not_persist_gov_nonce() {
     // ...and restart rebuilds from snapshot + journal: nonce 5 stays GONE.
     let eng3 = Engine::load_or_genesis(&validator_dir).unwrap();
     assert_eq!(
-        eng3.state.seen_gov_nonces.get(&alice).copied(),
-        None,
+        eng3.gov_nonce_watermark(&alice),
+        0,
         "failed validation must not burn the nonce on the validator node"
     );
     let _ = std::fs::remove_dir_all(&producer_dir);

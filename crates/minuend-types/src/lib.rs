@@ -209,8 +209,9 @@ pub type Bps = u64;
 /// first qualifying fill forever. Leveraged equity there is then priced
 /// against a stale mark — the position can no longer be liquidated by the
 /// engine's margin math, and the holder withdraws collateral that unrealized
-/// losses have already consumed. Full collateral makes max loss at entry
-/// cover any move, keeping the vault solvent without an oracle.
+/// losses have already consumed. Solvency there comes from the band worst
+/// case reserved per position (`minuend_account::spot_requirement`, #47 C2);
+/// the keeper cap and MM floor of regular markets still apply (#47 M1).
 pub fn risk_params_ok(
     im_bps: Bps,
     mm_bps: Bps,
@@ -226,13 +227,19 @@ pub fn risk_params_ok(
         if funding_rate {
             return false;
         }
+        // #47 M1: only the IM rule differs from a regular market. The
+        // keeper cap (≤ 5%) and the MM floor (≥ 5%) still apply: an
+        // uncapped keeper rate would hand a liquidatee's whole collateral
+        // to the keeper, and its value is printed into the meta witness
+        // leaf, whose numeric fields the dispute AA reads with ~15
+        // significant digits.
         return im_bps == 10_000
-            && mm_bps != 0
-            && mm_bps <= 10_000
+            && (500..=10_000).contains(&mm_bps)
             && im_bps > mm_bps
             && taker_fee_bps != 0
             && taker_fee_bps <= 200
             && keeper_reward_bps != 0
+            && keeper_reward_bps <= 500
             && funding_cap_bps == 0;
     }
     let shared = im_bps != 0
@@ -261,6 +268,18 @@ pub fn risk_params_ok(
             && im_bps >= 10 * (FUNDING_CAP_BPS as u64)
             && funding_cap_bps == 0
     }
+}
+
+/// #47 C2: a `spot_only` market is tradeable only when it is
+/// full-collateral AND declares a strictly positive, two-sided price band
+/// (`0 < min_price < max_price`). Only then is the worst-case loss of every
+/// position finite and computable without an oracle (see
+/// `minuend_account::spot_requirement`). Listings made before these rules
+/// (leveraged, band-less, or with a floor at or below zero) fail this
+/// check: the engine refuses to trade or liquidate them instead of
+/// running them on a frozen mark. Non-spot markets always pass.
+pub fn spot_market_tradeable(p: &MarketParams) -> bool {
+    !p.spot_only || (p.im_bps == 10_000 && p.min_price > 0 && p.max_price > p.min_price)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -363,16 +382,18 @@ pub struct MarketParams {
     #[serde(default)]
     pub funding_cap_bps: u64,
     /// Lowest price this market may ever trade at (signed price grid).
-    /// `0` = unbounded below. For a `spot_only` market (no oracle, so the
-    /// mark freezes) the max loss of a long is `qty × (entry − min_price)`,
-    /// which can exceed the notional when prices may go negative; listing a
-    /// range bounds it. Fixed at creation. Old JSON parses as `0`.
+    /// `0` = unbounded below; each side of the band is independent (#47 L2),
+    /// so `[min, 0]` is a floor-only band. For a `spot_only` market (no
+    /// oracle, so the mark freezes) it must be strictly positive: a long's
+    /// worst case `qty × (entry − min_price)` is what its collateral
+    /// reserves (#47 C2). Fixed at creation. Old JSON parses as `0`.
     #[serde(default)]
     pub min_price: Price,
     /// Highest price this market may ever trade at (signed price grid).
-    /// `0` = unbounded above (a limit order may not exceed it: the range is
-    /// an admission gate, not a clamp). Fixed at creation. Old JSON parses
-    /// as `0`.
+    /// `0` = unbounded above. Limit orders above it are refused (admission
+    /// gate) and off-book ADL prints are clamped to it. Required on a
+    /// `spot_only` market, where a short reserves `qty × (max_price −
+    /// entry)`. Fixed at creation. Old JSON parses as `0`.
     #[serde(default)]
     pub max_price: Price,
 }
@@ -447,5 +468,44 @@ mod tests {
         for bps in [0i64, 1, 12, 20, 500, -50, -100_000, max_bps] {
             assert_eq!(funding_rate_bps(encode_funding_price(bps)), bps);
         }
+    }
+
+    /// #47 M1: the spot_only branch keeps the regular keeper cap (≤ 500)
+    /// and MM floor (≥ 500); only IM differs (== 10 000).
+    #[test]
+    fn spot_risk_params_keep_keeper_and_mm_bounds() {
+        let ok = |im, mm, keeper| risk_params_ok(im, mm, 5, keeper, false, 0, true);
+        assert!(ok(10_000, 500, 100));
+        assert!(ok(10_000, 500, 500));
+        assert!(!ok(10_000, 500, 501), "keeper above 5% accepted");
+        assert!(!ok(10_000, 500, u64::MAX), "unbounded keeper accepted");
+        assert!(!ok(10_000, 499, 100), "mm below 5% accepted");
+        assert!(!ok(10_000, 1, 100), "mm of 1 bps accepted");
+        assert!(!ok(9_999, 500, 100), "leveraged spot accepted");
+    }
+
+    /// #47 C2: tradeable spot listings need full collateral and a strictly
+    /// positive two-sided band; non-spot markets always pass.
+    #[test]
+    fn spot_market_tradeable_requires_positive_two_sided_band() {
+        let mut p = genesis_params();
+        assert!(spot_market_tradeable(&p));
+        p.spot_only = true;
+        p.im_bps = 10_000;
+        for (lo, hi, want) in [
+            (1i64, 2i64, true),
+            (0, 2, false),
+            (-5, 2, false),
+            (1, 0, false),
+            (2, 2, false),
+        ] {
+            p.min_price = lo;
+            p.max_price = hi;
+            assert_eq!(spot_market_tradeable(&p), want, "({lo},{hi})");
+        }
+        p.min_price = 1;
+        p.max_price = 2;
+        p.im_bps = 1_000;
+        assert!(!spot_market_tradeable(&p));
     }
 }

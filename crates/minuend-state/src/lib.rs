@@ -1,5 +1,5 @@
 pub use minuend_account::Account;
-use minuend_book::{Fill, OrderBook};
+use minuend_book::{BookJournal, Fill, OrderBook, SelfTrade};
 use minuend_types::{
     bps, funding_notional_usd, funding_rate_bps, genesis_params, notional_usd, sha256, AccountId,
     ExternalSample, FundingSourceKind, Height, MarketId, MarketParams, OracleConfig, Price,
@@ -19,6 +19,18 @@ pub struct Withdrawal {
     /// 2048-height replay-protection window enforced by `prune_withdrawals`.
     pub height: Height,
 }
+/// #47 B4: undo log for one engine op (see `ChainState::rollback`).
+#[derive(Debug, Default)]
+pub struct StateJournal {
+    accounts: Vec<(AccountId, Option<Account>)>,
+    seen_accounts: HashSet<AccountId>,
+    /// (market, mark, last_funding_height) pre-images.
+    markets: Vec<(MarketId, Option<Price>, Option<Height>)>,
+    seen_markets: HashSet<MarketId>,
+    /// (market, book existed before, book undo log)
+    book: Option<(MarketId, bool, BookJournal)>,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChainState {
     pub height: Height,
@@ -882,6 +894,122 @@ impl ChainState {
         }
     }
 
+    // -------------------------------------------------------------------
+    // #47 B4: undo journal. `place` (and the book path of `liquidate`)
+    // used to deep-clone the WHOLE ChainState per op so that an error
+    // half-way through matching could be discarded. The journal instead
+    // records the first-touch pre-image of exactly what those ops can
+    // change — the matched book, the accounts of every fill party (plus
+    // insurance), the market's mark and funding clock, and for a
+    // funding-rate market every holder a peg transfer may touch — and puts
+    // it back on error. Same observable result, cost proportional to the
+    // op instead of to the chain.
+
+    /// Record `id`'s current account (or its absence) before mutating it.
+    pub fn journal_account(&self, j: &mut StateJournal, id: AccountId) {
+        if j.seen_accounts.insert(id) {
+            j.accounts.push((id, self.accounts.get(&id).cloned()));
+        }
+    }
+
+    /// Record the per-market scalars `apply_fill_pair` may write.
+    fn journal_market(&self, j: &mut StateJournal, m: MarketId) {
+        if j.seen_markets.insert(m) {
+            j.markets.push((
+                m,
+                self.marks.get(&m).copied(),
+                self.last_funding_height.get(&m).copied(),
+            ));
+        }
+    }
+
+    /// Book submit whose changes are recorded in `j` (at most one book per
+    /// journal). On `Err` the book is already untouched.
+    pub fn submit_journaled(
+        &mut self,
+        j: &mut StateJournal,
+        order: minuend_book::Order,
+        self_trade: SelfTrade,
+    ) -> Result<minuend_book::MatchResult, minuend_book::BookError> {
+        let market = order.market;
+        assert!(j.book.is_none(), "one book submit per journal");
+        let existed = self.books.contains_key(&market);
+        let (res, bj) = match self.book_mut(market).submit_journaled(order, self_trade) {
+            Ok(v) => v,
+            Err(e) => {
+                if !existed {
+                    self.books.remove(&market);
+                }
+                return Err(e);
+            }
+        };
+        j.book = Some((market, existed, bj));
+        Ok(res)
+    }
+
+    /// `apply_fill_pair` with every state it can touch recorded in `j`
+    /// first. `apply_fill_pair` itself writes nothing when it errors, so
+    /// the journal only has to undo the fills applied before this one.
+    pub fn apply_fill_pair_journaled(
+        &mut self,
+        j: &mut StateJournal,
+        fill: &Fill,
+    ) -> Result<(), minuend_account::AccountError> {
+        self.journal_account(j, fill.taker);
+        self.journal_account(j, fill.maker);
+        self.journal_account(j, INSURANCE_ACCOUNT);
+        self.journal_market(j, fill.market);
+        // A funding-rate fill can fire `settle_funding_peg`, which moves
+        // cash between every holder of the market.
+        if self
+            .markets
+            .get(&fill.market)
+            .is_some_and(|p| p.funding_rate)
+        {
+            let holders: Vec<AccountId> = self
+                .accounts
+                .iter()
+                .filter(|(_, a)| a.positions.contains_key(&fill.market))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in holders {
+                self.journal_account(j, id);
+            }
+        }
+        self.apply_fill_pair(fill)
+    }
+
+    /// Restore every pre-image recorded in `j`.
+    pub fn rollback(&mut self, j: StateJournal) {
+        if let Some((market, existed, bj)) = j.book {
+            if existed {
+                self.book_mut(market).rollback(bj);
+            } else {
+                self.books.remove(&market);
+            }
+        }
+        for (id, pre) in j.accounts {
+            match pre {
+                Some(a) => {
+                    self.accounts.insert(id, a);
+                }
+                None => {
+                    self.accounts.remove(&id);
+                }
+            }
+        }
+        for (m, mark, lfh) in j.markets {
+            match mark {
+                Some(v) => self.marks.insert(m, v),
+                None => self.marks.remove(&m),
+            };
+            match lfh {
+                Some(v) => self.last_funding_height.insert(m, v),
+                None => self.last_funding_height.remove(&m),
+            };
+        }
+    }
+
     pub fn book_mut(&mut self, market: MarketId) -> &mut OrderBook {
         self.books
             .entry(market)
@@ -898,8 +1026,10 @@ impl ChainState {
         // priced against a stale mark and leveraged losses escape both. New
         // listings must be full-collateral (`risk_params_ok`); this guards
         // pre-existing leveraged listings by refusing to trade them at all.
+        // #47 C2: the same refusal covers spot listings without a strictly
+        // positive two-sided band (no finite worst case to reserve).
         if let Some(p) = self.markets.get(&fill.market) {
-            if p.spot_only && p.im_bps != 10_000 {
+            if !minuend_types::spot_market_tradeable(p) {
                 return Err(minuend_account::AccountError::Risk);
             }
         }

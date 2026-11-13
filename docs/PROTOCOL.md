@@ -92,14 +92,28 @@ reduce_only      : equity·10000 ≤ mm·12000
 ```
 
 开仓前检查 `equity ≥ im(仓位) + resting_open_im(挂单预留) + 本次开仓 im`；
-`resting_open_im` 对每个市场取 `max(bid 侧 im, ask 侧 im)`（两侧最终不会同时
-开仓），只计仍会开仓的挂单侧。挂单数另有上限：每账户全簿 live 单 ≤ 64
-（含不会驻留的 IOC）。开仓单还要求 `equity ≥ $1` 且估算价非零、名义额非零
-（无 mark 的市价单被拒，防零保证金开仓）。市场参数统一经
-`risk_params_ok` 校验（非零、≤10000、im>mm、mm≥500、im≤5000、
-taker≤200、keeper≤500、im ≥ 10×FUNDING_CAP_BPS），CreateMarket 与
-治理提案（创建时预检 + finalize 落盘前复检，非法提案为 no-op 但仍消耗）
-共用同一谓词。提款后检查不得落入 reduce-only。
+`resting_open_im` 对每个市场、每侧先求该侧挂单名义额之和，再按**开仓数量**
+计价：开仓部分 = 该侧挂单量 − 可被该侧抵消的仓位量（bid 抵消空头、ask 抵消
+多头），预留 = `该侧名义额 × 开仓量 ÷ 该侧挂单量`（先乘后除，不截断），
+再取 `max(bid 侧 im, ask 侧 im)`（两侧最终不会同时开仓）。挂单数另有上限：
+每账户全簿 live 单 ≤ 64（含不会驻留的 IOC）。开仓单还要求 `equity ≥ $1`
+且估算价非零、名义额非零（无 mark 的市价单被拒，防零保证金开仓）。
+
+市场参数统一经 `risk_params_ok` 校验，CreateMarket 与治理提案（创建时预检 +
+finalize 落盘前复检，非法提案为 no-op 但仍消耗）共用同一谓词：
+
+- 普通市场：四个 bps 非零且 ≤10000、im>mm、mm≥500、im≤5000、taker≤200、
+  keeper≤500、im ≥ 10×FUNDING_CAP_BPS、`funding_cap_bps == 0`；
+- 资金费率市场：im≥100、mm≥50、`funding_cap_bps ∈ [1,500]`、
+  im ≥ 10×cap、keeper ≤ im/10；
+- `spot_only` 市场：`im == 10000`（全额抵押，不受 im≤5000 限制）、
+  mm≥500、im>mm、taker∈[1,200]、keeper∈[1,500]，且不得同时为资金费率市场。
+
+`spot_only` 市场还必须声明价格区间 `0 < min_price < max_price`；其仓位不用
+（冻结的）mark 计保证金，而是按区间最坏情况预留现金（多头跌到 `min`、空头
+涨到 `max`，另加 taker 费，且不少于全额名义额），预留从 equity 中扣除，见
+docs/MECHANISMS.md「spot_only 的偿付不变量」。提款后既不得落入 reduce-only，
+也不得使 equity（已扣除 spot 预留）为负。
 
 **逐仓模式**（`Place { isolated, margin }`，mode 在 order 上、无新 Op）：
 
@@ -201,12 +215,15 @@ joint 已进入 Obyte 主 DAG 或获得稳定；AA 谓词路径本身不验证�
 account_leaf = sha256("acct" ‖ id32 ‖ collateral_i128le16 ‖ realized_i128le16
                       ‖ pos_count_u32 ‖ [market_le4 qty_le8 entry_le8]*
                       ‖ iso_count_u32 ‖ [market_le4 margin_i128le16]*
-                      ‖ perp_u128le16)
+                      ‖ perp_u128le16 ‖ withdrawn_i128le16)
                # iso = 逐仓保证金桶（BTreeMap 序，§2.3），已出 collateral
                # perp = PERP 治理余额（§7），与抵押并列进入承诺
-book_leaf    = sha256(params_59B ‖ 簿承诺)
-               # params_59B = symbol16‖tick_le8‖im_le8‖mm_le8‖taker_le8
+               # withdrawn = 累计已签名提款额 W（vault 校验 本次+历史 ≤ W）
+book_leaf    = sha256(params_91B ‖ 簿承诺)
+               # params_91B = symbol16‖tick_le8‖im_le8‖mm_le8‖taker_le8
                #   ‖keeper_le8‖delisted1B‖spot_only1B‖funding_rate1B
+               #   ‖usd_per_unit_le8‖funding_cap_bps_le8
+               #   ‖min_price_le8‖max_price_le8
                #   ——市场参数本身成为被承诺状态
 meta_leaf    = sha256("meta" ‖ 全部规范化共识元数据)
                # 包含 height/seq/last_unit、市场与预言机状态、资金费时钟、

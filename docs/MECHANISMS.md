@@ -646,10 +646,15 @@ meta_leaf    = sha256(b"meta" ‖ height ‖ seq ‖ last_unit
 `meta_leaf` 在 `external_sources` 后提交 `last_funding_height`、
 snapshot 格式版本 1→2（v1 快照不再加载）。
 正数 canonical 字节逐字节不变。
-当前 snapshot 格式头为 v3，不做跨版本迁移。`load_latest` 按高度从新到旧尝试，
-跳过未知版本或不可解码文件；没有可读候选时返回 `None`。`load_or_genesis` 随后
-从 genesis 建立状态并合并 gov-nonce WAL；调用方须从 genesis（或最近可读快照）
-重放 finalized 批次。快照只是恢复加速器，不是共识状态。
+当前 snapshot 格式头为 v5（内容为 bincode 的 `(ChainState, DAG 锚点)` 元组；
+v5 对应 `MarketParams` 的 `min_price`/`max_price`），不做跨版本迁移。
+`load_latest` 按高度从新到旧尝试，跳过未知版本或不可解码文件；没有可读候选时
+返回 `None`。`load_or_genesis` 随后从 genesis 建立状态；gov-nonce WAL 中比快照
+更新的 nonce **不并入** `seen_gov_nonces`，而是放在引擎的 `wal_gov_nonces`：
+出块路径以 `max(seen_gov_nonces, wal_gov_nonces)` 为水位（不复用本节点已提交的
+nonce），验证重放只以已提交的 `seen_gov_nonces` 为水位（被重放的批次正是消费
+这些 WAL nonce 的批次）；两种模式都只在提现**成功**后推进水位。调用方须从
+genesis（或最近可读快照）重放 finalized 批次。快照只是恢复加速器，不是共识状态。
 
 meta_leaf 绑定 height（from_applied 先把 engine.state.height 推到
 checkpoint.height 再取根），使 state_root 跨批次成链：改历史高度必然断链。
@@ -943,7 +948,10 @@ exec 与治理共用）：任一为 0 或 > 10 000、`im_bps <= mm_bps`、
 `mm_bps < 500`、`im_bps > 5000`、`taker_fee_bps > 200`、
 `keeper_reward_bps > 500`、`im_bps < 10 × FUNDING_CAP_BPS` 均 Risk；
 `spot_only` 市场另走**全额抵押**分支：`im_bps` 必须恰为 10 000
-（`mm_bps` 仍 [1, 10 000) 且 `im > mm`，`funding_rate` 必须为 false）。
+（`mm_bps` 仍须 ≥ 500 且 `im > mm`，`keeper_reward_bps` 仍须 ≤ 500，
+`funding_rate` 必须为 false；只有 IM 规则与普通市场不同）。
+tick 检查（`tick_size ≤ 0` → Risk）先于一切 `% tick_size` 运算，零/负 tick
+不会再让节点 panic。
 CreateProposal 对非 Delist 键先按 finalize 同样方式预演参数更新，结果不
 过谓词即 Risk（提案表不写入）；FinalizePropose 落盘前同样复检——通过但
 非法的提案是 no-op（不写字段，提案仍被消耗）。
@@ -961,15 +969,35 @@ mark 冻结在首笔合格成交价。杠杆仓位因此永远等不到引擎保
 = 名义额的最大亏损，mark 冻结不再影响偿付能力（`apply_fill_pair` 对
 存量杠杆 `spot_only` 市场一律拒绝成交，不再产生新敞口）。
 
-**价格区间锁**：带符号价格下多头的最大亏损可超过名义额（价格能跌破 0
-时 `qty × |entry|` 只是其一部分），因此 `spot_only` 建市**必须同时声明**
-`[min_price, max_price]`（`0` 表示该侧无界，而 spot_only 两侧都禁止为 0；
-下界确为 0 的市场须写成 `min_price = tick_size`）。区间是**准入门而非钳制**：
-越界限价单直接 `Risk` 拒绝（market 单成交价取自对手限价，天然落在带内）。
-该区间可证明 `max_loss ≤ qty × (max_price − min_price)`，正是全额抵押充分
-的条件。区间须落在 tick 网格上且 `min < max`；`min ≥ max` 或离网格 → Risk。
+**价格区间**：每侧独立，`0` 表示该侧无界——`[min, 0]` 为只设下界、
+`[0, max]` 为只设上界；只有两侧都设置时才要求 `min < max`；设置的边界须
+落在 tick 网格上，否则 Risk。真实边界恰为 0 时写成最近的网格点（下界
+`tick_size`、上界 `-tick_size`）。区间是**限价准入门**：越界限价单直接
+`Risk`；market 单只会与已在带内准入的限价单成交，天然落在带内；ADL 的
+场外成交价（按 mark）会被钳进区间；资金费率市场不允许声明区间（其簿价是
+费率编码，另有 ±100% 费率带）。因此任何市场的成交都不会打到区间外。
 `min_price`/`max_price` 建时定死，随 `params_91B` 进 book_leaf 承诺，
 `ParamKey` 不可翻转。
+
+**spot_only 的偿付不变量**（#47 C2）：`spot_only` 建市必须声明
+`0 < min_price < max_price`。mark 冻结后不能用于保证金，所以每个 spot_only
+仓位改为按区间最坏情况**预留**现金，且不读 mark：
+
+```
+多头 R = max(qty·entry（全额，im_bps=10 000）, qty·(entry − min) + fee(qty·max))
+空头 R = max(qty·entry,                          qty·(max − entry) + fee(qty·max))
+```
+
+跨仓 `equity = collateral + 非 spot 仓位 uPnL − ΣR`（spot 仓位的 uPnL 视为 0、
+不计 MM/IM、不会被清算）；逐仓 spot 仓位的桶必须 ≥ R。开仓门、挂单预留
+（`resting_open_im`）都按该订单在区间内可能成交的最差价格计 R（另加本次
+开仓 taker 费）；`withdraw` 的 `debit` 在原有 reduce-only 检查之外，还要求
+提款后 `equity ≥ 0`，即不能动用预留。由此得到：任何持有 spot 仓位的账户，
+以区间内**任意**价格平仓（含 taker 费）后现金都不为负，`apply_fill_pair`
+的 claw 不会被触发，金库不会因冻结 mark 收不抵付。（例外：同一跨仓账户在
+普通市场的清算缺口会先吃掉这部分现金，这与任何跨仓账户的既有风险相同。）
+存量 spot 市场若不满足上述条件（杠杆、无区间或下界 ≤ 0），一律拒绝下单、
+成交与清算（`spot_market_tradeable`），清算在动订单簿之前即返回 Risk。
 
 `funding_rate` 同样建时定死、无 `ParamKey` 翻转：资金费率市场，簿价是
 外部交易所资金费率的编码价（`encode_funding_price`，offset 域内恒正，
