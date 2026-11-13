@@ -16,6 +16,7 @@
 
 const path = require("path");
 const fs = require("fs");
+const { envCompat } = require("./script_helpers");
 
 const aaRoot = path.join(__dirname, "..", "vendor", "aa-testkit");
 const nm = path.join(aaRoot, "node_modules");
@@ -41,9 +42,9 @@ async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const useFill = flag("fill");
   const dispute = useFill
-    ? deploy.dispute_fill_aa_address || process.env.MINUEND_DISPUTE_FILL_AA
-    : deploy.dispute_aa_address || process.env.MINUEND_DISPUTE_AA;
-  const rollup = deploy.rollup_aa_address || process.env.MINUEND_ROLLUP_AA;
+    ? deploy.dispute_fill_aa_address || envCompat("MINUEND_DISPUTE_FILL_AA")
+    : deploy.dispute_aa_address || envCompat("MINUEND_DISPUTE_AA");
+  const rollup = deploy.rollup_aa_address || envCompat("MINUEND_ROLLUP_AA");
   if (!dispute || !rollup) throw new Error("deployment.json dispute_aa_address/rollup_aa_address missing");
   const height = Number(arg("height"));
   const pred = arg("pred", "deposit");
@@ -58,11 +59,14 @@ async function main() {
       throw new Error(`proof file ${proofFile} must contain a JSON object`);
     return parsed;
   })();
-  // #37-2: this script only drives a local aa-testkit devnet. The watcher
-  // passes --hub / mnemonic for a production submit; accepting those
-  // silently would report a local drill as if it were a live challenge.
+  // #37-2: this script only drives a local aa-testkit devnet; accepting
+  // --hub / a mnemonic silently would report a local drill as if it were a
+  // live challenge. L5 (#47): the watcher no longer spawns this script in
+  // live mode at all (it reports "NOT posted" loudly instead) and only
+  // calls it for an explicit MINUEND_WATCH_DEVNET_CHALLENGE=1 drill, without
+  // --hub and with the mnemonic stripped from the child environment.
   const hubArg = arg("hub");
-  const mnemonicArg = arg("mnemonic") || process.env.MINUEND_WATCH_MNEMONIC;
+  const mnemonicArg = arg("mnemonic") || envCompat("MINUEND_WATCH_MNEMONIC");
   if (hubArg || mnemonicArg) {
     console.error(
       "post_challenge.js is not wired to a live hub: --hub/mnemonic are unsupported " +

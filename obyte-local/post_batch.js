@@ -19,6 +19,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const zlib = require("zlib");
+const { envCompat, finalizeReached } = require("./script_helpers");
 const {
   DEFAULT_PACKAGE_SOURCE_CAP,
   assertPackageSourceCap,
@@ -185,8 +186,8 @@ let network;
 async function main() {
   const deploy = JSON.parse(fs.readFileSync(path.join(__dirname, "deployment.json"), "utf8"));
   const rollup = deploy.rollup_aa_address
-    || process.env.MINUEND_ROLLUP_AA;
-  if (!rollup) throw new Error("deployment.json rollup_aa_address (or MINUEND_ROLLUP_AA) missing");
+    || envCompat("MINUEND_ROLLUP_AA");
+  if (!rollup) throw new Error("deployment.json rollup_aa_address (or MINUEND_ROLLUP_AA / legacy OPERP_ROLLUP_AA) missing");
   const batchFile = process.argv[2] || path.join(__dirname, "batch.json");
   const batchData = JSON.parse(fs.readFileSync(batchFile, "utf8"));
   // H3 contract visibility: the canonical pair watchers recompute from
@@ -337,14 +338,15 @@ async function main() {
     const varsNow = await poster.readAAStateVars(rollup);
     const vv = varsNow.vars || varsNow;
     const lf = Number(vv["last_finalized"]);
-    finalizedOk = lf === Number(header.height);
+    // L6 (#47): >= — a concurrent poster may already have finalized past us.
+    finalizedOk = finalizeReached(lf, header.height);
     if (!finalizedOk)
       console.log(`finalize not yet reflected (last_finalized=${lf}, want ${header.height}); retry ${attempt + 1}`);
   }
   if (!finalizedOk) {
     const varsNow = await poster.readAAStateVars(rollup);
     const lf = Number((varsNow.vars || varsNow)["last_finalized"]);
-    throw new Error(`finalize did not advance last_finalized to ${header.height} (got ${lf})`);
+    throw new Error(`finalize did not advance last_finalized to >= ${header.height} (got ${lf})`);
   }
   console.log("finalize confirmed on chain: last_finalized =", header.height);
 

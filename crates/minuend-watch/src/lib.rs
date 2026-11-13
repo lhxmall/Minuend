@@ -144,19 +144,20 @@ pub fn verify_da_binding(da: &DaUnit) -> Result<(), WatchError> {
     }
     Ok(())
 }
-/// Assemble a multi-package header's blob: fetch each `packages` hash via
-/// `get_joint`, require its `package_blob` string (base64(gzip(frames))),
-/// gunzip, concat the original package bytes, and check hex(sha256(concat))
-/// against `data_root`. Only after that check, add a parse-only LF at package
-/// boundaries that have no delimiter (legacy writers emitted none). Returns
-/// base64(gzip(parse_stream)) so it splices as `frames_blob`.
+/// Assemble a multi-package header: fetch each `packages` hash via
+/// `get_joint`, require its `package_blob` string (base64(gzip(bytes))),
+/// gunzip, and concatenate the package bytes **unchanged**. The result must
+/// hash (hex sha256) to the header's `data_root`; it is returned as-is and is
+/// exactly the byte string the frame parser reads (B11, #47: no parse-only
+/// LF insertion / duplicate-LF removal any more, so the bytes that are parsed
+/// are the bytes `data_root` commits to).
 /// Transport errors map to `HubUnavailable` (caller backs off); bad content
 /// (bad base64, invalid gzip, root mismatch) maps to `BindingMismatch`.
 /// No retries here — the poll loop owns backoff.
 pub fn assemble_frames<H: HubClient>(
     hub: &H,
     data: &serde_json::Value,
-) -> Result<String, WatchError> {
+) -> Result<Vec<u8>, WatchError> {
     let hashes = data
         .get("packages")
         .and_then(|v| v.as_array())
@@ -169,7 +170,6 @@ pub fn assemble_frames<H: HubClient>(
         .ok_or_else(|| WatchError::BindingMismatch("packages header missing data_root".into()))?;
     use base64::Engine as _;
     let mut concat: Vec<u8> = Vec::new();
-    let mut parse_stream: Vec<u8> = Vec::new();
     for h in hashes {
         let s = h
             .as_str()
@@ -187,47 +187,116 @@ pub fn assemble_frames<H: HubClient>(
             .decode(b64)
             .map_err(|_| WatchError::BindingMismatch("package_blob not base64".into()))?;
         let raw = gunzip_blob(&gz)?;
-        append_package_for_decode(&mut parse_stream, &raw);
         concat.extend_from_slice(&raw);
     }
+    check_data_root(&concat, want)?;
+    Ok(concat)
+}
+
+fn check_data_root(raw: &[u8], want: &str) -> Result<(), WatchError> {
     use sha2::{Digest, Sha256};
-    let got = hex::encode(Sha256::digest(&concat));
+    let got = hex::encode(Sha256::digest(raw));
     if got != want {
         return Err(WatchError::BindingMismatch(format!(
             "data_root mismatch: want {want} got {got}"
         )));
     }
-    Ok(base64::engine::general_purpose::STANDARD.encode(minuend_settle::gzip_bytes(&parse_stream)))
+    Ok(())
 }
 
-/// Add exactly one LF between non-empty package payloads for parsing. The
-/// returned stream is not the `data_root` input: that root is always checked
-/// against the untouched concatenation in `assemble_frames`.
-fn append_package_for_decode(parse_stream: &mut Vec<u8>, package: &[u8]) {
-    if package.is_empty() {
-        return;
+/// Header shape check shared by every decode path (B11, #47). A header must
+/// carry exactly one frame source: an inline `frames_blob` OR a `packages`
+/// list. Carrying both used to skip the inline `data_root` check (the check
+/// was keyed on "no `packages`"), so that combination is now refused.
+fn check_header_shape(data: &serde_json::Value) -> Result<(), WatchError> {
+    if data.get("units").is_some() {
+        return Err(WatchError::BindingMismatch(
+            "legacy units-array header is not accepted".into(),
+        ));
     }
-    if parse_stream.is_empty() {
-        parse_stream.extend_from_slice(package);
-        return;
+    match (
+        data.get("frames_blob").is_some(),
+        data.get("packages").is_some(),
+    ) {
+        (true, true) => Err(WatchError::BindingMismatch(
+            "header carries both frames_blob and packages".into(),
+        )),
+        (false, false) => Err(WatchError::BindingMismatch(
+            "header has neither frames_blob nor packages".into(),
+        )),
+        _ => Ok(()),
     }
-    let previous_has_lf = parse_stream.last() == Some(&b'\n');
-    let current_has_lf = package.first() == Some(&b'\n');
-    if !previous_has_lf && !current_has_lf {
-        parse_stream.push(b'\n');
-    }
-    let skip_duplicate_lf = previous_has_lf && current_has_lf;
-    parse_stream.extend_from_slice(if skip_duplicate_lf {
-        &package[1..]
+}
+
+/// Exact committed bytes of a single-package (inline `frames_blob`) header,
+/// verified against the mandatory `data_root`.
+pub fn inline_frame_bytes(data: &serde_json::Value) -> Result<Vec<u8>, WatchError> {
+    check_header_shape(data)?;
+    let blob = data
+        .get("frames_blob")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WatchError::BindingMismatch("frames_blob missing".into()))?;
+    let want = data
+        .get("data_root")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            WatchError::BindingMismatch("frames_blob header missing data_root".into())
+        })?;
+    let raw = minuend_settle::decode_package_blob(blob)
+        .map_err(|_| WatchError::BindingMismatch("frames_blob not base64(gzip)".into()))?;
+    check_data_root(&raw, want)?;
+    Ok(raw)
+}
+
+/// The exact byte string a header's `data_root` commits to, from whichever
+/// source the header names (inline blob or package joints). Every returned
+/// byte string has been checked against `data_root`.
+pub fn committed_frame_bytes<H: HubClient>(
+    hub: &H,
+    data: &serde_json::Value,
+) -> Result<Vec<u8>, WatchError> {
+    check_header_shape(data)?;
+    if data.get("packages").is_some() {
+        assemble_frames(hub, data)
     } else {
-        package
-    });
+        inline_frame_bytes(data)
+    }
+}
+
+/// Strict frame split over the committed bytes (B11, #47): valid UTF-8,
+/// frames separated by exactly one LF, no empty frame (so no leading,
+/// trailing or doubled LF) and no CR anywhere. Anything else is rejected
+/// instead of being normalised, so every implementation reaches the same
+/// verdict on the same committed bytes. A frame may span a package boundary:
+/// only the concatenation matters.
+pub fn parse_committed_frames(raw: &[u8]) -> Result<Vec<String>, SettleError> {
+    let text = std::str::from_utf8(raw).map_err(|_| SettleError::RootMismatch)?;
+    if text.is_empty() || text.contains('\r') {
+        return Err(SettleError::RootMismatch);
+    }
+    let frames: Vec<String> = text.split('\n').map(str::to_string).collect();
+    if frames.iter().any(|f| f.is_empty()) {
+        return Err(SettleError::RootMismatch);
+    }
+    Ok(frames)
+}
+
+/// Rebuild a [`Batch`] from a header plus the exact committed frame bytes
+/// returned by [`committed_frame_bytes`].
+pub fn batch_from_committed(data: &serde_json::Value, raw: &[u8]) -> Result<Batch, SettleError> {
+    if data.get("units").is_some() {
+        return Err(SettleError::RootMismatch);
+    }
+    let frames = parse_committed_frames(raw)?;
+    minuend_settle::batch_from_frames(data, &frames)
 }
 
 /// Replay a posted batch against the running engine and assert it reproduces
 /// the committed roots. On success the engine is advanced to the batch's
 /// state (so the caller can replay `h+1` with `engine.state.state_root()` as
-/// its prev root). Any failure is a real root mismatch.
+/// its prev root). Any failure is a real root mismatch. Inline headers only;
+/// multi-package callers use [`committed_frame_bytes`] +
+/// [`batch_from_committed`] and call `validate_against` directly.
 pub fn replay_and_check(
     da: &DaUnit,
     prev_root: [u8; 32],
@@ -237,12 +306,6 @@ pub fn replay_and_check(
     batch.validate_against(prev_root, engine)
 }
 
-/// Rebuild a [`Batch`] from the temp_data header JSON. The new wire stores
-/// scalars plus `frames_blob` (single package, base64(gzip(frames))).
-/// Multi-package (`packages`+`data_root`) arrives via `assemble_frames`
-/// before this call — legacy `units`-array headers are rejected. `data_root`
-/// covers original gunzipped frame bytes, not the gzip wrapper; inline roots
-/// are checked here and multi-package roots are checked before normalization.
 pub fn gunzip_blob(gz: &[u8]) -> Result<Vec<u8>, WatchError> {
     use flate2::read::GzDecoder;
     use std::io::Read;
@@ -252,23 +315,16 @@ pub fn gunzip_blob(gz: &[u8]) -> Result<Vec<u8>, WatchError> {
         .map_err(|_| WatchError::BindingMismatch("package_blob not gzip".into()))?;
     Ok(out)
 }
+
+/// Rebuild a [`Batch`] from a single-package temp_data header (scalars plus
+/// inline `frames_blob` = base64(gzip(frames))). `data_root` is mandatory
+/// and always checked over the exact gunzipped bytes; a header that also
+/// (or only) lists `packages` is rejected here — multi-package data goes
+/// through [`committed_frame_bytes`]. Legacy `units`-array headers are
+/// rejected.
 pub fn batch_from_data(data: &serde_json::Value) -> Result<Batch, SettleError> {
-    if data.get("units").is_some() {
-        return Err(SettleError::RootMismatch);
-    }
-    let blob = get_str(data, "frames_blob")?;
-    let raw = minuend_settle::decode_package_blob(blob)?;
-    if data.get("packages").is_none() {
-        let want = get_str(data, "data_root")?;
-        use sha2::{Digest, Sha256};
-        let got = hex::encode(Sha256::digest(&raw));
-        if got != want {
-            return Err(SettleError::RootMismatch);
-        }
-    }
-    let text = String::from_utf8(raw).map_err(|_| SettleError::RootMismatch)?;
-    let frames: Vec<String> = text.lines().map(str::to_string).collect();
-    minuend_settle::batch_from_frames(data, &frames)
+    let raw = inline_frame_bytes(data).map_err(|_| SettleError::RootMismatch)?;
+    batch_from_committed(data, &raw)
 }
 
 /// Locate the inline `temp_data` payload inside a hub-returned joint. The
@@ -287,12 +343,6 @@ fn extract_temp_data(joint: &serde_json::Value) -> Option<serde_json::Value> {
         }
     }
     None
-}
-
-fn get_str<'a>(data: &'a serde_json::Value, key: &str) -> Result<&'a str, SettleError> {
-    data.get(key)
-        .and_then(|v| v.as_str())
-        .ok_or(SettleError::RootMismatch)
 }
 
 pub use minuend_settle::obyte_hash;
@@ -561,81 +611,29 @@ mod tests {
             "tampered batch must not replay"
         );
     }
+    /// B11 (#47): the multi-package assembler returns exactly the bytes the
+    /// `data_root` covers — no parse-only LF insertion or LF de-duplication.
     #[test]
-    fn assemble_frames_reads_legacy_boundaries_and_preserves_raw_root() {
+    fn assemble_frames_returns_exact_committed_bytes() {
         use base64::Engine as _;
         use sha2::{Digest, Sha256};
-        let frames = [
-            "{\"u\":\"one\"}",
-            "{\"u\":\"two-β\"}",
-            "{\"u\":\"three\"}",
-            "{\"u\":\"four\"}",
-        ];
-        // Legacy writers separated frames inside a package but not package
-        // boundaries. Both packages contain multiple frames here.
-        let raw1 = format!("{}\n{}", frames[0], frames[1]).into_bytes();
-        let raw2 = format!("{}\n{}", frames[2], frames[3]).into_bytes();
-        let raw_concat = [raw1.clone(), raw2.clone()].concat();
-        let normalized = frames.join("\n");
+        let frames = ["{\"u\":\"one\"}", "{\"u\":\"two-β\"}", "{\"u\":\"three\"}"];
+        // Current producer shape: later packages start with LF.
+        let raw1 = frames[0].as_bytes().to_vec();
+        let raw2 = format!("\n{}\n{}", frames[1], frames[2]).into_bytes();
+        let concat = [raw1.clone(), raw2.clone()].concat();
         let (header, hub) = package_fixture(&[raw1, raw2]);
-        assert_eq!(
-            header["data_root"],
-            hex::encode(Sha256::digest(&raw_concat)),
-            "data_root is over the unmodified package bytes"
-        );
-        assert_ne!(
-            header["data_root"],
-            hex::encode(Sha256::digest(normalized.as_bytes())),
-            "parse-only inserted LF must not change the committed root"
-        );
+        assert_eq!(header["data_root"], hex::encode(Sha256::digest(&concat)));
+        let got = assemble_frames(&hub, &header).unwrap();
+        assert_eq!(got, concat, "assembled bytes must be the committed bytes");
+        assert_eq!(parse_committed_frames(&got).unwrap(), frames);
 
-        let assembled = assemble_frames(&hub, &header).unwrap();
-        let gz = base64::engine::general_purpose::STANDARD
-            .decode(assembled)
-            .unwrap();
-        let parse_bytes = gunzip_blob(&gz).unwrap();
-        assert_eq!(parse_bytes, normalized.as_bytes());
-        let text = String::from_utf8(parse_bytes).unwrap();
-        let decoded: Vec<_> = text.lines().collect();
-        assert_eq!(decoded, frames);
-        for frame in decoded {
-            serde_json::from_str::<serde_json::Value>(frame).unwrap();
-        }
-
-        // A root computed over the normalized parser stream is not accepted
-        // in place of the root over the original legacy package bytes.
-        let mut wrong_root = header.clone();
-        wrong_root["data_root"] =
-            serde_json::json!(hex::encode(Sha256::digest(normalized.as_bytes())));
-        assert!(assemble_frames(&hub, &wrong_root).is_err());
-
-        // Legacy single-package data already has frame separators internally;
-        // it needs no assembly-time boundary insertion.
-        let one_raw = frames.join("\n").into_bytes();
-        let (one_header, one_hub) = package_fixture(&[one_raw]);
-        let one = assemble_frames(&one_hub, &one_header).unwrap();
-        let one_gz = base64::engine::general_purpose::STANDARD
-            .decode(one)
-            .unwrap();
-        assert_eq!(gunzip_blob(&one_gz).unwrap(), normalized.as_bytes());
-
-        // A previously proposed trailing-LF package shape also remains
-        // readable by the new consumer, including its final frame.
-        let trailing_raws = vec![
-            format!("{}\n", frames[0]).into_bytes(),
-            format!("{}\n{}\n", frames[1], frames[2]).into_bytes(),
-        ];
-        let (trailing_header, trailing_hub) = package_fixture(&trailing_raws);
-        let trailing = assemble_frames(&trailing_hub, &trailing_header).unwrap();
-        let trailing_gz = base64::engine::general_purpose::STANDARD
-            .decode(trailing)
-            .unwrap();
-        let trailing_text = String::from_utf8(gunzip_blob(&trailing_gz).unwrap()).unwrap();
-        assert_eq!(trailing_text.lines().collect::<Vec<_>>(), &frames[..3]);
-
+        // Wrong root, bad gzip → BindingMismatch.
         let bad = serde_json::json!({"packages": header["packages"].clone(), "data_root": "00".repeat(32)});
-        assert!(assemble_frames(&hub, &bad).is_err());
-        // Invalid gzip maps to BindingMismatch, not HubUnavailable.
+        assert!(matches!(
+            assemble_frames(&hub, &bad),
+            Err(WatchError::BindingMismatch(_))
+        ));
         let not_gz = base64::engine::general_purpose::STANDARD.encode(b"not-gzip");
         let hub2 = MockHub {
             vars: Default::default(),
@@ -651,95 +649,114 @@ mod tests {
         ));
     }
 
+    /// B11 (#47): the frame parser is strict over the committed bytes. Shapes
+    /// the old normaliser silently repaired (missing boundary LF, doubled LF,
+    /// trailing LF, CR) are now rejected, so no two different committed byte
+    /// strings decode to the same batch by normalisation.
     #[test]
-    fn legacy_and_new_package_formats_rebuild_a_complete_real_batch() {
-        use base64::Engine as _;
-        use sha2::{Digest, Sha256};
+    fn parse_committed_frames_is_strict() {
+        assert_eq!(
+            parse_committed_frames(b"{\"a\":1}\n{\"b\":2}").unwrap(),
+            vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]
+        );
+        for bad in [
+            &b""[..],
+            b"{\"a\":1}\n",
+            b"\n{\"a\":1}",
+            b"{\"a\":1}\n\n{\"b\":2}",
+            b"{\"a\":1}\r\n{\"b\":2}",
+            &[0xff, 0xfe][..],
+        ] {
+            assert!(
+                parse_committed_frames(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
 
+    /// B11 (#47): `packages` next to an inline `frames_blob` used to switch
+    /// off the inline `data_root` check. Every path now refuses that header,
+    /// and an inline header's root is always verified.
+    #[test]
+    fn packages_key_no_longer_bypasses_inline_data_root() {
+        let da = build_batch_da(false);
+        assert!(batch_from_data(&da.data).is_ok());
+        // Tampered root alone: rejected.
+        let mut tampered = da.data.clone();
+        tampered["data_root"] = serde_json::json!("00".repeat(32));
+        assert!(batch_from_data(&tampered).is_err());
+        // Tampered root + a `packages` key: still rejected (was accepted).
+        let mut bypass = tampered.clone();
+        bypass["packages"] = serde_json::json!([]);
+        assert!(batch_from_data(&bypass).is_err());
+        let hub = MockHub {
+            vars: Default::default(),
+            joints: Default::default(),
+        };
+        assert!(matches!(
+            committed_frame_bytes(&hub, &bypass),
+            Err(WatchError::BindingMismatch(_))
+        ));
+        // Even with a correct root, both sources at once is refused.
+        let mut both = da.data.clone();
+        both["packages"] = serde_json::json!([]);
+        assert!(committed_frame_bytes(&hub, &both).is_err());
+        // Missing data_root on an inline header is refused.
+        let mut no_root = da.data.clone();
+        no_root.as_object_mut().unwrap().remove("data_root");
+        assert!(batch_from_data(&no_root).is_err());
+    }
+
+    /// Real batch through every producer shape: the inline blob, the current
+    /// multi-package producer (LF-prefixed later packages), and a frame
+    /// split across a package boundary all decode to the same batch from
+    /// the exact committed bytes. The pre-#39 multi-package shape without a
+    /// boundary LF is rejected (its committed bytes are not LF-separated).
+    #[test]
+    fn producer_package_formats_rebuild_a_complete_real_batch() {
         let da = build_batch_da(false);
         let expected = batch_from_data(&da.data).unwrap();
         let original = da.data["frames_blob"].as_str().unwrap();
         let original_raw = minuend_settle::decode_package_blob(original).unwrap();
-        let text = String::from_utf8(original_raw).unwrap();
-        let frames: Vec<String> = text.lines().map(str::to_string).collect();
+        let frames = parse_committed_frames(&original_raw).unwrap();
         assert!(frames.len() >= 2, "fixture needs multiple frames");
 
-        // Legacy single package: no terminal LF; root covers exact gunzipped bytes.
-        let legacy_single_raw = frames.join("\n").into_bytes();
-        let mut legacy_single = da.data.clone();
-        legacy_single["frames_blob"] = serde_json::json!(base64::engine::general_purpose::STANDARD
-            .encode(minuend_settle::gzip_bytes(&legacy_single_raw)));
-        legacy_single["data_root"] =
-            serde_json::json!(hex::encode(Sha256::digest(&legacy_single_raw)));
-        assert_eq!(batch_from_data(&legacy_single).unwrap(), expected);
-        let mut tampered_single = legacy_single.clone();
-        tampered_single["data_root"] = serde_json::json!("00".repeat(32));
-        assert!(batch_from_data(&tampered_single).is_err());
+        let multi = |raws: &[Vec<u8>]| -> (serde_json::Value, MockHub) {
+            let (pkg_header, hub) = package_fixture(raws);
+            let mut h = da.data.clone();
+            h.as_object_mut().unwrap().remove("frames_blob");
+            h["packages"] = pkg_header["packages"].clone();
+            h["data_root"] = pkg_header["data_root"].clone();
+            (h, hub)
+        };
 
-        // Legacy multi-package: no package delimiter is inserted by the old
-        // writer. The new assembler verifies this raw root before parse repair.
-        let split = frames.len() / 2;
-        let legacy_raws = vec![
-            frames[..split].join("\n").into_bytes(),
-            frames[split..].join("\n").into_bytes(),
-        ];
-        let (legacy_package_header, legacy_hub) = package_fixture(&legacy_raws);
-        let mut legacy_multi = da.data.clone();
-        legacy_multi.as_object_mut().unwrap().remove("frames_blob");
-        legacy_multi["packages"] = legacy_package_header["packages"].clone();
-        legacy_multi["data_root"] = legacy_package_header["data_root"].clone();
-        legacy_multi["frames_blob"] =
-            serde_json::json!(assemble_frames(&legacy_hub, &legacy_multi).unwrap());
-        assert_eq!(batch_from_data(&legacy_multi).unwrap(), expected);
-
-        // Current producer: first package has no prefix, each later package
-        // starts with LF, and the full wire stream has no terminal LF. Simulate
-        // the pre-PR watcher's split('\n') logic to prove rollback compatibility.
+        // Current Rust producer: one frame per package.
         let new_blobs = minuend_settle::pack_frames_with_cap(&frames, 1);
         assert_eq!(new_blobs.len(), frames.len());
         let new_raws: Vec<_> = new_blobs
             .iter()
             .map(|b| minuend_settle::decode_package_blob(b).unwrap())
             .collect();
-        let new_wire_raw: Vec<u8> = new_raws.iter().flatten().copied().collect();
-        assert_eq!(new_wire_raw, frames.join("\n").as_bytes());
-        assert_ne!(new_wire_raw.last(), Some(&b'\n'));
-        let old_reader_text = String::from_utf8(new_wire_raw.clone()).unwrap();
-        let old_reader_frames: Vec<String> =
-            old_reader_text.split('\n').map(str::to_string).collect();
-        assert_eq!(old_reader_frames, frames);
-        assert_eq!(
-            minuend_settle::batch_from_frames(&da.data, &old_reader_frames).unwrap(),
-            expected,
-            "new producer output remains readable by the old watcher decoder"
-        );
+        let (h, hub) = multi(&new_raws);
+        let raw = committed_frame_bytes(&hub, &h).unwrap();
+        assert_eq!(raw, original_raw);
+        assert_eq!(batch_from_committed(&h, &raw).unwrap(), expected);
 
-        let (new_package_header, new_hub) = package_fixture(&new_raws);
-        let mut new_multi = da.data.clone();
-        new_multi.as_object_mut().unwrap().remove("frames_blob");
-        new_multi["packages"] = new_package_header["packages"].clone();
-        new_multi["data_root"] = new_package_header["data_root"].clone();
-        new_multi["frames_blob"] =
-            serde_json::json!(assemble_frames(&new_hub, &new_multi).unwrap());
-        assert_eq!(batch_from_data(&new_multi).unwrap(), expected);
+        // A frame split mid-way across two packages: the concatenation is
+        // what is committed and parsed, so it decodes identically.
+        let cut = original_raw.len() / 2;
+        let (h, hub) = multi(&[original_raw[..cut].to_vec(), original_raw[cut..].to_vec()]);
+        let raw = committed_frame_bytes(&hub, &h).unwrap();
+        assert_eq!(batch_from_committed(&h, &raw).unwrap(), expected);
 
-        // Empty payloads are not batches; malformed UTF-8 is rejected before
-        // JSON frame parsing, without relaxing the UTF-8 wire contract.
-        let mut empty = da.data.clone();
-        let empty_raw: &[u8] = b"";
-        empty["frames_blob"] =
-            serde_json::json!(base64::engine::general_purpose::STANDARD
-                .encode(minuend_settle::gzip_bytes(empty_raw)));
-        empty["data_root"] = serde_json::json!(hex::encode(Sha256::digest(empty_raw)));
-        assert!(batch_from_data(&empty).is_err());
-        let invalid_utf8 = [0xff, 0xfe];
-        let mut invalid = da.data.clone();
-        invalid["frames_blob"] = serde_json::json!(base64::engine::general_purpose::STANDARD
-            .encode(minuend_settle::gzip_bytes(&invalid_utf8)));
-        invalid["data_root"] = serde_json::json!(hex::encode(Sha256::digest(invalid_utf8)));
-        assert!(matches!(
-            batch_from_data(&invalid),
-            Err(SettleError::RootMismatch)
-        ));
+        // Pre-#39 writer: no LF at the package boundary → rejected.
+        let split = frames.len() / 2;
+        let legacy = vec![
+            frames[..split].join("\n").into_bytes(),
+            frames[split..].join("\n").into_bytes(),
+        ];
+        let (h, hub) = multi(&legacy);
+        let raw = committed_frame_bytes(&hub, &h).unwrap();
+        assert!(batch_from_committed(&h, &raw).is_err());
     }
 }
