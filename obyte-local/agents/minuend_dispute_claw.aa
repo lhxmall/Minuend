@@ -1,0 +1,544 @@
+{
+	// MINUEND claw dispute AA (minuend-v2) — round 6: BOTH legs of one fill.
+	//
+	// fill_math (minuend_dispute_fill.aa) judges each fill leg alone, so
+	// the claw — a fill party's negative fill-stage collateral pulled back
+	// from the OTHER fill party, capped at what that party can pay
+	// (minuend-state apply_fill_pair) — was only a per-leg RANGE: the
+	// operator could credit the receiver without debiting the payer and
+	// print money with its own accounts (PR #51 未修复项 27). P-claw reads
+	// the pre and post `acct:` leaves of the taker AND the maker, both pre
+	// positions, the maker order and the unit op, replays the engine's
+	// fill-stage collateral of each party, the claw (taker first, then
+	// maker), the isolated taker's unrested escrow refund and the keeper
+	// seize, and verdicts when either post collateral leaves that
+	// two-party result by more than the Oscript rounding slack.
+	//
+	// Bind: {bind_claw:1, rollup:<addr>} payment 20000 -> forwards 10000 to
+	// the rollup with {set_dispute_claw:1} (the rollup hardcodes THIS
+	// address: placeholder DISPUTE_CLAW_AA_HERE, var dispute_claw_aa).
+	// Challenge {pred:'claw', height, rollup, k, trace_root, fills_root,
+	//   ops_root, units_root, fill, fill_proof, units_proof, right,
+	//   right_proof, pre_wit (+pre_proof k>0), post_wit, post_proof, op,
+	//   ops_proof, pre_meta, pre_meta_proof, maker_ord(+proof, kind != 2),
+	//   band(+band_proof: round 7, kind 2 ADL price = clamp(mark, band)),
+	//   and for X in t (taker) / m (maker): X_pre_acct, X_post_acct (+proofs),
+	//   X_pre_pos (+proof) or, when the party had no position on the
+	//   market, X_pleft / X_pright (+proofs): the adjacent pre leaves that
+	//   straddle the pos:{acct}:{market}: prefix (a market's own meta: leaf
+	//   always sorts before it and `~:end` after it)}, payment 20000.
+	//
+	// Fill string: f:{unit}:{idx}:{taker}:{maker}:{taker_order}:
+	//   {maker_order}:{market}:{price}:{qty}:{seq}:{side}:{kind}:{taker_post}
+	// Account / order / unit ids are read as raw substrings (a 64-hex id of
+	// digits only would become a Decimal through split()).
+	//
+	// Round 6b (R6-C1): the fill-to-op binding is FRAUD, not a gate. For
+	// the FIRST fill of unit k (idx 0, any fill count, any market) the
+	// verdict is immediate when the op is not `p:` / `L:` (only Place and
+	// Liquidate emit fills; a Reveal commits the inner op), when a `p:`
+	// fill is not the op's own (account, market, side, qty <= order qty,
+	// kind 0/1) or a `L:` fill is not (market, target on one side, kind
+	// 2/3, caller != target / insurance), and (R6-H1) when the fill qty or
+	// the order qty is >= QTY_CAP (1e15, never emitted by the engine). On
+	// a regular market additionally kind 1, or a Liquidate whose target is
+	// not the taker, is fraud; so is (R6-H1) a fill that lifts either
+	// position to >= 1e15.
+	// Judged by the two-leg model (everything else bounces 'no fraud'):
+	//   * the unit's ONLY fill (idx 0 + right neighbour outside the unit);
+	//     multi-fill units remain PR #51 未修复项 19;
+	//   * a regular market (proven meta usd_per_unit == 0) — funding
+	//     markets settle the peg between all holders (R2-A-7);
+	//   * a cross liquidation target (an isolated target may get STP
+	//     escrow refunds in-unit), taker != maker (34), neither insurance;
+	//   * pre positions / the maker order below 1e15 (R6-H1: a larger one
+	//     is a pre-state the engine never produces — its own unit is the
+	//     fraud).
+	// R6-C2: optionally ONE more account (x_who): the Liquidate caller
+	// (credited exactly kpay) or the insurance account (credited exactly
+	// the taker fee); every other account of a zero- / single-fill
+	// Place / Liquidate unit is frozen by P-frame (binding AA).
+	// Lies in what is still a gate are fraud for another predicate: a fill
+	// off its maker order (P-mbind), kind 0 on a funding market (P-fsane).
+	// pred 'noband' (round 9, moved from minuend_dispute_mframe.aa): see the
+	// branch below; same header (k, trace / fills / ops / units roots).
+	bounce_fees: { base: 10000 },
+	messages: {
+		cases: [
+			{
+				if: "{trigger.data.bind_claw}",
+				init: "{
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							set_dispute_claw: 1
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['bound_claw'] = 1;
+						}"
+					}
+				]
+			},
+			{
+				if: "{trigger.data.pred == 'claw' OR trigger.data.pred == 'noband'}",
+				init: "{
+					$h = trigger.data.height;
+					if (typeof(trigger.data.rollup) == 'boolean' OR length(trigger.data.rollup) != 32 OR !is_valid_address(trigger.data.rollup))
+						bounce('bad rollup');
+					$rollup = trigger.data.rollup;
+					$n = var[$rollup]['unit_count_' || $h];
+					if (!$h OR !$n) bounce('no height');
+					if (var[$rollup]['frozen_' || $h] OR timestamp >= (var[$rollup]['submitted_at_' || $h] otherwise 0) + 3600)
+						bounce('challenge not possible');
+					if (trigger.data.trace_root != var[$rollup]['trace_root_' || $h]
+						OR trigger.data.fills_root != var[$rollup]['fills_root_' || $h]
+						OR trigger.data.ops_root != var[$rollup]['ops_root_' || $h]
+						OR trigger.data.units_root != var[$rollup]['units_root_' || $h])
+						bounce('stale roots');
+					$k = trigger.data.k;
+					if (!is_integer($k) OR $k < 0 OR $k >= $n)
+						bounce('bad k');
+					if (trigger.data.pred == 'noband') {
+						// P-noband (round 7b R7-H2; moved here from the m-frame
+						// AA in round 9 for its ops budget): `meta` (+meta_proof)
+						// in post_wit (trace[k]) and the
+						// [band:m:, band:m;) straddle left/right in post_wit:
+						// a market without its band leaf (the ADL price below
+						// needs it) is fraud. Indices compared here live in the
+						// sorted witness tree: an aliased right index can only
+						// wrap to (max leaf `~:end`, min leaf), never a straddle.
+						// R11-C1: no `$S = trigger.data` (ocore caps a local object at 4096
+						// chars after pemCurvesFix); every field is read from trigger.data.
+						$post_wit = trigger.data.post_wit;
+						// Any committed trace leaf (unit post tree) lacking a band
+						// is fraud whatever its k, so a short-depth (aliased)
+						// index cannot hide anything: an inner node is no meta
+						// tree. Non-string leaves bounce on the comparisons below.
+						if (trigger.data.post_proof.index != $k OR trigger.data.post_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof))
+							bounce('bad post proof');
+						$pm = trigger.data.meta;
+						$M = split($pm, ':');
+						if (array_length($M) != 11 OR $M[0] != 'meta'
+							OR !is_valid_merkle_proof($pm, trigger.data.meta_proof) OR trigger.data.meta_proof.root != $post_wit)
+							bounce('bad meta');
+						$blo = 'band:' || $M[1] || ':';
+						$bhi = 'band:' || $M[1] || ';';
+						$nb1 = trigger.data.right AND is_integer(trigger.data.left_proof.index) AND trigger.data.left_proof.index >= 0
+							AND trigger.data.left_proof.index + 1 == trigger.data.right_proof.index
+							AND trigger.data.left_proof.root == $post_wit AND trigger.data.right_proof.root == $post_wit
+							AND trigger.data.left < $blo AND $bhi <= trigger.data.right
+							AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof)
+							AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof);
+						$nb2 = trigger.data.left_proof.index == 0
+							AND trigger.data.left_proof.root == $post_wit AND $bhi <= trigger.data.left
+							AND is_valid_merkle_proof(trigger.data.left, trigger.data.left_proof);
+						if (!$nb1 AND !$nb2) bounce('no fraud');
+					} else {
+					$fill = trigger.data.fill;
+					if (typeof($fill) == 'boolean'
+						OR !is_valid_merkle_proof($fill, trigger.data.fill_proof)
+						OR trigger.data.fill_proof.root != trigger.data.fills_root)
+						bounce('bad fill proof');
+					$F = split($fill, ':');
+					// Raw ids: unit, taker, maker, maker order (64 hex each,
+					// idx 0 between unit and taker — the unit's FIRST fill).
+					$u = substring($fill, 2, 64);
+					$tk = substring($fill, 69, 64);
+					$mk = substring($fill, 134, 64);
+					$mo = substring($fill, 264, 64);
+					if (array_length($F) != 14 OR substring($fill, 0, 2) != 'f:' OR substring($fill, 66, 3) != ':0:'
+						OR substring($fill, 133, 1) != ':' OR substring($fill, 198, 1) != ':'
+						OR substring($fill, 263, 1) != ':' OR substring($fill, 328, 1) != ':'
+						OR contains($u || $tk || $mk || $mo, ':'))
+						bounce('no fraud');
+					if ($F[11] != '0' AND $F[11] != '1') bounce('bad fill');
+					$kind = $F[12];
+					if (!trigger.data.units_proof OR trigger.data.units_proof.index != $k
+						OR trigger.data.units_proof.root != trigger.data.units_root
+						OR !is_valid_merkle_proof($u, trigger.data.units_proof))
+						bounce('bad unit');
+					$op = trigger.data.op;
+					// R7-C2: the ops / units / fills proofs must have the
+					// exact depth of their committed leaf counts (unit_count,
+					// unit_count, fill_count + 1 with the `n:` sentinel): at
+					// that depth an element is the committed leaf itself,
+					// never an internal node (node-as-leaf would otherwise
+					// reach the "op not p:/L:" fraud below). A tree of
+					// another size is P-tsize fraud (xframe AA).
+					if (typeof($op) != 'string' OR !trigger.data.ops_proof OR trigger.data.ops_proof.index != $k
+						OR trigger.data.ops_proof.root != trigger.data.ops_root
+						OR !is_valid_merkle_proof($op, trigger.data.ops_proof))
+						bounce('bad ops proof');
+					$d1 = 2 ^ array_length(trigger.data.ops_proof.siblings);
+					$nfl = (var[$rollup]['fill_count_' || $h] otherwise 0) + 1;
+					$d3 = 2 ^ array_length(trigger.data.fill_proof.siblings);
+					if (($n > 1 AND ($d1 < $n OR $d1 >= 2 * $n OR array_length(trigger.data.units_proof.siblings) != array_length(trigger.data.ops_proof.siblings)))
+						OR $d3 < $nfl OR $d3 >= 2 * $nfl)
+						bounce('bad proof depth');
+					$market = $F[7];
+					$qty = $F[9];
+					if (!is_integer($qty) OR $qty <= 0) bounce('no fraud');
+					$OP = split($op, ':');
+					$Z = '0000000000000000000000000000000000000000000000000000000000000000';
+					// R6-C1: the FIRST fill of unit k must be its op's, on any
+					// market and whatever the fill count — only Place and
+					// Liquidate (direct or revealed, committed as the inner
+					// p: / L:) emit fills: a Place's first fill is its own
+					// book fill (kind 0/1, its account, market and side,
+					// qty <= the order qty); a Liquidate's is kind 2/3 on
+					// its market with the target on one side (taker on the
+					// book path / regular ADL, maker in a funding-rate
+					// off-book ADL), and the caller is neither the target
+					// nor the insurance account. Any other op (`x:` …)
+					// carries no fill. R6-H1: qty and the order qty stay
+					// below QTY_CAP (1e15) — a larger one is never emitted.
+					$tg = substring($op, 67, 64);
+					$bad = $qty >= 1000000000000000
+						OR (substring($op, 0, 2) == 'p:' AND (array_length($OP) != 10 OR substring($op, 2, 64) != $tk
+							OR substring($op, 66, 1) != ':' OR $OP[2] != $market OR $OP[3] != $F[11]
+							OR ($OP[6] != '0' AND $OP[6] != '1') OR !is_integer($OP[5]) OR $OP[5] >= 1000000000000000
+							OR $qty > $OP[5] OR !is_integer($OP[7]) OR $OP[7] < 0 OR ($kind != 0 AND $kind != 1)))
+						OR (substring($op, 0, 2) == 'L:' AND (array_length($OP) != 4 OR substring($op, 66, 1) != ':'
+							OR substring($op, 131, 1) != ':' OR $OP[3] != $market OR ($tg != $tk AND $tg != $mk)
+							OR substring($op, 2, 64) == $tg OR substring($op, 2, 64) == $Z OR ($kind != 2 AND $kind != 3)))
+						OR (substring($op, 0, 2) != 'p:' AND substring($op, 0, 2) != 'L:');
+					if (!$bad) {
+						if ($kind != 0 AND $kind != 1 AND $kind != 2 AND $kind != 3) bounce('no fraud');
+						if ($tk == $mk OR $tk == $Z OR $mk == $Z)
+							bounce('no fraud');
+						// Single-fill completeness (fill_math's arm): the right
+						// neighbour is a real fills leaf of ANOTHER unit or the
+						// fills_root length sentinel.
+						if (!(trigger.data.right
+							AND is_valid_merkle_proof(trigger.data.right, trigger.data.right_proof)
+							AND trigger.data.right_proof.root == trigger.data.fills_root
+							AND is_integer(trigger.data.fill_proof.index) AND trigger.data.fill_proof.index >= 0
+							AND trigger.data.right_proof.index == trigger.data.fill_proof.index + 1
+							AND (starts_with(trigger.data.right, 'f:') OR starts_with(trigger.data.right, 'n:'))
+							AND !starts_with(trigger.data.right, 'f:' || $u || ':')))
+							bounce('no fraud');
+						$pre_wit = trigger.data.pre_wit;
+						if ($k == 0){
+							if ($h == 1){
+								if ($pre_wit != 'eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=') bounce('bad pre wit');
+							} else {
+								if ($pre_wit != var[$rollup]['wit_root_' || ($h - 1)]) bounce('bad pre wit');
+							}
+						} else {
+							if (!trigger.data.pre_proof OR trigger.data.pre_proof.index != $k - 1 OR trigger.data.pre_proof.root != trigger.data.trace_root
+								OR !is_valid_merkle_proof($pre_wit, trigger.data.pre_proof))
+								bounce('bad pre proof');
+						}
+						$post_wit = trigger.data.post_wit;
+						if (!trigger.data.post_proof OR trigger.data.post_proof.index != $k OR trigger.data.post_proof.root != trigger.data.trace_root
+							OR !is_valid_merkle_proof($post_wit, trigger.data.post_proof))
+							bounce('bad post proof');
+						$pre_meta = trigger.data.pre_meta;
+						if (typeof($pre_meta) == 'boolean'
+							OR !is_valid_merkle_proof($pre_meta, trigger.data.pre_meta_proof)
+							OR trigger.data.pre_meta_proof.root != $pre_wit)
+							bounce('bad pre meta proof');
+						$M = split($pre_meta, ':');
+						if (array_length($M) != 11 OR $M[0] != 'meta' OR $M[1] != $market) bounce('bad pre meta');
+						// Funding-rate market: peg cash between all holders.
+						if ($M[9] != 0) bounce('no fraud');
+						$price = $F[8] + 0;
+						// Round 7 (未修复项 28): a kind-2 ADL prints at
+						// clamp(pre mark, band) (exec clamp_to_band: floor then
+						// ceiling, 0 = unbounded). One fill per unit means the
+						// book filled nothing in this unit, so the mark is the
+						// PRE meta's. Judged when the band leaf is given.
+						$bnd = trigger.data.band;
+						if ($kind == 2 AND typeof($bnd) == 'string') {
+							$B = split($bnd, ':');
+							if (!is_valid_merkle_proof($bnd, trigger.data.band_proof) OR trigger.data.band_proof.root != $pre_wit
+								OR array_length($B) != 4 OR $B[0] != 'band' OR $B[1] != $market)
+								bounce('bad band');
+							$ex1 = ($B[2] != 0 AND $M[8] < $B[2]) ? $B[2] : $M[8];
+							$ex2 = ($B[3] != 0 AND $ex1 > $B[3]) ? $B[3] : $ex1;
+							$badp = $price != $ex2;
+						} else $badp = false;
+						// Regular market (R6-C1): kind 1 never occurs and a
+						// Liquidate's target is always the taker.
+						$fr0 = $badp OR $kind == 1 OR (substring($op, 0, 2) == 'L:' AND $tg != $tk);
+						if ($kind == 0) {
+							$margin = ($OP[6] == '1') ? $OP[7] : 0;
+							$tp = ($qty >= $OP[5]) ? $margin : floor($margin * $qty / $OP[5]);
+							// Unfilled remainder rests iff Limit + Gtc + qty left;
+							// otherwise its escrow returns AFTER the claw.
+							$refund = ($OP[9] == '0' AND $OP[8] == '0' AND $qty < $OP[5]) ? 0 : $margin - $tp;
+							$keeper_m = false;
+						} else {
+							$margin = 0;
+							$tp = 0;
+							$refund = 0;
+							$keeper_m = substring($op, 2, 64) == $mk;
+						}
+						if (!$fr0) {
+							// Maker order (book fills): owner, price, remaining, escrow.
+							if ($kind != 2) {
+								$mord = trigger.data.maker_ord;
+								if (typeof($mord) == 'boolean'
+									OR !starts_with($mord, 'ord:' || $mo || ':')
+									OR !is_valid_merkle_proof($mord, trigger.data.maker_ord_proof)
+									OR trigger.data.maker_ord_proof.root != $pre_wit)
+									bounce('bad maker ord');
+								$MO = split($mord, ':');
+								if (array_length($MO) != 10 OR $mo == $mk OR !contains($mord, ':' || $mk || ':')
+									OR $MO[4] != $price OR $qty > $MO[6])
+									bounce('bad maker ord');
+								$mml = $MO[9] + 0;
+								$mp = ($qty >= $MO[6]) ? $mml : floor($mml * $qty / $MO[6]);
+								$mbig = $MO[6] >= 1000000000000000;
+							} else {
+								$mml = 0;
+								$mp = 0;
+								$mbig = false;
+							}
+							// Price notional (Rust i128 truncation): taker fee (kind
+							// 0/3) and keeper reward (kind 2/3) bases.
+							$t1 = ($qty * $price < 0) ? ceil($qty * $price / 100000000) : floor($qty * $price / 100000000);
+							$t2 = abs(($t1 * 1000000 < 0) ? ceil($t1 * 1000000 / 100000000) : floor($t1 * 1000000 / 100000000));
+							$fee = ($kind == 2) ? 0 : floor($t2 * $M[5] / 10000);
+							$reward = ($kind == 0) ? 0 : floor($t2 * $M[6] / 10000);
+							// ---- taker leg (side F[11]) ----
+							$tA0 = trigger.data.t_pre_acct;
+							if (typeof($tA0) == 'boolean' OR !starts_with($tA0, 'acct:' || $tk || ':')
+								OR !is_valid_merkle_proof($tA0, trigger.data.t_pre_acct_proof) OR trigger.data.t_pre_acct_proof.root != $pre_wit)
+								bounce('bad t_pre_acct');
+							$tA1 = trigger.data.t_post_acct;
+							if (typeof($tA1) == 'boolean' OR !starts_with($tA1, 'acct:' || $tk || ':')
+								OR !is_valid_merkle_proof($tA1, trigger.data.t_post_acct_proof) OR trigger.data.t_post_acct_proof.root != $post_wit)
+								bounce('bad t_post_acct');
+							$tS0 = split($tA0, ':');
+							$tS1 = split($tA1, ':');
+							$tc0 = $tS0[2] + 0;
+							// R10-H2: non-integer POST collateral = fraud (sentinel).
+							$tc1 = is_integer($tS1[2]) ? $tS1[2] : 1000000000000000000000000000000;
+							$tlo = 'pos:' || $tk || ':' || $market || ':';
+							$thi = 'pos:' || $tk || ':' || $market || ';';
+							$tPP = trigger.data.t_pre_pos;
+							if (typeof($tPP) != 'boolean') {
+								if (!starts_with($tPP, $tlo) OR !is_valid_merkle_proof($tPP, trigger.data.t_pre_pos_proof)
+									OR trigger.data.t_pre_pos_proof.root != $pre_wit)
+									bounce('bad t_pre_pos');
+								$tP = split($tPP, ':');
+								if (array_length($tP) != 7 OR ($tP[5] != '0' AND $tP[5] != '1')) bounce('bad t_pre_pos');
+								$tq0 = $tP[3] + 0;
+								$te0 = $tP[4] + 0;
+								$ti = $tP[5] == '1';
+								$tb = $tP[6] + 0;
+							} else {
+								if (!(trigger.data.t_pleft AND trigger.data.t_pright
+									AND is_integer(trigger.data.t_pleft_proof.index) AND trigger.data.t_pleft_proof.index >= 0
+									AND trigger.data.t_pleft_proof.index + 1 == trigger.data.t_pright_proof.index
+									AND trigger.data.t_pleft_proof.root == $pre_wit AND trigger.data.t_pright_proof.root == $pre_wit
+									AND trigger.data.t_pleft < $tlo AND $thi <= trigger.data.t_pright
+									AND is_valid_merkle_proof(trigger.data.t_pleft, trigger.data.t_pleft_proof)
+									AND is_valid_merkle_proof(trigger.data.t_pright, trigger.data.t_pright_proof)))
+									bounce('bad t_pos absence');
+								$tq0 = 0;
+								$te0 = 0;
+								$ti = false;
+								$tb = 0;
+							}
+							// Liquidation target: an isolated position may get STP
+							// escrow refunds in-unit (unmodelled).
+							if ($kind != 0 AND $ti) bounce('no fraud');
+							$td = ($F[11] == '0') ? $qty : 0 - $qty;
+							$taq = abs($tq0);
+							if ($tq0 == 0 OR ($tq0 > 0 AND $td > 0) OR ($tq0 < 0 AND $td < 0)) {
+								$trel = 0;
+								$tpnl = 0;
+								$tback = 0;
+							} else {
+								$tcl = min($taq, $qty);
+								$trel = $ti ? (($tcl == $taq) ? $tb : floor($tb * $tcl / $taq)) : 0;
+								$tpr = (($tq0 > 0) ? ($price - $te0) : ($te0 - $price)) * $tcl * 1000000;
+								$tq1 = ($tpr < 0) ? ceil($tpr / 100000000) : floor($tpr / 100000000);
+								$tpnl = ($tq1 < 0) ? ceil($tq1 / 100000000) : floor($tq1 / 100000000);
+								// the escrow share returns to collateral unless the
+								// fill flipped the position (new open qty).
+								$tback = ($tcl == $taq AND $qty > $tcl) ? 0 : $tp;
+							}
+							// Fill-stage: escrow left at place, release, pnl, fee.
+							$mt = $tc0 - $margin + $trel + $tpnl + $tback - $fee;
+							// ---- maker leg (opposite side) ----
+							$mA0 = trigger.data.m_pre_acct;
+							if (typeof($mA0) == 'boolean' OR !starts_with($mA0, 'acct:' || $mk || ':')
+								OR !is_valid_merkle_proof($mA0, trigger.data.m_pre_acct_proof) OR trigger.data.m_pre_acct_proof.root != $pre_wit)
+								bounce('bad m_pre_acct');
+							$mA1 = trigger.data.m_post_acct;
+							if (typeof($mA1) == 'boolean' OR !starts_with($mA1, 'acct:' || $mk || ':')
+								OR !is_valid_merkle_proof($mA1, trigger.data.m_post_acct_proof) OR trigger.data.m_post_acct_proof.root != $post_wit)
+								bounce('bad m_post_acct');
+							$mS0 = split($mA0, ':');
+							$mS1 = split($mA1, ':');
+							$mc0 = $mS0[2] + 0;
+							$mc1 = is_integer($mS1[2]) ? $mS1[2] : 1000000000000000000000000000000;
+							$mlo = 'pos:' || $mk || ':' || $market || ':';
+							$mhi = 'pos:' || $mk || ':' || $market || ';';
+							$mPP = trigger.data.m_pre_pos;
+							if (typeof($mPP) != 'boolean') {
+								if (!starts_with($mPP, $mlo) OR !is_valid_merkle_proof($mPP, trigger.data.m_pre_pos_proof)
+									OR trigger.data.m_pre_pos_proof.root != $pre_wit)
+									bounce('bad m_pre_pos');
+								$mP = split($mPP, ':');
+								if (array_length($mP) != 7 OR ($mP[5] != '0' AND $mP[5] != '1')) bounce('bad m_pre_pos');
+								$mq0 = $mP[3] + 0;
+								$me0 = $mP[4] + 0;
+								$mi = $mP[5] == '1';
+								$mb = $mP[6] + 0;
+							} else {
+								if (!(trigger.data.m_pleft AND trigger.data.m_pright
+									AND is_integer(trigger.data.m_pleft_proof.index) AND trigger.data.m_pleft_proof.index >= 0
+									AND trigger.data.m_pleft_proof.index + 1 == trigger.data.m_pright_proof.index
+									AND trigger.data.m_pleft_proof.root == $pre_wit AND trigger.data.m_pright_proof.root == $pre_wit
+									AND trigger.data.m_pleft < $mlo AND $mhi <= trigger.data.m_pright
+									AND is_valid_merkle_proof(trigger.data.m_pleft, trigger.data.m_pleft_proof)
+									AND is_valid_merkle_proof(trigger.data.m_pright, trigger.data.m_pright_proof)))
+									bounce('bad m_pos absence');
+								$mq0 = 0;
+								$me0 = 0;
+								$mi = false;
+								$mb = 0;
+							}
+							$maq = abs($mq0);
+							// R6-H1: the engine keeps every position below QTY_CAP
+							// (1e15), where `qty` vs `|pos|` (flip or pure close)
+							// compares exactly. A pre position (or maker order) at
+							// or above it is a pre-state the engine never produces
+							// (its own unit is the fraud): not judged here. A fill
+							// that would lift either position to the cap is fraud.
+							if ($taq >= 1000000000000000 OR $maq >= 1000000000000000 OR $mbig)
+								bounce('no fraud');
+							$fr1 = abs($tq0 + $td) >= 1000000000000000 OR abs($mq0 - $td) >= 1000000000000000;
+							if ($mq0 == 0 OR ($mq0 > 0 AND $td < 0) OR ($mq0 < 0 AND $td > 0)) {
+								$mrel = 0;
+								$mpnl = 0;
+								$mback = 0;
+							} else {
+								$mcl = min($maq, $qty);
+								$mrel = $mi ? (($mcl == $maq) ? $mb : floor($mb * $mcl / $maq)) : 0;
+								$mpr = (($mq0 > 0) ? ($price - $me0) : ($me0 - $price)) * $mcl * 1000000;
+								$mq1 = ($mpr < 0) ? ceil($mpr / 100000000) : floor($mpr / 100000000);
+								$mpnl = ($mq1 < 0) ? ceil($mq1 / 100000000) : floor($mq1 / 100000000);
+								$mback = ($mcl == $maq AND $qty > $mcl) ? 0 : $mp;
+							}
+							$mm = $mc0 + $mrel + $mpnl + $mback;
+							// ---- the claw (taker first, then maker), zero-sum ----
+							$x = ($mt < 0) ? min(0 - $mt, max($mm, 0)) : (($mm < 0) ? 0 - min(0 - $mm, max($mt, 0)) : 0);
+							// keeper seize from the clawed target, credited to the caller
+							$kpay = min($reward, max($mt + $x, 0));
+							$et = $mt + $x + $refund - $kpay;
+							$em = $mm - $x + ($keeper_m ? $kpay : 0);
+							// Oscript keeps 15 significant digits: each leg's terms
+							// are off by at most 6 below 1e14 and by < 1e-12 of the
+							// summed PROVEN magnitudes above (fill_math's R5-A-2
+							// tolerance); the claw and the seize are 1-Lipschitz in
+							// both fill stages, so four times the sum bounds the
+							// error of either expected post.
+							$slack = 4 * (16 + floor((abs($tc0) + abs($mc0) + 2 * $t2 + abs($tpnl) + abs($mpnl) + $tb + $mb + $mml + $margin
+								+ ($taq * abs($te0) + $maq * abs($me0)) / 10000000000) / 1000000000000));
+							// R6-C2: one more account of the unit, when supplied —
+							// x_who 'c': the Liquidate caller (neither fill party:
+							// credited exactly the seized kpay), 'i': the insurance
+							// account (credited exactly the taker fee). Its pre leaf
+							// is proven, or absent by an adjacent straddle of the
+							// acct:{a}: prefix (col 0). Every other account is frozen
+							// by P-frame (binding AA).
+							$xw = trigger.data.x_who;
+							if ($xw) {
+								if ($xw != 'c' AND $xw != 'i') bounce('bad x_who');
+								$xa = ($xw == 'c') ? substring($op, 2, 64) : $Z;
+								if ($xw == 'c' AND ($kind == 0 OR $keeper_m)) bounce('no fraud');
+								$xlo = 'acct:' || $xa || ':';
+								$xhi = 'acct:' || $xa || ';';
+								$xA1 = trigger.data.x_post_acct;
+								if (typeof($xA1) == 'boolean' OR !starts_with($xA1, $xlo)
+									OR !is_valid_merkle_proof($xA1, trigger.data.x_post_acct_proof) OR trigger.data.x_post_acct_proof.root != $post_wit)
+									bounce('bad x_post_acct');
+								$xA0 = trigger.data.x_pre_acct;
+								if (typeof($xA0) != 'boolean') {
+									if (!starts_with($xA0, $xlo) OR !is_valid_merkle_proof($xA0, trigger.data.x_pre_acct_proof)
+										OR trigger.data.x_pre_acct_proof.root != $pre_wit)
+										bounce('bad x_pre_acct');
+									$xS0 = split($xA0, ':');
+									$xc0 = $xS0[2] + 0;
+								} else {
+									if (!(trigger.data.x_pleft AND trigger.data.x_pright
+										AND is_integer(trigger.data.x_pleft_proof.index) AND trigger.data.x_pleft_proof.index >= 0
+										AND trigger.data.x_pleft_proof.index + 1 == trigger.data.x_pright_proof.index
+										AND trigger.data.x_pleft_proof.root == $pre_wit AND trigger.data.x_pright_proof.root == $pre_wit
+										AND trigger.data.x_pleft < $xlo AND $xhi <= trigger.data.x_pright
+										AND is_valid_merkle_proof(trigger.data.x_pleft, trigger.data.x_pleft_proof)
+										AND is_valid_merkle_proof(trigger.data.x_pright, trigger.data.x_pright_proof)))
+										bounce('bad x absence');
+									$xc0 = 0;
+								}
+								$xS1 = split($xA1, ':');
+								$xok = is_integer($xS1[2]) AND abs($xS1[2] - $xc0 - (($xw == 'c') ? $kpay : $fee))
+									<= $slack + 4 * floor(abs($xc0) / 1000000000000);
+							} else {
+								$xok = true;
+							}
+							if (!$fr1 AND $xok AND abs($tc1 - $et) <= $slack AND abs($mc1 - $em) <= $slack)
+								bounce('no fraud');
+						}
+					}
+					}
+					if (trigger.output[[asset=base]] < 20000) bounce('need fee');
+				}",
+				messages: [
+					{
+						app: "payment",
+						payload: {
+							asset: "base",
+							outputs: [
+								{
+									address: "{trigger.data.rollup}",
+									amount: 10000
+								}
+							]
+						}
+					},
+					{
+						app: "data",
+						payload: {
+							verdict: "fraud",
+							height: "{trigger.data.height}",
+							challenger: "{trigger.address}"
+						}
+					},
+					{
+						app: "state",
+						state: "{
+							var['fraud_' || trigger.data.height] = trigger.address;
+						}"
+					}
+				]
+			}
+		]
+	}
+}

@@ -1,5 +1,5 @@
 pub use minuend_account::Account;
-use minuend_book::{Fill, OrderBook};
+use minuend_book::{BookJournal, Fill, OrderBook, SelfTrade};
 use minuend_types::{
     bps, funding_notional_usd, funding_rate_bps, genesis_params, notional_usd, sha256, AccountId,
     ExternalSample, FundingSourceKind, Height, MarketId, MarketParams, OracleConfig, Price,
@@ -19,6 +19,31 @@ pub struct Withdrawal {
     /// 2048-height replay-protection window enforced by `prune_withdrawals`.
     pub height: Height,
 }
+/// #47 B4: undo log for one engine op (see `ChainState::rollback`).
+#[derive(Debug, Default)]
+pub struct StateJournal {
+    accounts: Vec<(AccountId, Option<Account>)>,
+    seen_accounts: HashSet<AccountId>,
+    /// (market, mark, last_funding_height) pre-images.
+    markets: Vec<(MarketId, Option<Price>, Option<Height>)>,
+    seen_markets: HashSet<MarketId>,
+    /// (market, book existed before, book undo log)
+    book: Option<(MarketId, bool, BookJournal)>,
+}
+
+/// R3-E-1 / R3-A-5: the verified on-chain payment behind a deposit
+/// anchor (see [`ChainState::deposit_backing`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DepositBacking {
+    /// Amount in the deposit's own unit (collateral base units excluding
+    /// the vault bounce fee, or PERP).
+    pub amount: u128,
+    /// The paying Obyte address (`trigger.address`).
+    pub payer: String,
+    /// The sidechain account the payer designated (`trigger.data.account`).
+    pub account: AccountId,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChainState {
     pub height: Height,
@@ -59,6 +84,21 @@ pub struct ChainState {
     /// endorsing PERP are distinct entries. Deposit ops referencing units
     /// outside this set are rejected.
     pub deposits_allowed: HashSet<([u8; 32], bool)>,
+    /// R3-E-1 / R3-A-5 / R3-E-3: the verified payment behind each
+    /// `deposits_allowed` anchor: `(anchor, is_perp) ->` [`DepositBacking`]
+    /// (amount, payer address, payer-designated sidechain account). When an
+    /// anchor has an entry here, a Deposit/GovDeposit consuming it must
+    /// carry exactly this amount and address
+    /// ([`ChainState::deposit_backing_matches`]) and credit exactly this
+    /// account ([`ChainState::deposit_account_matches`]), so nobody can
+    /// front-run a payment to credit or bind it to themselves. The batch
+    /// verifier fills it from evidence-checked anchors only; a producer
+    /// fills it from the vault's `dep_<unit>` / `depp_<unit>` record via
+    /// [`ChainState::allow_deposit`]. Not committed in any root, but
+    /// persisted in snapshots (format v8) together with `deposits_allowed`
+    /// so a snapshot-restored node judges a pending anchor exactly like a
+    /// node that never restarted. Pruned with `deposits_allowed`.
+    pub deposit_backing: BTreeMap<([u8; 32], bool), DepositBacking>,
     /// Highest consumed GovWithdraw nonce per account: strict watermark —
     /// nonces must be strictly increasing per account (`nonce <= watermark`
     /// bounces). Bounded by the account count, unlike a spent-nonce set.
@@ -67,6 +107,14 @@ pub struct ChainState {
     /// The AA-facing tree keys leaves by this address; unbound accounts are
     /// not representable on the AA side and are excluded from it.
     pub aa_addresses: BTreeMap<AccountId, String>,
+    /// #47 A2: reverse index of `aa_addresses` (address -> its ONE bound
+    /// account). An Obyte address may be bound to at most one account, so
+    /// the AA forest and the `adr:` witness leaves hold at most one leaf
+    /// per address and the forest↔witness dispute predicate can never be
+    /// pointed at an honest twin leaf. Always updated together with
+    /// `aa_addresses` via [`ChainState::bind_aa_address`].
+    #[serde(default)]
+    pub aa_address_owners: BTreeMap<String, AccountId>,
     /// Cumulative sidechain-signed withdrawal amount per account (i128 to
     /// match Usd). Committed inside the binary account leaf as `W` so the
     /// vault AA can enforce "this claim + prior claims <= W".
@@ -228,8 +276,10 @@ impl ChainState {
             seen_aa_units: HashMap::new(),
             seen_client_seq: HashMap::new(),
             deposits_allowed: HashSet::new(),
+            deposit_backing: BTreeMap::new(),
             seen_gov_nonces: HashMap::new(),
             aa_addresses: BTreeMap::new(),
+            aa_address_owners: BTreeMap::new(),
             withdrawn_total: BTreeMap::new(),
             last_finalized_root: sha256(b"minuend-mvp-1-genesis"),
             last_finalized_height: 0,
@@ -261,6 +311,60 @@ impl ChainState {
                 false
             }
         });
+        let allowed = &self.deposits_allowed;
+        self.deposit_backing.retain(|k, _| allowed.contains(k));
+    }
+    /// R3-E-1 / R3-A-5: admit a deposit anchor together with the payment it
+    /// was verified against (amount in the deposit's own unit, payer
+    /// address, payer-designated account).
+    pub fn allow_deposit(
+        &mut self,
+        anchor: [u8; 32],
+        is_perp: bool,
+        amount: u128,
+        payer: &str,
+        account: AccountId,
+    ) {
+        self.deposits_allowed.insert((anchor, is_perp));
+        self.deposit_backing.insert(
+            (anchor, is_perp),
+            DepositBacking {
+                amount,
+                payer: payer.to_string(),
+                account,
+            },
+        );
+    }
+    /// R3-E-1: whether a deposit op of `amount` paid by `addr` may consume
+    /// `(anchor, is_perp)`. With a recorded backing the match must be exact
+    /// (`amount == None` — a negative collateral amount — never matches);
+    /// an anchor admitted without a backing (legacy `deposits_allowed`
+    /// insertions) is judged by the caller's allow-list check alone.
+    pub fn deposit_backing_matches(
+        &self,
+        anchor: [u8; 32],
+        is_perp: bool,
+        amount: Option<u128>,
+        addr: &str,
+    ) -> bool {
+        match self.deposit_backing.get(&(anchor, is_perp)) {
+            Some(b) => amount == Some(b.amount) && addr == b.payer,
+            None => true,
+        }
+    }
+    /// R3-A-5 / R3-E-3: whether `account` is the payer-designated account
+    /// of `(anchor, is_perp)` (true when no backing is recorded — legacy
+    /// fixtures).
+    pub fn deposit_account_matches(
+        &self,
+        anchor: [u8; 32],
+        is_perp: bool,
+        account: AccountId,
+    ) -> bool {
+        match self.deposit_backing.get(&(anchor, is_perp)) {
+            Some(b) => b.account == account,
+            None => true,
+        }
     }
     /// Window prune (2048 from genesis, mainnet launch). Same `window` on
     /// producer and replay keeps batch commits deterministic.
@@ -702,7 +806,10 @@ impl ChainState {
                 .filter(|p| *p != 0)
                 .unwrap_or(index);
         }
-        self.marks.insert(market, capped);
+        // R9-H2: a mark at / above MARK_CAP is never written.
+        if capped.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+            self.marks.insert(market, capped);
+        }
         // Record TWAP sample after median update
         self.record_twap_sample(market, median, caller_seq);
         // Funding: once at least two valid reports exist, every report tick
@@ -882,6 +989,146 @@ impl ChainState {
         }
     }
 
+    // -------------------------------------------------------------------
+    // #47 B4: undo journal. `place` (and the book path of `liquidate`)
+    // used to deep-clone the WHOLE ChainState per op so that an error
+    // half-way through matching could be discarded. The journal instead
+    // records the first-touch pre-image of exactly what those ops can
+    // change — the matched book, the accounts of every fill party (plus
+    // insurance), the market's mark and funding clock, and for a
+    // funding-rate market every holder a peg transfer may touch — and puts
+    // it back on error. Same observable result, cost proportional to the
+    // op instead of to the chain.
+
+    /// Record `id`'s current account (or its absence) before mutating it.
+    pub fn journal_account(&self, j: &mut StateJournal, id: AccountId) {
+        if j.seen_accounts.insert(id) {
+            j.accounts.push((id, self.accounts.get(&id).cloned()));
+        }
+    }
+
+    /// Record the per-market scalars `apply_fill_pair` may write.
+    fn journal_market(&self, j: &mut StateJournal, m: MarketId) {
+        if j.seen_markets.insert(m) {
+            j.markets.push((
+                m,
+                self.marks.get(&m).copied(),
+                self.last_funding_height.get(&m).copied(),
+            ));
+        }
+    }
+
+    /// Book submit whose changes are recorded in `j` (at most one book per
+    /// journal). On `Err` the book is already untouched.
+    pub fn submit_journaled(
+        &mut self,
+        j: &mut StateJournal,
+        order: minuend_book::Order,
+        self_trade: SelfTrade,
+    ) -> Result<minuend_book::MatchResult, minuend_book::BookError> {
+        let market = order.market;
+        assert!(j.book.is_none(), "one book submit per journal");
+        let existed = self.books.contains_key(&market);
+        let (res, bj) = match self.book_mut(market).submit_journaled(order, self_trade) {
+            Ok(v) => v,
+            Err(e) => {
+                if !existed {
+                    self.books.remove(&market);
+                }
+                return Err(e);
+            }
+        };
+        j.book = Some((market, existed, bj));
+        Ok(res)
+    }
+
+    /// `apply_fill_pair` with every state it can touch recorded in `j`
+    /// first. `apply_fill_pair` itself writes nothing when it errors, so
+    /// the journal only has to undo the fills applied before this one.
+    pub fn apply_fill_pair_journaled(
+        &mut self,
+        j: &mut StateJournal,
+        fill: &Fill,
+    ) -> Result<(), minuend_account::AccountError> {
+        self.journal_account(j, fill.taker);
+        self.journal_account(j, fill.maker);
+        self.journal_account(j, INSURANCE_ACCOUNT);
+        self.journal_market(j, fill.market);
+        // A funding-rate fill can fire `settle_funding_peg`, which moves
+        // cash between every holder of the market.
+        if self
+            .markets
+            .get(&fill.market)
+            .is_some_and(|p| p.funding_rate)
+        {
+            let holders: Vec<AccountId> = self
+                .accounts
+                .iter()
+                .filter(|(_, a)| a.positions.contains_key(&fill.market))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in holders {
+                self.journal_account(j, id);
+            }
+        }
+        self.apply_fill_pair(fill)
+    }
+
+    /// Restore every pre-image recorded in `j`.
+    pub fn rollback(&mut self, j: StateJournal) {
+        if let Some((market, existed, bj)) = j.book {
+            if existed {
+                self.book_mut(market).rollback(bj);
+            } else {
+                self.books.remove(&market);
+            }
+        }
+        for (id, pre) in j.accounts {
+            match pre {
+                Some(a) => {
+                    self.accounts.insert(id, a);
+                }
+                None => {
+                    self.accounts.remove(&id);
+                }
+            }
+        }
+        for (m, mark, lfh) in j.markets {
+            match mark {
+                Some(v) => self.marks.insert(m, v),
+                None => self.marks.remove(&m),
+            };
+            match lfh {
+                Some(v) => self.last_funding_height.insert(m, v),
+                None => self.last_funding_height.remove(&m),
+            };
+        }
+    }
+
+    /// #47 A2: may `account` use `addr` as its AA withdrawal address?
+    /// `Some(true)` = first binding needed, `Some(false)` = already bound to
+    /// exactly this address, `None` = refused (the account is bound
+    /// elsewhere, or the address already belongs to another account). Pure
+    /// check — call [`Self::bind_aa_address`] only after every other
+    /// fallible step of the op succeeded, so a rejected op never leaves a
+    /// binding behind.
+    pub fn check_aa_binding(&self, account: AccountId, addr: &str) -> Option<bool> {
+        match self.aa_addresses.get(&account) {
+            Some(bound) if bound != addr => None,
+            Some(_) => Some(false),
+            None => match self.aa_address_owners.get(addr) {
+                Some(owner) if *owner != account => None,
+                _ => Some(true),
+            },
+        }
+    }
+
+    /// Record a first binding approved by [`Self::check_aa_binding`].
+    pub fn bind_aa_address(&mut self, account: AccountId, addr: &str) {
+        self.aa_addresses.insert(account, addr.to_string());
+        self.aa_address_owners.insert(addr.to_string(), account);
+    }
+
     pub fn book_mut(&mut self, market: MarketId) -> &mut OrderBook {
         self.books
             .entry(market)
@@ -898,8 +1145,10 @@ impl ChainState {
         // priced against a stale mark and leveraged losses escape both. New
         // listings must be full-collateral (`risk_params_ok`); this guards
         // pre-existing leveraged listings by refusing to trade them at all.
+        // #47 C2: the same refusal covers spot listings without a strictly
+        // positive two-sided band (no finite worst case to reserve).
         if let Some(p) = self.markets.get(&fill.market) {
-            if p.spot_only && p.im_bps != 10_000 {
+            if !minuend_types::spot_market_tradeable(p) {
                 return Err(minuend_account::AccountError::Risk);
             }
         }
@@ -1046,7 +1295,8 @@ impl ChainState {
                     _ => false,
                 }
             };
-            if step_ok {
+            // R9-H2: a print at / above MARK_CAP never becomes the mark.
+            if step_ok && fill.price.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
                 self.marks.insert(fill.market, fill.price);
                 // The mark just moved: re-evaluate the peg so its interval
                 // clock arms as soon as index + mark + fresh reports exist.
@@ -1086,7 +1336,10 @@ impl ChainState {
                     }
                     _ => fill.price,
                 };
-                self.marks.insert(fill.market, capped);
+                // R9-H2: a mark at / above MARK_CAP is never written.
+                if capped.unsigned_abs() < minuend_types::MARK_CAP.unsigned_abs() {
+                    self.marks.insert(fill.market, capped);
+                }
             }
         }
         Ok(())
@@ -1672,16 +1925,31 @@ pub fn aa_sharded_proof_for_account(
 /// Hex is lowercase `hex::encode` of the 32-byte id.
 pub fn wit_leaves(state: &ChainState) -> Vec<String> {
     let mut leaves = Vec::new();
-    for (id, acct) in &state.accounts {
+    // R8-C3 (ASSERTION_VERSION 6): every account that holds PERP or W gets
+    // an `acct:` leaf, not only the ones with an `accounts` entry. A gov
+    // deposit (`D:`) or a Slash reward never creates an `accounts` entry,
+    // so before this its PERP was invisible until the account's first
+    // collateral op made the leaf appear "with" PERP — which P-xframe
+    // judged as a PERP change (honest batch slashable).
+    let ids: std::collections::BTreeSet<AccountId> = state
+        .accounts
+        .keys()
+        .chain(state.perp_balances.keys())
+        .chain(state.withdrawn_total.keys())
+        .copied()
+        .collect();
+    for id in &ids {
         let perp = state.perp_balances.get(id).copied().unwrap_or(0);
         let w = state.withdrawn_total.get(id).copied().unwrap_or(0);
+        let acct = state.accounts.get(id);
         leaves.push(format!(
             "acct:{}:{}:{}:{}",
             hex::encode(id.0),
-            acct.collateral,
+            acct.map(|a| a.collateral).unwrap_or(0),
             perp,
             w
         ));
+        let Some(acct) = acct else { continue };
         for (market, pos) in &acct.positions {
             // isolated 0/1 + the account's escrowed bucket for this market:
             // the fill predicate needs both to recompute the proportional
@@ -1714,8 +1982,53 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
             ));
         }
     }
+    // #47 A2: address -> account binding, keyed by the Obyte address so a
+    // dispute can prove an address is NOT bound (sorted-neighbour
+    // non-membership). The forest dispute AA ties every aa_forest leaf to
+    // the `adr:` + `acct:` leaves of this (final) witness tree.
+    for (addr, id) in &state.aa_address_owners {
+        leaves.push(format!("adr:{}:{}", addr, hex::encode(id.0)));
+        // R2-A-8: reverse binding leaf keyed by the ACCOUNT, so the binding
+        // dispute AA can prove "this account is already bound" (membership)
+        // and pin the mirror invariant adr <-> adrx on every unit.
+        leaves.push(format!("adrx:{}:{}", hex::encode(id.0), addr));
+    }
+    // R2-A-3: one permanent marker per consumed deposit anchor (collateral
+    // and PERP alike), keyed by the Obyte unit hash in standard base64 (the
+    // vault AA's `dep_<unit>` key). P-deposit proves a re-credited anchor by
+    // membership of its marker in the pre tree.
+    {
+        use base64::Engine as _;
+        for u in &state.consumed_deposits {
+            leaves.push(format!(
+                "dep:{}",
+                base64::engine::general_purpose::STANDARD.encode(u)
+            ));
+        }
+    }
+    // R8-H2 (ASSERTION_VERSION 6): one `obond:{acct}:{unlock}` leaf per
+    // bonded oracle (`unlock` = 0 while bonded, the unbonding height after
+    // UnstakeOracle), so a bond returned at the batch boundary
+    // (`prune_oracle_unbonding`) is provable and the x-frame AA's k == 0
+    // +ORACLE_BOND_PERP allowance applies only to an oracle whose bond
+    // actually releases.
+    for acct in state.oracle_bonds.keys() {
+        leaves.push(format!(
+            "obond:{}:{}",
+            hex::encode(acct.0),
+            state.oracle_unbonding.get(acct).copied().unwrap_or(0)
+        ));
+    }
     for (market, params) in &state.markets {
         let mark = state.marks.get(market).copied().unwrap_or(0);
+        // Round 7 (PR #51 未修复项 28): the listed price band (0 = that
+        // side unbounded), so P-claw can bind a kind-2 ADL print to
+        // `clamp(mark, band)`. A separate leaf keeps the 11-field `meta:`
+        // layout every dispute AA parses.
+        leaves.push(format!(
+            "band:{}:{}:{}",
+            market.0, params.min_price, params.max_price
+        ));
         leaves.push(format!(
             "meta:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             market.0,
@@ -1730,21 +2043,96 @@ pub fn wit_leaves(state: &ChainState) -> Vec<String> {
             params.funding_cap_bps
         ));
     }
+    // R2-A-5/R2-A-10: a max sentinel that sorts after every real leaf
+    // ('~' > any lowercase tag), so every key absence is provable by an
+    // adjacent straddle or before-min — no "after max" arm and no reliance
+    // on the operator-reported wit_count.
+    leaves.push(WIT_MAX_SENTINEL.to_string());
     leaves.sort();
-    if leaves.is_empty() {
-        leaves.push(minuend_types::WIT_EMPTY_ELEMENT.to_string());
-    }
     leaves
 }
+/// Last leaf of every witness tree (R2-A-5/R2-A-10).
+pub const WIT_MAX_SENTINEL: &str = "~:end";
 /// Witness root after the current state (Obyte-merkle domain).
 pub fn wit_root(state: &ChainState) -> String {
     obyte_merkle::root(&wit_leaves(state))
 }
+/// R9-C1 (round 9 of #47): the witness root of the GENESIS state
+/// (`wit_root(&ChainState::new())`: the seeded insurance account, the
+/// BTC_USD `band:` / `meta:` leaves and the `~:end` sentinel). Every dispute
+/// AA anchors the k == 0 pre tree of height 1 on this literal (there is no
+/// `wit_root_0`); it replaced `root(["empty"])`, which the x-/m-frame AAs read
+/// as an EMPTY pre tree and so judged an honest height 1 as fraud. Pinned by
+/// `genesis_wit_root_is_pinned_in_every_dispute_aa`.
+pub const GENESIS_WIT_ROOT: &str = "eAvY8SrlhdhSdmnRPyc2nkQxTpgiaJ9eMxYVVs5gSIQ=";
+/// R11-M1: leaf count of the genesis witness tree — the wf AA's after-max
+/// newness proof at height 1, unit 0 (pinned in `minuend_dispute_wf.aa`).
+pub const GENESIS_WIT_COUNT: usize = 4;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use minuend_types::USD_SCALE;
+
+    /// R9-C1: the genesis witness root is the literal every dispute AA uses
+    /// for the height-1 k == 0 pre tree, and no AA still carries the
+    /// `root(["empty"])` sentinel.
+    #[test]
+    fn genesis_wit_count_is_pinned_in_the_wf_aa() {
+        assert_eq!(wit_leaves(&ChainState::new()).len(), GENESIS_WIT_COUNT);
+        let p = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../obyte-local/agents/minuend_dispute_wf.aa"
+        );
+        let src = std::fs::read_to_string(p).expect("wf aa");
+        assert!(src.contains(&format!("(($h == 1) ? {GENESIS_WIT_COUNT} :")));
+    }
+
+    #[test]
+    fn genesis_wit_root_is_pinned_in_every_dispute_aa() {
+        assert_eq!(wit_root(&ChainState::new()), GENESIS_WIT_ROOT);
+        let empty = obyte_merkle::root(&[]);
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../obyte-local/agents");
+        for f in [
+            "minuend_dispute.aa",
+            "minuend_dispute_fill.aa",
+            "minuend_dispute_bind.aa",
+            "minuend_dispute_book.aa",
+            "minuend_dispute_claw.aa",
+            "minuend_dispute_xframe.aa",
+            "minuend_dispute_mframe.aa",
+            "minuend_dispute_wf.aa",
+            "minuend_rollup.aa",
+            "minuend_vault.aa",
+        ] {
+            let src = std::fs::read_to_string(format!("{dir}/{f}")).unwrap();
+            assert!(!src.contains(&empty), "{f} still uses the empty sentinel");
+            if src.contains("'bad pre wit'") {
+                assert!(src.contains(GENESIS_WIT_ROOT), "{f} lacks the genesis root");
+            }
+        }
+    }
+
+    /// R9-H2: a ReportPrice median or a fill price at / above MARK_CAP never
+    /// becomes the mark (the AA compares marks exactly only below 1e15).
+    #[test]
+    fn marks_stay_below_mark_cap() {
+        let cap = minuend_types::MARK_CAP;
+        assert_eq!(cap.to_string().len(), 16);
+        assert_eq!((cap - 1).to_string().len(), 15);
+        let mut s = ChainState::new();
+        s.marks.remove(&BTC_USD);
+        let oa = AccountId([5; 32]);
+        s.oracle_bonds.insert(oa, minuend_types::ORACLE_BOND_PERP);
+        // A first median at / above the cap is not written ...
+        s.apply_report(oa, BTC_USD, 2 * cap, 1).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), None);
+        s.apply_report(oa, BTC_USD, -cap, 2).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), None);
+        // ... one below it is.
+        s.apply_report(oa, BTC_USD, cap - 1, 3).unwrap();
+        assert_eq!(s.marks.get(&BTC_USD), Some(&(cap - 1)));
+    }
 
     #[test]
     fn mean_price_signed_samples_do_not_overflow() {

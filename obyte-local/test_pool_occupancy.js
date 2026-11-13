@@ -65,7 +65,7 @@ function submitData(h, prev) {
   return {
     submit: 1,
     chain_id: "minuend-v2",
-    assertion_version: 1,
+    assertion_version: 9,
     height: h,
     state_root: sha256Hex("state-" + h),
     prev_state_hash: prev,
@@ -81,7 +81,39 @@ function submitData(h, prev) {
     unit_count: 1,
     wit_count: 1,
     fill_count: 0,
+    data_root: sha256Hex("frames-" + h),
   };
+}
+// R2-R-1: da_bind over the roots + exactly one temp_data header message.
+const { daBindHash } = require("./script_helpers");
+function bound(h, prev) {
+  const sd = submitData(h, prev);
+  sd.da_bind = daBindHash(sd);
+  return sd;
+}
+async function submitBound(wallet, to, sd) {
+  const header = { height: sd.height, da_bind: sd.da_bind };
+  const r = await wallet.sendMulti({
+    messages: [
+      {
+        app: "temp_data",
+        payload_location: "inline",
+        payload: {
+          data_length: require("ocore/object_length.js").getLength(header, true),
+          data_hash: require("ocore/object_hash.js").getBase64Hash(header, true),
+          data: header,
+        },
+      },
+      { app: "data", payload: sd },
+    ],
+    base_outputs: [{ address: to, amount: SUBMIT_FEE }],
+  });
+  if (r.error) throw new Error(`submit h=${sd.height}: ${r.error}`);
+  await network.witnessUntilStable(r.unit);
+  const res = await network.getAaResponseToUnit(r.unit).catch(() => null);
+  const log = JSON.stringify(res || {});
+  if (log.includes('"bounced":true')) throw new Error(`submit h=${sd.height} bounced: ` + log.slice(0, 300));
+  return r;
 }
 
 let network;
@@ -113,8 +145,8 @@ async function main() {
   await trigger(operator, rollup, { pool: 1 }, POOL_FUND_GROSS);
   let prev = GENESIS;
   for (let h = 1; h <= 50; h++) {
-    const sd = submitData(h, prev);
-    await trigger(operator, rollup, sd, SUBMIT_FEE);
+    const sd = bound(h, prev);
+    await submitBound(operator, rollup, sd);
     prev = sd.state_root;
     if (h % 10 === 0) console.log(`submitted h=${h}`);
   }
@@ -126,7 +158,7 @@ async function main() {
   const r = await operator.triggerAaWithData({
     toAddress: rollup,
     amount: SUBMIT_FEE,
-    data: submitData(51, prev),
+    data: bound(51, prev),
   });
   if (r.error && String(r.error).includes("pool occupancy")) {
     console.log("bounce ok: 'pool occupancy' (composer-level)");

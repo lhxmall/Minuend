@@ -1,10 +1,14 @@
 "use strict";
 
-// MINUEND four-AA deployment — Obyte MAINNET (GBYTE collateral).
+// MINUEND ten-AA deployment — Obyte MAINNET (GBYTE collateral).
 //
-// Posts minuend_rollup.aa, minuend_dispute.aa, minuend_dispute_fill.aa and
-// minuend_vault.aa via a light headless wallet (default mainnet hub),
-// binds both dispute AAs, smoke-triggers the vault, and writes
+// Posts the vault BASE, minuend_dispute.aa, minuend_dispute_fill.aa,
+// minuend_dispute_bind.aa, minuend_dispute_book.aa, minuend_dispute_claw.aa
+// (round 6), minuend_dispute_xframe.aa (round 7b), minuend_dispute_mframe.aa
+// (round 8), minuend_dispute_wf.aa (round 10), minuend_rollup.aa and
+// the vault INSTANCE {base_aa, params:{rollup}} via a light headless wallet
+// (default mainnet hub), binds all eight dispute AAs, smoke-triggers the
+// vault, and writes
 // obyte-local/deployment.json.
 //
 //   MINUEND_DEPLOY_MNEMONIC="word word ... " PERP_ASSET_ID=<44-char id> \
@@ -98,32 +102,65 @@ async function main() {
 
   // 1. Dispute AAs FIRST (#13): their definitions carry no rollup address,
   // the rollup hardcodes THEM — mutual hardcoding would be a chash cycle.
-  const disputeSrc = readAa("minuend_dispute.aa");
+  // Round 2 (R2-A-3): vault BASE first (names no address); dispute.aa
+  // hardcodes the base and derives the rollup's vault instance.
+  const vaultBaseSrc = substitute(readAa("minuend_vault.aa"), { PERP_ASSET_ID_HERE: PERP_ASSET_ID });
+  const vaultBaseDef = ["autonomous agent", await parseAa(vaultBaseSrc, "minuend_vault.aa")];
+  const vaultBase = await postDefinition(vaultBaseDef, "vault base");
+  await waitBeat(vaultBase.unit, "vault base");
+  const disputeSrc = substitute(readAa("minuend_dispute.aa"), { VAULT_BASE_HERE: vaultBase.address });
   const fillSrc = readAa("minuend_dispute_fill.aa");
   const disputeDef = ["autonomous agent", await parseAa(disputeSrc, "minuend_dispute.aa")];
   const fillDef = ["autonomous agent", await parseAa(fillSrc, "minuend_dispute_fill.aa")];
+  // #47 A2: the binding dispute AA (W / adr: witness pins).
+  // R4-A-4: P-adr reads the vault deposit ledger too (derived from the base).
+  const bindSrc = substitute(readAa("minuend_dispute_bind.aa"), { VAULT_BASE_HERE: vaultBase.address });
+  const bindDef = ["autonomous agent", await parseAa(bindSrc, "minuend_dispute_bind.aa")];
   const dispute = await postDefinition(disputeDef, "dispute");
   const fill = await postDefinition(fillDef, "fill");
+  const bindAa = await postDefinition(bindDef, "bind");
+  // Round 2: P-ghost / P-skip live in the book dispute AA (ops budget).
+  const bookSrc = readAa("minuend_dispute_book.aa");
+  const bookDef = ["autonomous agent", await parseAa(bookSrc, "minuend_dispute_book.aa")];
+  const bookAa = await postDefinition(bookDef, "book");
+  // Round 6: P-claw (both legs of one fill) in the claw dispute AA.
+  const clawSrc = readAa("minuend_dispute_claw.aa");
+  const clawDef = ["autonomous agent", await parseAa(clawSrc, "minuend_dispute_claw.aa")];
+  const clawAa = await postDefinition(clawDef, "claw");
+  // Round 7b: P-xframe (+ P-tsize since round 8) in the x-frame AA.
+  const xfSrc = readAa("minuend_dispute_xframe.aa");
+  const xfDef = ["autonomous agent", await parseAa(xfSrc, "minuend_dispute_xframe.aa")];
+  const xfAa = await postDefinition(xfDef, "xframe");
+  // Round 8: P-mframe in the m-frame AA (P-noband: claw AA since round 9).
+  const mfSrc = readAa("minuend_dispute_mframe.aa");
+  const mfDef = ["autonomous agent", await parseAa(mfSrc, "minuend_dispute_mframe.aa")];
+  const mfAa = await postDefinition(mfDef, "mframe");
+  // Round 10: P-wf (malformed leaf / fill field = fraud) in the wf AA.
+  const wfSrc = readAa("minuend_dispute_wf.aa");
+  const wfDef = ["autonomous agent", await parseAa(wfSrc, "minuend_dispute_wf.aa")];
+  const wfAa = await postDefinition(wfDef, "wf");
   await waitBeat(dispute.unit, "dispute");
 
   // 2. Rollup with both dispute addresses hardcoded, then the vault.
   const rollupSrc = substitute(readAa("minuend_rollup.aa"), {
     DISPUTE_AA_HERE: dispute.address,
     DISPUTE_FILL_AA_HERE: fill.address,
+    DISPUTE_BIND_AA_HERE: bindAa.address,
+    DISPUTE_BOOK_AA_HERE: bookAa.address,
+    DISPUTE_CLAW_AA_HERE: clawAa.address,
+    DISPUTE_XFRAME_AA_HERE: xfAa.address,
+    DISPUTE_MFRAME_AA_HERE: mfAa.address,
+    DISPUTE_WF_AA_HERE: wfAa.address,
   });
   const rollupDef = ["autonomous agent", await parseAa(rollupSrc, "minuend_rollup.aa")];
   const rollup = await postDefinition(rollupDef, "rollup");
   await waitBeat(rollup.unit, "rollup");
 
-  const vaultSrc = substitute(readAa("minuend_vault.aa"), {
-    ROLLUP_AA_HERE: rollup.address,
-    PERP_ASSET_ID_HERE: PERP_ASSET_ID,
-  });
-  const vaultDef = ["autonomous agent", await parseAa(vaultSrc, "minuend_vault.aa")];
+  const vaultDef = ["autonomous agent", { base_aa: vaultBase.address, params: { rollup: rollup.address } }];
   const vault = await postDefinition(vaultDef, "vault");
   await waitBeat(vault.unit, "vault");
 
-  // 3. Bind both dispute AAs (20000 each, rollup address in trigger data);
+  // 3. Bind all eight dispute AAs (20000 each, rollup address in trigger data);
   // assert via AA state.
   await triggerAa(
     { to: dispute.address, amount: 20000, data: { bind: 1, rollup: rollup.address } },
@@ -133,13 +170,49 @@ async function main() {
     { to: fill.address, amount: 20000, data: { bind_fill: 1, rollup: rollup.address } },
     "fill bind"
   );
+  await triggerAa(
+    { to: bindAa.address, amount: 20000, data: { bind_bind: 1, rollup: rollup.address } },
+    "binding-dispute bind"
+  );
+  await triggerAa(
+    { to: bookAa.address, amount: 20000, data: { bind_book: 1, rollup: rollup.address } },
+    "book-dispute bind"
+  );
+  await triggerAa(
+    { to: clawAa.address, amount: 20000, data: { bind_claw: 1, rollup: rollup.address } },
+    "claw-dispute bind"
+  );
+  await triggerAa(
+    { to: xfAa.address, amount: 20000, data: { bind_xframe: 1, rollup: rollup.address } },
+    "xframe-dispute bind"
+  );
+  await triggerAa(
+    { to: mfAa.address, amount: 20000, data: { bind_mframe: 1, rollup: rollup.address } },
+    "mframe-dispute bind"
+  );
+  await triggerAa(
+    { to: wfAa.address, amount: 20000, data: { bind_wf: 1, rollup: rollup.address } },
+    "wf-dispute bind"
+  );
   await waitBeat("binds", "bind");
   const state = await readAaState(rollup.address);
   if (String(state.dispute_aa) !== String(dispute.address))
     throw new Error("dispute_aa not bound: " + JSON.stringify(state.dispute_aa));
   if (String(state.dispute_fill_aa) !== String(fill.address))
     throw new Error("dispute_fill_aa not bound: " + JSON.stringify(state.dispute_fill_aa));
-  console.log("both dispute AAs bound");
+  if (String(state.dispute_bind_aa) !== String(bindAa.address))
+    throw new Error("dispute_bind_aa not bound: " + JSON.stringify(state.dispute_bind_aa));
+  if (String(state.dispute_book_aa) !== String(bookAa.address))
+    throw new Error("dispute_book_aa not bound: " + JSON.stringify(state.dispute_book_aa));
+  if (String(state.dispute_claw_aa) !== String(clawAa.address))
+    throw new Error("dispute_claw_aa not bound: " + JSON.stringify(state.dispute_claw_aa));
+  if (String(state.dispute_xframe_aa) !== String(xfAa.address))
+    throw new Error("dispute_xframe_aa not bound: " + JSON.stringify(state.dispute_xframe_aa));
+  if (String(state.dispute_mframe_aa) !== String(mfAa.address))
+    throw new Error("dispute_mframe_aa not bound: " + JSON.stringify(state.dispute_mframe_aa));
+  if (String(state.dispute_wf_aa) !== String(wfAa.address))
+    throw new Error("dispute_wf_aa not bound: " + JSON.stringify(state.dispute_wf_aa));
+  console.log("all eight dispute AAs bound");
 
   // 4. Write deployment.json.
   const info = {
@@ -147,9 +220,17 @@ async function main() {
     rollup_aa_address: rollup.address,
     dispute_aa_address: dispute.address,
     dispute_fill_aa_address: fill.address,
+    dispute_bind_aa_address: bindAa.address,
+    dispute_book_aa_address: bookAa.address,
+    dispute_claw_aa_address: clawAa.address,
+    dispute_xframe_aa_address: xfAa.address,
+    dispute_mframe_aa_address: mfAa.address,
+    dispute_wf_aa_address: wfAa.address,
     vault_aa_address: vault.address,
+    vault_base_aa_address: vaultBase.address,
     perp_asset_id: PERP_ASSET_ID,
     chain_id: CHAIN_ID,
+    assertion_version: 9,
     pool_fund_gross: POOL_FUND_GROSS,
     challenge_secs: CHALLENGE_SECS,
     deployed_at: new Date().toISOString(),
@@ -163,7 +244,11 @@ async function main() {
   // when the AA actually accepted the deposit.
   let smokeOutcome;
   try {
-    const unit = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1 } }, "vault smoke");
+    // R3-A-5: a deposit must name the credited sidechain account (64 hex);
+    // the smoke byte goes to MINUEND_SMOKE_ACCOUNT (default: the all-zero
+    // account no one can sign for — the byte just stays in the vault).
+    const smokeAccount = process.env.MINUEND_SMOKE_ACCOUNT || "0".repeat(64);
+    const unit = await triggerAa({ to: vault.address, amount: 10001, data: { deposit: 1, account: smokeAccount } }, "vault smoke");
     // Wait a beat, then confirm the vault AA state still answers (the AA
     // existed before the smoke, so a bounced deposit is not detectable from
     // state; the honest claim is "submitted and propagated").
